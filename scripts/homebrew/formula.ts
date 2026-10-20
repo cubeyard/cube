@@ -1,13 +1,15 @@
 /** Generates the Homebrew tap formulas (cubeyard/homebrew-tap: Formula/cube.rb
- * and Formula/cube-runner.rb) from one published stable release's signed
- * darwin-arm64 manifests. The manifests are verified with the committed
- * release key before any byte of them is trusted; the formulas pin the exact
- * release URL and sha256 the signed manifest names, never a moving `latest`.
+ * and Formula/cube-berth.rb) from one published stable release's signed
+ * manifests: cubed's and berth's for darwin-arm64 and keel's for arm64. The
+ * manifests are verified with the committed release key before any byte of
+ * them is trusted; the formulas pin the exact release URLs and sha256s the
+ * signed manifests name, never a moving `latest`.
  *
  *   node scripts/homebrew/formula.ts vX.Y.Z --assets DIR --out DIR
  *
- * DIR holds cubed-darwin-arm64.json(.sig) and cube-runner-darwin-arm64.json(.sig)
- * downloaded from that release (`gh release download vX.Y.Z -p '*darwin-arm64.json*'`). */
+ * DIR holds cubed-darwin-arm64.json, berth-darwin-arm64.json and
+ * keel-arm64.json, each with its .sig, downloaded from that release
+ * (`gh release download vX.Y.Z -p 'cubed-darwin-arm64.json*' -p 'berth-darwin-arm64.json*' -p 'keel-arm64.json*'`). */
 import fs from "node:fs";
 import path from "node:path";
 import { createPublicKey, verify } from "node:crypto";
@@ -17,130 +19,176 @@ import { CUBED_STATE_SCHEMA } from "../../packages/server/src/version.ts";
 
 const REPOSITORY = "https://github.com/cubeyard/cube";
 const PLATFORM = "darwin-arm64";
+const ARCH = "arm64";
 const TAP = "cubeyard/tap";
 
+interface Asset { url: string; sha256: string; bytes: number }
 interface CubedManifest {
   schema: 1; product: "cubed"; version: string; commit: string; platform: string; minimumSupervisor: number;
   stateSchema: { minimum: number; maximum: number; rollbackSafeFrom: number };
-  artifact: { url: string; sha256: string; bytes: number }; includesRunner: false;
+  artifact: Asset; includesRunner: false;
 }
-interface RunnerManifest {
-  schema: 1; product: "cube-runner"; version: string; release: string; commit: string; platform: string; protocolVersion: number;
-  artifact: { url: string; sha256: string; bytes: number };
+interface BerthManifest {
+  schema: 1; product: "berth"; version: string; release: string; commit: string; platform: string; protocolVersion: 4; artifact: Asset;
+}
+interface KeelManifest {
+  schema: 1; product: "keel"; release: string; commit: string; arch: string; kernel: Asset & { version: string }; base: Asset & { listing: Asset };
 }
 
-export interface FormulaInputs { tag: string; cubed: CubedManifest; runner: RunnerManifest }
+export interface FormulaInputs { tag: string; cubed: CubedManifest; berth: BerthManifest; keel: KeelManifest }
+
+const download = (tag: string, name: string) => `${REPOSITORY}/releases/download/${tag}/${name}`;
+/** An asset entry that is exactly the release's asset `name`, so nothing
+ * but a hex digest and a version ever reaches the generated Ruby. */
+const isAsset = (entry: unknown, tag: string, name: string): boolean => {
+  const asset = entry as Record<string, unknown> | undefined;
+  return asset?.url === download(tag, name) && /^[0-9a-f]{64}$/.test(String(asset.sha256))
+    && Number.isSafeInteger(asset.bytes) && (asset.bytes as number) > 0;
+};
 
 /** Reads and verifies one signed manifest: the signature over the exact
- * bytes, then the fields the formula depends on. The artifact URL must be
- * exactly the release's asset, so nothing but a hex digest and a version
- * ever reaches the generated Ruby. */
-export function readSignedManifest<T extends { product: string }>(options: {
-  manifestPath: string; signaturePath: string; publicKeyPem: Buffer; product: T["product"]; tag: string;
+ * bytes, then the fields the formulas depend on. */
+export function readSignedManifest<T>(options: {
+  manifestPath: string; signaturePath: string; publicKeyPem: Buffer; product: "cubed" | "berth" | "keel"; tag: string;
 }): T {
+  const { tag, product } = options;
   const bytes = fs.readFileSync(options.manifestPath);
   const signature = Buffer.from(fs.readFileSync(options.signaturePath, "utf8").trim(), "base64");
   const key = createPublicKey(options.publicKeyPem);
+  const name = path.basename(options.manifestPath);
   if (key.asymmetricKeyType !== "ed25519" || !verify(null, bytes, key, signature)) {
-    throw new Error(`${path.basename(options.manifestPath)}: manifest signature verification failed`);
+    throw new Error(`${name}: manifest signature verification failed`);
   }
   const manifest = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
-  const artifact = manifest.artifact as Record<string, unknown> | undefined;
-  const expectedUrl = `${REPOSITORY}/releases/download/${options.tag}/${options.product}-${options.tag}-${PLATFORM}.tar.gz`;
-  if (manifest.schema !== 1 || manifest.product !== options.product || manifest.platform !== PLATFORM
-    || !/^[0-9a-f]{40}$/.test(String(manifest.commit))
-    || artifact?.url !== expectedUrl
-    || !/^[0-9a-f]{64}$/.test(String(artifact.sha256)) || !Number.isSafeInteger(artifact.bytes) || (artifact.bytes as number) <= 0) {
-    throw new Error(`${path.basename(options.manifestPath)}: not a ${options.product} ${PLATFORM} manifest of ${options.tag}`);
-  }
-  if (options.product === "cubed") {
+  const where = product === "keel" ? ARCH : PLATFORM;
+  const identity = manifest.schema === 1 && manifest.product === product && /^[0-9a-f]{40}$/.test(String(manifest.commit))
+    && (product === "keel" ? manifest.arch === ARCH : manifest.platform === PLATFORM);
+  const assets = product === "keel"
+    ? isAsset(manifest.kernel, tag, `keel-${tag}-${ARCH}-vmlinuz`) && isAsset(manifest.base, tag, `keel-${tag}-${ARCH}-base.erofs`)
+    : isAsset(manifest.artifact, tag, `${product}-${tag}-${PLATFORM}.tar.gz`);
+  if (!identity || !assets) throw new Error(`${name}: not a ${product} ${where} manifest of ${tag}`);
+  if (product === "cubed") {
     const state = manifest.stateSchema as Record<string, unknown> | undefined;
-    if (manifest.version !== options.tag || manifest.includesRunner !== false || manifest.minimumSupervisor !== 1
+    if (manifest.version !== tag || manifest.includesRunner !== false || manifest.minimumSupervisor !== 1
       || state?.minimum !== CUBED_STATE_SCHEMA || state?.maximum !== CUBED_STATE_SCHEMA || state?.rollbackSafeFrom !== CUBED_STATE_SCHEMA) {
-      throw new Error(`${path.basename(options.manifestPath)}: unexpected cubed release contract`);
+      throw new Error(`${name}: unexpected cubed release contract`);
     }
-  } else if (manifest.release !== options.tag || manifest.protocolVersion !== 3
-    || !/^\d+\.\d+\.\d+$/.test(String(manifest.version))) {
-    throw new Error(`${path.basename(options.manifestPath)}: unexpected cube-runner release contract`);
-  }
+  } else if (product === "berth") {
+    if (manifest.release !== tag || manifest.protocolVersion !== 4 || !/^\d+\.\d+\.\d+$/.test(String(manifest.version))) {
+      throw new Error(`${name}: unexpected berth release contract`);
+    }
+  } else if (manifest.release !== tag) throw new Error(`${name}: unexpected keel release contract`);
   return manifest as unknown as T;
 }
 
 export function readFormulaInputs(tag: string, assets: string, publicKeyPem: Buffer, fingerprint: string): FormulaInputs {
   if (!/^v\d+\.\d+\.\d+$/.test(tag)) throw new Error("the release must be a stable tag vX.Y.Z");
   if (publicKeyFingerprint(publicKeyPem) !== fingerprint) throw new Error("the release public key does not match the committed fingerprint");
-  const cubed = readSignedManifest<CubedManifest>({ manifestPath: path.join(assets, `cubed-${PLATFORM}.json`),
-    signaturePath: path.join(assets, `cubed-${PLATFORM}.json.sig`), publicKeyPem, product: "cubed", tag });
-  const runner = readSignedManifest<RunnerManifest>({ manifestPath: path.join(assets, `cube-runner-${PLATFORM}.json`),
-    signaturePath: path.join(assets, `cube-runner-${PLATFORM}.json.sig`), publicKeyPem, product: "cube-runner", tag });
-  if (cubed.commit !== runner.commit) throw new Error("the cubed and cube-runner manifests come from different commits");
-  return { tag, cubed, runner };
+  const read = <T>(product: "cubed" | "berth" | "keel") => {
+    const file = path.join(assets, `${product}-${product === "keel" ? ARCH : PLATFORM}.json`);
+    return readSignedManifest<T>({ manifestPath: file, signaturePath: `${file}.sig`, publicKeyPem, product, tag });
+  };
+  const cubed = read<CubedManifest>("cubed");
+  const berth = read<BerthManifest>("berth");
+  const keel = read<KeelManifest>("keel");
+  if (cubed.commit !== berth.commit || cubed.commit !== keel.commit) throw new Error("the cubed, berth and keel manifests come from different commits");
+  return { tag, cubed, berth, keel };
 }
 
-/** Formula/cube-runner.rb: the runner binary, QEMU from Homebrew, a user
- * service running the local runner. Its version is the cube release's (the
- * asset is per release), so every release upgrades it even when the runner's
- * own version did not change. No self-updater: brew upgrade is the update
- * path, and the runner's own updater would fight it. */
-export function runnerFormula({ tag, runner }: FormulaInputs): string {
+/** Formula/cube-berth.rb: the runner, `berth vm`, with keel's kernel and
+ * base for arm64, QEMU and erofs-utils from Homebrew, and a user service
+ * that starts it with what `cubed runners init-local` wrote. Its version is
+ * the cube release's (the asset is per release). Uninstalling it keeps
+ * every file of the runner's (~/.cube/berth*), so installing it again
+ * finds the same runner, key and enrollment. */
+export function berthFormula({ tag, berth, keel }: FormulaInputs): string {
   return `# Generated by scripts/homebrew/formula.ts in cubeyard/cube from the signed
-# ${PLATFORM} manifest of release ${tag} (cube-runner ${runner.version}). Do not edit by hand.
-class CubeRunner < Formula
-  desc "Cube's VM runner: one QEMU machine per coding-agent thread"
+# ${PLATFORM} berth and ${ARCH} keel manifests of release ${tag} (berth ${berth.version}). Do not edit by hand.
+class CubeBerth < Formula
+  desc "Cube's runner: one keel virtual machine per coding-agent thread"
   homepage "${REPOSITORY}"
-  url "${runner.artifact.url}"
-  sha256 "${runner.artifact.sha256}"
+  url "${berth.artifact.url}"
+  sha256 "${berth.artifact.sha256}"
   license "Apache-2.0"
 
   depends_on arch: :arm64
+  depends_on "erofs-utils"
   depends_on :macos
   depends_on "qemu"
 
+  # keel: the guest kernel and base every machine boots, of the same release.
+  resource "keel-vmlinuz" do
+    url "${keel.kernel.url}"
+    sha256 "${keel.kernel.sha256}"
+  end
+
+  resource "keel-base" do
+    url "${keel.base.url}"
+    sha256 "${keel.base.sha256}"
+  end
+
   def install
-    bin.install "bin/cube-runner"
-    # The operator scripts and the pinned release key, for reference; the
-    # self-updater they implement is not installed: brew upgrade updates
-    # this runner.
-    libexec.install "scripts", "update-public-key.pem", "MANIFEST"
-    # The service's entry point: the home is resolved when the service
-    # starts, for the user who starts it.
+    bin.install "bin/berth"
+    resource("keel-vmlinuz").stage { (libexec/"keel").install "keel-${tag}-${ARCH}-vmlinuz" => "vmlinuz" }
+    resource("keel-base").stage { (libexec/"keel").install "keel-${tag}-${ARCH}-base.erofs" => "base.erofs" }
+    # The service's entry point: berth vm in ~/.cube/berth, as
+    # \`cubed runners init-local\` set it up, with Homebrew's QEMU and
+    # mkfs.erofs and this keel. Until it is set up it says so and waits, so
+    # launchd does not restart it in a loop.
     (libexec/"service.sh").write <<~SH
       #!/bin/sh
       set -eu
-      exec "#{opt_bin}/cube-runner" run --home "\${CUBE_RUNNER_HOME:-$HOME/.cube/runner}" "$@"
+      home="$HOME/.cube"
+      if [ ! -f "$home/berth.env" ] || [ ! -f "$home/berth/.berth/vm.json" ]; then
+        echo "cube-berth: not set up yet: run cubed runners init-local --image <registry/repository@sha256:...>" >&2
+        sleep 60
+        exit 78
+      fi
+      image=$(sed -n 's/^CUBE_BERTH_IMAGE=//p' "$home/berth.env")
+      machines=$(sed -n 's/^CUBE_BERTH_MAX_MACHINES=//p' "$home/berth.env")
+      exec "#{opt_bin}/berth" vm --dir "$home/berth" \\\\
+        --qemu "#{formula_opt_bin("qemu")}/qemu-system-aarch64" --qemu-img "#{formula_opt_bin("qemu")}/qemu-img" \\\\
+        --mkfs-erofs "#{formula_opt_bin("erofs-utils")}/mkfs.erofs" --keel "#{opt_libexec}/keel" \\\\
+        --image "$image" --max-machines "$machines"
     SH
     chmod 0755, libexec/"service.sh"
   end
 
-  # The local runner that \`cubed runners init-local\` sets up under
-  # ~/.cube/runner (its default --home). It runs as the user who starts the
-  # service: the thread machines are sandboxes, QEMU itself is not. SIGTERM
-  # powers the machines down (up to 30 s each) before the runner exits.
+  # It runs as the user who starts the service: the thread machines are
+  # sandboxes, QEMU itself is not. SIGTERM stops the machines' QEMUs
+  # (their disks are kept) before berth exits.
   service do
     run [opt_libexec/"service.sh"]
     keep_alive true
-    stop_timeout 60
-    log_path var/"log/cube-runner.log"
-    error_log_path var/"log/cube-runner.log"
+    stop_timeout 120
+    log_path var/"log/cube-berth.log"
+    error_log_path var/"log/cube-berth.log"
     environment_variables PATH: std_service_path_env
   end
 
   def caveats
     <<~EOS
-      The runner needs Hypervisor.framework. Set it up from the cube formula with
-        cubed runners init-local
-      (downloads Debian's genericcloud arm64 image, checksum-verified; --image takes
-      one you have), then: brew services start cube-runner
-      After brew upgrade: brew services restart cube-runner (a running service is not restarted).
-      Its state (key, base image, machine disks) is ~/.cube; uninstalling keeps it.
-      QEMU runs as your user; a thread's machine is the sandbox, this Mac is not.
+      Set it up from the cube formula, once (later runs change nothing):
+        cubed runners init-local --image <registry/repository@sha256:...>
+        brew services restart cubeyard/tap/cube-berth
+      Its state (key, disks, layer cache) is ~/.cube/berth, with berth.json,
+      berth.control.key and berth.env beside it in ~/.cube; uninstalling keeps
+      them, and installing again uses them as they are.
+      QEMU runs as your user, without -sandbox on macOS: a thread's machine is
+      the sandbox, this Mac is not.
     EOS
   end
 
   test do
-    assert_match '"protocolVersion":3', shell_output("#{bin}/cube-runner version")
-    assert_match "cube-runner init", shell_output("#{bin}/cube-runner --help")
+    assert_match '"protocolVersion":4', shell_output("#{bin}/berth version")
+    vmlinuz = Digest::SHA256.file(libexec/"keel/vmlinuz").hexdigest
+    assert_equal "${keel.kernel.sha256}", vmlinuz
+    base = Digest::SHA256.file(libexec/"keel/base.erofs").hexdigest
+    assert_equal "${keel.base.sha256}", base
     assert_predicate libexec/"service.sh", :executable?
+    # Not set up: it says so (its 60 s pause skipped) and exits 78.
+    unset = "HOME=#{testpath} /bin/sh -c 'sleep() { :; }; . #{libexec}/service.sh' 2>&1"
+    assert_match "not set up yet", shell_output(unset, 78)
   end
 end
 `;
@@ -161,7 +209,7 @@ class Cube < Formula
   license "Apache-2.0"
 
   depends_on arch: :arm64
-  depends_on "${TAP}/cube-runner"
+  depends_on "${TAP}/cube-berth"
   depends_on "gh"
   depends_on :macos
 
@@ -201,7 +249,13 @@ class Cube < Formula
       if [ -z "\${CUBED_PORTAL_IP+set}\${CUBED_PORTAL_LISTEN+set}\${CUBED_PORTAL_DOMAIN+set}" ]; then
         export CUBED_PORTAL_IP=127.0.0.1 CUBED_PORTAL_DOMAIN=localhost
       fi
-      export CUBE_RUNNER="\${CUBE_RUNNER:-#{HOMEBREW_PREFIX}/opt/cube-runner/bin/cube-runner}"
+      # \`cubed runners init-local\` sets up berth vm with the same programs
+      # and keel as cube-berth's service.
+      export CUBE_BERTH="\${CUBE_BERTH:-#{HOMEBREW_PREFIX}/opt/cube-berth/bin/berth}"
+      export CUBE_BERTH_KEEL="\${CUBE_BERTH_KEEL:-#{HOMEBREW_PREFIX}/opt/cube-berth/libexec/keel}"
+      export CUBE_BERTH_QEMU="\${CUBE_BERTH_QEMU:-#{HOMEBREW_PREFIX}/opt/qemu/bin/qemu-system-aarch64}"
+      export CUBE_BERTH_QEMU_IMG="\${CUBE_BERTH_QEMU_IMG:-#{HOMEBREW_PREFIX}/opt/qemu/bin/qemu-img}"
+      export CUBE_BERTH_MKFS_EROFS="\${CUBE_BERTH_MKFS_EROFS:-#{HOMEBREW_PREFIX}/opt/erofs-utils/bin/mkfs.erofs}"
       export CUBED_VERSION="${tag}" CUBED_COMMIT="${cubed.commit}"
       exec "#{libexec}/bin/node" "#{libexec}/app/packages/server/src/index.ts" "$@"
     SH
@@ -222,25 +276,27 @@ class Cube < Formula
 
   def caveats
     <<~EOS
-      One-time setup on this Mac (Apple Silicon); the first command downloads
-      Debian's genericcloud arm64 image (~340 MB, checksum-verified):
-        cubed runners init-local
-        brew services start cube-runner
-        brew services start cube
-      Then open http://127.0.0.1:7777, connect a model under "models" and run
-      "gh auth login" for GitHub. cubed listens on loopback only and has no user
-      authentication; keep it there or behind an authenticated private network.
+      Set up on this Mac (Apple Silicon), the same commands for a first
+      install, an upgrade and an install after brew uninstall; init-local
+      changes nothing that is there, and only the first time needs --image
+      (the image every thread machine is built on, pinned by digest):
+        cubed runners init-local --image <registry/repository@sha256:...>
+        brew services restart cubeyard/tap/cube-berth cubeyard/tap/cube
+      ("restart" also starts them, and replaces a process brew uninstall left
+      running.) Then open http://127.0.0.1:7777, connect a model under
+      "models" and run "gh auth login" for GitHub. cubed listens on loopback
+      only and has no user authentication; keep it there or behind an
+      authenticated private network.
       Settings go in ~/.config/cubed/environment (CUBED_STATE, CUBED_HOST,
       CUBED_ALLOWED_HOSTS, CUBED_CLAUDE, ...). Web servers a thread runs with
       "cube service" get URLs like http://web-<label>.localhost:7780/ that
       open only in a browser on this Mac (loopback). CUBED_PORTAL_IP= turns
       them off; CUBED_PORTAL_IP=<this Mac's Tailscale IPv4> serves them to your
       tailnet instead (docs/services.md). State: ~/.cube-host and ~/.cube;
-      uninstalling keeps both. After brew upgrade, restart the services:
-        brew services restart cube-runner cube
-      Had this tap's old v0.1 "cube" launcher? Its VM may still run and hold
-      port 7777: check ps -p "$(cat ~/.cube/vm.pid)" -o command= for qemu, kill
-      that pid, and move ~/.cube aside before init-local.
+      uninstalling keeps both, and a later install uses them as they are.
+      A cube-runner (protocol 3) from this tap is no longer updated: retire it
+      (docs/macos.md), then brew services stop cube-runner and brew uninstall
+      cube-runner; its ~/.cube/runner stays.
     EOS
   end
 
@@ -268,7 +324,8 @@ if (import.meta.main) {
     fs.readFileSync(path.join(here, "../cubed/update-public-key.fingerprint"), "utf8").trim());
   fs.mkdirSync(values.out, { recursive: true });
   fs.writeFileSync(path.join(values.out, "cube.rb"), cubeFormula(inputs));
-  fs.writeFileSync(path.join(values.out, "cube-runner.rb"), runnerFormula(inputs));
+  fs.writeFileSync(path.join(values.out, "cube-berth.rb"), berthFormula(inputs));
   process.stdout.write(`${JSON.stringify({ tag, commit: inputs.cubed.commit, cubed: inputs.cubed.artifact.sha256,
-    runner: inputs.runner.version, runnerSha256: inputs.runner.artifact.sha256, formulas: ["cube.rb", "cube-runner.rb"] })}\n`);
+    berth: inputs.berth.version, berthSha256: inputs.berth.artifact.sha256, keelKernel: inputs.keel.kernel.sha256, keelBase: inputs.keel.base.sha256,
+    formulas: ["cube.rb", "cube-berth.rb"] })}\n`);
 }
