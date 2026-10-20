@@ -60,6 +60,7 @@ OFFLINE_TESTS=(
   packages/server/test/optchat-compactor-hold-test.ts
   packages/server/test/optchat-test.ts
   packages/server/test/optchat-fail-closed-test.ts
+  packages/server/test/pi-sends-test.ts
   packages/server/test/optchat-product-test.ts
   packages/server/test/optchat-cache-test.ts
   packages/server/test/optchat-gpt6-test.ts

@@ -7,6 +7,7 @@ import { ConversationBusy, LiveDoc, type UsageState } from "@earendil-works/pi-d
 import { ClaudeAgent, ClaudeBusy, CLAUDE_PROVIDER, type ClaudeRuntime } from "./claude-agent.ts";
 import { ClaudeThreadEvents } from "./claude-thread-events.ts";
 import { skillsPrompt } from "./skills.ts";
+import { SendsDoc } from "./pi-sends.ts";
 import { assertCurrentThreadStore, downText, openAgent, type Agent } from "./durable-agent.ts";
 import { createLogger } from "./log.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
@@ -401,7 +402,7 @@ export class Conversations {
   private async closePi(id: string, loading: Promise<Agent> | undefined): Promise<void> {
     const agent = await loading?.catch(() => null);
     if (!agent) return;
-    try { if (this.onUsage) this.onUsage(id, await agent.harness.usage(context)); }
+    try { if (this.onUsage) this.onUsage(id, await piUsage(agent)); }
     catch (error) { log.warn("usage not kept at close", { thread: id, error }); }
     await agent.close();
   }
@@ -409,7 +410,7 @@ export class Conversations {
    * when its agent is not open. Never opens one. */
   async liveUsage(id: string): Promise<UsageState | null> {
     const agent = await this.agents.get(id)?.catch(() => null);
-    return agent ? agent.harness.usage(context) : null;
+    return agent ? piUsage(agent) : null;
   }
   /** An agent opens only on a machine that finished preparing: it takes the
    * workspace lease for its lifetime, which preparing the machine needs, and
@@ -695,4 +696,10 @@ export class Conversations {
 function messageText(message: Message): string {
   if (typeof message.content === "string") return message.content;
   return message.content.map(part => part.type === "text" ? part.text : part.type === "thinking" ? part.thinking : "").filter(Boolean).join("\n");
+}
+
+/** A thread's Pi usage with the requests that were out at a stop (pi-sends.ts). */
+async function piUsage(agent: Agent): Promise<UsageState & { interrupted?: Record<string, number> }> {
+  const interrupted = (await agent.harness.snapshot(SendsDoc, context))?.interrupted;
+  return { ...await agent.harness.usage(context), ...interrupted && Object.keys(interrupted).length ? { interrupted: { ...interrupted } } : {} };
 }

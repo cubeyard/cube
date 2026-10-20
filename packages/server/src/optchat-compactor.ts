@@ -208,8 +208,9 @@ export async function compactNode(options: {
   /** Before each answer is asked: true holds the round, nothing is sent and
    * Held is thrown. It gets the round so far to keep. */
   hold?: (round: Round) => Promise<boolean>;
-  /** Right before each model call is sent; its reply comes to `onReply`. */
-  onRequest?: () => void;
+  /** Right before each model call is sent, awaited: a throw sends nothing
+   * and ends the round with it. Its reply comes to `onReply`. */
+  onRequest?: () => void | Promise<void>;
   /** Every model reply, failed ones included, before it is used: its usage. */
   onReply?: (reply: AssistantMessage) => void | Promise<void>;
   /** Why the node is its source cut short. */
@@ -240,7 +241,7 @@ export async function compactNode(options: {
   for (let answers = options.round?.answers ?? 1; ; answers++) {
     if (left <= 0) throw new Spent(`the compactor's answers for this node were spent before its lines (${answers - 1} this round)`);
     if (await options.hold?.({ messages, seen, outOfRoom, answers })) throw new Held(`the round was held before answer ${answers}`);
-    options.onRequest?.();
+    await options.onRequest?.();
     const reply = await options.models.completeSimple(model, { messages }, {
       cacheRetention: "short",
       maxTokens: outputTokens(limit),
