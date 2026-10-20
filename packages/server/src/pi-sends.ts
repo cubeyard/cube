@@ -87,11 +87,20 @@ export async function refuseSend(harness: Harness, task: TaskId, signal: AbortSi
 }
 
 /** A thread agent's hook: every request's send recorded before it leaves.
- * Installed last, so it runs after every other `beforeRequest` hook. */
-export function sendsExtension(harness: () => Harness, epoch: () => number): Extension {
+ * Installed last, so it runs after every other `beforeRequest` hook. While
+ * `gate.closing`, a request is held back unsent (counted in `gate.held`)
+ * until Pi's close aborts it; the reopened run sends it, once. */
+export function sendsExtension(harness: () => Harness, epoch: () => number, gate: { closing: boolean; held: number } = { closing: false, held: 0 }): Extension {
   return defineExtension({
     name: "cube-sends",
     hooks: [hook(GenerationTask, { beforeRequest: async (_request, api, callContext) => {
+      const signal = callContext.abortSignal;
+      if (gate.closing && signal) {
+        gate.held++;
+        try { if (!signal.aborted) await new Promise(resolve => { signal.addEventListener("abort", resolve, { once: true }); }); }
+        finally { gate.held--; }
+        signal.throwIfAborted();
+      }
       try { await markSent(api, epoch(), callContext); }
       catch (error) { return refuseSend(harness(), api.taskId, callContext.abortSignal, error, callContext); }
       return undefined;

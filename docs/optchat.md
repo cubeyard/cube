@@ -175,15 +175,27 @@ settle their usage, and Pi's own close (it aborts and joins every task) up
 to 2 s (`CLOSE_JOIN_MS`); past that cubed's close goes on without it. So
 the chat's close ends within 14 s whatever a tool or a provider does
 (`optchat-close-test` measures it with a tool and a provider that never
-end). That is OptChat's part only: cubed's close then closes the threads'
-agents, the gateway and the registry, which this bound does not cover. The
-supervisor (`cubed-supervisor.ts`) sends SIGKILL 30 s after its SIGTERM
-(`CUBED_UPDATE_STOP_TIMEOUT_MS`). Above it, the service manager's own
-stop timeout applies to the supervisor: the systemd user unit
-(`scripts/cubed/service.sh`) sets no `TimeoutStopSec`, so systemd's
-`DefaultTimeoutStopSec` (90 s unless the host changes it), and the launchd
-agent sets no `ExitTimeOut`, so launchd's system-defined one. Neither is
-measured here; one shorter than cubed's whole close would cut it short.
+end). That is OptChat's part only. cubed's whole close (`createCubed`'s
+`close`) is bounded by one deadline, `CLOSE_MS` (25 s), under the
+supervisor's SIGKILL 30 s after its SIGTERM (`cubed-supervisor.ts`,
+`CUBED_UPDATE_STOP_TIMEOUT_MS`): each step (the HTTP server, the portal,
+model sign-ins, OptChat, the threads, the gateway, egress, the workspace
+socket) takes at most its cap and what is left, and the close goes on past
+it and logs which step was late, so the stores (usage, artifacts, the
+registry) are always closed. The threads (`Conversations.close`) get what
+OptChat leaves, at most 9 s: they send no new request (held back, sent
+once after the reopen), a command OptChat cut off (a `tell`, an `archive`)
+gets up to 2 s, and the agents' own closes the rest; Pi's close waits for a
+request already out and stores its answer. Past that bound a request still
+out is counted at the next open and not sent again, a guest command goes
+on and the next cubed reattaches to it, and a tell or an archive is keyed.
+`cubed-close-test.ts` closes a real cubed with a thread agent and a
+command that never end: it ends in about 9 s with its stores closed. The
+service managers wait longer than the supervisor: the systemd user unit
+(`scripts/cubed/service.sh`) sets `TimeoutStopSec=45`, the launchd agent
+`ExitTimeOut` 45, and Homebrew's service `stop_timeout 60` (it runs cubed
+without the supervisor, so cubed's 25 s is the bound there). None of these
+service timeouts is measured here.
 
 **A paid call is never sent again on its own** (`pi-sends.ts`). Provider
 calls are not idempotent, and whether one that was out when cubed stopped

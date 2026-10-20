@@ -1,6 +1,7 @@
 /** Host activation and transport, never a second agent state machine. */
 import path from "node:path";
 import type { ServerResponse } from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message, Models } from "@earendil-works/pi-ai";
 import { ConversationBusy, LiveDoc, type UsageState } from "@earendil-works/pi-durable";
@@ -28,6 +29,10 @@ const log = createLogger("threads");
 /** The registry's first message is submitted once under this request id. */
 const INITIAL_REQUEST = "cube:initial";
 /** Why a disk the release check let go is kept all the same. */
+/** The threads' part of cubed's close (Conversations.close). */
+export const THREADS_CLOSE_MS = 9_000;
+/** How long the close waits for the commands still running. */
+const COMMANDS_MS = 2_000;
 const RUNNER_KEPT = "the release check was clean, but the runner kept the disk (a machine that did not stop in time or failed, or a host runner's directory)";
 /** Archive refused: the thread's agent is running. Nothing is interrupted. */
 export class ThreadWorking extends Error {
@@ -680,14 +685,26 @@ export class Conversations {
     await agent.conversation.abort(context);
   }
   /** cubed stops; thread machines keep running and the next cubed attaches
-   * to them again. */
-  async close(): Promise<void> {
+   * to them again. Bounded by `ms` whatever a machine, a command or an agent
+   * does, so cubed's whole close stays under its supervisor's SIGKILL. The
+   * threads send no new request (held back, sent once after the reopen); a
+   * command (a tell or an archive OptChat cut off) gets up to COMMANDS_MS,
+   * and the agents' own closes the rest: Pi's waits for a request out and
+   * stores its answer. Past a bound the close goes on and logs what was
+   * left: a request still out is counted at the next open and not sent
+   * again (pi-sends.ts), a guest command goes on and the next cubed
+   * reattaches to it, and a tell or an archive is keyed. */
+  async close(ms = THREADS_CLOSE_MS): Promise<void> {
     this.closing = true;
+    const deadline = Date.now() + ms;
+    const left = (cap = Infinity) => Math.min(cap, Math.max(0, deadline - Date.now()));
     // A machine still booting is left to boot; the next cubed attaches to it.
-    await this.machines.close();
-    await Promise.allSettled(this.commands.values());
-    await Promise.all([...this.agents].map(([id, promise]) => this.closePi(id, promise)));
-    await Promise.all([...this.claudes.values()].map(async promise => (await promise.catch(() => null))?.close()));
+    await within("thread machines", this.machines.close(), left());
+    const agents = [...this.agents];
+    await within("threads' new requests", Promise.all(agents.map(async ([, promise]) => (await promise.catch(() => null))?.hold())), left(500));
+    await within("commands", Promise.allSettled(this.commands.values()), left(COMMANDS_MS));
+    await within("thread agents", Promise.all([...agents.map(([id, promise]) => this.closePi(id, promise)),
+      ...[...this.claudes.values()].map(async promise => (await promise.catch(() => null))?.close())]), left());
     this.agents.clear(); this.claudes.clear();
     for (const id of [...this.workspaces.keys()]) this.closeWorkspace(id);
   }
@@ -702,4 +719,14 @@ function messageText(message: Message): string {
 async function piUsage(agent: Agent): Promise<UsageState & { interrupted?: Record<string, number> }> {
   const interrupted = (await agent.harness.snapshot(SendsDoc, context))?.interrupted;
   return { ...await agent.harness.usage(context), ...interrupted && Object.keys(interrupted).length ? { interrupted: { ...interrupted } } : {} };
+}
+
+/** `work`, or false once `ms` passed; the close goes on without it. */
+async function within<T>(step: string, work: Promise<T>, ms: number): Promise<T | false> {
+  const bound = new AbortController();
+  const timedOut = Symbol("timed out");
+  const result = await Promise.race([work, delay(ms, timedOut, { signal: bound.signal }).catch(() => timedOut)]).finally(() => bound.abort());
+  if (result !== timedOut) return result as T;
+  log.warn("a step of the close did not end in time; the close goes on", { step, ms });
+  return false;
 }

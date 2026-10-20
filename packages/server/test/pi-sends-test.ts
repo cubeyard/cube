@@ -40,8 +40,13 @@ const context = BACKGROUND_CONTEXT;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-pi-sends-"));
 const textOf = (message: Message) => typeof message.content === "string" ? message.content : message.content.map(part => part.type === "text" ? part.text : "").join("");
 const sent: Array<{ kind: "turn" | "compaction"; user: string }> = [];
+/** How long a turn's answer takes. */
+let turnMs = 0;
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
-faux.setResponses(Array.from({ length: 400 }, () => async request => {
+faux.setResponses(Array.from({ length: 400 }, () => async (request, options) => {
+  // An abort (a close) ends the wait, as a provider's stream ends.
+  if (turnMs) await delay(turnMs, null, { signal: options?.signal }).catch(() => {});
+  if (options?.signal?.aborted) return fauxAssistantMessage("", { stopReason: "aborted" });
   const kind = request.messages.some(message => message.role === "system" && textOf(message).includes("You write the memory of OptChat")) ? "compaction" : "turn";
   sent.push({ kind, user: textOf(request.messages.filter(message => message.role === "user").at(-1)!) });
   return fauxAssistantMessage(kind === "compaction" ? `summary ${sent.length} ${"s".repeat(20)}` : `reply ${sent.length}`);
@@ -146,6 +151,49 @@ const talk = (chat: OptChat) => chat.memory.messages.filter(message => message.k
   assert.equal(read.coverage, "partial");
   assert.match(read.notes.join(" "), /1 model requests were out when cubed stopped/);
   console.log("ok: thread: a request out at a crash is counted once (its usage partial), not sent again; the next message is answered");
+}
+
+// A thread's close: its request out comes back and is stored (Pi's close
+// waits for it; the reopen neither drops nor sends it), and one it would
+// start is held back unsent and sent once after the reopen (G1).
+{
+  const directory = path.join(root, "drain", "thread");
+  const files = path.join(root, "drain", "workspace");
+  fs.mkdirSync(files, { recursive: true });
+  const guest = new LocalGuestTransport(path.dirname(files));
+  const open = () => openAgent({ directory, binding: guest.binding, workspace: new VmWorkspace({ guest, leases: new LeaseStore(directory), owner: "pi", binding: guest.binding }), models, model });
+  sent.length = 0;
+  turnMs = 600;
+  let agent = await open();
+  try {
+    await agent.conversation.submit({ type: "input", content: "out", requestId: "out" }, context);
+    await until(() => sent.length === 1, "the request is out");
+    agent.hold();
+  } finally { await agent.close(); }
+  turnMs = 0;
+  agent = await open();
+  try {
+    await agent.conversation.waitForIdle(context);
+    assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted ?? {}, {}, "nothing was out at the close");
+    // Pi's close waited for it.
+    const answers = (await agent.conversation.context(context)).messages.filter(message => message.role === "assistant");
+    assert.deepEqual(answers.map(message => (message as { stopReason: string }).stopReason), ["stop"], "its answer came back whole and was stored");
+    assert.deepEqual(sent.map(call => call.user), ["out"], "and nothing is sent again");
+    // Now the gate: held before the request is sent.
+    agent.hold();
+    await agent.conversation.submit({ type: "input", content: "held", requestId: "held" }, context);
+    // Prepared and at its request (the hook), then given time to be sent.
+    await until(async () => sent.some(call => call.user === "held") || (await agent.harness.inspect(context)).tasks.some(task => (task.record.state as { checkpoint?: { phase?: string } }).checkpoint?.phase === "request"), "the request is ready to go");
+    await delay(300);
+    assert.deepEqual(sent.map(call => call.user), ["out"], "a request is not sent while closing");
+  } finally { await agent.close(); }
+  agent = await open();
+  try {
+    await agent.conversation.waitForIdle(context);
+    assert.deepEqual(sent.map(call => call.user), ["out", "held"], "the reopen sends the held request, once");
+    assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted ?? {}, {}, "never sent before, so not counted");
+  } finally { await agent.close(); }
+  console.log("ok: a thread's close: a request out is stored, one not yet sent is held and sent once after the reopen");
 }
 
 // Settling twice before a resume, as a crash during the open does, counts once.

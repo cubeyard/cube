@@ -221,7 +221,8 @@ export async function openAgent(options: {
     // Last, so its hook runs after every other: each request's send is
     // recorded before it leaves (pi-sends.ts).
     let epoch = 0;
-    registry.install(sendsExtension(() => harness!, () => epoch));
+    const gate = { closing: false, held: 0 };
+    registry.install(sendsExtension(() => harness!, () => epoch, gate));
     const thread = path.basename(options.directory);
     harness = await Harness.open(storage, { models: sessions.models, registry, onReport: piReports(log, { thread }), settings: { toolExecution: "sequential" } }, context);
     // Before anything is scheduled: a request that was out when the last
@@ -266,9 +267,13 @@ export async function openAgent(options: {
       harness: opened, conversation, storage,
       /** Why the agent is down, once Pi's Session failed; null while it works. */
       failure: () => down,
+      /** Before a close: no new request is sent (held back, sent once after
+       * the reopen). Pi's close then waits for a request already out and
+       * stores its answer; cubed bounds that wait (Conversations.close). */
+      hold(): void { gate.closing = true; },
       async close() {
         if (closed) return;
-        closed = true; closing = true;
+        closed = true; closing = true; gate.closing = true;
         try { await opened.close(context); }
         finally { sessions.release(); await release(); }
       },
