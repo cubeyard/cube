@@ -553,7 +553,8 @@ export class OptChat {
     }, context);
     const settings = await this.harness.snapshot(SettingsDoc, context);
     this.cacheKey = `optchat-${settings!.cache}`;
-    this.compactorModels = cachedModels(this.options.models, () => `${this.cacheKey}-compact`);
+    // The compactor's task is its own: its request end is not cached.
+    this.compactorModels = cachedModels(this.options.models, () => `${this.cacheKey}-compact`, { task: false });
     const existing = await this.harness.conversation(ROOT_CONVERSATION_ID, context);
     if (existing) this.conversation = existing;
     else {

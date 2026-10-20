@@ -111,12 +111,13 @@ for (const lines of [9, 100, 500]) {
 
 {
   process.env.ANTHROPIC_API_KEY = "sk-ant-test";
-  await assert.rejects(compactNode({ models: cached, model, context: Array.from({ length: 100 }, (_, n) => line(n)), source: { message: "hello" } }), /captured/);
+  await assert.rejects(compactNode({ models: cachedModels(models, () => "optchat-test-compact", { task: false }), model, context: Array.from({ length: 100 }, (_, n) => line(n)), source: { message: "hello" } }), /captured/);
   const body = bodies.pop()!.body as unknown as Body;
   const content = body.messages[0]!.content;
   assert.equal(content.slice(0, 26).map(block => block.text).join(""), render(100));
-  assert.deepEqual(marked(content), [24, 26], "the compactor's context carries a view mark");
-  assert.equal(marks(body), 3);
+  assert.deepEqual(marked(content), [24], "the compactor's context carries a view mark; its task none");
+  assert.deepEqual(marked(body.system), [0]);
+  assert.equal(marks(body), 2);
 }
 
 {
@@ -139,8 +140,11 @@ for (const lines of [9, 100, 500]) {
   await sleep(30);
   assert.deepEqual(order, ["fetch 0+1|user: xxx"], "the second call waits for the writer");
   held.shift()!.release(open());
+  await sleep(30);
+  assert.deepEqual(order, ["fetch 0+1|user: xxx"], "the writer's headers alone do not let it go: the entry is not readable yet");
+  body.enqueue(new TextEncoder().encode(`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "msg_1", model: model.id, usage: { input_tokens: 1, output_tokens: 0 } } })}\n\n`));
   await until(() => held.length === 1);
-  assert.deepEqual(order, ["fetch 0+1|user: xxx", "fetch 0+1|user: xxx"], "it goes once the writer's response starts, before its end");
+  assert.deepEqual(order, ["fetch 0+1|user: xxx", "fetch 0+1|user: xxx"], "it goes once the writer's response begins, before its end");
   body.close();
   held.shift()!.release(new Response("{}", { status: 400 }));
   await Promise.all([a, b]);
@@ -153,17 +157,18 @@ for (const lines of [9, 100, 500]) {
   await Promise.all([c, d]);
   order.length = 0;
 
-  const e = call(render(100)), f = call(render(100));
+  // A prefix whose writer began is cached for a while: other views below.
+  const e = call(render(100, 2)), f = call(render(100, 2));
   await until(() => held.length === 1);
   held.shift()!.release(new Error("connection reset"));
   await until(() => held.length === 1);
-  assert.deepEqual(order, ["fetch 0+1|user: xxx", "end 0+1|user: xxx", "fetch 0+1|user: xxx"], "a failed writer releases the waiter");
+  assert.deepEqual(order, ["fetch 2+1|user: xxx", "end 2+1|user: xxx", "fetch 2+1|user: xxx"], "a failed writer releases the waiter, which then leads");
   held.shift()!.release(new Response("{}", { status: 400 }));
   await Promise.all([e, f]);
   order.length = 0;
 
   const abort = new AbortController();
-  const g = call(render(100)), h = call(render(100), abort.signal);
+  const g = call(render(100, 3)), h = call(render(100, 3), abort.signal);
   await until(() => held.length === 1);
   abort.abort();
   const aborted = await h;
@@ -171,6 +176,31 @@ for (const lines of [9, 100, 500]) {
   assert.equal(held.length, 1, "while the writer still holds the prefix");
   held.shift()!.release(new Response("{}", { status: 400 }));
   await g;
+  order.length = 0;
+
+  // A call whose prefix starts with one being written waits for it as well
+  // (uniichat's AskAI.wait), then writes only the rest; another prefix does not.
+  const begin = () => body.enqueue(new TextEncoder().encode(`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "msg_2", model: model.id, usage: { input_tokens: 1, output_tokens: 0 } } })}\n\n`));
+  const i = call(render(100, 4)), j = call(render(108, 4)), k = call(render(100, 5));
+  await until(() => held.length === 2);
+  await sleep(30);
+  assert.deepEqual(order, ["fetch 4+1|user: xxx", "fetch 5+1|user: xxx"], "the longer view waits on the writer of its start");
+  for (const other of held.splice(1)) other.release(new Response("{}", { status: 400 }));
+  held.shift()!.release(open());
+  begin();
+  await until(() => held.length === 1);
+  const longer = held[0]!.body.body as unknown as Body;
+  assert.deepEqual(marked(longer.messages[0]!.content), [26, 28], "it marks its own last whole block, within 20 blocks of the written one");
+  body.close();
+  held.shift()!.release(new Response("{}", { status: 400 }));
+  await Promise.all([i, j, k]);
+  order.length = 0;
+
+  // Once a prefix is written, a call of it or of a start of it does not wait.
+  const m = call(render(100, 4)), n = call(render(100, 4));
+  await until(() => held.length === 2);
+  for (const other of held.splice(0)) other.release(new Response("{}", { status: 400 }));
+  await Promise.all([m, n]);
   respond = () => new Response("{}", { status: 400 });
 }
 
@@ -192,6 +222,30 @@ for (const lines of [9, 100, 500]) {
   assert.equal(input[0]!.content!.slice(0, 126).map(part => part.text).join(""), big, "the view leads the input, so turns share its prefix");
   assert.equal(captured.body.store, false);
   assert.ok(!JSON.stringify(captured.body).includes("cache_control"));
+
+  // Single flight holds for Codex too: a compaction whose view starts with
+  // one being written waits until that one's first stream event.
+  const order: string[] = [];
+  const streams: Array<ReadableStreamDefaultController<Uint8Array>> = [];
+  respond = captured => {
+    const input = (captured.body.input as Array<{ content?: Array<{ text?: string }> }>)[0]!.content!;
+    order.push(`fetch ${input.length}`);
+    return new Response(new ReadableStream<Uint8Array>({ start: controller => { streams.push(controller); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  const compactor = cachedModels(direct, () => "optchat-test-compact", { task: false });
+  const options = { apiKey: `x.${claim}.y`, transport: "sse" as const, maxRetries: 0 };
+  const a = compactor.completeSimple(model, { messages: request(render(100, 6)) }, options);
+  const b = compactor.completeSimple(model, { messages: request(render(108, 6)) }, options);
+  for (let k = 0; k < 200 && order.length < 1; k++) await sleep(5);
+  await sleep(30);
+  assert.deepEqual(order, ["fetch 27"], "the longer view waits while the shorter is written");
+  streams[0]!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "response.created", response: { id: "resp_1" } })}\n\n`));
+  for (let k = 0; k < 200 && order.length < 2; k++) await sleep(5);
+  assert.deepEqual(order, ["fetch 27", "fetch 29"], "it goes once the writer's response begins");
+  for (const stream of streams) stream.error(new Error("done"));
+  await Promise.all([a, b]);
+  bodies.length = 0;
+  respond = () => new Response("{}", { status: 400 });
 }
 
 console.log("optchat cache: ok");
