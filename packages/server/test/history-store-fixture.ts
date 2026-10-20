@@ -43,7 +43,7 @@ export async function piStore(directory: string, options: { runs: number; calls:
   const registry = createRegistry();
   registry.install(defineExtension({ name: "bench", tools: [defineTool({
     name: "bash", description: "stand-in bash", parameters: Type.Object({ command: Type.String() }), replay: "safe",
-    async execute() { return { content: [{ type: "text" as const, text: output(options.bytes) }] }; },
+    async execute() { return { output: [{ type: "text" as const, text: output(options.bytes) }] }; },
   })] }));
   const harness = await Harness.open(await openStorage(file), { models, registry }, context);
   try {

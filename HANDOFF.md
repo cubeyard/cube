@@ -5,7 +5,7 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
 
 ## What cube is now
 
-- **cubed** runs the agents on the host. Pi uses pi-durable 1.0.1 with
+- **cubed** runs the agents on the host. Pi uses pi-durable 1.3.0 with
   SQLite; Claude Code threads use the unmodified `claude` with the user's own
   login. Both work on the thread's `Workspace`.
 - **Every thread has its own VM on a runner** (runner protocol 3; see
@@ -429,7 +429,7 @@ fails in the machine, which has no credentials for it.
   - a released berth binary end to end in production (installed from a
     release and running a thread).
 - **Other:**
-  - pi-codemode 1.0.1 has no CPU-slice limit;
+  - pi-codemode 1.3.0's worker `CodemodeSandbox` has no CPU-slice limit;
   - there is no manual compaction or reset in the UI;
   - pi-durable's `onReport` is not wired to logs;
   - AGENTS.md still calls Pi an AgentHarness;

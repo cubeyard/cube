@@ -268,7 +268,10 @@ export function cachedModels(models: Models, sessionId: () => string, options: {
     let lead = IDLE;
     const call = { allTurns: false, end: () => lead.end(), options: {
       ...callOptions,
-      sessionId: callOptions?.sessionId ?? sessionId(),
+      // Cube's key, over the one Pi (≥1.0.2) sends per conversation: the
+      // chat and the compactor keep their own caches, and a close releases
+      // the connections by these keys.
+      sessionId: sessionId(),
       onPayload: async (payload: unknown, piModel: never) => {
         const next = (await callOptions?.onPayload?.(payload, piModel)) ?? payload;
         const api = model.api;

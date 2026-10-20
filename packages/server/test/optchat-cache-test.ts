@@ -17,7 +17,7 @@ import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { streamSimple as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { azureOpenAIResponsesProvider } from "@earendil-works/pi-ai/providers/azure-openai-responses";
+import { azureProvider } from "@earendil-works/pi-ai/providers/azure";
 import { streamSimple as responsesStream } from "@earendil-works/pi-ai/api/openai-responses";
 import { GITHUB_COPILOT_MODELS } from "@earendil-works/pi-ai/providers/github-copilot.models";
 import { OPENCODE_MODELS } from "@earendil-works/pi-ai/providers/opencode.models";
@@ -447,7 +447,7 @@ for (const lines of [9, 100, 500]) {
   const direct = { streamSimple: (m: never, c: never, o: never) => responsesStream(m, c, o), completeSimple: async (m: never, c: never, o: never) => responsesStream(m, c, o).result() } as unknown as Models;
   const later = (id: string) => { const version = /^gpt-(\d+)(?:\.(\d+))?(?:-|$)/.exec(id); return !!version && (Number(version[1]) > 5 || (Number(version[1]) === 5 && Number(version[2] ?? 0) >= 6)); };
   const thirdParty = [GITHUB_COPILOT_MODELS, OPENCODE_MODELS, OPENCODE_GO_MODELS, CLOUDFLARE_AI_GATEWAY_MODELS].flatMap(catalog => Object.values(catalog)).filter(candidate => candidate.api === "openai-responses" && later(candidate.id));
-  assert.equal(thirdParty.length, 22, "the catalog's GPT-5.6+ models on openai-responses outside OpenAI");
+  assert.equal(thirdParty.length, 23, "the catalog's GPT-5.6+ models on openai-responses outside OpenAI");
   const options = { apiKey: "third-party-key", maxRetries: 0, reasoning: "high" as const, sessionId: "optchat-test" };
   for (const pick of thirdParty) {
     await cachedModels(direct, () => "optchat-test").completeSimple(pick, { messages: request(render(100)) }, options);
@@ -475,9 +475,9 @@ for (const lines of [9, 100, 500]) {
   process.env.AZURE_OPENAI_RESOURCE_NAME = "cube-test";
   const platform = createModels();
   platform.setProvider(openaiProvider());
-  platform.setProvider(azureOpenAIResponsesProvider());
+  platform.setProvider(azureProvider());
   const pick = (provider: string, id: string) => platform.getModels(provider).find(candidate => candidate.id === id)!;
-  const sol = pick("openai", "gpt-5.6-sol"), five = pick("openai", "gpt-5.5"), azure = pick("azure-openai-responses", "gpt-5.6-sol");
+  const sol = pick("openai", "gpt-5.6-sol"), five = pick("openai", "gpt-5.5"), azure = pick("azure", "gpt-5.6-sol");
   const flagged = (model: typeof sol) => (model.compat as { supportsExplicitPromptCacheMode?: boolean } | undefined)?.supportsExplicitPromptCacheMode === true;
   assert.ok(flagged(sol) && !flagged(five) && !flagged(azure), "pi-ai flags the platform's 5.6+ only");
   type Part = { type: string; text?: string; prompt_cache_breakpoint?: unknown };

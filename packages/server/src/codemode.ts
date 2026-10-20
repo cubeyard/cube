@@ -110,7 +110,7 @@ export function createCodemodeTool(options: {
     executionMode: "sequential",
     async execute(args, api, context) {
       const refuse = (text: string, extra: Partial<CodemodeDetails> = {}) => ({
-        content: [{ type: "text" as const, text }], isError: true, details: { calls: [], completionUnknown: false, ...extra },
+        output: [{ type: "text" as const, text }], isError: true, details: { calls: [], completionUnknown: false, ...extra },
       });
       const sourceBytes = Buffer.byteLength(args.code);
       if (sourceBytes > limits.sourceBytes) return refuse(`Script not run: the source is ${sourceBytes} bytes; codemode accepts at most ${limits.sourceBytes}.`, { limit: "sourceBytes" });
@@ -183,7 +183,7 @@ export function createCodemodeTool(options: {
           if (result.isError) throw new Error(text || `${call.name} failed`);
           const bytes = Buffer.byteLength(text);
           if (bytes > limits.maxCallResultBytes) throw new Error(`${call.name} returned ${bytes} bytes; codemode hands at most ${limits.maxCallResultBytes} bytes of one call result to the script`);
-          const parts = (result.content ?? []).filter((part): part is ImageContent => part.type === "image");
+          const parts = (result.output ?? []).filter((part): part is ImageContent => part.type === "image");
           const bytesOfImages = parts.reduce((sum, part) => sum + Buffer.byteLength(part.data), 0);
           if (images.length + parts.length > IMAGE_COUNT || imageBytes + bytesOfImages > IMAGE_BYTES) throw new Error("codemode image budget exceeded; read fewer images per script");
           // A late completion after the script ended must not mutate its result.
@@ -254,7 +254,7 @@ export function createCodemodeTool(options: {
         ].join("\n"));
       }
       const details: CodemodeDetails = { calls: calls.map(call => ({ ...call })), completionUnknown: uncertain.length > 0, ...(limit ? { limit } : {}) };
-      return { content: [{ type: "text", text: bound(body.join("\n\n"), resultBytes) }, ...images], isError: !result.ok || uncertain.length > 0 || unsupportedImage, details };
+      return { output: [{ type: "text", text: bound(body.join("\n\n"), resultBytes) }, ...images], isError: !result.ok || uncertain.length > 0 || unsupportedImage, details };
     },
   });
 }
@@ -265,7 +265,7 @@ function codemodeParameters() {
 
 /** A nested result as the script sees it: its text, then any remarks. */
 function render(result: ToolExecutionResult, diagnostics: readonly ToolDiagnostic[]): string {
-  const text = (result.content ?? []).map(part => part.type === "text" ? part.text : "").join("");
+  const text = (result.output ?? []).map(part => part.type === "text" ? part.text : "").join("");
   const remarks = [...diagnostics, ...(result.diagnostics ?? [])].map(each => `[${each.severity}: ${each.message}]`);
   return [text, ...remarks].filter(Boolean).join("\n");
 }
