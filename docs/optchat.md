@@ -104,7 +104,7 @@ A node the compactor fails on ends one of these ways:
 | its input's doing: asked again, it fails alike | an empty answer; an input too long for the model (pi-ai's `isContextOverflow`); a refusal or safety stop, told by the provider's stop reason (`refusal`, `content_filter`, `SAFETY`, …) whatever its explanation says, so one that mentions "500" or "timeout" is not taken for an outage; an error stop on a reply the model began (its usage is not zero); five answers none of them in the form | its source cut short, after one call (five for the form): `(no summary, cut short: zoom it) ` and the start of the message, or of both halves of a merge, within 512 bytes; stored with `cut: <why>` and logged as a warning. The log keeps the message whole | runs |
 | not its input's doing | an outage, a rate limit (pi-ai's `isRetryableAssistantError`), or an error no reply carried (a bad key, a quota, a model that is gone) | asked again every 10 s until it answers; never cut | waits, and the chat shows `summarizing: <error>`; a change of the compactor model applies to the next try |
 | out of output: every answer stopped at the cap (`length`, thinking only or lines cut off), not an overflow | a model that thinks past 9216 tokens | an answer that ran out is never used; the model is told to think briefly and asked again within the five answers. If none gave lines, the node is asked again every 10 s; never cut | waits, and the chat shows `summarizing: the compactor ran out of output …` |
-| its answers spent: 15 answers since the node's last release, whatever ended each round | answers that ran out, answers not in the form, or either followed by a rate limit or an outage | held: no timer and no call, never cut. A new message of the user gives it one more round of at most 5 answers; another compactor model (saved in settings, or the chat's model it follows) gives a new one, also at open. A thread's report, a repeated request, a restart or waiting gives none | waits, and the chat shows `summarizing: no summary for a message yet (<last error>); change the compactor model or send a message to try again` |
+| its answers spent: 15 answers since the node's last release, whatever ended each round | answers that ran out, answers not in the form, or either followed by a rate limit or an outage | held: no timer and no call, never cut. A new message of the user (typed in the chat, or a batch of the user's comments on one of the chat's artifacts) gives it one more round of at most 5 answers; another compactor model (saved in settings, or the chat's model it follows) gives a new one, also at open. A step that comes while the node's last answer is still out counts the same once that answer is in. A thread's report, the notice of a merge the user confirmed (sent as a report), a repeated request, a restart or waiting gives none | waits, and the chat shows `summarizing: no summary for a message yet (<last error>); change the compactor model or send a message to try again` |
 
 A `length` stop that is a context overflow is the input's doing like any
 other: Bedrock's `model_context_window_exceeded` (pi-ai maps it to
@@ -120,7 +120,16 @@ not even that is sent. So the compactor spends at most 15 capped answers on
 a node, then at most 5 per message of the user or change of model, each
 for at most the eight nodes being written at once: at most 40 answers per
 message, about 370k output tokens at 9216 (nearly twice that on a thinking
-budget, where the cap is 17408). Nothing asks again on its own.
+budget, where the cap is 17408). That token figure does not hold on a
+ChatGPT sign-in (Codex, or `openai` signed in): pi-ai sends no output cap
+there, so the bound is the count of answers only, not of tokens or cost.
+Nothing asks again on its own.
+
+The answers left are stored best effort, like the usage. A crash between
+a reply and its commit gives that one answer back at the next open: at
+most one per node being asked. A commit that fails while cubed runs on
+loses nothing yet: memory still counts the answer and the node's next
+commit stores it; a restart before that gives those answers back.
 
 So a refusal costs one call and an outage no summary. A failure that is
 the input's doing but reaches the compactor as a setup error (a 4xx no
@@ -575,7 +584,8 @@ compactor model, an ignored `CUBED_OPTCHAT_COMPACTOR`, the chat's model,
 the available models) and
 saves with `PUT /api/settings/compactor {model: {provider, id} | null}`
 (400 for a malformed body, 422 for a model no connected provider offers);
-a save looks at the nodes held with their answers spent again.
+a save looks at the nodes held with their answers spent again, and at a
+node whose last answer was out during the save once that answer is in.
 The panel also lists the newest
 artifacts (`GET /api/artifacts`); comments on the chat's own artifacts reach
 it as messages starting `[artifact <id>]` through the same pending queue, as

@@ -454,6 +454,10 @@ export class OptChat {
   private readonly spend = new Map<string, Spend>();
   /** Nodes held with their answers spent (busy, no timer), and why. */
   private readonly held = new Map<string, string>();
+  /** Counts of the user's messages and of compactor model changes, so a
+   * node whose last answer was out when one came is not held past it. */
+  private asks = 0;
+  private changes = 0;
   /** The last error each failing node gave, for the held message. */
   private readonly why = new Map<string, string>();
   private compactorError: string | null = null;
@@ -763,6 +767,7 @@ export class OptChat {
     if (this.closing || !this.conversation) return;
     for (const job of this.memory.ready(this.busy, this.options.limits?.jobs ?? JOBS)) {
       const key = `${job.l}:${job.i}`;
+      const { asks, changes } = this;
       this.busy.add(key);
       this.build(job.l, job.i).then(() => {
         this.busy.delete(key);
@@ -780,7 +785,19 @@ export class OptChat {
         // Its answers spent, whatever ended the round: held (busy, no timer,
         // no call) until a message of the user or another compactor model
         // releases it. Never cut: the source is not lost.
-        if ((this.spend.get(key)?.left ?? ANSWERS) <= 0) {
+        const spend = this.spend.get(key);
+        if (spend && spend.left <= 0) {
+          // A step that came while its last answer was out is not lost: a
+          // message gives the round release() gave the held, another model
+          // is looked at as compactorChanged() looks at the held (the same
+          // model is held again, no call). Once per step, never a loop.
+          if (changes !== this.changes || asks !== this.asks) {
+            if (asks !== this.asks) { spend.left = TRIES; void this.saveSpend([key]); }
+            this.compactorError = message;
+            this.busy.delete(key);
+            this.pump();
+            return;
+          }
           const why = this.why.get(key) ?? message;
           this.held.set(key, why);
           this.compactorError = `no summary for a message yet (${why}); change the compactor model or send a message to try again`;
@@ -848,9 +865,11 @@ export class OptChat {
 
   /** A message of the user: every node with its answers spent gets one
    * more round of TRIES. A held one is asked again now; one still being
-   * looked at goes to the retry its failure takes with answers left. */
+   * looked at goes to the retry its failure takes with answers left, and
+   * one whose last answer is still out gets its round when it fails. */
   private release(): void {
     if (this.closing) return;
+    this.asks++;
     const nodes = [...this.spend].filter(([, spend]) => spend.left <= 0).map(([node]) => node);
     if (!nodes.length) return;
     for (const node of nodes) {
@@ -869,6 +888,7 @@ export class OptChat {
    * under another model gets a new round of TRIES answers; the rest are
    * held again without a call. */
   compactorChanged(): void {
+    this.changes++;
     if (this.closing || !this.held.size) return;
     for (const node of this.held.keys()) this.busy.delete(node);
     this.held.clear();
