@@ -79,8 +79,9 @@ so a repeated HTTP action does not append another turn; a busy thread rejects a
 new prompt instead of queueing it. The product registry stores no model or tool
 progress. A failed Storage call ends the Harness (`harness.closed` is
 `failed`): cubed logs it, releases the agent's provider sessions and shows the
-thread's agent as down until cubed restarts, without reopening it (the reopen
-would send the request out at the failure again). Pi's `onReport` goes to
+thread's agent as down until cubed restarts, without reopening it, not even
+when its machine boots again (the reopen would send the request out at the
+failure again); only the thread's release ends that. Pi's `onReport` goes to
 cubed's log, redacted (`pi-report.ts`). The thread's machine binding (runner and VM) and a random storage
 identity live in a session-scoped Pi document, `cube.runner`; a changed binding
 refuses to open.

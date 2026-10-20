@@ -562,7 +562,8 @@ export class OptChat {
   }
   /** Set when Pi's Session failed (a storage error): the chat is down. */
   private down: string | null = null;
-  /** The last request the chat refused to send, until one is sent. */
+  /** The last request the chat refused to send, until the hook next builds
+   * one and hands it to Pi to send. */
   private requestError: string | null = null;
 
   /** Pi ended the Session by itself: a Storage call failed, so nothing more
@@ -1701,7 +1702,12 @@ export class OptChat {
    * aborted, when the throw ends it. So the generation is aborted first, as
    * a stop would: the turn ends unanswered, nothing retries it, and the
    * next message starts a new turn. Its abort comes with the abort commit,
-   * or with the Session's end if that commit fails; a close aborts it too. */
+   * or with the Session's end if that commit fails; a close aborts it too.
+   * A close that seals admission before the abort commits leaves the task
+   * live: the reopened chat builds this request again and sends it once if
+   * it builds (it was never sent), or refuses it again. The wait counts as
+   * a request held back, so a close neither waits for it nor counts it as
+   * a call cut off: it was never sent. */
   private async refuse(task: TaskId, signal: AbortSignal | undefined, error: unknown): Promise<never> {
     if (!signal || signal.aborted) throw error;
     this.requestError = `a request was not sent: ${errorText(error)}`;
@@ -1710,7 +1716,9 @@ export class OptChat {
     void this.harness.abortTask(task, context).catch(abortError => {
       if (!signal.aborted) log.warn("the unsent request's turn was not aborted; it waits for the close", { task, error: errorText(abortError) });
     });
-    if (!signal.aborted) await new Promise(resolve => { signal.addEventListener("abort", resolve, { once: true }); });
+    this.gated.requests++;
+    try { if (!signal.aborted) await new Promise(resolve => { signal.addEventListener("abort", resolve, { once: true }); }); }
+    finally { this.gated.requests--; }
     throw error;
   }
 

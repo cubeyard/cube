@@ -90,6 +90,8 @@ export const LEGACY_THREAD = "this thread was created by an older cube and is no
 export function assertCurrentThreadStore(directory: string): void {
   if (LEGACY_STORE.some(name => fs.existsSync(path.join(directory, name)))) throw new Error(LEGACY_THREAD);
 }
+/** Why a thread's agent is down: its Pi Session failed. */
+export const downText = (error: unknown) => `the thread's agent stopped: its history could not be saved (${reportText(error)}); it stays stopped until cubed restarts`;
 
 export async function openAgent(options: {
   directory: string;
@@ -219,13 +221,14 @@ export async function openAgent(options: {
     harness = await Harness.open(storage, { models: sessions.models, registry, onReport: piReports(log, { thread }), settings: { toolExecution: "sequential" } }, context);
     // A failed Storage call ends the Session: Pi aborts every task, and every
     // later call of the Harness rejects, so nothing is sent or retried in
-    // this process. The agent stays down until cubed restarts (it does not
-    // reopen by itself, which would send the request out at the failure
-    // again); its provider sessions are released now, not at the close.
+    // this process. The agent stays down until cubed restarts (Conversations
+    // does not reopen it, not even when its machine boots again: that would
+    // send the request out at the failure again); its provider sessions are
+    // released now, not at the close.
     let down: string | null = null;
     void harness.closed.then(end => {
       if (end.reason !== "failed" || closing) return;
-      down = `the thread's agent stopped: its history could not be saved (${reportText(end.error)}); it stays stopped until cubed restarts`;
+      down = downText(end.error);
       log.error("thread session failed; its agent is down until cubed restarts", { thread, error: reportText(end.error) });
       sessions.release();
     }, () => {});

@@ -640,9 +640,14 @@ a live provider.
   for that abort and only then throws. The turn ends unanswered, as a stop
   does: nothing retries it, the next message starts a new turn, and a
   reopen does not send it. The failure is logged (`request not sent`) and
-  shown as the chat's failure until a request is sent. If the abort's
-  commit fails, the Session fails and its end aborts the generation; a
-  close aborts it too.
+  shown as the chat's failure until the hook next builds a request (and
+  hands it to Pi to send). If the abort's commit fails, the Session fails
+  and its end aborts the generation; a close aborts it too. One exception:
+  a close that seals admission before the abort commits leaves the turn's
+  task live, so the reopened chat builds the request again and sends it
+  once if it builds (it was never sent before), or refuses it again. Not a
+  duplicate, but a reopen can send a request that was refused. The close
+  does not wait for the refused request or count it as a call cut off.
 - **Pi's reports.** Both Harnesses (the chat's and each thread's) pass
   `onReport`: a hook's or listener's throw, a task Pi cannot run
   (`task_too_old` after a rollback), a failed cleanup. Each is one warning
@@ -656,19 +661,28 @@ a live provider.
   compactor's calls, starts no turn, node or retry, releases its provider
   sessions and shows `the chat stopped: its history could not be saved`.
   A thread's agent does the same: it is logged, its provider sessions are
-  released, and its thread shows why. Neither reopens by itself: the
+  released, and its thread shows why (its row is an error, a reader of its
+  transcript and a message are answered with why, and OptChat's thread
+  record carries it). Neither reopens by itself, a thread's agent not even
+  when its machine boots again (a runner restart or a guest crash): the
   reopen sends the request that was out at the failure again (N2, not
   exactly-once), and whether and when to reopen is the open decision D2′.
-  Both stay down until cubed restarts.
+  Both stay down until cubed restarts; a thread's archive still runs its
+  release check, and the release ends the mark.
 
 `optchat-fail-closed-test.ts` makes the view's rendering and the image
 check throw and checks that nothing is sent, now, with the next turn or
-after a reopen, and that the log has no secret and no stack; then fails the
-chat's storage with a request out and with a compactor call held, and
-checks that nothing more is sent, the provider sessions are released before
-any close, and the close ends without the grace. `pi-upgrade-test.ts` pins
-Pi's side: the abort-then-throw primitive, and a thread agent's reports
-and failed Session.
+after a reopen, and that the log has no secret and no stack; fails the
+abort's commit (the chat goes down, nothing sent) and holds the abort off
+across a close (not waited for or counted; the reopen sends it once); then
+fails the chat's storage with a request out and with a compactor call held,
+and checks that nothing more is sent, the provider sessions are released
+before any close, and the close ends without the grace. `pi-upgrade-test.ts`
+pins Pi's side: the abort-then-throw primitive, and a thread agent's reports
+and failed Session. `thread-down-test.ts` fails a thread's Session through
+`Conversations` and checks what its row, its readers and OptChat's record
+show, and that neither reboots of its machine (also one during the
+failure) nor recovery rounds send its request again; then archives it.
 
 ## Configuration
 

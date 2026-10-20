@@ -429,7 +429,8 @@ fails in the machine, which has no credentials for it.
   - pi-codemode 1.3.0's worker `CodemodeSandbox` has no CPU-slice limit;
   - there is no manual compaction or reset in the UI;
   - a Harness whose Session failed (a storage error) stays down until cubed
-    restarts; it does not reopen by itself (D2′ open; docs/optchat.md,
+    restarts; it does not reopen by itself, a thread's agent not even when
+    its machine boots again (D2′ open; docs/optchat.md,
     "Failing closed");
   - GPT-6 on the OpenAI platform: pi-ai 1.3.0's `configuration_update`
     together with OptChat's `reasoning.context: "all_turns"` is pinned

@@ -4,7 +4,10 @@
  * messages (no view, no images: another prefix and cost), so OptChat aborts
  * the generation first. The turn ends unanswered, the failure is logged and
  * shown, and nothing sends it again: not a retry, not the next turn, not a
- * reopen. H1: when Pi's Session fails (a storage error), the chat goes down
+ * reopen. If the abort's commit fails, the Session's end aborts it: the
+ * chat goes down, nothing sent. A close that comes before the abort
+ * commits neither waits for the refused request nor counts it as cut off
+ * (it was never sent); the reopened chat sends it once. H1: when Pi's Session fails (a storage error), the chat goes down
  * at once: no further send or retry in the process, the compactor cut off
  * without the close's grace, provider sessions released, the failure shown
  * and logged without secrets. */
@@ -135,6 +138,71 @@ try {
     assert.deepEqual([sent("m1"), sent("m2"), sent("m3")], [1, 0, 1], "no send again after a reopen");
     await chat.close();
     console.log(`ok: a failure building ${label} sends nothing, ends the turn unanswered, is logged without secrets, and is never sent again`);
+  }
+
+  {
+    // The abort's commit fails (as every commit from then on): the
+    // Session's end aborts the generation. The wait ends at once, the chat
+    // goes down, and nothing is sent or retried.
+    turns.length = 0;
+    const chat = await open("abort-commit", 30_000);
+    await chat.send("m1 first", "r1");
+    await until(() => answered(chat, "m1"), "m1 answered");
+    await until(() => idle(chat), "idle after m1");
+    const inner = chat as unknown as Inner;
+    const render = inner.memory.render.bind(inner.memory);
+    const storage = chat.agent.storage as unknown as { commit: (...args: unknown[]) => Promise<unknown> };
+    const commit = storage.commit.bind(storage);
+    let broken = false;
+    storage.commit = (...args) => broken ? Promise.reject(new Error("disk I/O error (test)")) : commit(...args);
+    inner.memory.render = (...args) => {
+      // The request's view fails; so does every commit after it, the abort's first.
+      if (turns.includes("m1")) { broken = true; throw new Error("render failed"); }
+      return render(...args);
+    };
+    const started = Date.now();
+    await chat.send("m2 refused", "r2");
+    await until(() => chat.failure()?.startsWith("the chat stopped") ?? false, "the chat down");
+    await chat.close();
+    const ms = Date.now() - started;
+    await delay(10 * RETRY_MS);
+    assert.ok(broken, "the view failed");
+    assert.ok(ms < 6_000, `the wait ends with the Session, not the 30 s grace (${ms} ms)`);
+    assert.equal(sent("m2"), 0, "the refused request is not sent");
+    assert.deepEqual(turns, ["m1"], "nor anything else, no retry");
+    console.log(`ok: an abort whose commit fails ends with the Session: the chat goes down in ${ms} ms, nothing sent`);
+  }
+
+  {
+    // A close before the abort commits (the abort is held off here): the
+    // close does not wait for the refused request or count it as cut off,
+    // since it was never sent. Its task stays live, so the reopened chat
+    // builds it again and sends it once.
+    turns.length = 0;
+    let chat = await open("close-race", 30_000);
+    await chat.send("m1 first", "r1");
+    await until(() => answered(chat, "m1"), "m1 answered");
+    await until(() => idle(chat), "idle after m1");
+    const inner = chat as unknown as Inner & { harness: { abortTask: (...args: unknown[]) => Promise<void> } };
+    const render = inner.memory.render.bind(inner.memory);
+    let armed = true;
+    inner.memory.render = (...args) => { if (armed && turns.includes("m1")) throw new Error("render failed"); return render(...args); };
+    inner.harness.abortTask = async () => {};
+    await chat.send("m2 refused", "r2");
+    await until(() => chat.failure()?.startsWith("a request was not sent") ?? false, "the refusal shown");
+    const started = Date.now();
+    const { lines } = await logged(() => chat.close());
+    const ms = Date.now() - started;
+    assert.ok(ms < 6_000, `the close does not wait the grace for it (${ms} ms)`);
+    assert.equal(sent("m2"), 0, "not sent before the close");
+    assert.ok(!lines.some(line => line.includes("calls cut off at close")), "and not counted as a call cut off");
+    armed = false;
+    chat = await open("close-race", 30_000);
+    await until(() => answered(chat, "m2"), "the reopened chat sends it");
+    await until(() => idle(chat), "idle after the reopen");
+    assert.equal(sent("m2"), 1, "once");
+    await chat.close();
+    console.log(`ok: a close before the abort commits ends in ${ms} ms without counting the unsent request; the reopen sends it once`);
   }
 
   {

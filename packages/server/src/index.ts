@@ -321,7 +321,7 @@ export async function createCubed(options: {
   const runnerHealth = options.runnerHealth ?? protocolRunnerHealth;
   /** A machine that waits for a runner is still starting (`waiting` says
    * why), unless its agent is open on it already. */
-  const threadState = (id: string) => conversations.error(id) ? "error"
+  const threadState = (id: string) => conversations.error(id) || conversations.down(id) ? "error"
     : conversations.starting(id) || (conversations.waiting(id) && !conversations.agentOpen(id)) ? "starting" : "ready";
   const runnerView = (id: string) => registry.runnerStatuses().find(runner => runner.id === id);
   const probeRunner = async (id: string) => {
@@ -758,7 +758,7 @@ export async function createCubed(options: {
       if (parts[0] === "api" && parts[1] === "threads") {
         const id = parts[2];
         if (parts.length > 4 && parts[3] !== "workspace" && !(parts[3] === "media" && parts.length === 5)) return json({ error: "not found" }, 404);
-        if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...listed(thread), state: threadState(thread.id), error: conversations.error(thread.id), waiting: conversations.waiting(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
+        if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...listed(thread), state: threadState(thread.id), error: conversations.error(thread.id) ?? conversations.down(thread.id), waiting: conversations.waiting(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
         if (!id && method === "POST") {
           const model = await selection(body.model);
           const projectId = text("projectId");
