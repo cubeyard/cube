@@ -193,6 +193,8 @@ export async function compactNode(options: {
   /** Answers this round may spend, TRIES at most; TRIES when not given. */
   answers?: number;
   signal?: AbortSignal;
+  /** Right before each model call is sent; its reply comes to `onReply`. */
+  onRequest?: () => void;
   /** Every model reply, failed ones included, before it is used: its usage. */
   onReply?: (reply: AssistantMessage) => void | Promise<void>;
   /** Why the node is its source cut short. */
@@ -222,6 +224,7 @@ export async function compactNode(options: {
   let left = options.answers ?? TRIES;
   for (let answers = 1; ; answers++) {
     if (left <= 0) throw new Spent(`the compactor's answers for this node were spent before its lines (${answers - 1} this round)`);
+    options.onRequest?.();
     const reply = await options.models.completeSimple(model, { messages }, {
       cacheRetention: "short",
       maxTokens: outputTokens(limit),

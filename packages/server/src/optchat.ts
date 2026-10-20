@@ -10,6 +10,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { JsonRepresentation } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { cleanupSessionResources, Type, type AssistantMessage, type Message, type Models, type Usage } from "@earendil-works/pi-ai";
@@ -43,6 +44,13 @@ export const ANSWERS = 3 * TRIES;
 /** How long a thread's machine must keep failing to start before the chat
  * hears of it: cubed's recovery loop retries every 30 s. */
 export const START_GRACE_MS = 2 * 60_000;
+/** How long a close waits for the model calls already out (summaries being
+ * built, a chat request sent) to come back and be stored, so a reopen does
+ * not send them again. The supervisor kills cubed 30 s after SIGTERM, and
+ * the rest of its shutdown comes after the chat's. */
+export const CLOSE_GRACE_MS = 10_000;
+/** After the grace, how long the cut-off calls get to settle before Pi closes. */
+const CLOSE_SETTLE_MS = 2_000;
 
 /** Tells to one thread between two messages of the user: unattended
  * follow-up is bounded; the user's next message allows more. */
@@ -318,6 +326,11 @@ const CompactorUsageDoc = defineDoc<CompactorUsage>({ kind: "cube.optchat.usage"
  * with none left is held; a built node's record goes with it. */
 type Spend = { left: number; model: string };
 const SpendDoc = defineDoc<{ nodes: Record<string, Spend> }>({ kind: "cube.optchat.spend", version: 1, scope: "session", initial: () => ({ nodes: {} }) });
+/** Model calls a close cut off after its grace, by `provider/model`: what
+ * they cost is unknown (their usage, if any came, is counted as it came),
+ * and the reopened chat may send them again. */
+type Cut = { chat: Record<string, number>; compactor: Record<string, number> };
+const CutDoc = defineDoc<Cut>({ kind: "cube.optchat.cut", version: 1, scope: "session", initial: () => ({ chat: {}, compactor: {} }) });
 const TURN = "optchat.turn";
 const NODE_ENTRY = "optchat.node";
 
@@ -417,7 +430,7 @@ export type OptChatOptions = {
   /** Work artifacts: the chat writes its own and reads its threads'. */
   artifacts?: Artifacts;
   /** Tests lower these. */
-  limits?: { view?: number; low?: number; node?: number; compaction?: number; compactionLow?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number; page?: number };
+  limits?: { view?: number; low?: number; node?: number; compaction?: number; compactionLow?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number; page?: number; closeMs?: number };
 };
 
 /** The log's shape after one more entry: a hash over how many messages each
@@ -475,7 +488,16 @@ export class OptChat {
   private again = false;
   private syncing: Promise<void> | null = null;
   private dirty = false;
+  /** Set when a close begins: no new work starts (no node, no turn, no
+   * request of the chat); what is out is waited for, then cut off. */
   private closing = false;
+  private closed: Promise<void> | undefined;
+  /** Each node being built, settled either way, so a close can wait for it. */
+  private readonly building = new Map<string, Promise<void>>();
+  /** The compactor calls out now: node → `provider/model`. */
+  private readonly calling = new Map<string, string>();
+  /** Chat requests held back by a close, unsent, until Pi closes. */
+  private gated = 0;
   private readonly abort = new AbortController();
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private watchTimer: ReturnType<typeof setInterval> | undefined;
@@ -769,7 +791,10 @@ export class OptChat {
       const key = `${job.l}:${job.i}`;
       const { asks, changes } = this;
       this.busy.add(key);
-      this.build(job.l, job.i).then(() => {
+      const built = this.build(job.l, job.i);
+      const settled: Promise<void> = built.then(() => {}, () => {}).finally(() => { if (this.building.get(key) === settled) this.building.delete(key); });
+      this.building.set(key, settled);
+      built.then(() => {
         this.busy.delete(key);
         this.failed.delete(key);
         this.spend.delete(key);
@@ -829,10 +854,14 @@ export class OptChat {
         spend.model = name;
         await this.saveSpend([key]);
       }
-      text = await compactNode({ models: this.compactorModels, model, context: this.memory.context(l, i), source, node: this.memory.nodeLimit, signal: this.abort.signal,
-        answers: this.spend.get(key)?.left ?? ANSWERS, onReply: reply => this.countCompactor(reply, key, name), onCut: why => { cut = why; } });
+      try {
+        text = await compactNode({ models: this.compactorModels, model, context: this.memory.context(l, i), source, node: this.memory.nodeLimit, signal: this.abort.signal,
+          answers: this.spend.get(key)?.left ?? ANSWERS, onRequest: () => { this.calling.set(key, name); },
+          onReply: reply => { this.calling.delete(key); return this.countCompactor(reply, key, name); }, onCut: why => { cut = why; } });
+      } finally { this.calling.delete(key); }
     }
-    if (this.closing) return;
+    // A node that came back while the chat closes is stored all the same: a
+    // close waits for it, and the reopened chat would pay for it again.
     if (cut !== undefined) log.warn("compactor gave no line: node cut short", { node: `${l}:${i}`, error: cut });
     // Stored first: memory never holds a node storage lacks, and its answers
     // left go with it. The view it leads to is a cache for the next open,
@@ -922,8 +951,10 @@ export class OptChat {
   async usage(): Promise<OptChatUsage> {
     const compactor = await this.harness.snapshot(CompactorUsageDoc, context);
     const threads = Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {});
+    const cut = await this.harness.snapshot(CutDoc, context);
     return { chat: await this.harness.usage(context) as OptChatUsage["chat"],
-      compactor: compactor ? JSON.parse(JSON.stringify(compactor)) as OptChatUsage["compactor"] : { models: {}, calls: {}, since: null, earlier: false }, threads };
+      compactor: compactor ? JSON.parse(JSON.stringify(compactor)) as OptChatUsage["compactor"] : { models: {}, calls: {}, since: null, earlier: false }, threads,
+      cut: cut ? { chat: { ...cut.chat }, compactor: { ...cut.compactor } } : { chat: {}, compactor: {} } };
   }
 
   /** Accepts a user message or a thread report and keeps it until it is in
@@ -1537,6 +1568,15 @@ export class OptChat {
         }, { tag: false }),
       ],
       hooks: [hook(GenerationTask, { beforeRequest: async (request, api, callContext) => {
+        // A close sends no new request: this one waits, unsent, until Pi
+        // closes and aborts it; the reopened run sends it then, once.
+        const signal = callContext.abortSignal;
+        if (this.closing && signal) {
+          this.gated++;
+          try { if (!signal.aborted) await new Promise(resolve => { signal.addEventListener("abort", resolve, { once: true }); }); }
+          finally { this.gated--; }
+          signal.throwIfAborted();
+        }
         // The turn's images, read from the store for this request only.
         const support = this.imageSupport();
         const messages = withImages(request.messages, { load: id => this.media.get(id), refused: support.reason, limit: MEDIA_LIMITS.perTurn, bytes: MEDIA_LIMITS.turnBytes });
@@ -1549,13 +1589,53 @@ export class OptChat {
     });
   }
 
-  async close(): Promise<void> {
-    if (this.closing) return;
+  /** Closes the chat. No new work starts; the model calls already out (the
+   * nodes being built, a chat request sent) get up to `closeMs` to come back
+   * and be stored with their usage. Only then is what is still out cut off,
+   * and counted in CutDoc: a reopen may send those again. A crash has no
+   * grace: every call out at it is sent again, uncounted (N2). */
+  close(): Promise<void> {
+    return this.closed ??= this.shut();
+  }
+
+  /** Waits at most `ms` until no model call of the chat is out: no node
+   * being built, and no chat request sent whose answer is not stored yet
+   * (one held back by the gate in beforeRequest was never sent). Answers the
+   * nodes still being built and whether a chat request is still out. */
+  private async quiesce(ms: number): Promise<{ nodes: string[]; chat: boolean }> {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const generation = (await this.live().catch(() => undefined))?.generation;
+      // Pi keeps `generation` from a request's start until its answer is stored.
+      const chat = !!generation && !generation.retry && !generation.deferred && this.gated === 0;
+      const left = deadline - Date.now();
+      if ((!chat && !this.building.size) || left <= 0) return { nodes: [...this.building.keys()], chat };
+      await delay(Math.min(20, left));
+    }
+  }
+
+  private async shut(): Promise<void> {
     this.closing = true;
-    this.abort.abort();
     this.notify();
     for (const timer of this.timers) clearTimeout(timer);
     if (this.watchTimer) clearInterval(this.watchTimer);
+    if (this.harness && this.conversation) {
+      const out = await this.quiesce(this.options.limits?.closeMs ?? CLOSE_GRACE_MS);
+      const compactor = [...this.calling.values()];
+      const chat = out.chat && this.model ? [`${this.model.provider}/${this.model.id}`] : [];
+      if (compactor.length || chat.length) {
+        log.warn("model calls cut off at close: their cost is unknown, and the reopened chat may send them again", { chat, compactor, nodes: out.nodes });
+        await this.harness.commit(async tx => {
+          const doc = await tx.doc(CutDoc);
+          // A key holds a slash, so it is never `__proto__`.
+          for (const key of chat) doc.chat[key] = (Object.hasOwn(doc.chat, key) ? doc.chat[key]! : 0) + 1;
+          for (const key of compactor) doc.compactor[key] = (Object.hasOwn(doc.compactor, key) ? doc.compactor[key]! : 0) + 1;
+        }, context).catch(error => { log.warn("calls cut off at close not counted", { error }); });
+      }
+    }
+    this.abort.abort();
+    // The cut-off calls' replies (usage, if any) are counted before Pi closes.
+    await Promise.race([Promise.allSettled(this.building.values()), delay(CLOSE_SETTLE_MS, undefined, { ref: false })]);
     await Promise.allSettled([...this.watchers.values()].map(async watching => (await watching)?.stop()));
     await this.stopWatch?.().catch(() => {});
     await this.syncing;

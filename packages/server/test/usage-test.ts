@@ -298,12 +298,20 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
     assert.match(usageText(report), /optchat itself: .*\(chat .*, compactor [^,]*\)/);
     // No model reads the chat for wishes behind the user's back, however long it idles.
     await new Promise(resolve => setTimeout(resolve, 500));
-    assert.deepEqual(Object.keys(await chat.usage()).sort(), ["chat", "compactor", "threads"]);
+    assert.deepEqual(Object.keys(await chat.usage()).sort(), ["chat", "compactor", "cut", "threads"]);
     assert.ok(prompts.length >= 2 && prompts.every(prompt => prompt.includes("You are OptChat") || prompt.startsWith('["You write the memory of OptChat')), JSON.stringify(prompts.map(prompt => prompt.slice(0, 60))));
     assert.deepEqual([...new Set(report.optchat!.lines.map(line => line.source))].sort(), ["optchat", "optchat-compactor"]);
     assert.ok(!counted.compactor.earlier, "a new chat counts its compactor from its first call");
     assert.equal(report.optchat!.coverage, "complete");
     usage.close();
+    // Calls a close cut off after its grace: their cost is unknown, not zero.
+    const cutUsage = new UsageService({ file: path.join(root, "usage-cut.sqlite"), registry, threads, live: async () => null,
+      optchat: async () => ({ ...await chat.usage(), cut: { chat: { [key]: 1 }, compactor: { [key]: 2 } } }) });
+    const cut = (await cutUsage.report()).optchat!;
+    assert.notEqual(cut.coverage, "complete");
+    assert.equal(cut.unknownTurns, 3);
+    assert.ok(cut.notes.some(note => note.startsWith("3 model calls (chat 1, compactor 2) were cut off by a close of cubed")), JSON.stringify(cut.notes));
+    cutUsage.close();
   } finally { await chat.close(); }
   // Reopened: still counted from its first open, so nothing is unknown.
   const reopened = await OptChat.open({ directory: path.join(root, "optchat"), models, model: async () => ({ provider: model.provider, id: model.id }),

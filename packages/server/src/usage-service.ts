@@ -37,6 +37,8 @@ export interface OptChatUsage {
   compactor: { models: Record<string, Usage>; calls: Record<string, number>; since: number | null; earlier?: boolean };
   /** The threads it started. */
   threads: string[];
+  /** Calls a close cut off after its grace, by `provider/model`: their cost is unknown. */
+  cut?: { chat: Record<string, number>; compactor: Record<string, number> };
 }
 
 export interface UsageReport {
@@ -209,7 +211,10 @@ export class UsageService {
     const compactor = piLines({ models: chat.compactor.models }, "optchat-compactor", this.pricing)
       .map(line => ({ ...line, calls: chat.compactor.calls[`${line.provider}/${line.model}`] ?? null }));
     const notes = chat.compactor.earlier ? [`compactor calls before ${chat.compactor.since === null ? "now" : new Date(chat.compactor.since).toISOString()} were not counted (an older cube): their usage is unknown`] : [];
-    const usage = subject({ ...base, lines: [...piLines(chat.chat, "optchat", this.pricing), ...compactor], unknownTurns: 0, incomplete: !!chat.compactor.earlier, read: "live", readAt: Date.now(), notes });
+    const count = (calls: Record<string, number> | undefined) => Object.values(calls ?? {}).reduce((sum, n) => sum + n, 0);
+    const cutChat = count(chat.cut?.chat), cutCompactor = count(chat.cut?.compactor);
+    if (cutChat + cutCompactor) notes.push(`${cutChat + cutCompactor} model calls (chat ${cutChat}, compactor ${cutCompactor}) were cut off by a close of cubed: what the provider billed for them is unknown`);
+    const usage = subject({ ...base, lines: [...piLines(chat.chat, "optchat", this.pricing), ...compactor], unknownTurns: cutChat + cutCompactor, incomplete: !!chat.compactor.earlier || cutChat + cutCompactor > 0, read: "live", readAt: Date.now(), notes });
     this.store(usage, null);
     return { usage, threads: chat.threads };
   }

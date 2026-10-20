@@ -67,6 +67,7 @@ with Pi as its only writer. cubed's live-instance socket lock (one cubed per
 | view at load | `cube.optchat.view`, written with every node: the view over the first `total` messages and `batch`, whether a batch is still merging toward 64,000 bytes. A reopen restores both and appends the rest, so it goes on from the view it had. A view stored before batching has no `batch` and was never mid-batch; it restores as it was, and the first batch comes once it passes 128,000 bytes as now measured (ids included, so possibly at the reopen). `compaction` and `compactionBatch` are the compaction view and its batch, restored the same way if it still tiles the log and coarsens the view; a view stored before it lacks them, and the compaction view is merged down from the view at the reopen. A message's own line may be stored unbuilt (the view is written after every node) and restores as such; a merged line must be built. `entry`, `shape` and `shapeTotal` are the last Pi entry the view covers, a hash over how many messages each entry gave up to it and how many that was: a reopen whose log numbers its messages otherwise (a change to how entries are read) is refused with `the chat's log numbers its messages differently from its memory`, rather than putting every summary on the wrong message. A cubed before pages keeps these three while it grows `total`; when `total` differs from `shapeTotal`, such a cubed wrote the view since and numbered the log without pages, and the reopen is refused (`an older cubed numbered the chat's log without pages`) only if an entry logged in pages gives a different count without them. A view stored before `shape` is not checked; one stored before `shapeTotal` is checked against `total` |
 | compactor usage | `cube.optchat.usage`: the compactor's calls run beside Pi, so its `pi.usage` misses them; each reply's usage (failed ones too) is added there in its own commit, by `provider/model` with a call count |
 | compactor answers | `cube.optchat.spend`: for each node not built yet that the compactor answered, its answers left (of 15) and the `provider/model` that spent the last, in the same commit as the usage; it goes in the commit that stores the node. A restart reads it back, so it is no new budget |
+| calls cut off at close | `cube.optchat.cut`: the model calls a close cut off after its grace (below), by `provider/model`, the chat's and the compactor's apart. Their cost is unknown: whatever usage came is counted as it came, and the usage report shows them as calls without a usage report |
 | subagent reports | when a spawned thread's run settles, how it ended and its last reply go to the chat as `[<first 8 of the thread id>] <report>` (see "Follow-up and unattended work"), with request id `report:<thread>:<run>`, so a report is delivered once across restarts. The transcript marks it with `from` (the short id) and shows it as the thread's, not the user's |
 
 `packages/server/src/optchat-memory.ts` is the pure part: the fold that appends
@@ -130,6 +131,21 @@ a reply and its commit gives that one answer back at the next open: at
 most one per node being asked. A commit that fails while cubed runs on
 loses nothing yet: memory still counts the answer and the node's next
 commit stores it; a restart before that gives those answers back.
+
+A close (cubed stops, updates or restarts) starts no new work: no node, no
+turn, and no new request of a running turn (the request hook holds it back,
+unsent, until Pi closes; the reopened run sends it). It then waits up to 10
+s (`CLOSE_GRACE_MS`) for the model calls already out: the nodes being built
+(each may finish its round of answers) and a chat request sent and not yet
+stored. Each that comes back is stored with its usage, the node and its view
+too, so a reopen sends none of them again. Only what is still out after the
+grace is cut off; each such call is logged and counted in
+`cube.optchat.cut`, and the reopen sends it again, at most once per call (at
+most the 8 nodes being built and one chat request). The close then gives the
+cut-off calls up to 2 s to settle their usage before Pi closes, so it takes
+at most about 12 s; the supervisor kills cubed 30 s after SIGTERM. A crash
+or kill has no grace: every call out at it is sent again at the next open and
+none is counted (N2).
 
 So a refusal costs one call and an outage no summary. A failure that is
 the input's doing but reaches the compactor as a setup error (a 4xx no
@@ -535,7 +551,12 @@ its mark, byte for byte, unless a batch merged it (and then only merged
 lines change); a reopen at rest, with summaries running or between a
 turn's steps changes nothing of it; new instructions rewrite the request
 once; turns carry three marks, compactions two; no two calls write the same
-prefix at once. `optchat-view-fault-test.ts` makes the stored view's
+prefix at once, across reopens too, and no request is sent twice.
+`optchat-close-test.ts` closes with summaries and a chat request out:
+within the grace they are stored with their usage and the reopen sends
+none again, and the turn's next step is not sent while closing; past the
+grace (forced), each cut-off call is counted and sent again at most once.
+`optchat-view-fault-test.ts` makes the stored view's
 commits fail after their nodes are stored, then reopens: the turns after it
 send the views the uninterrupted chat sends. Hit rates are modelled offline (spec §3.3), not measured on
 a live provider.

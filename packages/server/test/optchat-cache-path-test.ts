@@ -8,8 +8,9 @@
  * reopen (idle, or with summaries running) changes nothing of it; the
  * system prompt changing rewrites once; turns mark the system, the view and
  * the end, compactions only the system and the view; no two calls write the
- * same prefix at once (within one open: a call a close cut off is not known
- * to the reopened chat, which may send it again). Several messages waiting for a turn (before the
+ * same prefix at once, and no request is sent twice, across reopens too: a
+ * close waits for the calls out and stores their answers (the forced case,
+ * past the close's grace, is optchat-close-test's). Several messages waiting for a turn (before the
  * first, or while a run generates) go as one batch turn, sent like any other:
  * the system prompt on top, never among the messages, and its prefix read by
  * the next turn. The shares read are this model's, not a provider's:
@@ -29,7 +30,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-cache-path-"));
 process.env.ANTHROPIC_API_KEY = "sk-ant-test";
 const LOOK = 20, FIRST_MS = 10;
 const hash = (text: string) => crypto.createHash("sha256").update(text).digest("hex");
-let seed = 11;
+let seed = Number(process.env.CUBE_TEST_OPTCHAT_SEED ?? 11);
 const rand = () => (seed = (seed * 48271) % 2147483647) / 2147483647;
 const span = (a: number, b: number) => a * (b / a) ** rand();
 const random = (bytes: number) => crypto.createHash("sha512").update(String(rand())).digest("base64").repeat(Math.ceil(bytes / 88)).slice(0, Math.ceil(bytes));
@@ -290,7 +291,11 @@ for (let k = 1; k < turns.length; k++) {
 assert.ok(requests.at(-1)!.merges > 0, "batches happened");
 assert.ok(rewrites >= 1 && rewrites <= turns.length / 8, `a batch rewrote the view, rarely (${rewrites} of ${turns.length} turns)`);
 assert.equal(twice, 0, "no two calls of one open wrote the same prefix at once");
-assert.ok(across <= 3, `a reopen sent again at most what its close cut off (${across})`);
+assert.equal(across, 0, "nor across a reopen: a close waits for the calls out");
+// A close stores what was out, so a reopen sends nothing again: every
+// request differs from every other one, byte for byte.
+const sentTwice = requests.length - new Set(requests.map(request => hash(JSON.stringify([request.kind, request.blocks])))).size;
+assert.equal(sentTwice, 0, "no request was sent twice");
 
 const share = (kind: Request["kind"]) => {
   const list = requests.filter(request => request.kind === kind);
@@ -298,7 +303,7 @@ const share = (kind: Request["kind"]) => {
   return list.reduce((sum, request) => sum + Math.min(request.read, request.total - task(request)), 0) / list.reduce((sum, request) => sum + request.total - task(request), 0);
 };
 const turnShare = share("turn"), compactionShare = share("compaction");
-console.log(`optchat cache path: ${turns.length} turns (${rewrites} rewritten by a batch), ${requests.length} requests, ${across} written again across a reopen, read ${(100 * turnShare).toFixed(1)}% of turns and ${(100 * compactionShare).toFixed(1)}% of compactions but their task (modelled, not measured)`);
+console.log(`optchat cache path: ${turns.length} turns (${rewrites} rewritten by a batch), ${requests.length} requests, read ${(100 * turnShare).toFixed(1)}% of turns and ${(100 * compactionShare).toFixed(1)}% of compactions but their task (modelled, not measured)`);
 // At these small marks a batch rewrites a larger share; at the real ones (128 KB) the same model reads about 97%.
 assert.ok(turnShare >= 0.85, "turns read at least 85% of their input in this model");
 assert.ok(compactionShare >= 0.85, "compactions read at least 85% of their input but their task in this model");
