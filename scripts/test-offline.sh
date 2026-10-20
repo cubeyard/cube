@@ -45,6 +45,7 @@ OFFLINE_TESTS=(
   packages/server/test/durable-agent-test.ts
   packages/server/test/codemode-test.ts
   packages/server/test/pi-read-test.ts
+  packages/server/test/pi-upgrade-test.ts
   packages/server/test/thread-events-test.ts
   packages/server/test/transcript-window-test.ts
   packages/server/test/pi-compaction-test.ts
