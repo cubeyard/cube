@@ -116,6 +116,13 @@ try {
   const image = `docker.io/library/debian@sha256:${"c".repeat(64)}`;
   const settings = `# Written once by \`cubed runners init-local\`\nCUBE_BERTH_IMAGE=${image}\nCUBE_BERTH_MAX_MACHINES=2\n`;
   fs.writeFileSync(path.join(home, ".cube/berth.env"), settings);
+  // A first init-local that has not got berth listening wrote no berth.json:
+  // the service must not take the directory from the next run.
+  const half = serve();
+  assert.equal(half.status, 78, half.stderr);
+  assert.match(half.stderr, /cube-berth: not set up yet/);
+  assert.equal(half.stdout, "", "berth is not started without berth.json");
+  fs.writeFileSync(path.join(home, ".cube/berth.json"), "{}");
   const started = serve();
   assert.equal(started.status, 0, started.stderr);
   assert.equal(started.stdout.trim(), `berth vm --dir ${home}/.cube/berth --qemu ${root}/opt/qemu/bin/qemu-system-aarch64 --qemu-img ${root}/opt/qemu/bin/qemu-img`

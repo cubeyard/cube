@@ -1046,8 +1046,12 @@ async function runnersInitLocal(state: string, options: NonNullable<CubedCli["lo
     console.log(`next: ${service}`);
     return 0;
   }
-  console.error(`cubed: the local berth vm is set up but not enrolled: ${local.runnerError}`);
-  console.error(`cubed: fix that, then run cubed runners init-local again (it continues where it stopped), or ${service} and run: cubed runners enroll --config ${local.files.configPath} --state ${state}`);
+  console.error(`cubed: the local berth vm is not enrolled: ${local.runnerError}`);
+  // Until berth.json is there the service does not start berth, and there
+  // is nothing to enroll from.
+  console.error(fs.existsSync(local.files.configPath)
+    ? `cubed: fix that, then run cubed runners init-local again (it continues where it stopped), or ${service} and run: cubed runners enroll --config ${local.files.configPath} --state ${state}`
+    : "cubed: fix that, then run cubed runners init-local again (it continues where it stopped; until berth has started once, --image and --max-machines may be given anew)");
   return 1;
 }
 

@@ -127,10 +127,11 @@ keel has no default. Everything goes under `<home>`:
 | `berth.env` | `CUBE_BERTH_IMAGE` and `CUBE_BERTH_MAX_MACHINES`, what the service starts it with (0600) |
 | `berth.json` | the version-2 protocol-4 config cubed reads (0600; binding `node-berth-<host>`, the same id, environment 1) |
 
-It creates only what is missing, in this order: the control key,
-`berth.env`, berth's own first run (which binds the directory to that key
-and the node id, pulls the image before it listens and prints its peer),
-then `berth.json`, and it enrolls the runner with an authenticated hello
+It creates only what is missing, in this order: the control key, berth's
+own first run (which binds the directory to that key, the node id and the
+listen address in `berth/.berth/vm.json`, pulls the image before it listens
+and prints its peer), then, once berth listens, `berth.env` and `berth.json`,
+and it enrolls the runner with an authenticated hello
 while that berth runs, then stops it with SIGTERM. What is already there must
 agree (image, slots, node id, address, control key, berth's binding); a
 disagreement is refused and nothing changes. Nothing is ever overwritten,
@@ -140,8 +141,14 @@ deleted or rebound. So:
   `already set up and enrolled`, starts nothing and changes nothing. This is
   what happens after `brew uninstall` and `brew install`, which keep `~/.cube`
   and `~/.cube-host`.
-- **After a failed run** (no accelerator, an image pull that failed): run it
-  again; it continues with the key and settings it made.
+- **After a failed run** (no accelerator, an image pull that failed, a
+  digest that does not exist): run it again; it continues with the key and
+  berth's binding it made. Until berth has listened once nothing records the
+  image or the slots, so that run may give a corrected `--image` or
+  `--max-machines`; the node id and `--listen` are berth's binding and stay.
+  The service does not start berth before `berth.json` is there. If a berth
+  already holds the directory without one, `init-local` says to stop it
+  first.
 - **With a moved or new `--state`:** it enrolls the same runner there (the
   same key and peer).
 - **A retired runner** is not admitted again.

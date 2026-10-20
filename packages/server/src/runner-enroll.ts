@@ -197,9 +197,11 @@ function program(given: string | undefined, variable: string, flag: string, name
 
 /** Sets up the local `berth vm` and enrolls it. It can be run again at any
  * time, for example after `brew uninstall` and `brew install`: it creates
- * only what is missing (the control key, `berth.env`, berth's directory by
- * berth's own first run, `berth.json`), checks that what is there belongs
- * together, and never deletes, overwrites or rebinds a file. When all of it
+ * only what is missing (the control key, berth's directory by berth's own
+ * first run, then `berth.env` and `berth.json` once berth listens), checks
+ * that what is there belongs together, and never deletes, overwrites or
+ * rebinds a file. A run that failed before berth listened (a wrong image
+ * digest) recorded no image, so the next may name another. When all of it
  * is there and enrolled in this state it changes nothing and starts
  * nothing. Enrollment needs berth answering: it is started until the
  * admission is recorded (the first time it pulls the image before it
@@ -226,7 +228,7 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   if (options.image !== undefined && !PINNED_IMAGE.test(options.image)) throw new Error("--image must be pinned: <registry/repository>@sha256:<64 hex>");
   if (recorded && options.image !== undefined && options.image !== recorded.image) throw conflict(`${files.settings} names the image ${recorded.image}`);
   const image = options.image ?? recorded?.image;
-  if (!image) throw new Error("--image <registry/repository@sha256:…> is needed the first time: the image every thread machine is built on");
+  if (!image) throw new Error("--image <registry/repository@sha256:…> is needed the first time (until a run gets berth started): the image every thread machine is built on");
   if (options.maxMachines !== undefined && (!Number.isInteger(options.maxMachines) || options.maxMachines < 1 || options.maxMachines > 64)) {
     throw new Error("--max-machines must be 1 through 64");
   }
@@ -303,10 +305,9 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
     allowPeer = (JSON.parse((await run(berth, ["keygen", "--key", files.controlKey], { encoding: "utf8", timeout: 10000 })).stdout) as { peerId: string }).peerId;
     log(`wrote ${files.controlKey}`);
   }
-  if (!recorded) {
-    fs.writeFileSync(files.settings, berthSettingsText(image, maxMachines), { mode: 0o600, flag: "wx" });
-    log(`wrote ${files.settings}`);
-  }
+  // berth.env and berth.json come only after berth has pulled the image and
+  // listens: until then a run may give another --image or --max-machines
+  // (berth's vm.json records neither), and the service does not start.
 
   log(berthHome ? `starting berth vm in ${files.dir} to enroll it` : `starting berth vm in ${files.dir} for the first time: it makes its key and pulls ${image}`);
   const child = spawn(berth, ["vm", "--dir", files.dir, "--qemu", qemu, "--qemu-img", qemuImg, "--keel", keel, "--mkfs-erofs", mkfs,
@@ -344,11 +345,19 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
     await delay(ready ? 0 : 100);
     // A berth that stopped at once may have found its service holding the
     // directory; with a config, whoever answers with its key is it.
-    const held = !ready && config !== null && /another berth vm runs in/.test(stderr);
+    const another = !ready && /another berth vm runs in/.test(stderr);
+    const held = another && config !== null;
     if (!ready && !held) {
-      result.runnerError = gone() ? `berth exited (${child.exitCode ?? child.signalCode}): ${lastLines(stderr)}`
-        : `berth did not say "waiting for cubed" in time: ${lastLines(stderr)}`;
+      result.runnerError = another
+        ? `another berth vm runs in ${files.dir} and there is no ${files.configPath} yet, so it cannot be asked: stop it (Homebrew: brew services stop cubeyard/tap/cube-berth), then run init-local again`
+        : gone() ? `berth exited (${child.exitCode ?? child.signalCode}): ${lastLines(stderr)}`
+          : `berth did not say "waiting for cubed" in time: ${lastLines(stderr)}`;
       return result;
+    }
+    if (ready && !recorded) {
+      // berth runs on this image: what the service starts it with from now on.
+      fs.writeFileSync(files.settings, berthSettingsText(image, maxMachines), { mode: 0o600, flag: "wx" });
+      log(`wrote ${files.settings}`);
     }
     if (config) {
       if (serverPeer && serverPeer !== config.config.serverPeer) throw conflict(`${files.configPath} names peer ${config.config.serverPeer}, but the berth in ${files.dir} is ${serverPeer}`);

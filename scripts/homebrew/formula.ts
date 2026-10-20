@@ -133,13 +133,14 @@ class CubeBerth < Formula
     resource("keel-base").stage { (libexec/"keel").install "keel-${tag}-${ARCH}-base.erofs" => "base.erofs" }
     # The service's entry point: berth vm in ~/.cube/berth, as
     # \`cubed runners init-local\` set it up, with Homebrew's QEMU and
-    # mkfs.erofs and this keel. Until it is set up it says so and waits, so
-    # launchd does not restart it in a loop.
+    # mkfs.erofs and this keel. Until it is set up (berth.json, the last file
+    # init-local writes before it enrolls) it says so and waits, so launchd
+    # does not restart it in a loop, and never holds a half-set-up directory.
     (libexec/"service.sh").write <<~SH
       #!/bin/sh
       set -eu
       home="$HOME/.cube"
-      if [ ! -f "$home/berth.env" ] || [ ! -f "$home/berth/.berth/vm.json" ]; then
+      if [ ! -f "$home/berth.json" ] || [ ! -f "$home/berth.env" ] || [ ! -f "$home/berth/.berth/vm.json" ]; then
         echo "cube-berth: not set up yet: run cubed runners init-local --image <registry/repository@sha256:...>" >&2
         sleep 60
         exit 78

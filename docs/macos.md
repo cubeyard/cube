@@ -42,17 +42,19 @@ service when it uninstalls a formula).
 (`<registry>/<repository>@sha256:<64 hex>`); it needs bash, sudo,
 coreutils, util-linux, git, gh, curl and ca-certificates. cube publishes no
 default image yet. It is
-recorded in `~/.cube/berth.env`; a later `init-local` with another image is
-refused rather than changing it. berth pulls it the first time it starts,
-before it listens, so the first `init-local` takes as long as the pull.
+recorded in `~/.cube/berth.env` once berth has pulled it and listens; a later
+`init-local` with another image is then refused rather than changing it.
+A digest that does not exist fails the first run and is recorded nowhere:
+run `init-local` again with the right one. berth pulls it the first time it
+starts, before it listens, so the first `init-local` takes as long as the pull.
 
-`init-local` creates cubed's control key for the runner, writes
-`berth.env`, starts berth once (it binds `~/.cube/berth` to that key, pulls
-the image and prints its peer), writes `berth.json`, enrolls the runner and
-stops it; the services then keep both running and restart them after a crash
+`init-local` creates cubed's control key for the runner, starts berth once
+(it binds `~/.cube/berth` to that key, pulls the image and prints its peer),
+writes `berth.env` and `berth.json`, enrolls the runner and stops it; the services then keep both running and restart them after a crash
 or a login. It never overwrites, deletes or rebinds a file: a run that
 disagrees with what is there is refused with the path, and a run after a
-failure (for example no Hypervisor.framework) continues where it stopped.
+failure (for example no Hypervisor.framework, or an image that could not be
+pulled) continues where it stopped.
 Keep the default `--home` (`~/.cube`): the service starts berth there. The
 runner needs Hypervisor.framework (`sysctl kern.hv_support` prints 1).
 Nothing asks for `sudo`. Do not combine this with a `install.sh` installation
@@ -209,10 +211,15 @@ is), then move `~/.cube` aside.
 
 - **`brew upgrade` says the old version is already installed.** Its tap copy
   is older than the release: `brew update`, then upgrade again (see above).
-- **`init-local` says "set up but not enrolled".** berth could not start
-  here: the message carries its error (no Hypervisor.framework, a QEMU below
-  keel's floor, an image pull that failed). Fix that and run `init-local`
-  again; it continues with what it already made.
+- **`init-local` says "not enrolled".** berth could not start here: the
+  message carries its error (no Hypervisor.framework, a QEMU below keel's
+  floor, an image pull that failed). Fix that and run `init-local` again; it
+  continues with what it already made. Until berth has started once, that
+  run may give another `--image` or `--max-machines`.
+- **`init-local` says "another berth vm runs in".** Something holds
+  `~/.cube/berth` before `init-local` wrote `berth.json` (a service started
+  by hand, or a second `init-local`): `brew services stop
+  cubeyard/tap/cube-berth`, then run `init-local` again.
 - **`init-local` refuses with "init-local changes nothing that is there".**
   An option disagrees with what `~/.cube` already records (another image,
   `--listen`, `--node-id` or `--max-machines`). Leave the option out to keep
@@ -229,5 +236,6 @@ is), then move `~/.cube` aside.
   `cube-gateway`; the Homebrew bundle has it next to `release.json`. Check
   `cubed.log`.
 - **Port 7777 or 7779 is taken.** `CUBED_PORT` in the environment file;
-  `--listen` at the first `init-local` for the runner (the enrollment
-  records it).
+  `--listen` at the first `init-local` for the runner (berth's first run
+  records it in `~/.cube/berth/.berth/vm.json`, before its pull, so a run
+  that failed keeps it: free that port and run `init-local` again).

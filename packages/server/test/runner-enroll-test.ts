@@ -4,7 +4,8 @@
  * npm iroh endpoint: the files written, the admission recorded, the
  * temporary berth stopped, the refusals, and every later run: after a
  * reinstall (nothing changes, nothing starts), with a moved state, after a
- * failed first run, with the service holding the directory, and with a
+ * failed first run, after a pull of a digest that does not exist, with the
+ * service holding the directory (with and without a config), and with a
  * protocol-3 runner's files beside it (never touched). */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -68,8 +69,8 @@ const accept = (async () => {
 })();
 
 // The fake berth: berth's arguments; `vm` binds its directory on the first
-// run (and refuses another control peer or node later), prints the banner
-// and waits for SIGTERM.
+// run (and refuses another control peer or node later), pulls only
+// FAKE_IMAGE, prints the banner and waits for SIGTERM.
 const log = path.join(root, "berth.log");
 const fakeBerth = path.join(root, "bin", "berth");
 fs.mkdirSync(path.dirname(fakeBerth));
@@ -79,8 +80,8 @@ printf '%s\\n' "$*" >> "${log}"
 case "$1" in
   version) printf '%s\\n' '{"softwareVersion":"0.1.0","protocolVersion":4}' ;;
   keygen) [ "$2" = --key ]; [ ! -e "$3" ]; cp "$FAKE_CONTROL_KEY_FILE" "$3"; chmod 600 "$3"; printf '{"peerId":"%s"}\\n' "$FAKE_CONTROL_PEER" ;;
-  vm) shift; dir='' peer='' node='' listen=''
-    while [ "$#" -gt 0 ]; do case "$1" in --dir) dir=$2 ;; --allow-peer) peer=$2 ;; --node-id) node=$2 ;; --listen) listen=$2 ;; esac; shift 2; done
+  vm) shift; dir='' peer='' node='' listen='' image=''
+    while [ "$#" -gt 0 ]; do case "$1" in --dir) dir=$2 ;; --allow-peer) peer=$2 ;; --node-id) node=$2 ;; --listen) listen=$2 ;; --image) image=$2 ;; esac; shift 2; done
     if [ "\${FAKE_HELD:-}" = 1 ]; then echo "Error: another berth vm runs in $dir" >&2; exit 1; fi
     if [ "\${FAKE_VM_FAIL:-}" = 1 ]; then echo 'Error: accelerator hvf is not available' >&2; exit 1; fi
     mkdir -p "$dir/.berth"
@@ -89,8 +90,10 @@ case "$1" in
         || { echo "Error: $dir/.berth/vm.json already names this runner's control peer, node id and labels; a runner is never rebound" >&2; exit 1; }
     else
       printf '{\\n  "version": 1,\\n  "nodeId": "%s",\\n  "allowedPeer": "%s",\\n  "network": "loopback",\\n  "listen": "%s",\\n  "labels": {}\\n}' "$node" "$peer" "$listen" > "$dir/.berth/vm.json"
-      echo "image: pulling $FAKE_IMAGE" >&2
+      echo "image: pulling $image" >&2
     fi
+    # As berth: the image is pulled after the directory is bound, before it listens.
+    [ "$image" = "$FAKE_IMAGE" ] || { echo "Error: pulling $image: manifest unknown" >&2; exit 1; }
     trap 'printf "vm stopped by SIGTERM\\n" >> "${log}"; exit 0' TERM
     printf 'dir: %s\\nnode: %s\\npeer: %s\\ncontrol peer: %s\\nwaiting for cubed; Ctrl-C stops the runner\\n' "$dir" "$node" "$FAKE_PEER" "$peer" >&2
     while :; do sleep 0.1; done ;;
@@ -275,12 +278,13 @@ try {
   fs.writeFileSync(path.join(home, "berth.control.key"), Buffer.from(SecretKey.generate().toBytes()), { mode: 0o600 });
   const failed = await cubed([...twoArgs, "--image", IMAGE], { ...paths(), FAKE_VM_FAIL: "1" });
   assert.equal(failed.status, 1, failed.stdout + failed.stderr);
-  assert.match(failed.stderr, /set up but not enrolled: berth exited \(1\): Error: accelerator hvf is not available/);
-  assert.match(failed.stderr, /run cubed runners init-local again \(it continues where it stopped\)/);
-  assert.ok(fs.existsSync(path.join(second, "berth.control.key")) && fs.existsSync(path.join(second, "berth.env")), "the key and settings stay");
-  assert.ok(!fs.existsSync(path.join(second, "berth.json")), "no config without a peer");
+  assert.match(failed.stderr, /not enrolled: berth exited \(1\): Error: accelerator hvf is not available/);
+  assert.match(failed.stderr, /run cubed runners init-local again \(it continues where it stopped/);
+  assert.doesNotMatch(failed.stderr, /enroll --config|brew services/, "no advice that needs a berth.json or starts the service");
+  assert.ok(fs.existsSync(path.join(second, "berth.control.key")), "the key stays");
+  assert.ok(!fs.existsSync(path.join(second, "berth.env")) && !fs.existsSync(path.join(second, "berth.json")), "no settings and no config before berth listens");
   const keygens = calls().filter(line => line.startsWith("keygen")).length;
-  const continued = await cubed(twoArgs);
+  const continued = await cubed([...twoArgs, "--image", IMAGE]);
   assert.equal(continued.status, 0, continued.stdout + continued.stderr);
   assert.equal(calls().filter(line => line.startsWith("keygen")).length, keygens, "the key from the failed run is used, not a new one");
   assert.equal(JSON.parse(fs.readFileSync(path.join(second, "berth.json"), "utf8")).serverPeer, peer);
@@ -293,13 +297,60 @@ try {
   assert.equal(rebinding.status, 1);
   assert.match(rebinding.stderr, /takes another control peer than .*berth\.control\.key's/);
 
+  // B-1: a well-formed digest that does not exist. berth binds its directory
+  // and then fails the pull; nothing records the image, so the corrected
+  // --image continues, with no file edited or removed.
+  const fourth = path.join(root, "cube-four");
+  const state4 = path.join(root, "state-four");
+  answersAs = "node-berth-four";
+  const fourArgs = ["runners", "init-local", "--state", state4, "--home", fourth, "--node-id", "node-berth-four", "--listen", address];
+  const missing = `docker.io/library/debian@sha256:${"0".repeat(64)}`;
+  const wrong = await cubed([...fourArgs, "--image", missing]);
+  assert.equal(wrong.status, 1, wrong.stdout + wrong.stderr);
+  assert.match(wrong.stderr, /not enrolled: berth exited \(1\): .*Error: pulling docker\.io\/library\/debian@sha256:0+: manifest unknown/);
+  assert.doesNotMatch(wrong.stderr, /enroll --config|brew services/);
+  assert.match(wrong.stderr, /until berth has started once, --image and --max-machines may be given anew/);
+  assert.ok(fs.existsSync(path.join(fourth, "berth", ".berth", "vm.json")), "berth bound its directory before the pull, as berth does");
+  assert.ok(!fs.existsSync(path.join(fourth, "berth.env")) && !fs.existsSync(path.join(fourth, "berth.json")), "the wrong image is recorded nowhere");
+  const bound = snapshot(fourth);
+  const unknown = await cubed(fourArgs);
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /--image .* is needed the first time \(until a run gets berth started\)/);
+  assert.deepEqual(snapshot(fourth), bound);
+
+  // Meanwhile a berth holds the directory (a service set up by hand, another
+  // init-local): with no berth.json it cannot be asked, so the advice is to
+  // stop it, never to enroll from a config that is not there.
+  const blocked = await cubed([...fourArgs, "--image", IMAGE], { ...paths(), FAKE_HELD: "1" });
+  assert.equal(blocked.status, 1, blocked.stdout + blocked.stderr);
+  assert.match(blocked.stderr, /another berth vm runs in .*cube-four\/berth and there is no .*cube-four\/berth\.json yet, so it cannot be asked: stop it \(Homebrew: brew services stop cubeyard\/tap\/cube-berth\), then run init-local again/);
+  assert.doesNotMatch(blocked.stderr, /enroll --config|services restart/);
+  assert.deepEqual(snapshot(fourth), bound, "nothing written while it is held");
+
+  // Stopped, the corrected image: the same key and binding, enrolled.
+  const keygens4 = calls().filter(line => line.startsWith("keygen")).length;
+  const corrected = await cubed([...fourArgs, "--image", IMAGE]);
+  assert.equal(corrected.status, 0, corrected.stdout + corrected.stderr);
+  assert.match(corrected.stdout, new RegExp(`enrolled in ${state4}`));
+  assert.equal(calls().filter(line => line.startsWith("keygen")).length, keygens4, "no new control key");
+  for (const file of ["berth.control.key", path.join("berth", ".berth", "vm.json")]) assert.equal(snapshot(fourth)[file], bound[file], `${file} is unchanged`);
+  assert.deepEqual(readBerthSettings(fs.readFileSync(path.join(fourth, "berth.env"), "utf8")), { image: IMAGE, maxMachines: 2 });
+  for (const file of ["berth.json", "berth.env"]) assert.equal(fs.statSync(path.join(fourth, file)).mode & 0o777, 0o600, file);
+  // Enrolled, the image is fixed again.
+  const afterwards = snapshot(fourth);
+  const changed = await cubed([...fourArgs, "--image", missing]);
+  assert.equal(changed.status, 1);
+  assert.match(changed.stderr, /names the image docker\.io\/library\/debian@sha256:c+; init-local changes nothing/);
+  assert.match((await cubed(fourArgs)).stdout, /already set up and enrolled/);
+  assert.deepEqual(snapshot(fourth), afterwards);
+
   // A berth host directory is not taken for a berth vm.
   const third = path.join(root, "cube-three");
   fs.mkdirSync(path.join(third, "berth", ".berth"), { recursive: true });
   fs.writeFileSync(path.join(third, "berth", ".berth", "host.json"), "{}");
   const hostDir = await cubed(["runners", "init-local", "--state", state2, "--home", third, "--image", IMAGE]);
   assert.match(hostDir.stderr, /is a berth host directory/);
-  console.log("ok: runners init-local sets up and enrolls a local berth vm, and every later run (reinstall, moved state, failed first run, held directory) changes only what is missing");
+  console.log("ok: runners init-local sets up and enrolls a local berth vm, and every later run (reinstall, moved state, failed first run, an unknown image digest then the corrected one, a held directory with and without a config) changes only what is missing");
 } finally {
   await server.close();
   await accept;

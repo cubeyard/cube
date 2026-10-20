@@ -353,7 +353,7 @@ upgrade` is the update path. Services are `brew services` user agents
 running `cubed` and
 cube-berth's `libexec/service.sh`, which starts `berth vm --dir ~/.cube/berth`
 with `berth.env`'s image and slots, or, until `cubed runners init-local` has
-set it up, says so and exits after 60 s (see [runner
+set it up (`berth.json`, `berth.env` and berth's `vm.json` all there), says so and exits after 60 s (see [runner
 operations](docs/runner-operations.md#local-runner)). Homebrew never stops a
 service on `brew uninstall` (formulae have no uninstall hook), so the
 documented step after every install or upgrade is `brew services restart`,
