@@ -576,7 +576,22 @@ without changing Pi:
   (GitHub Copilot, opencode, Cloudflare AI Gateway) is sent what pi-ai builds.
   A request refused with an error naming `reasoning.context` or the value
   `all_turns` (Codex keeps only the message) is sent again once without it,
-  and that model is not sent it again while cubed runs.
+  and that model is not sent it again while cubed runs. Any other refusal is
+  not sent again.
+- **GPT-6 on the platform (R-1).** For a model pi-ai flags
+  `supportsMidConvoEffort` (gpt-6-sol, gpt-6.1-sol, gpt-6-luna, gpt-6-astra)
+  with an `sk-` key, pi-ai 1.3.0 fixes `reasoning.effort` at `medium` and
+  sends the thinking level as a trailing `configuration_update` input item,
+  so a level change alters only that last item. OptChat adds `all_turns`
+  beside them, its own `prompt_cache_key` and the view's breakpoint; a
+  ChatGPT sign-in gets the level as `reasoning.effort` and no configuration
+  item. `optchat-gpt6-test.ts` pins this payload, its prefix across levels
+  and the refusal paths offline. Whether OpenAI accepts `all_turns` together
+  with `configuration_update` is **not tested** against the provider: a
+  refusal that names neither `reasoning.context` nor `all_turns` gets no
+  fallback, so every GPT-6 turn would fail the same way until the model is
+  changed. That is a live check (two calls, within P1), not offline
+  correctness.
 - **Retention** is `short` for the chat and the compactor, even when
   `PI_CACHE_RETENTION=long`.
 
