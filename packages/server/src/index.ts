@@ -233,6 +233,8 @@ export async function createCubed(options: {
   githubPulls?: GithubPulls;
   /** Artifact comment delivery retry, for tests. */
   artifactRetryMs?: number;
+  /** OptChat's compactor retry, for tests. */
+  optchatRetryMs?: number;
   /** The skill source before the user's (docs/skills.md); none when absent.
    * The cubed command passes DEFAULT_SKILL_SOURCE. */
   skillSource?: SkillSource | null;
@@ -388,7 +390,7 @@ export async function createCubed(options: {
   const openOptchat = () => optchat ??= OptChat.open({
     directory: path.join(options.state, "optchat"), models, threads: optchatThreads,
     model: async () => preferredModel(await catalog()), compactor: async () => (await compactorChoice()).model,
-    artifacts: artifactService,
+    artifacts: artifactService, ...options.optchatRetryMs ? { limits: { retryMs: options.optchatRetryMs } } : {},
   }).then(chat => ({ chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) }))
     .catch(error => {
       optchat = null;
@@ -660,7 +662,8 @@ export async function createCubed(options: {
         if (parts.length === 2 && method === "GET") return json(await settingsView());
         // `{model: {provider, id}}` saves a compactor model, `{model: null}`
         // follows the chat's. The next node written uses it; one being
-        // written finishes with the model it started with.
+        // written finishes with the model it started with, and a held one
+        // is asked again if the model is another.
         if (parts.length === 3 && parts[2] === "compactor" && method === "PUT") {
           const input = body.model;
           if (Object.keys(body).some(key => key !== "model") || input === undefined) return json({ error: "send {model: {provider, id}} or {model: null}" }, 400);
@@ -673,6 +676,8 @@ export async function createCubed(options: {
             if (!chosen) return json({ error: `${`${candidate.provider}/${candidate.id}`.slice(0, 200)} is not an available model; connect its provider first` }, 422);
           }
           settings.setCompactor(chosen);
+          // A node held with its answers spent gets a new round under another model.
+          void optchat?.then(({ chat }) => chat.compactorChanged(), () => {});
           return json(await settingsView());
         }
         // What updating the default source would give; nothing is saved.

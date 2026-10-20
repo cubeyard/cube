@@ -18,7 +18,7 @@ import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openStorage } from "./durable-agent.ts";
 import { agents } from "./claude-agent.ts";
 import { createLogger } from "./log.ts";
-import { compactNode } from "./optchat-compactor.ts";
+import { compactNode, Spent, spent, TRIES } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { CAP, capText, Memory, pages, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
@@ -34,6 +34,12 @@ const context = BACKGROUND_CONTEXT;
 const log = createLogger("optchat");
 export const JOBS = 8;
 export const RETRY_MS = 10_000;
+/** The answers (capped replies that spent output) the compactor may spend
+ * on one node before it is held: three rounds of TRIES. Counted whatever
+ * ended the round, an outage after them included, and kept across
+ * restarts. A held node gets one more round of TRIES from a message of the
+ * user or from another compactor model, never from a timer. */
+export const ANSWERS = 3 * TRIES;
 /** How long a thread's machine must keep failing to start before the chat
  * hears of it: cubed's recovery loop retries every 30 s. */
 export const START_GRACE_MS = 2 * 60_000;
@@ -307,6 +313,11 @@ const LogDoc = defineDoc<{ pagedFrom?: number }>({ kind: "cube.optchat.log", ver
  * counted. */
 type CompactorUsage = { models: Record<string, JsonRepresentation<Usage>>; calls: Record<string, number>; since: number | null; earlier?: boolean };
 const CompactorUsageDoc = defineDoc<CompactorUsage>({ kind: "cube.optchat.usage", version: 1, scope: "session", initial: () => ({ models: {}, calls: {}, since: null }) });
+/** What the compactor may still spend on each node it has not built: its
+ * answers left and the model (`provider/id`) that spent the last. A node
+ * with none left is held; a built node's record goes with it. */
+type Spend = { left: number; model: string };
+const SpendDoc = defineDoc<{ nodes: Record<string, Spend> }>({ kind: "cube.optchat.spend", version: 1, scope: "session", initial: () => ({ nodes: {} }) });
 const TURN = "optchat.turn";
 const NODE_ENTRY = "optchat.node";
 
@@ -439,6 +450,16 @@ export class OptChat {
   private pagedFrom = 0;
   private readonly busy = new Set<string>();
   private readonly failed = new Set<string>();
+  /** Each unbuilt node's answers left, as SpendDoc stores them. */
+  private readonly spend = new Map<string, Spend>();
+  /** Nodes held with their answers spent (busy, no timer), and why. */
+  private readonly held = new Map<string, string>();
+  /** Counts of the user's messages and of compactor model changes, so a
+   * node whose last answer was out when one came is not held past it. */
+  private asks = 0;
+  private changes = 0;
+  /** The last error each failing node gave, for the held message. */
+  private readonly why = new Map<string, string>();
   private compactorError: string | null = null;
   private readonly watchers = new Map<string, Promise<ThreadWatch | null>>();
   private readonly reported = new Map<string, string>();
@@ -623,6 +644,11 @@ export class OptChat {
     // forgotten once Pi has placed it, which happens after the steer.
     watch.start(async () => { void this.sync(); this.notify(); void this.drain(); });
     this.stopWatch = async () => { await watch.stop(); };
+    // Answers left are kept across restarts: a restart is no new budget.
+    for (const [key, spend] of Object.entries((await this.harness.snapshot(SpendDoc, context))?.nodes ?? {})) {
+      const [l, i] = key.split(":").map(Number);
+      if (!this.memory.built(l!, i!)) this.spend.set(key, { ...spend });
+    }
     this.harness.resume();
     this.pump();
     void this.drain();
@@ -741,10 +767,13 @@ export class OptChat {
     if (this.closing || !this.conversation) return;
     for (const job of this.memory.ready(this.busy, this.options.limits?.jobs ?? JOBS)) {
       const key = `${job.l}:${job.i}`;
+      const { asks, changes } = this;
       this.busy.add(key);
       this.build(job.l, job.i).then(() => {
         this.busy.delete(key);
         this.failed.delete(key);
+        this.spend.delete(key);
+        this.why.delete(key);
         if (!this.failed.size) this.compactorError = null;
         this.pump();
       }, error => {
@@ -752,6 +781,28 @@ export class OptChat {
         const message = error instanceof Error ? error.message : String(error);
         if (!this.failed.has(key)) log.warn("compactor failed", { node: key, error: message });
         this.failed.add(key);
+        if (!(error instanceof Spent)) this.why.set(key, message);
+        // Its answers spent, whatever ended the round: held (busy, no timer,
+        // no call) until a message of the user or another compactor model
+        // releases it. Never cut: the source is not lost.
+        const spend = this.spend.get(key);
+        if (spend && spend.left <= 0) {
+          // A step that came while its last answer was out is not lost: a
+          // message gives the round release() gave the held, another model
+          // is looked at as compactorChanged() looks at the held (the same
+          // model is held again, no call). Once per step, never a loop.
+          if (changes !== this.changes || asks !== this.asks) {
+            if (asks !== this.asks) { spend.left = TRIES; void this.saveSpend([key]); }
+            this.compactorError = message;
+            this.busy.delete(key);
+            this.pump();
+            return;
+          }
+          const why = this.why.get(key) ?? message;
+          this.held.set(key, why);
+          this.compactorError = `no summary for a message yet (${why}); change the compactor model or send a message to try again`;
+          return;
+        }
         this.compactorError = message;
         // An outage or a setup error: retried soon until it answers; the
         // next turn waits for this node and the chat shows why.
@@ -769,14 +820,27 @@ export class OptChat {
     else {
       const model = await this.compactorModel();
       if (!model) throw new Error("the chat has no model");
+      const key = `${l}:${i}`, name = `${model.provider}/${model.id}`;
+      const spend = this.spend.get(key);
+      if (spend && spend.left <= 0) {
+        // Held under this model: no call. Another model gets a new round.
+        if (spend.model === name) throw new Spent("the compactor's answers for this message are spent");
+        spend.left = TRIES;
+        spend.model = name;
+        await this.saveSpend([key]);
+      }
       text = await compactNode({ models: this.compactorModels, model, context: this.memory.context(l, i), source, node: this.memory.nodeLimit, signal: this.abort.signal,
-        onReply: reply => this.countCompactor(reply), onCut: why => { cut = why; } });
+        answers: this.spend.get(key)?.left ?? ANSWERS, onReply: reply => this.countCompactor(reply, key, name), onCut: why => { cut = why; } });
     }
     if (this.closing) return;
     if (cut !== undefined) log.warn("compactor gave no line: node cut short", { node: `${l}:${i}`, error: cut });
-    // Stored first: memory never holds a node storage lacks. The view it
-    // leads to is a cache for the next open, written after.
-    await this.harness.commit(tx => tx.appendEntry(this.tree, { kind: NODE_ENTRY, data: { l, i, text, ...cut !== undefined ? { cut } : {} } }), context);
+    // Stored first: memory never holds a node storage lacks, and its answers
+    // left go with it. The view it leads to is a cache for the next open,
+    // written after.
+    await this.harness.commit(async tx => {
+      await tx.appendEntry(this.tree, { kind: NODE_ENTRY, data: { l, i, text, ...cut !== undefined ? { cut } : {} } });
+      delete (await tx.doc(SpendDoc)).nodes[`${l}:${i}`];
+    }, context);
     this.memory.setNode(l, i, text);
     // The log's shape through the view's last message, checked at the next open.
     const view = { total: this.memory.length, parts: flatParts(this.memory.view), batch: this.memory.batching,
@@ -785,11 +849,66 @@ export class OptChat {
       .catch(error => { if (!this.closing) log.warn("view not stored", { error }); });
   }
 
-  /** Adds one compactor reply's usage. Best effort: a failed commit loses
-   * that reply's usage, never the node. */
-  private async countCompactor(reply: AssistantMessage): Promise<void> {
-    const key = `${reply.provider}/${reply.model}`;
+  /** Stores the answers left of `nodes` as memory has them. Best effort:
+   * memory decides within this open. */
+  private async saveSpend(nodes: readonly string[]): Promise<void> {
     await this.harness.commit(async tx => {
+      const doc = await tx.doc(SpendDoc);
+      for (const node of nodes) {
+        const spend = this.spend.get(node);
+        // A node key is `l:i`, never `__proto__`.
+        if (spend) doc.nodes[node] = { ...spend };
+        else delete doc.nodes[node];
+      }
+    }, context).catch(error => { if (!this.closing) log.warn("compactor answers not stored", { error }); });
+  }
+
+  /** A message of the user: every node with its answers spent gets one
+   * more round of TRIES. A held one is asked again now; one still being
+   * looked at goes to the retry its failure takes with answers left, and
+   * one whose last answer is still out gets its round when it fails. */
+  private release(): void {
+    if (this.closing) return;
+    this.asks++;
+    const nodes = [...this.spend].filter(([, spend]) => spend.left <= 0).map(([node]) => node);
+    if (!nodes.length) return;
+    for (const node of nodes) {
+      this.spend.get(node)!.left = TRIES;
+      if (!this.held.delete(node)) continue;
+      this.busy.delete(node);
+      this.failed.delete(node);
+    }
+    if (!this.failed.size) this.compactorError = null;
+    void this.saveSpend(nodes);
+    this.pump();
+  }
+
+  /** The compactor's model may have changed (saved in settings, or the
+   * chat's own it follows): every held node is looked at again. One held
+   * under another model gets a new round of TRIES answers; the rest are
+   * held again without a call. */
+  compactorChanged(): void {
+    this.changes++;
+    if (this.closing || !this.held.size) return;
+    for (const node of this.held.keys()) this.busy.delete(node);
+    this.held.clear();
+    this.pump();
+  }
+
+  /** Adds one compactor reply's usage, and counts it against `node`'s
+   * answers when it spent output. Best effort: a failed commit loses that
+   * reply's usage, never the node; memory still counts the answer. */
+  private async countCompactor(reply: AssistantMessage, node: string, model: string): Promise<void> {
+    const key = `${reply.provider}/${reply.model}`;
+    if (spent(reply)) {
+      const spend = this.spend.get(node) ?? { left: ANSWERS, model };
+      spend.left--;
+      spend.model = model;
+      this.spend.set(node, spend);
+    }
+    await this.harness.commit(async tx => {
+      const left = this.spend.get(node);
+      if (left) (await tx.doc(SpendDoc)).nodes[node] = { ...left };
       const usage = await tx.doc(CompactorUsageDoc);
       const total = Object.hasOwn(usage.models, key) ? usage.models[key] : undefined;
       // A key holds a slash, so it is never `__proto__`.
@@ -827,11 +946,11 @@ export class OptChat {
 
   private async accept(text: string, requestId: string, images: MediaRef[]): Promise<void> {
     const conversation = this.conversation;
-    await this.harness.commit(async tx => {
+    const fresh = await this.harness.commit(async tx => {
       const pending = await tx.doc(PendingDoc);
       const same = (item: PendingItem) => item.requestId === requestId;
-      if (pending.items.some(same) || pending.batch?.some(same) || pending.sent.some(same)) return;
-      if (await tx.submissionByRequest(conversation.id, requestId) || await tx.submissionByRequest(conversation.id, `${requestId}:unanswered`)) return;
+      if (pending.items.some(same) || pending.batch?.some(same) || pending.sent.some(same)) return false;
+      if (await tx.submissionByRequest(conversation.id, requestId) || await tx.submissionByRequest(conversation.id, `${requestId}:unanswered`)) return false;
       if (images.length) {
         // Refused, not dropped: the model would never see them.
         const support = this.imageSupport();
@@ -842,7 +961,11 @@ export class OptChat {
       pending.items.push({ text, requestId, after: this.lastEntry, ...images.length ? { images } : {} });
       // A message of the user (not a report) renews every thread's tells.
       if (!requestId.startsWith("report:")) for (const thread of Object.values((await tx.doc(SettingsDoc)).threads)) delete thread.tells;
+      return true;
     }, context);
+    // A new message of the user, never a thread's report: one more round
+    // for each held node, each paid for by the user's own step.
+    if (fresh && !isReport(requestId)) this.release();
     this.notify();
     this.pendingChanged();
     void this.drain();
@@ -1070,6 +1193,8 @@ export class OptChat {
       if (!model.input.includes("image") && (await this.pending()).some(item => item.images?.length)) throw new Error(`${model.id} does not take images, and a message with images is waiting for the chat`);
       await this.conversation.configure({ model: { provider: selection.provider, modelId: selection.id } }, context);
       this.model = selection;
+      // The compactor follows the chat's model unless one is saved.
+      this.compactorChanged();
     }
     return this.model;
   }
