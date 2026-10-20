@@ -200,7 +200,15 @@ request already out and stores its answer. Past that bound a request still
 out is counted at the next open and not sent again, a guest command goes
 on and the next cubed reattaches to it, and a tell or an archive is keyed.
 `cubed-close-test.ts` closes a real cubed with a thread agent and a
-command that never end: it ends in about 9 s with its stores closed. The
+command that never end: it ends in about 9 s with its stores closed.
+`scripts/gate-close.ts` has the real supervisor SIGTERM a real cubed
+process (`serve`'s own lifecycle, `serveUntilStopped`, a faux model and
+local guests) with a guest command running, and with a request out at a
+provider that never answers: cubed exits by itself (about 1 s and 9 s), the
+request is not sent again and its run says why, and no command runs twice;
+its `--control <main>` run is SIGKILLed at 30 s. `serve` reads the
+supervisor's lifeline as a socket: a file read of that pipe held the
+process until the SIGKILL after every close. The
 service managers wait longer than the supervisor: the systemd user unit
 (`scripts/cubed/service.sh`) sets `TimeoutStopSec=45`, the launchd agent
 `ExitTimeOut` 45, and Homebrew's service `stop_timeout 60` (it runs cubed

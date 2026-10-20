@@ -1107,23 +1107,33 @@ async function main(argv: string[]): Promise<void> {
   console.log(`threads resumed: ${app.registry.listThreads().filter(thread => !thread.archived).length}`);
   console.log(`runners enrolled: ${app.registry.listRunners().length}`);
   console.log("press Ctrl-C to stop");
+  await serveUntilStopped(app);
+}
+
+/** `serve` from listening to stopped: SIGTERM, SIGINT or the end of the
+ * supervisor's lifeline (fd 3) closes the app once, and nothing else holds
+ * the process after that, so it exits by itself. The lifeline is read as a
+ * socket: a file read of a pipe the supervisor keeps open (as it does while
+ * it waits for this process to exit) would hold a threadpool request that
+ * nothing can cancel, and the supervisor's SIGKILL would end every stop. */
+export async function serveUntilStopped(app: { server: http.Server; close(): Promise<void> }, say: (line: string) => void = line => console.log(line)): Promise<void> {
   let shutdown: Promise<void> | undefined;
   const stop = (signal: NodeJS.Signals | "supervisor-exit") => {
     if (shutdown) {
-      console.log(`stopping: ${signal} received while shutdown is already in progress`);
+      say(`stopping: ${signal} received while shutdown is already in progress`);
       return;
     }
-    console.log(`stopping: ${signal}; waiting for accepted work to reconcile`);
-    shutdown = app.close().then(() => { console.log("stopped"); });
+    say(`stopping: ${signal}; waiting for accepted work to reconcile`);
+    shutdown = app.close().then(() => { say("stopped"); });
     void shutdown.catch(error => { console.error(`cubed: shutdown failed: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; });
   };
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, stop);
-  let lifeline: fs.ReadStream | undefined;
+  let lifeline: net.Socket | undefined;
   if (process.env.CUBED_SUPERVISOR_LIFELINE_FD === "3") {
-    lifeline = fs.createReadStream("/dev/null", { fd: 3, autoClose: false });
-    lifeline.resume();
+    lifeline = new net.Socket({ fd: 3, readable: true, writable: false });
     lifeline.once("end", () => stop("supervisor-exit"));
     lifeline.once("error", () => stop("supervisor-exit"));
+    lifeline.resume();
   }
   await new Promise<void>(resolve => app.server.once("close", resolve));
   await shutdown;
