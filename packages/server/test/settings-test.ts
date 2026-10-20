@@ -3,14 +3,18 @@
  * the next node the compactor writes (one being written keeps its model),
  * kept over a restart, reset to the chat's model, passed over when no
  * provider offers it; CUBED_OPTCHAT_COMPACTOR is no longer read, only
- * reported. Faux models, disposable state. */
+ * reported. A node held with its answers spent is asked again after a
+ * message of the user (one round) and after a save of another model. Faux
+ * models, disposable state. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AddressInfo } from "node:net";
-import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxThinking, type Message } from "@earendil-works/pi-ai";
+import { ANSWERS } from "../src/optchat.ts";
+import { TRIES } from "../src/optchat-compactor.ts";
 import { createCubed } from "../src/index.ts";
 import { LocalMachines } from "./local-guest.ts";
 
@@ -26,6 +30,10 @@ faux.setResponses(Array.from({ length: 500 }, () => async (request, _options, _s
   if (system.includes("You write the memory of OptChat")) {
     calls.push(model.id);
     if (gate) await gate;
+    // The chat's model runs out of output on a HOLD message's own step.
+    const user = request.messages.find(message => message.role === "user") as Extract<Message, { role: "user" }>;
+    const step = typeof user.content === "string" ? user.content : user.content.map(part => part.type === "text" ? part.text : "").findLast(text => /^(Compress|Merge) /.test(text)) ?? "";
+    if (model.id === "faux-chat" && step.startsWith("Compress") && step.includes("HOLD")) return fauxAssistantMessage([fauxThinking("thinking on ".repeat(40))], { stopReason: "length" });
     return fauxAssistantMessage(`line by ${model.id}`);
   }
   return fauxAssistantMessage("ok");
@@ -36,8 +44,8 @@ const chatModel = { provider: "faux", id: "faux-chat" };
 const cheap = { provider: "faux", id: "faux-cheap" };
 const other = { provider: "faux", id: "faux-other" };
 
-async function start() {
-  const app = await createCubed({ state, models, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null });
+async function start(dir = state, optchatRetryMs?: number) {
+  const app = await createCubed({ state: dir, models, ...optchatRetryMs ? { optchatRetryMs } : {}, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null });
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   const call = async (route: string, method = "GET", body?: unknown) => {
@@ -178,6 +186,30 @@ try {
   } finally {
     delete process.env.CUBED_OPTCHAT_COMPACTOR;
   }
+
+  // A node held with its answers spent: the user's message gives it one
+  // more round, a save of another model a new one; nothing else asks again.
+  host = await start(path.join(root, "held"), 20);
+  const failure = async () => (await host.call("/api/optchat/view")).body.failure as string | null;
+  const until = async (check: () => Promise<boolean> | boolean, what: string) => { for (let i = 0; !(await check()); i++) { assert.ok(i < 400, what); await delay(25); } };
+  const start0 = calls.length;
+  const spentOn = () => calls.slice(start0).filter(id => id === "faux-chat").length;
+  assert.equal((await host.call("/api/optchat/prompt", "POST", { text: `HOLD ${"words to fold ".repeat(60)}`, requestId: "held-1" })).status, 200);
+  await until(async () => /send a message to try again/.test(await failure() ?? ""), "held: the chat says so");
+  assert.equal(spentOn(), ANSWERS, "held: ANSWERS calls");
+  assert.match(await failure() ?? "", /^summarizing: no summary for a message yet \(the compactor ran out of output/);
+  await delay(400);
+  assert.equal(spentOn(), ANSWERS, "held: no call over 20 retry periods");
+  assert.equal((await host.call("/api/optchat/prompt", "POST", { text: "try again", requestId: "held-2" })).status, 200);
+  await until(async () => spentOn() === ANSWERS + TRIES && /send a message/.test(await failure() ?? ""), "held: one more round, held again");
+  await delay(400);
+  assert.equal(spentOn(), ANSWERS + TRIES, "held: one round for one message");
+  view = (await host.call("/api/settings/compactor", "PUT", { model: cheap })).body;
+  assert.deepEqual(view.compactor.model, cheap);
+  await settled(host.call, "line by faux-cheap");
+  assert.equal(await failure(), null, "held: summarized by the saved model");
+  assert.equal(spentOn(), ANSWERS + TRIES, "held: the chat's model is not asked again");
+  await host.close();
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

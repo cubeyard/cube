@@ -66,6 +66,7 @@ with Pi as its only writer. cubed's live-instance socket lock (one cubed per
 | the input queue | `cube.optchat.pending`: a message or report is accepted there at once and kept until Pi has placed it; all waiting messages become one turn, each still its own user message and its own Pi submission |
 | view at load | `cube.optchat.view`, written with every node: the view over the first `total` messages and `batch`, whether a batch is still merging toward 64,000 bytes. A reopen restores both and appends the rest, so it goes on from the view it had. A view stored before batching has no `batch` and was never mid-batch; it restores as it was, and the first batch comes once it passes 128,000 bytes as now measured (ids included, so possibly at the reopen). `compaction` and `compactionBatch` are the compaction view and its batch, restored the same way if it still tiles the log and coarsens the view; a view stored before it lacks them, and the compaction view is merged down from the view at the reopen. A message's own line may be stored unbuilt (the view is written after every node) and restores as such; a merged line must be built. `entry`, `shape` and `shapeTotal` are the last Pi entry the view covers, a hash over how many messages each entry gave up to it and how many that was: a reopen whose log numbers its messages otherwise (a change to how entries are read) is refused with `the chat's log numbers its messages differently from its memory`, rather than putting every summary on the wrong message. A cubed before pages keeps these three while it grows `total`; when `total` differs from `shapeTotal`, such a cubed wrote the view since and numbered the log without pages, and the reopen is refused (`an older cubed numbered the chat's log without pages`) only if an entry logged in pages gives a different count without them. A view stored before `shape` is not checked; one stored before `shapeTotal` is checked against `total` |
 | compactor usage | `cube.optchat.usage`: the compactor's calls run beside Pi, so its `pi.usage` misses them; each reply's usage (failed ones too) is added there in its own commit, by `provider/model` with a call count |
+| compactor answers | `cube.optchat.spend`: for each node not built yet that the compactor answered, its answers left (of 15) and the `provider/model` that spent the last, in the same commit as the usage; it goes in the commit that stores the node. A restart reads it back, so it is no new budget |
 | subagent reports | when a spawned thread's run settles, how it ended and its last reply go to the chat as `[<first 8 of the thread id>] <report>` (see "Follow-up and unattended work"), with request id `report:<thread>:<run>`, so a report is delivered once across restarts. The transcript marks it with `from` (the short id) and shows it as the thread's, not the user's |
 
 `packages/server/src/optchat-memory.ts` is the pure part: the fold that appends
@@ -96,14 +97,30 @@ loop (a turn waits until every line of the view is a summary), the compactor
 pump (eight jobs) and the thread watchers. `optchat-threads.ts` connects it
 to cube's registry and threads.
 
-A node the compactor fails on ends one of two ways:
+A node the compactor fails on ends one of these ways:
 
 | failure | examples | the node | the next turn |
 | --- | --- | --- | --- |
 | its input's doing: asked again, it fails alike | an empty answer; an input too long for the model (pi-ai's `isContextOverflow`); a refusal or safety stop, told by the provider's stop reason (`refusal`, `content_filter`, `SAFETY`, …) whatever its explanation says, so one that mentions "500" or "timeout" is not taken for an outage; an error stop on a reply the model began (its usage is not zero); five answers none of them in the form | its source cut short, after one call (five for the form): `(no summary, cut short: zoom it) ` and the start of the message, or of both halves of a merge, within 512 bytes; stored with `cut: <why>` and logged as a warning. The log keeps the message whole | runs |
 | not its input's doing | an outage, a rate limit (pi-ai's `isRetryableAssistantError`), or an error no reply carried (a bad key, a quota, a model that is gone) | asked again every 10 s until it answers; never cut | waits, and the chat shows `summarizing: <error>`; a change of the compactor model applies to the next try |
+| out of output: every answer stopped at the cap (`length`, thinking only or lines cut off), not an overflow | a model that thinks past 9216 tokens | an answer that ran out is never used; the model is told to think briefly and asked again within the five answers. If none gave lines, the node is asked again every 10 s; never cut | waits, and the chat shows `summarizing: the compactor ran out of output …` |
+| its answers spent: 15 answers since the node's last release, whatever ended each round | answers that ran out, answers not in the form, or either followed by a rate limit or an outage | held: no timer and no call, never cut. A new message of the user gives it one more round of at most 5 answers; another compactor model (saved in settings, or the chat's model it follows) gives a new one, also at open. A thread's report, a repeated request, a restart or waiting gives none | waits, and the chat shows `summarizing: no summary for a message yet (<last error>); change the compactor model or send a message to try again` |
 
-| out of output: every answer stopped at the cap (`length`, thinking only or lines cut off) | a model that thinks past 9216 tokens | an answer that ran out is never used; the model is told to think briefly and asked again within the five answers. If none gave lines, the node is asked again 2 more times (`ROOM_ROUNDS`, every 10 s), then held with no timer until the chat reopens; never cut, at most 15 capped answers per node per open | waits, and the chat shows `summarizing: … held after 3 rounds until the chat reopens` |
+A `length` stop that is a context overflow is the input's doing like any
+other: Bedrock's `model_context_window_exceeded` (pi-ai maps it to
+`length`), or a `length` stop with no output and the window full (pi-ai's
+`isContextOverflow`, as Xiaomi's), is cut after one call. A thinking-only
+`length` stop, or an empty one far from the window, is not.
+
+An answer is a reply that spent output: every reply the model gave, and an
+error stop after it began writing (its usage or content shows it). An
+outage or rate limit before any output costs nothing and is not counted, so
+it is asked again every 10 s as before; once a node's answers are spent,
+not even that is sent. So the compactor spends at most 15 capped answers on
+a node, then at most 5 per message of the user or change of model, each
+for at most the eight nodes being written at once: at most 40 answers per
+message, about 370k output tokens at 9216 (nearly twice that on a thinking
+budget, where the cap is 17408). Nothing asks again on its own.
 
 So a refusal costs one call and an outage no summary. A failure that is
 the input's doing but reaches the compactor as a setup error (a 4xx no
@@ -557,7 +574,8 @@ The settings page reads `GET /api/settings` (the saved and effective
 compactor model, an ignored `CUBED_OPTCHAT_COMPACTOR`, the chat's model,
 the available models) and
 saves with `PUT /api/settings/compactor {model: {provider, id} | null}`
-(400 for a malformed body, 422 for a model no connected provider offers).
+(400 for a malformed body, 422 for a model no connected provider offers);
+a save looks at the nodes held with their answers spent again.
 The panel also lists the newest
 artifacts (`GET /api/artifacts`); comments on the chat's own artifacts reach
 it as messages starting `[artifact <id>]` through the same pending queue, as
