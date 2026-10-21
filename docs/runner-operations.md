@@ -109,7 +109,7 @@ A `berth vm` on the cubed host itself, reached over loopback, is set up and
 enrolled by one cubed command, which can be run again at any time:
 
 ```sh
-cubed runners init-local --image <registry/repository@sha256:…> \
+cubed runners init-local [--image default|<registry/repository@sha256:…>] \
   [--home ~/.cube] [--listen 127.0.0.1:7779] [--node-id node-berth-<host>] [--max-machines 2] \
   [--berth PATH] [--keel DIR] [--qemu PATH] [--qemu-img PATH] [--mkfs-erofs PATH] [--state ~/.cube-host]
 ```
@@ -157,8 +157,25 @@ deleted or rebound. So:
 - **With a moved or new `--state`:** it enrolls the same runner there (the
   same key and peer).
 - **A retired runner** is not admitted again.
-- **`--image` is needed only the first time.** The image is the operator's
-  choice; cube publishes no default image yet.
+- **No `--image`: cube's default image.** That is official Debian trixie,
+  pinned by digest in berth (`packages/berth/debian/trixie.json`), and
+  `berth.env` says `CUBE_BERTH_IMAGE=default`. Official Debian lacks sudo,
+  git, gh, curl and a CA bundle, which a machine needs to become ready, so
+  berth prepares it before it first listens: it fetches the pinned Debian
+  packages (each checked by size and sha256; deb.debian.org first, then
+  snapshot.debian.org), unpacks them with what their maintainer scripts do
+  on a fresh install into one more layer, checks that layer against its
+  pinned sha256 and keeps it in the layer cache, above the image's own.
+  Machines and templates are made on the image with that layer; a
+  template made on another layer list is refused (`template_image_changed`).
+  See `packages/berth/src/debian.rs` for what is and is not reproduced.
+- **`--image <reference>` is your own image** (advanced). berth does not
+  prepare it: it must bring bash, sudo with `/etc/sudoers.d`, util-linux's
+  `flock`, git, gh, curl and a CA bundle, or the machine stays not ready
+  ("the image lacks …"). Once recorded, a run without `--image` keeps it;
+  `init-local` never moves a runner to the default by itself. If `berth.env`
+  is lost while the runner is enrolled, `init-local` asks for `--image` as it
+  was instead of guessing.
 
 The runner is then started by its service (`brew services restart
 cubeyard/tap/cube-berth` under Homebrew, whose service assumes the default

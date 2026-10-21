@@ -13,7 +13,7 @@ and `berth host`, unsandboxed, for developing runners.
 
 ```text
 berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img \
-  --keel /abs/keel/out/<arch> --mkfs-erofs /abs/mkfs.erofs --image <registry/repository@sha256:…> \
+  --keel /abs/keel/out/<arch> --mkfs-erofs /abs/mkfs.erofs [--image default|<registry/repository@sha256:…>] \
   [--layer-cache-gib 16] [--accel kvm|hvf|tcg] --allow-peer <control peer> --node-id node-<name> \
   [--network loopback|direct|relay [--relay-only]] [--listen ip:port] [--labels k=v,...] [--max-machines 8]
 ```
@@ -41,7 +41,21 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   names `--network` names it again, and keeps neither. `Network.mode` in
   hello stays `relay`.
 - `--image` names the one image every machine is built on, pinned by
-  digest. berth pulls it when it starts (masterplan B-7), under the
+  digest. Without it (or with `default`) that is cube's default image,
+  official Debian trixie pinned in `debian/trixie.json`, and berth adds the
+  **Debian preparation layer** (`src/debian.rs`): the pinned Debian
+  packages a guest needs and the image lacks (sudo, git, gh, curl,
+  ca-certificates and their dependencies, resolved by `debian/resolve.sh`
+  at the image's own snapshot time), each checked by size and sha256,
+  unpacked on the runner with what their maintainer scripts do on a fresh
+  install (`/etc/sudoers` 0440, `update-ca-certificates`' bundle and
+  links, dpkg's status and `info/`), as one tar whose sha256 is pinned
+  (`diffId`) and converted like an image layer into the cache. It is the
+  image's topmost layer for machines and templates (`MachineImage.diff_ids`;
+  a template on another layer list is refused as `template_image_changed`).
+  It applies to the image whose manifest is the plan's, by default or by
+  `--image`; any other image is the operator's own and must bring those
+  tools. berth pulls the image when it starts (masterplan B-7), under the
   directory's lock and **before it listens**, unless its record and every
   layer file are in `--dir` already; then nothing goes over the network. A
   layer file that is gone is fetched again. Until the image is there cubed
@@ -306,6 +320,34 @@ image `runner-vm-test.ts` also runs templates (V10; `CUBE_TEST_BERTH_IMAGE_B`
 for `template_image_changed`, `CUBE_TEST_BERTH_FSCK` for fsck.erofs on the
 layer).
 
+## Updating the default image
+
+`debian/trixie.json` pins cube's default image and its preparation: the
+image's index digest (a dated `trixie-YYYYMMDD` tag as a label), the
+snapshot.debian.org time it was built from (debuerreotype's `@epoch` in the
+image configuration's history), and for each platform its manifest, its own
+`/var/lib/dpkg/status` (`debian/trixie-<arch>.status`), the packages with
+their sizes and sha256, and the layer's `diffId`. To move it to a newer
+Debian:
+
+1. Pick the new `docker.io/library/debian:trixie-YYYYMMDD` and its index
+   digest; note each platform's manifest digest and the image's snapshot
+   time.
+2. In a throwaway container (or chroot) of that image, as root, with the
+   arm64 image's status copied in:
+   `sh resolve.sh <snapshot> amd64` and `sh resolve.sh <snapshot> arm64
+   /arm64.status`; copy both images' `/var/lib/dpkg/status` beside the plan.
+3. Write the plan with empty `diffId`s, run
+   `cargo test -p berth debian::tests::build_the_pinned_layers -- --ignored --nocapture`
+   (fetches the packages, builds both tars) and pin the sha256 it prints;
+   run it twice: the same packages must give the same bytes.
+4. `cargo test -p berth` checks the plan is whole. A changed plan is a
+   changed image: templates made on the old one are refused
+   (`template_image_changed`), and since cubed's template key does not name
+   the image, its threads start fresh until those templates expire
+   (`CUBED_TEMPLATE_TTL_HOURS`, 24 h by default) and new ones are built;
+   machines keep the layers they were made with.
+
 ## Install from a release
 
 A release carries `berth-<release>-<platform>.tar.gz` for `linux-x64-gnu`
@@ -330,7 +372,7 @@ a new runner with its own directory and key.
    berth-<release>-<platform>/share/berth/install-berth.sh \
      --prefix ~/berth --dir ~/berth/state --keel ~/berth/keel/<arch> \
      --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img --mkfs-erofs /abs/mkfs.erofs \
-     --image <registry/repository@sha256:…> --network loopback --listen 127.0.0.1:7798 \
+     --network loopback --listen 127.0.0.1:7798 \
      --node-id node-<name> --allow-peer <cubed's control peer> --max-machines 4 \
      --unit-dir ~/berth/units --unit-name berth-vm --kind systemd   # or launchd
    ```
@@ -365,7 +407,7 @@ a new runner with its own directory and key.
 
 ```text
 berth image pull --dir /abs/dir --mkfs-erofs /abs/mkfs.erofs \
-  --image ghcr.io/<owner>/<name>[:tag]@sha256:<digest>
+  [--image default|ghcr.io/<owner>/<name>[:tag]@sha256:<digest>]
 ```
 
 What `berth vm` does itself when it starts (above), by hand: always a

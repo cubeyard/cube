@@ -11,8 +11,8 @@ What `brew install` does, and what stays yours to do:
 
 | `brew install cubeyard/tap/cube` | you |
 |---|---|
-| `cubed`: the control plane with its own Node runtime, `cube-gateway` and the web UI (the signed `darwin-arm64` release bundle, verified by its pinned sha256, minus other platforms' prebuilt native modules) | choose the image thread machines are built on, pinned by digest |
-| `cube-berth`: the runner, `berth vm`, with keel's arm64 guest kernel and base of the same release (each pinned by sha256); Homebrew's `qemu` and `erofs-utils` | run `cubed runners init-local` (the first time with `--image`) |
+| `cubed`: the control plane with its own Node runtime, `cube-gateway` and the web UI (the signed `darwin-arm64` release bundle, verified by its pinned sha256, minus other platforms' prebuilt native modules) | nothing about images: berth pulls cube's default image (official Debian trixie, pinned) and prepares it for cube |
+| `cube-berth`: the runner, `berth vm`, with keel's arm64 guest kernel and base of the same release (each pinned by sha256); Homebrew's `qemu` and `erofs-utils` | run `cubed runners init-local` |
 | `gh`, so threads can use your GitHub access | `gh auth login`; connect a model in the UI |
 | user services (`brew services`) for both daemons, loopback only | optional: Claude Code login, Tailscale access |
 
@@ -23,8 +23,9 @@ brew trust cubeyard/tap          # Homebrew asks you once to trust a third-party
 brew install cubeyard/tap/cube
 
 # sets up the runner under ~/.cube (loopback on 127.0.0.1:7779) and enrolls
-# it in cubed's state (~/.cube-host); the first time it pulls the image
-cubed runners init-local --image <registry/repository@sha256:…>
+# it in cubed's state (~/.cube-host); the first time berth pulls cube's
+# default image (official Debian trixie) and prepares it for cube
+cubed runners init-local
 
 brew services restart cubeyard/tap/cube-berth cubeyard/tap/cube
 open http://127.0.0.1:7777
@@ -33,20 +34,38 @@ open http://127.0.0.1:7777
 **The same three commands work every time**: for a first install, after
 `brew upgrade`, and after `brew uninstall` followed by `brew install`.
 `brew uninstall` keeps `~/.cube` and `~/.cube-host`; `init-local` then finds
-everything in place, says `already set up and enrolled` and changes nothing
-(`--image` may be left out then). `restart` starts a stopped service, and
+everything in place, says `already set up and enrolled` and changes nothing. `restart` starts a stopped service, and
 replaces one that `brew uninstall` left running (Homebrew never stops a
 service when it uninstalls a formula).
 
-`--image` names the image every thread machine is built on, pinned by digest
-(`<registry>/<repository>@sha256:<64 hex>`); it needs bash, sudo,
-coreutils, util-linux, git, gh, curl and ca-certificates. cube publishes no
-default image yet. It is
-recorded in `~/.cube/berth.env` once berth has pulled it and listens; a later
-`init-local` with another image is then refused rather than changing it.
-A digest that does not exist fails the first run and is recorded nowhere:
-run `init-local` again with the right one. berth pulls it the first time it
+**The image.** Thread machines run cube's default image: official Debian
+trixie (`docker.io/library/debian`), pinned by digest in berth. Official
+Debian lacks what a cube machine needs (sudo, git, gh, curl, a CA bundle), so
+berth adds it: before it first listens it fetches pinned Debian packages for
+them (each checked by sha256, from deb.debian.org or snapshot.debian.org),
+unpacks them into one more layer whose sha256 is pinned too, and keeps it
+in its layer cache. That takes seconds after the image pull, once. berth
+writes `CUBE_BERTH_IMAGE=default` to `~/.cube/berth.env`, so the service
+follows berth's default; a newer cube can pin a newer Debian, and existing
+machines keep the image they were made on.
+
+`--image <registry/repository@sha256:…>` names your own image instead. That
+is advanced use: berth does not prepare it, so it must bring bash, sudo
+(and `/etc/sudoers.d`), util-linux's `flock`, git, gh, curl and a CA bundle,
+or no thread machine becomes ready. It is recorded in `~/.cube/berth.env`
+once berth has pulled it and listens; a later `init-local` with another
+image is then refused rather than changing it. A digest that does not exist
+fails the first run and is recorded nowhere: run `init-local` again with the
+right one (or without `--image`). berth pulls the image the first time it
 starts, before it listens, so the first `init-local` takes as long as the pull.
+
+**A runner set up with plain `debian:trixie` as its own image** (its machines
+never become ready: "the image lacks sudo, git, gh, curl, a CA bundle") keeps
+it: `init-local` never changes `berth.env`. To move it to the default, stop
+the service, change that line to `CUBE_BERTH_IMAGE=default` by hand and
+restart it; berth then prepares the default image for new machines.
+Machines made before keep the layers they were made with and stay not
+ready: archive those threads and start new ones. Nothing is deleted.
 
 `init-local` creates cubed's control key for the runner, starts berth once
 (it binds `~/.cube/berth` to that key, pulls the image and prints its peer),

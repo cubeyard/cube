@@ -37,12 +37,12 @@ and keel's `vmlinuz` and `base.erofs` for x86_64 (a release's, or
 ```sh
 pnpm install --frozen-lockfile && pnpm build
 cargo build --locked -p berth -p cube-gateway
-pnpm cubed runners init-local --state "$HOME/.cube-host" --image '<registry/repository@sha256:…>' \
+pnpm cubed runners init-local --state "$HOME/.cube-host" \
   --berth "$PWD/target/debug/berth" --keel /abs/keel/x86_64 --qemu /abs/qemu-system-x86_64 \
   --qemu-img /abs/qemu-img --mkfs-erofs "$(command -v mkfs.erofs)"
 target/debug/berth vm --dir "$HOME/.cube/berth" --qemu /abs/qemu-system-x86_64 --qemu-img /abs/qemu-img \
   --keel /abs/keel/x86_64 --mkfs-erofs "$(command -v mkfs.erofs)" \
-  --image '<the same image>' --max-machines 2          # terminal 1
+  --max-machines 2                                     # terminal 1 (cube's default image)
 pnpm cubed --state "$HOME/.cube-host"                  # terminal 2
 ```
 

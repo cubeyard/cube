@@ -53,8 +53,13 @@ keel's floor, which `berth vm` checks, and its `qemu-img`),
 `vmlinuz` and `base.erofs`, from `packages/keel/kernel/build.sh <arch>` and
 `packages/keel/base/build.sh <arch>`, which build in Docker),
 `CUBE_TEST_BERTH_IMAGE` (a public image pinned by digest,
-`registry/repository@sha256:…`, with bash, sudo, flock, git, gh, curl, perl
-and a CA bundle; `berth vm` pulls it itself) and `CUBE_TEST_BERTH_MKFS` (an
+`registry/repository@sha256:…`; `berth vm` pulls it itself. cube's default
+image, `docker.io/library/debian@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308`
+as `packages/berth/debian/trixie.json` pins it, is the one to use: berth
+adds its Debian preparation layer with sudo, git, gh, curl, perl and a CA
+bundle. Any other image must bring bash, sudo, flock, git, gh, curl, perl
+and a CA bundle itself. `scripts/test-local-berth.ts` without it runs
+`init-local` with no `--image`, the normal first install) and `CUBE_TEST_BERTH_MKFS` (an
 absolute `mkfs.erofs`). Without them each test prints `SKIP: … did NOT run`,
 and `CUBE_TEST_BERTH_VM=required` makes that a failure. Optional:
 `CUBE_TEST_BERTH_ACCEL` (default `kvm` on Linux, `hvf` on macOS),
@@ -73,7 +78,7 @@ packages/keel/kernel/build.sh x86_64 && packages/keel/base/build.sh x86_64
 CUBE_TEST_BERTH_VM=required CUBE_TEST_LAYER_TOOLS=required \
   CUBE_TEST_BERTH_QEMU=/path/to/qemu-system-x86_64 CUBE_TEST_BERTH_QEMU_IMG=/path/to/qemu-img \
   CUBE_TEST_BERTH_KEEL="$PWD/packages/keel/out/x86_64" CUBE_TEST_BERTH_MKFS="$(command -v mkfs.erofs)" \
-  CUBE_TEST_BERTH_IMAGE='<registry/repository@sha256:…>' \
+  CUBE_TEST_BERTH_IMAGE='docker.io/library/debian@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308' \
   CUBE_TEST_VM=required CUBE_TEST_VM_IMAGE=/path/debian-13-genericcloud-amd64.qcow2 \
   bash scripts/test-node-transport.sh
 ```
