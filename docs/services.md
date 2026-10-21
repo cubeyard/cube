@@ -55,11 +55,14 @@ The same command has `cube hooks`, which shows the project's hooks this
 machine runs, read only (see [project-hooks.md](project-hooks.md)).
 
 On a keel machine (`berth vm`) the command is keel's `cube-agent`, with the
-same CLI (packages/keel/README.md). The details below about units, sudo and
-files are those of the guest helper `cube-guest`, which a `berth host`
-machine runs (`/usr/local/bin/cube` is a shim for `cube-guest cli`); it
-needs root for units and registrations and gets it through the agent's sudo. Registrations are JSON files under
-`/var/lib/cube/services/`, written atomically under the helper's lock. Pi and
+same CLI (packages/keel/README.md). On a `berth host` machine it is the guest
+helper `cube-guest` (the machine's `bin/cube` runs `cube-guest host MACHINE
+cli`), which runs each service as a supervised process and keeps its
+registrations under the machine's `services/`, written atomically under the
+helper's lock. The unit names and paths in this section
+(`cube-service-NAME.service`, `/var/lib/cube/services/`, transient units)
+were those of the Debian guests of protocol 3 (retired); keel and berth host
+keep the CLI and its rules with their own supervisor and paths.
 Claude Code threads learn about it from one sentence in their instructions.
 
 ## How the command gets into machines

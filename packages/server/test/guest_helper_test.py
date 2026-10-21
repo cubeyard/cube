@@ -82,20 +82,10 @@ class GuestHelperTest(unittest.TestCase):
     def exec_header(self, op_id, epoch=10, command="true"):
         return {"id": op_id, "epoch": epoch, "command": command, "cwd": ".", "timeoutMs": 1000, "outputLimit": 100}
 
-    def test_systemd_launcher_runs_the_wrapper_in_a_transient_unit(self):
-        argv = guest.SystemdLauncher().argv("ws-abc", 1500)
-        self.assertEqual(argv[:2], ["systemd-run", "--quiet"])
-        self.assertIn("--collect", argv)
-        self.assertEqual(argv[argv.index("--unit") + 1], "cube-op-ws-abc.service")
-        self.assertIn("RuntimeMaxSec=1500ms", argv)
-        self.assertIn("ExecStopPost=+/usr/local/sbin/cube-guest finish ws-abc", argv)
-        self.assertIn("KillMode=control-group", argv)
-        self.assertEqual(argv[-3:], ["/usr/local/sbin/cube-guest", "wrap", "ws-abc"])
-
     def test_hello_reports_readiness_limits_and_epoch(self):
         answer, _ = call("hello", {})
         self.assertTrue(answer["ready"])
-        self.assertNotIn("templateSeal", answer, "a machine from the base image")
+        self.assertNotIn("templateSeal", answer, "no machine reports a template seal (protocol 3 only)")
         self.assertEqual(answer["limits"]["maxWriteBytes"], 524288)
         self.assertIn("fs.write", answer["capabilities"])
         guest.configure(commands=["cube-no-such-command"])
@@ -104,6 +94,17 @@ class GuestHelperTest(unittest.TestCase):
         self.assertFalse(call("hello", {})[0]["ready"])
         call("exec", self.exec_header("e1", epoch=42))
         self.assertEqual(call("hello", {})[0]["epoch"], 42)
+
+    def test_the_protocol_3_vm_commands_are_gone(self):
+        # Debian-VM mode (SSH dispatch, cloud-init's init, apt packages, the
+        # template seal, boot recovery) went with protocol 3: each is now
+        # an unknown command, also through host mode.
+        for command in ["ssh", "init", "packages", "seal", "seal-final", "recover"]:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(guest.main([command]), 2, command)
+            self.assertIn("usage: cube-guest host MACHINE", err.getvalue())
+        for name in ["SystemdLauncher", "SystemdServices", "seal", "seal_final", "init", "recover", "packages", "template_seal"]:
+            self.assertFalse(hasattr(guest, name), name)
 
     def test_exec_journals_once_and_conflicts_on_change(self):
         first, _ = call("exec", self.exec_header("e1"))
@@ -194,15 +195,6 @@ class GuestHelperTest(unittest.TestCase):
         self.assertEqual(self.launcher.started, [], "a command cancelled before it arrived never starts")
         self.assertEqual(call("write", {"id": "o1", "epoch": 10, "path": "o"}, b"x")[0]["error"]["code"], "CANCELLED")
         self.assertFalse(os.path.exists(os.path.join(self.workspace, "o")))
-
-    def test_recover_marks_unfinished_records_interrupted(self):
-        call("exec", self.exec_header("r1"))
-        call("exec", self.exec_header("r2"))
-        guest.write_json(guest.op_path("r2", "result.json"), {"state": "Failed", "error": "CANCELLED", "completionUnknown": False})
-        guest.recover()
-        self.launcher.running.clear()
-        self.assertEqual(call("get", {"id": "r1"})[0]["state"], "Interrupted")
-        self.assertEqual(call("get", {"id": "r2"})[0]["error"], "CANCELLED")
 
     def test_writes_are_journaled_and_conditional(self):
         written, _ = call("write", {"id": "w1", "epoch": 10, "path": "a/b.txt", "createParents": True}, b"hello")
@@ -346,61 +338,6 @@ class GuestHelperTest(unittest.TestCase):
         finally:
             guest.MAX_RECORDS = original
 
-    def test_seal_final_removes_the_machine_identity_and_keeps_the_preparation(self):
-        system = os.path.join(self.root, "system")
-        guest.configure(root=system, state=os.path.join(system, "var/lib/cube"))
-        try:
-            files = {
-                "var/lib/cube/ops/ws-1/request.json": "{}", "var/lib/cube/epoch": "9", "etc/cube/env": "GH_TOKEN=cube_ph_github_x",
-                "etc/cube/hooks/pre-setup": "#!/bin/sh", "etc/ssh/ssh_host_ed25519_key": "private", "etc/ssh/sshd_config": "keep",
-                "etc/machine-id": "0123456789abcdef0123456789abcdef", "var/lib/cloud/instances/a/boot-finished": "",
-                "var/lib/dhcp/dhclient.leases": "lease", "var/lib/systemd/random-seed": "seed", "tmp/socket": "",
-                "home/agent/.bash_history": "history", "home/agent/.cache/cube/setup.log": "keep",
-                "workspace/node_modules/x": "keep", "etc/systemd/system/cube-seal.service": "[Unit]",
-            }
-            for name, content in files.items():
-                os.makedirs(os.path.dirname(os.path.join(system, name)), exist_ok=True)
-                with open(os.path.join(system, name), "w") as handle:
-                    handle.write(content)
-            self.assertEqual(guest.seal_final(), 0)
-            gone = ["var/lib/cube", "etc/cube", "etc/ssh/ssh_host_ed25519_key", "var/lib/cloud/instances", "var/lib/dhcp/dhclient.leases",
-                    "var/lib/systemd/random-seed", "tmp/socket", "home/agent/.bash_history", "etc/systemd/system/cube-seal.service",
-                    "home/agent/.cache/cube/setup.log"]
-            for name in gone:
-                self.assertFalse(os.path.exists(os.path.join(system, name)), name)
-            for name in ["etc/ssh/sshd_config", "workspace/node_modules/x"]:
-                self.assertTrue(os.path.exists(os.path.join(system, name)), name)
-            self.assertEqual(os.path.getsize(os.path.join(system, "etc/machine-id")), 0, "empty: a new id at the next boot")
-            self.assertTrue(os.path.exists(os.path.join(system, guest.SEAL_MARKER)))
-            # The first boot of a machine made from it: a fresh journal, the marker consumed.
-            os.makedirs(os.path.join(system, "var/lib/cube/ops/ws-stale"))
-            self.assertEqual(guest.init(), 0)
-            self.assertEqual(os.listdir(os.path.join(system, "var/lib/cube/ops")), [])
-            self.assertFalse(os.path.exists(os.path.join(system, guest.SEAL_MARKER)))
-            self.assertEqual(call("hello", {})[0]["templateSeal"], "ok")
-            # An ordinary later init keeps the journal (only a template's first boot clears it).
-            os.makedirs(os.path.join(system, "var/lib/cube/ops/ws-2"))
-            guest.init()
-            self.assertEqual(os.listdir(os.path.join(system, "var/lib/cube/ops")), ["ws-2"])
-            # A seal that could not clean everything says so, and the next
-            # machine still starts with an empty journal and reports it.
-            os.remove(os.path.join(system, "etc/machine-id"))
-            os.makedirs(os.path.join(system, "etc/machine-id"))
-            self.assertEqual(guest.seal_final(), 1)
-            guest.init()
-            self.assertEqual(os.listdir(os.path.join(system, "var/lib/cube/ops")), [])
-            self.assertRegex(call("hello", {})[0]["templateSeal"], r"^failed: /etc/machine-id")
-            # A seal that never ran at power-off: seal() left the failure up front.
-            os.makedirs(os.path.dirname(os.path.join(system, guest.SEAL_MARKER)))
-            with open(os.path.join(system, guest.SEAL_MARKER), "w") as handle:
-                handle.write("failed: the seal did not run at power-off")
-            os.makedirs(os.path.join(system, "var/lib/cube/ops/ws-3"))
-            guest.init()
-            self.assertEqual(os.listdir(os.path.join(system, "var/lib/cube/ops")), [])
-            self.assertEqual(call("hello", {})[0]["templateSeal"], "failed: the seal did not run at power-off")
-        finally:
-            guest.configure(root="/")
-
     def test_dispatch(self):
         stdout = io.BytesIO()
         guest.call("format-disk", io.BytesIO(b"{}\n"), stdout)
@@ -485,7 +422,7 @@ class ServicesTest(unittest.TestCase):
     def tearDown(self):
         for name in list(self.services.processes):
             self.services.stop(name)
-        guest.configure(services=guest.SystemdServices(), portal_file="/etc/cube/portal.json", service_host=None,
+        guest.configure(services=None, portal_file="/etc/cube/portal.json", service_host=None,
                         helper=guest.HELPER, cli=guest.CLI_PATH)
         shutil.rmtree(self.root)
 
@@ -602,12 +539,6 @@ class ServicesTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("not registered", result.stderr)
 
-    def test_unit_text_names_only_the_service(self):
-        text = guest.SystemdServices().text("web")
-        self.assertIn("ExecStart=/usr/local/sbin/cube-guest service-run web\n", text)
-        self.assertIn("Restart=on-failure", text)
-        self.assertIn("WantedBy=multi-user.target", text)
-
     def test_install_replaces_the_helper_and_writes_the_shim(self):
         with open(os.path.join(HERE, "..", "guest", "cube-guest.py"), "rb") as handle:
             source = handle.read()
@@ -658,17 +589,6 @@ class ServicesTest(unittest.TestCase):
         for portal in [{"urlTemplate": "https://{name}-x.example/"}, {"urlTemplate": "http://evil/{name}"}, {}, None,
                        {"urlTemplate": "http://{name}-x.example/\n"}]:
             self.assertEqual(call("portal", {"portal": portal})[0]["error"]["code"], "INVALID_REQUEST", portal)
-
-    def test_seal_removes_service_units(self):
-        system = os.path.join(self.root, "system")
-        units = os.path.join(system, "etc/systemd/system")
-        os.makedirs(os.path.join(units, "multi-user.target.wants"))
-        for path in ("cube-service-web.service", "multi-user.target.wants/cube-service-web.service", "ssh.service"):
-            with open(os.path.join(units, path), "w") as handle:
-                handle.write("x")
-        guest.remove_service_units(units)
-        self.assertEqual(sorted(os.listdir(units)), ["multi-user.target.wants", "ssh.service"])
-        self.assertEqual(os.listdir(os.path.join(units, "multi-user.target.wants")), [])
 
 
 if __name__ == "__main__":

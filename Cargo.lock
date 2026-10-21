@@ -533,7 +533,6 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bytes",
- "heapless",
  "http",
  "hyper",
  "hyper-util",
