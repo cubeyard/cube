@@ -1,8 +1,9 @@
 /** Explicit operator admission; never provisions or modifies the runner.
  * The same as `cubed runners enroll --config … --state …` (packages/server/src/runner-enroll.ts).
- * The runner config is version 2 (protocol 3, VM runners):
- * {"version":2,"binding":{"nodeId","threadId","environmentId"},"controlKey":"/abs/control.key",
- *  "serverPeer":"<runner peer>","network":"loopback|direct|relay","address":"host:port"} (no address for relay), mode 0600. */
+ * The runner config is version 2 with `"protocol": 4` (berth):
+ * {"version":2,"protocol":4,"binding":{"nodeId","threadId","environmentId"},"controlKey":"/abs/control.key",
+ *  "serverPeer":"<runner peer>","network":"loopback|direct|relay","address":"host:port"} (no address for relay), mode 0600.
+ * A protocol-3 runner's config is refused. */
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { enrollRunner } from "../packages/server/src/runner-enroll.ts";
