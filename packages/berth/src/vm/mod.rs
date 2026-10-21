@@ -739,6 +739,7 @@ impl VmRunner {
                 base_image_sha256: self.keel.base_sha256.clone(),
                 base_image_name: "keel".into(),
                 host_name: host_name(),
+                image_id: image_id(&self.image.machine_image()),
             }),
             limits: Some(proto::Limits {
                 max_vcpus: MAX_VCPUS.min(host_cpus.max(1)),
@@ -1755,6 +1756,25 @@ impl VmRunner {
                         ),
                     ));
                 }
+                // Made on cube's default image before berth prepared it
+                // (official Debian alone): it was never ready, so nothing
+                // ran in it; it takes the preparation layer, its disk kept.
+                Some(image)
+                    if takes_preparation(
+                        image,
+                        &runner_image,
+                        self.image.prepared.is_some(),
+                        entry.record.template.is_some(),
+                        entry.record.phase,
+                    ) =>
+                {
+                    entry.record.image = Some(self.write_layers(&id, None).map_err(internal)?);
+                    event(
+                        &self.machine_dir(&id),
+                        "prepared",
+                        "made on the image before its Debian preparation layer: the layer is added below its disk, which is kept",
+                    );
+                }
                 Some(_) => {}
                 // Created before the runner had an image (B-1): its disk
                 // never had a workload root, so it takes the runner's.
@@ -2513,6 +2533,45 @@ fn setup_layers(image: &MachineImage, template: Option<&str>) -> Vec<proto::Laye
                 }),
         )
         .collect()
+}
+
+/// `Platform.image_id`: sha256 of the manifest digest and every layer's
+/// diff_id, bottom first, each followed by a newline.
+fn image_id(image: &MachineImage) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut hasher = Sha256::new();
+    for part in std::iter::once(&image.manifest).chain(&image.diff_ids) {
+        hasher.update(part.as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Whether a machine made on `image` gets the runner's Debian preparation
+/// layer when it starts: the same manifest, exactly the runner's layers
+/// without that topmost one, not from a template (a template's build
+/// machine was ready, so it had the layer), and not suspended (its memory
+/// holds the old layer list). Such a machine ran official Debian alone,
+/// which keel never calls ready, so no command ran in it.
+fn takes_preparation(
+    image: &MachineImage,
+    runner: &MachineImage,
+    prepared: bool,
+    from_template: bool,
+    phase: Phase,
+) -> bool {
+    prepared
+        && !from_template
+        && phase != Phase::Suspended
+        && image.manifest == runner.manifest
+        && runner
+            .diff_ids
+            .split_last()
+            .is_some_and(|(_, below)| image.diff_ids == below)
 }
 
 /// How many machines that are not deleted (retained ones too) are made

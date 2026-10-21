@@ -45,7 +45,7 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   official Debian trixie pinned in `debian/trixie.json`, and berth adds the
   **Debian preparation layer** (`src/debian.rs`): the pinned Debian
   packages a guest needs and the image lacks (sudo, git, gh, curl,
-  ca-certificates and their dependencies, resolved by `debian/resolve.sh`
+  ca-certificates, openssh-client and their dependencies, resolved by `debian/resolve.sh`
   at the image's own snapshot time), each checked by size and sha256,
   unpacked on the runner with what their maintainer scripts do on a fresh
   install (`/etc/sudoers` 0440, `update-ca-certificates`' bundle and
@@ -342,11 +342,10 @@ Debian:
    (fetches the packages, builds both tars) and pin the sha256 it prints;
    run it twice: the same packages must give the same bytes.
 4. `cargo test -p berth` checks the plan is whole. A changed plan is a
-   changed image: templates made on the old one are refused
-   (`template_image_changed`), and since cubed's template key does not name
-   the image, its threads start fresh until those templates expire
-   (`CUBED_TEMPLATE_TTL_HOURS`, 24 h by default) and new ones are built;
-   machines keep the layers they were made with.
+   changed image: `Platform.image_id` changes, so cubed builds new
+   templates (it keys them on it), and berth refuses one made on the old
+   layers (`template_image_changed`); machines keep the layers they were
+   made with.
 
 ## Install from a release
 

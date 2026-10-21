@@ -34,7 +34,7 @@ const USAGE: &str = "usage:
       each machine is a keel guest under the QEMU given by path, which must meet keel's QEMU floor,
       built on the image, which berth pulls into <directory> before it listens if any of it is missing;
       without --image (or with default) cube's default image, official Debian trixie pinned by digest, which berth
-      prepares for cube with a layer of pinned Debian packages (sudo, git, gh, curl, ca-certificates); any other image
+      prepares for cube with a layer of pinned Debian packages (sudo, git, gh, curl, ca-certificates, openssh-client); any other image
       is the operator's and must bring bash, sudo, flock, git, gh, curl and a CA bundle itself;
       the layer cache keeps at most --layer-cache-gib (kept in .berth/vm.json) besides the layers machines use;
       machine_suspend is on only with --suspend-disk-margin-gib (no default): a machine is saved only while the disk

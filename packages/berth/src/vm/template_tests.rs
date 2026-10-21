@@ -865,3 +865,186 @@ async fn the_default_images_preparation_layer_is_part_of_the_image() {
         refused.message
     );
 }
+
+/// A machine made on cube's default image before berth prepared it
+/// (official Debian alone, never ready): its next start adds the layer and
+/// keeps its disk. Anything else keeps its own layers.
+#[tokio::test]
+async fn a_machine_made_before_the_preparation_takes_it_when_it_starts() {
+    let lab = Lab::new();
+    let platform = image::Platform::native().unwrap();
+    let plan = &crate::debian::plan().platforms[&platform.to_string()];
+    let image = pull_manifest(lab.path(), 1, &[1, 2], &plan.manifest);
+    let prepared = plan.diff_id().unwrap();
+    LayerCache::open(image::layer_dir(lab.path()))
+        .unwrap()
+        .publish(&prepared, |out| Ok(std::fs::write(out, vec![9u8; 4096])?))
+        .unwrap();
+    let runner = lab.runner(image.clone(), 16 << 30, plenty).await;
+    create(&runner, USER, base(), false).await.unwrap();
+    drop(runner);
+    // As the previous berth left it: the image's own layers only.
+    let path = lab.path().join(USER).join(record::RECORD);
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["image"]["diffIds"].as_array_mut().unwrap().pop();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o644);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let rw = std::fs::read(lab.path().join(USER).join(qemu::RW_DISK)).unwrap();
+
+    let runner = lab.runner(image, 16 << 30, plenty).await;
+    // No QEMU here: the start fails at launch, after the layers are set.
+    let _ = runner
+        .start(proto::MachineStart {
+            r#ref: Some(reference(USER)),
+            fence: fence(1),
+            ..Default::default()
+        })
+        .await;
+    {
+        let state = runner.state.lock().unwrap();
+        let ids = &state.machines[USER].record.image.as_ref().unwrap().diff_ids;
+        assert_eq!(
+            ids,
+            &[
+                diff_id(1).to_string(),
+                diff_id(2).to_string(),
+                prepared.to_string()
+            ]
+        );
+    }
+    let events = std::fs::read_to_string(lab.path().join(USER).join("events.log")).unwrap();
+    assert!(events.contains("prepared"), "{events}");
+    assert_eq!(
+        std::fs::read(lab.path().join(USER).join(qemu::RW_DISK)).unwrap(),
+        rw,
+        "the disk is kept"
+    );
+    assert_eq!(runner.setup(USER).layers.len(), 3);
+}
+
+#[test]
+fn only_an_unprepared_machine_of_the_same_image_takes_the_preparation() {
+    let runner = MachineImage {
+        reference: "r".into(),
+        manifest: "sha256:m".into(),
+        diff_ids: vec!["a".into(), "b".into(), "p".into()],
+    };
+    let made = |manifest: &str, ids: &[&str]| MachineImage {
+        reference: "r".into(),
+        manifest: manifest.into(),
+        diff_ids: ids.iter().map(|s| s.to_string()).collect(),
+    };
+    let raw = made("sha256:m", &["a", "b"]);
+    assert!(takes_preparation(
+        &raw,
+        &runner,
+        true,
+        false,
+        Phase::Stopped
+    ));
+    // Not when the runner has no preparation, from a template, suspended,
+    // another manifest, another layer list or one prepared already.
+    assert!(!takes_preparation(
+        &raw,
+        &runner,
+        false,
+        false,
+        Phase::Stopped
+    ));
+    assert!(!takes_preparation(
+        &raw,
+        &runner,
+        true,
+        true,
+        Phase::Stopped
+    ));
+    assert!(!takes_preparation(
+        &raw,
+        &runner,
+        true,
+        false,
+        Phase::Suspended
+    ));
+    assert!(!takes_preparation(
+        &made("sha256:o", &["a", "b"]),
+        &runner,
+        true,
+        false,
+        Phase::Stopped
+    ));
+    assert!(!takes_preparation(
+        &made("sha256:m", &["a"]),
+        &runner,
+        true,
+        false,
+        Phase::Stopped
+    ));
+    assert!(!takes_preparation(
+        &made("sha256:m", &["a", "b", "q"]),
+        &runner,
+        true,
+        false,
+        Phase::Stopped
+    ));
+    assert!(!takes_preparation(
+        &runner.clone(),
+        &runner,
+        true,
+        false,
+        Phase::Stopped
+    ));
+}
+
+/// cubed keys templates on `Platform.image_id`: it differs with the
+/// preparation layer, and only with what machines are made from.
+#[tokio::test]
+async fn the_runner_names_its_image_with_its_preparation() {
+    let lab = Lab::new();
+    let platform = image::Platform::native().unwrap();
+    let plan = &crate::debian::plan().platforms[&platform.to_string()];
+    let default = pull_manifest(lab.path(), 1, &[1, 2], &plan.manifest);
+    let other = pull(lab.path(), 2, &[1, 2]);
+    let prepared = plan.diff_id().unwrap();
+    LayerCache::open(image::layer_dir(lab.path()))
+        .unwrap()
+        .publish(&prepared, |out| Ok(std::fs::write(out, vec![9u8; 4096])?))
+        .unwrap();
+    let id = |runner: &Arc<VmRunner>| {
+        let state = runner.state.lock().unwrap();
+        runner.runner(&state).platform.unwrap().image_id
+    };
+    let with = id(&lab.runner(default.clone(), 16 << 30, plenty).await);
+    let made = |manifest: &str, ids: Vec<String>| MachineImage {
+        reference: "r".into(),
+        manifest: manifest.into(),
+        diff_ids: ids,
+    };
+    assert_eq!(
+        with,
+        image_id(&made(
+            &plan.manifest,
+            vec![
+                diff_id(1).to_string(),
+                diff_id(2).to_string(),
+                prepared.to_string()
+            ]
+        )),
+        "the preparation layer is part of it"
+    );
+    assert_eq!(
+        id(&lab.runner(default, 16 << 30, plenty).await),
+        with,
+        "stable"
+    );
+    let without = id(&lab.runner(other, 16 << 30, plenty).await);
+    assert_eq!(without.len(), 64);
+    assert_ne!(without, with);
+    // sha256 of "sha256:m\na\n".
+    assert_eq!(
+        image_id(&made("sha256:m", vec!["a".into()])),
+        "7468283ecb5a9346a8ba5254f93172c21159cdf9bcea6b92fd1e8b8ed9c6fdcd"
+    );
+}

@@ -595,6 +595,19 @@ export declare type Platform = Message<"cube.runner.v4.Platform"> & {
    * @generated from field: string host_name = 7;
    */
   hostName: string;
+
+  /**
+   * VM runners: what a new machine's workload root is made from, as one
+   * identity: sha256 (hex) of the image's manifest digest and its layers'
+   * diff_ids, bottom first, a runner's own layers (berth's Debian
+   * preparation layer) included, each followed by a newline. Another value
+   * means another image: a template made on one is refused on the other
+   * (template_image_changed), so cubed keys templates on it. Empty for a
+   * runner without one (berth host).
+   *
+   * @generated from field: string image_id = 8;
+   */
+  imageId: string;
 };
 
 /**
