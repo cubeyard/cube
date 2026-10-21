@@ -462,8 +462,17 @@ try {
   assert.match(checkRefused.stderr, /names docker\.io\/library\/debian:trixie@sha256:e+, official Debian alone, but berth would not serve cube's default image in .*: Error: .* serves ghcr\.io\/example\/guest@sha256:ccc.*\. Nothing was changed/);
   assert.doesNotMatch(checkRefused.stdout, /recovered:/);
   assert.deepEqual(snapshot(plain), brokenSnapshot, "nothing moved");
+  // N2: a later check that refuses (another slot count) refuses before
+  // anything moves, and berth is not even asked.
+  const callsBeforeLater = calls().length;
+  const laterRefusal = await cubed([...plainArgs, "--max-machines", "3"]);
+  assert.equal(laterRefusal.status, 1, laterRefusal.stdout + laterRefusal.stderr);
+  assert.match(laterRefusal.stderr, /says 2 machines at once/);
+  assert.deepEqual(snapshot(plain), brokenSnapshot, "nothing moved");
+  assert.equal(calls().length, callsBeforeLater, "berth was not asked");
   const callsBeforeRecovery = calls().length;
-  const recovering = await cubed(plainArgs);
+  // --image default is the same request as no --image.
+  const recovering = await cubed([...plainArgs, "--image", "default"]);
   assert.equal(recovering.status, 0, recovering.stdout + recovering.stderr);
   assert.match(recovering.stdout, /recovered: berth\.env named official Debian alone; it now names cube's default image \(the earlier file is .*berth\.env\.official-debian\./);
   assert.match(recovering.stdout, /next: start or restart its service/);

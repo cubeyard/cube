@@ -49,8 +49,9 @@ image, `docker.io/library/debian@sha256:4c25275446ca371766b8b093c696782eabce0626
 as `packages/berth/debian/trixie.json` pins it, is the one to use: berth
 adds its Debian preparation layer with sudo, git, gh, curl, perl and a CA
 bundle. Any other image must bring bash, sudo, flock, git, gh, curl, perl
-and a CA bundle itself. `scripts/test-local-berth.ts` without it runs
-`init-local` with no `--image`, the normal first install) and `CUBE_TEST_BERTH_MKFS` (an
+and a CA bundle itself. `scripts/test-local-berth.ts` without it, or with
+official Debian there, runs `init-local` with no `--image`, the normal first
+install, since `init-local` refuses official Debian as `--image`) and `CUBE_TEST_BERTH_MKFS` (an
 absolute `mkfs.erofs`). Without them each test prints `SKIP: … did NOT run`,
 and `CUBE_TEST_BERTH_VM=required` makes that a failure. Optional:
 `CUBE_TEST_BERTH_ACCEL` (default `kvm` on Linux, `hvf` on macOS),

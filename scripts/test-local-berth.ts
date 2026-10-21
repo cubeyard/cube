@@ -2,8 +2,9 @@
  * run binds its directory to the control key init-local made, pulls the
  * image, prints its peer and waits for cubed; the admission is recorded and
  * berth is stopped. A second run, as after `brew uninstall` and `brew
- * install`, changes nothing and starts nothing. Without CUBE_TEST_BERTH_IMAGE
- * it is the normal first install: no --image, so cube's default image
+ * install`, changes nothing and starts nothing. Without CUBE_TEST_BERTH_IMAGE,
+ * or with official Debian there (init-local refuses it as --image), it is
+ * the normal first install: no --image, so cube's default image
  * (official Debian trixie), which berth prepares with its Debian layer
  * before it listens, and berth.env says `default`; with it, that image.
  * Needs CUBE_TEST_BERTH_QEMU, _QEMU_IMG, _KEEL, _MKFS and an
@@ -24,6 +25,9 @@ if (!binary || !fs.existsSync(binary)) throw new Error("usage: node scripts/test
 const env = process.env;
 const given = { qemu: env.CUBE_TEST_BERTH_QEMU ?? "", qemuImg: env.CUBE_TEST_BERTH_QEMU_IMG ?? "", keel: env.CUBE_TEST_BERTH_KEEL ?? "",
   image: env.CUBE_TEST_BERTH_IMAGE ?? "", mkfs: env.CUBE_TEST_BERTH_MKFS ?? "" };
+// init-local refuses official Debian as --image (cube's default is official
+// Debian trixie, prepared): with it, this is the normal install, no --image.
+const own = /^(docker\.io\/)?(library\/)?debian(:[^@]+)?@/.test(given.image) ? "" : given.image;
 const missing = [
   ...(path.isAbsolute(given.qemu) && fs.existsSync(given.qemu) ? [] : ["CUBE_TEST_BERTH_QEMU"]),
   ...(path.isAbsolute(given.qemuImg) && fs.existsSync(given.qemuImg) ? [] : ["CUBE_TEST_BERTH_QEMU_IMG"]),
@@ -43,7 +47,7 @@ try {
   const home = path.join(root, "cube");
   const state = path.join(root, "state");
   const cubed = () => spawnSync(process.execPath, [path.resolve(import.meta.dirname, "../packages/server/src/index.ts"), "runners", "init-local",
-    "--state", state, "--home", home, ...(given.image ? ["--image", given.image] : []), "--listen", "127.0.0.1:47812", "--node-id", "node-berth-test"],
+    "--state", state, "--home", home, ...(own ? ["--image", own] : []), "--listen", "127.0.0.1:47812", "--node-id", "node-berth-test"],
   { encoding: "utf8", timeout: 30 * 60_000, env: { ...env, CUBE_BERTH: path.resolve(binary), CUBE_BERTH_QEMU: given.qemu, CUBE_BERTH_QEMU_IMG: given.qemuImg,
     CUBE_BERTH_KEEL: given.keel, CUBE_BERTH_MKFS_EROFS: given.mkfs, CUBED_CLAUDE: "off" } });
   const first = cubed();
@@ -55,8 +59,8 @@ try {
   assert.equal(bound.network, "loopback");
   assert.equal(config.address, "127.0.0.1:47812");
   const settings = fs.readFileSync(path.join(home, "berth.env"), "utf8");
-  assert.match(settings, new RegExp(`^CUBE_BERTH_IMAGE=${given.image ? given.image.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "default"}$`, "m"));
-  if (!given.image) {
+  assert.match(settings, new RegExp(`^CUBE_BERTH_IMAGE=${own ? own.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "default"}$`, "m"));
+  if (!own) {
     assert.match(first.stdout, /pulls cube's default image \(Debian trixie\), then prepares it for cube/);
     assert.match(first.stdout, /berth: preparing the image for cube: \d+ Debian packages/, "berth built the preparation layer");
     assert.match(first.stdout, /berth: prepared layer sha256:[0-9a-f]{64}/);
@@ -74,7 +78,7 @@ try {
   assert.match(again.stdout, /already set up and enrolled in .*; nothing changed/);
   assert.doesNotMatch(again.stdout, /starting berth vm/);
   for (const [file, sum] of kept) assert.equal(digest(path.join(home, file!)), sum, `${file} is unchanged`);
-  console.log(`ok: init-local with the real berth vm (${given.image || "no --image: cube's default image, prepared"}): enrolled ${config.serverPeer.slice(0, 12)}…, then a second run changed nothing`);
+  console.log(`ok: init-local with the real berth vm (${own || "no --image: cube's default image, prepared"}): enrolled ${config.serverPeer.slice(0, 12)}…, then a second run changed nothing`);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

@@ -269,32 +269,15 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
     throw new Error(`--image ${options.image} is official Debian alone, which lacks sudo, git, gh, curl and a CA bundle, so no thread machine would get ready: leave out --image (cube's default is official Debian trixie, which berth prepares for cube)`);
   }
   // Recovery: a berth.env an earlier cube wrote for official Debian alone
-  // (its machines never got ready). It now says default; the earlier file
-  // is kept beside it, and nothing else changes here (berth adds the
-  // preparation layer to such machines when they start).
-  let recovered: string | null = null;
-  if (recorded && options.image === undefined && isOfficialDebian(recorded.image)) {
-    // berth's word first: it refuses the default where the directory also
-    // served an image of the operator's own (served.rs). Then nothing moves.
-    const berth = program(options.berth, "CUBE_BERTH", "--berth", ["berth"]);
-    try {
-      await run(berth, ["image", "check", "--dir", files.dir, "--image", DEFAULT_LOCAL_BERTH_IMAGE], { encoding: "utf8", timeout: 10000 });
-    } catch (error) {
-      const said = String((error as { stderr?: string }).stderr ?? (error as Error).message).trim();
-      throw new Error(`${files.settings} names ${recorded.image}, official Debian alone, but berth would not serve cube's default image in ${files.dir}: ${said}. Nothing was changed`);
-    }
-    const kept = `${files.settings}.official-debian.${new Date().toISOString().replace(/[:.]/g, "-")}`;
-    fs.copyFileSync(files.settings, kept, fs.constants.COPYFILE_EXCL);
-    fs.chmodSync(kept, 0o600);
-    const temporary = `${files.settings}.tmp-${process.pid}`;
-    fs.writeFileSync(temporary, berthSettingsText(DEFAULT_LOCAL_BERTH_IMAGE, recorded.maxMachines, recorded.listen), { mode: 0o600, flag: "wx" });
-    fs.renameSync(temporary, files.settings);
-    log(`${files.settings} named ${recorded.image}, official Debian alone, on which no thread machine gets ready: it now names cube's default image (official Debian trixie, prepared by berth); the earlier file is ${kept}`);
-    recorded = { ...recorded, image: DEFAULT_LOCAL_BERTH_IMAGE };
-    recovered = kept;
-  }
-  if (recorded && options.image !== undefined && options.image !== recorded.image) throw conflict(`${files.settings} names the image ${recorded.image}`);
-  const image = options.image ?? recorded?.image ?? DEFAULT_LOCAL_BERTH_IMAGE;
+  // (its machines never got ready) moves to the default, without --image or
+  // with --image default alike. Decided here, done only after every other
+  // check below has passed (and berth agreed), so a refused run changes
+  // nothing.
+  const recovering = recorded !== null && (options.image === undefined || options.image === DEFAULT_LOCAL_BERTH_IMAGE)
+    && isOfficialDebian(recorded.image);
+  const recordedImage = recovering ? DEFAULT_LOCAL_BERTH_IMAGE : recorded?.image;
+  if (recorded && options.image !== undefined && options.image !== recordedImage) throw conflict(`${files.settings} names the image ${recorded.image}`);
+  const image = options.image ?? recordedImage ?? DEFAULT_LOCAL_BERTH_IMAGE;
   if (options.maxMachines !== undefined && (!Number.isInteger(options.maxMachines) || options.maxMachines < 1 || options.maxMachines > 64)) {
     throw new Error("--max-machines must be 1 through 64");
   }
@@ -332,6 +315,28 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   }
   const dir = physical(files.dir);
   if (Buffer.byteLength(dir) > MAX_DIR_BYTES) throw new Error(`${dir} is too long: berth needs <dir>/<machine id>/qmp.sock within 100 bytes (choose a shorter --home)`);
+
+  let recovered: string | null = null;
+  if (recovering && recorded) {
+    // berth's word first: it refuses the default where the directory also
+    // served an image of the operator's own (served.rs). Then nothing moves.
+    const berth = program(options.berth, "CUBE_BERTH", "--berth", ["berth"]);
+    try {
+      await run(berth, ["image", "check", "--dir", files.dir, "--image", DEFAULT_LOCAL_BERTH_IMAGE], { encoding: "utf8", timeout: 10000 });
+    } catch (error) {
+      const said = String((error as { stderr?: string }).stderr ?? (error as Error).message).trim();
+      throw new Error(`${files.settings} names ${recorded.image}, official Debian alone, but berth would not serve cube's default image in ${files.dir}: ${said}. Nothing was changed`);
+    }
+    const kept = `${files.settings}.official-debian.${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    fs.copyFileSync(files.settings, kept, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(kept, 0o600);
+    const temporary = `${files.settings}.tmp-${process.pid}`;
+    fs.writeFileSync(temporary, berthSettingsText(DEFAULT_LOCAL_BERTH_IMAGE, recorded.maxMachines, recorded.listen), { mode: 0o600, flag: "wx" });
+    fs.renameSync(temporary, files.settings);
+    log(`${files.settings} named ${recorded.image}, official Debian alone, on which no thread machine gets ready: it now names cube's default image (official Debian trixie, prepared by berth); the earlier file is ${kept}`);
+    recorded = { ...recorded, image: DEFAULT_LOCAL_BERTH_IMAGE };
+    recovered = kept;
+  }
 
   const result: LocalBerth = { home, files, nodeId, address: listen, image, maxMachines, already: false, enrollment: null, runnerError: null, recovered };
 

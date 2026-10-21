@@ -15,6 +15,12 @@
  *    image's own, so they are provably never ready (the user's ruling P1);
  *    each gets a new blank disk on the default image and gets ready, its
  *    earlier disk kept with its bytes.
+ * C. Negative control: an earlier berth's machine whose image's record in
+ *    `images/` is gone is not provably never ready: not renewed (its
+ *    events.log says why), refused as made on another image, its disk the
+ *    same file with the same bytes.
+ * D. Negative control: A's machine, once ready, keeps its disk (the same
+ *    file) across a berth restart and a start; nothing is renewed.
  *
  * Needs CUBE_TEST_BERTH_QEMU, _QEMU_IMG, _KEEL, _MKFS, _OLD_DEBIAN
  * (docker.io/library/debian@sha256:… other than the pinned one) and, for B,
@@ -29,7 +35,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { type Machine } from "../src/gen/runner_pb.js";
-import { RunnerSession, loadSessionConfig } from "../src/runner-session.ts";
+import { RunnerError, RunnerSession, loadSessionConfig } from "../src/runner-session.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
 assert.ok(fs.existsSync(binary), `${binary}: build berth first (cargo build -p berth)`);
@@ -161,6 +167,23 @@ try {
     await run.session.close();
     await stop(run.child);
     note(`A: renewed on the default image and ready; the earlier disk kept as kept/${disk} (sha256 unchanged); a second start changed nothing`);
+
+    // D (negative control): that machine was ready; a berth restart and a
+    // start leave its disk the same file, add nothing to kept/, renew nothing.
+    const rw = path.join(r.directory, ref.id, "rw.qcow2");
+    const inode = fs.statSync(rw).ino;
+    const renewals = (r.events(ref.id).match(/ renewed: /g) ?? []).length;
+    run = await r.start(binary, null);
+    const third = await settle(run.session, ref);
+    assert.ok(third!.ready);
+    assert.equal(fs.statSync(rw).ino, inode, "an ever-ready machine keeps its disk");
+    assert.deepEqual(r.kept(), kept);
+    assert.equal((r.events(ref.id).match(/ renewed: /g) ?? []).length, renewals);
+    assert.equal(r.readiness(ref.id), true);
+    await stopMachine(run.session, ref);
+    await run.session.close();
+    await stop(run.child);
+    note("D: the ever-ready machine kept its disk (same inode) across a berth restart and a start; nothing renewed");
   }
 
   // B. An earlier berth's machines: no readiness record, so left as they were.
@@ -194,10 +217,38 @@ try {
     await run.session.close();
     await stop(run.child);
     note(`B: an earlier berth's never-ready machines on ${pinned} and ${old}: each renewed on the default image and ready; both earlier disks kept unchanged`);
+
+    // C (negative control): an earlier berth's machine berth cannot prove
+    // never ready (its image's record in images/ is gone): left as it was.
+    const c = runnerDir("c");
+    const ambiguous = { owner: "thread-c", id: randomBytes(8).toString("hex") };
+    {
+      const legacyRun = await c.start(legacy, old);
+      await legacyRun.session.machine({ case: "machineCreate", value: { ref: ambiguous, fence, spec: { source: { case: "base", value: true }, size } } });
+      const guest = await settle(legacyRun.session, ambiguous);
+      assert.ok(!guest!.ready);
+      await stopMachine(legacyRun.session, ambiguous);
+      await legacyRun.session.close();
+      await stop(legacyRun.child);
+    }
+    const oldRecord = path.join(c.directory, "images", `${old.split("@")[1]}.json`);
+    assert.ok(fs.existsSync(oldRecord), oldRecord);
+    fs.rmSync(oldRecord);
+    const cDisk = path.join(c.directory, ambiguous.id, "rw.qcow2");
+    const cBefore = { sha: sha(cDisk), ino: fs.statSync(cDisk).ino };
+    const cRun = await c.start(binary, null);
+    await assert.rejects(cRun.session.call({ case: "machineStart", value: { ref: ambiguous, fence, boot } }),
+      (error: unknown) => error instanceof RunnerError && error.reason === "image_changed");
+    assert.match(c.events(ambiguous.id), /not renewed: a machine on official Debian whose layers are not exactly that image's own/);
+    assert.deepEqual({ sha: sha(cDisk), ino: fs.statSync(cDisk).ino }, cBefore, "its disk is the same file with the same bytes");
+    assert.deepEqual(c.kept(), []);
+    await cRun.session.close();
+    await stop(cRun.child);
+    note("C: an earlier berth's machine without its image's record: not renewed (event says why), refused as image_changed, disk unchanged");
   } else {
     note("B: NOT checked: CUBE_TEST_BERTH_LEGACY (the released v0.3.32 berth) is unset");
   }
-  console.log(`ok: berth renewal on real machines (${accel}): a never-ready official-Debian machine gets a new disk on the default image and gets ready, its earlier disk kept${legacy ? "; so do an earlier berth's never-ready machines on the pinned and an older digest" : ""}`);
+  console.log(`ok: berth renewal on real machines (${accel}): a never-ready official-Debian machine gets a new disk on the default image and gets ready, its earlier disk kept${legacy ? "; so do an earlier berth's never-ready machines on the pinned and an older digest; an ambiguous one is left" : ""}; an ever-ready one is left`);
 } finally {
   for (const child of children) await stop(child).catch(() => {});
   if (env.CUBE_TEST_KEEP === "1") console.log(`kept ${root}`);
