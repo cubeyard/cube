@@ -173,8 +173,9 @@ deleted or rebound. So:
   holds it, so after a change cubed builds a new template rather than pick
   one berth would refuse.
   The packages: sudo, git, gh, curl, ca-certificates and openssh-client
-  (ssh, ssh-keygen, git's ssh signing; outbound ssh still needs the egress
-  policy to allow it, and cube's allows HTTP and HTTPS).
+  (ssh, ssh-keygen, git's ssh signing). git over SSH is not available in a
+  guest, whose egress is HTTP and HTTPS only: use HTTPS remotes (cube's
+  credential helper serves them with `GH_TOKEN`).
   See `packages/berth/src/debian.rs` for what is and is not reproduced.
 - **`--image <reference>` is your own image** (advanced). berth does not
   prepare it: it must bring bash, sudo with `/etc/sudoers.d`, util-linux's
@@ -185,6 +186,16 @@ deleted or rebound. So:
   Official Debian itself (`docker.io/library/debian@…`) is refused as
   `--image`: it never gets ready, and the default is official Debian
   trixie prepared.
+- **A runner directory keeps its image.** berth records what a directory
+  serves (`.berth/served.json`; for one an earlier berth served, the images
+  pulled into it). Without `--image` (or with `--image default`) it refuses
+  to start where that was an image of the operator's own, saying how to
+  keep it (`--image <that reference>`) or move it on purpose
+  (`--change-image` on `berth vm`, or once `berth image check --dir <dir>
+  --change-image` while it is stopped). Machines keep their layers; nothing
+  is deleted. Official Debian alone, which never got ready, is the one image
+  that moves to the default without the flag. `install-berth.sh` runs the
+  same check before it writes anything.
 - **Recovery of a runner an earlier cube set up with official Debian
   alone.** Its machines never got ready. A run of `init-local` without
   `--image` (the same command as an upgrade) moves its `berth.env` to

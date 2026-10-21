@@ -59,6 +59,13 @@ fails the first run and is recorded nowhere: run `init-local` again with the
 right one (or without `--image`). berth pulls the image the first time it
 starts, before it listens, so the first `init-local` takes as long as the pull.
 
+git over SSH is not available in a thread machine, whose network is HTTP
+and HTTPS only: use HTTPS remotes (`gh` and the credential helper use your
+GitHub login). A runner on an image of your own keeps it on every upgrade;
+berth refuses to start it on the default unless you move it on purpose
+(`berth image check --dir ~/.cube/berth --change-image`, with the service
+stopped, then `CUBE_BERTH_IMAGE=default` in `~/.cube/berth.env`).
+
 **A runner set up with plain `debian:trixie` as its own image** (its machines
 never got ready: "the image lacks sudo, git, gh, curl, a CA bundle") is
 recovered by the usual upgrade commands: `cubed runners init-local` moves
