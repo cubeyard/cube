@@ -2,8 +2,8 @@
 
 Self-hosted coding-agent threads, each in its own virtual machine. You talk to
 a chat in your browser; it starts threads in your projects; every thread's
-agent works in a fresh Debian machine of its own, with only HTTP and HTTPS
-through cube's gateway, and reports back. Closing the tab or restarting cube
+agent works in a fresh machine of its own, with only HTTP and HTTPS to
+public hosts, and reports back. Closing the tab or restarting cube
 does not discard accepted work.
 
 **Experimental software.** It runs agents with real tools against your
@@ -13,15 +13,17 @@ browser.
 
 - **cubed** is the control plane: the web UI, [OptChat](docs/optchat.md) (one
   endless chat that starts and steers threads), the agents (Pi, or Claude Code
-  with your own login), projects, and the gateway every thread machine's
-  traffic goes through.
-- **cube-runner** hosts the thread machines: one QEMU VM per active thread,
-  several per runner, on Linux with KVM or on an Apple Silicon Mac with
+  with your own login), projects, and the gateway that puts your GitHub
+  token into a thread's requests to GitHub (the machine sees only a
+  placeholder).
+- **berth** ([packages/berth](packages/berth/README.md)) hosts the thread
+  machines: `berth vm` runs one QEMU machine per open thread, several per
+  runner, on Linux with KVM or on an Apple Silicon Mac with
   Hypervisor.framework.
-- **keel** (in development, [packages/keel](packages/keel/README.md)) is what
-  runs inside a thread machine: a guest kernel, a small init and the guest
-  agent, booted directly with OCI images as read-only layers, in about 0.1 s
-  and built for suspend and resume. The runner does not use it yet.
+- **keel** ([packages/keel](packages/keel/README.md)) is what runs inside a
+  thread machine: a guest kernel, a small init and the guest agent, booted
+  directly with OCI images as read-only layers, built for suspend and
+  resume.
 - Threads run `read`, `write`, `edit`, bounded `bash`, `codemode` (one
   model-written script calling those tools) and `cube service` (web servers
   with a URL for you). They write [artifacts](docs/artifacts.md): documents

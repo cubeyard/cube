@@ -31,8 +31,7 @@ boots keel machines under the QEMU, kernel and `base.erofs` it is given by
 absolute path (`--qemu`, `--qemu-img`, `--keel`), with `-sandbox on` on
 Linux. cubed talks to it over a RunnerSession (`runner-select.ts`), and a
 thread that names no runner is placed only on an enrolled `berth vm`
-(`registry.ts` `pooledRunner`). The protocol-3 runner, `cube-runner`
-(`packages/node-transport`), does not use keel. Whether a given cubed has a
+(`registry.ts` `pooledRunner`). Whether a given cubed has a
 `berth vm` enrolled is up to its operator.
 
 ## Startup, as measured
@@ -204,7 +203,7 @@ key a build would use, or the reason it would be bypassed.
 ## Releases
 
 A `vX.Y.Z` release carries keel for both architectures (`release.yml`), next
-to cubed and cube-runner, signed with the same key as cubed's updates:
+to cubed and berth, signed with the same key as cubed's updates:
 
 ```text
 keel-<release>-<arch>-vmlinuz       the kernel

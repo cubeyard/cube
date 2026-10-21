@@ -413,9 +413,10 @@ partial reply.
 `diagnose(id)` gives the same evidence as `GET /api/threads/<id>/diagnostics`,
 for a thread the chat started only (any other id is refused as unknown), as
 text of about 12,000 characters at most: cubed's record and activation, the runner's
-last report and its age, the gateway's link, one guest hello, the runner's
-process, QMP, frames, disk and launch line, its newest events, cubed's machine
-events and the last lines of the console and qemu logs. Every string is
+last report and its age, what the runner last reported of the guest, berth
+vm's machine diagnosis (the machine, QEMU, QMP, guest, egress, Iroh paths,
+its newest events), cubed's machine events and the last lines of the console
+and qemu logs. Every string is
 escaped and redacted (`vm-diagnostics.ts`), so console output never reaches
 the model or a terminal raw. It starts, stops and attaches nothing; evidence
 it could not collect is named as unavailable, unsupported or none.
@@ -798,9 +799,9 @@ failure) nor recovery rounds send its request again; then archives it.
 - A spawned thread goes to the runner pool (its `berth vm` runners; refused
   when none has a free slot) unless the task names a `runner`
   (its node id, from `runners`); then it starts on that runner and never
-  moves, and waits while it is down. That is the only way onto a
-  protocol-3 runner (`cube-runner`) or a host runner (`berth host`,
-  unsandboxed), which OptChat names only when the user asks for it.
+  moves, and waits while it is down. That is the only way onto a host
+  runner (`berth host`, unsandboxed), which OptChat names only when the user
+  asks for it. A protocol-3 runner (`cube-runner`, retired) takes none.
 - A spawned thread runs on the host's preferred model unless the task names
   one; `claude · max` models start Claude Code threads.
 

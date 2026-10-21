@@ -2,8 +2,8 @@
 
 A thread's agent can run a web server in its machine as a **service** and
 give the user a URL for it. The URL goes to cubed's **portal**, which passes
-plain HTTP and WebSocket traffic to the service through the gateway and the
-runner, the path cubed already uses for the guest's sshd. The portal is
+plain HTTP and WebSocket traffic to the service over a `dial` stream through
+the thread's runner. The portal is
 private: it listens only on a private or loopback address of the cubed host
 (a Tailscale address, or loopback for a browser on the same host, the
 Homebrew default) and has no login of its own.
@@ -54,39 +54,27 @@ so instead of printing a URL; the service still runs.
 The same command has `cube hooks`, which shows the project's hooks this
 machine runs, read only (see [project-hooks.md](project-hooks.md)).
 
-The CLI is the guest helper itself (`/usr/local/bin/cube` is a shim for
-`cube-guest cli`). It needs root for units and registrations and gets it
-through the agent's sudo. Registrations are JSON files under
+On a keel machine (`berth vm`) the command is keel's `cube-agent`, with the
+same CLI (packages/keel/README.md). The details below about units, sudo and
+files are those of the guest helper `cube-guest`, which a `berth host`
+machine runs (`/usr/local/bin/cube` is a shim for `cube-guest cli`); it
+needs root for units and registrations and gets it through the agent's sudo. Registrations are JSON files under
 `/var/lib/cube/services/`, written atomically under the helper's lock. Pi and
 Claude Code threads learn about it from one sentence in their instructions.
 
 ## How the command gets into machines
 
-- **New machines** get the helper and the shim from their seed, like the
-  rest of the helper.
-- **Machines from a template**: the template key includes the helper's
-  hash, so a new helper means a new template. Each machine's seed writes the
-  current helper anyway. A template's seal removes `cube-service-*` units
-  (and their registrations go with `/var/lib/cube`); a template machine's
-  first boot removes any that a failed seal left.
-- **Existing machines** (made by an older cubed, a reused disk) are brought
-  up to date when cubed resumes them: on every machine boot and on every
-  cubed start, before the agent opens. The helper's `hello` reports a
-  `build` (the sha256 of its file). When it differs from the helper cubed
-  ships, cubed sends the new helper with the helper's `install` operation
-  (content-addressed; it also writes the shim). A helper from before
-  `install` existed has no `build`; cubed then replaces it once with a few
-  of its own ordinary commands (`cube:helper:<epoch>:<n>`): the gzipped
-  helper in chunks under `/var/tmp`, checked against its sha256 and
-  installed by the new helper's own `install` as root. These commands are
-  cubed's, not the agent's, so they do not keep a disk at archive. A failure
-  is logged ("the machine's cube command could not be brought up to date")
-  and does not stop the thread.
-- Every resume also writes `/etc/cube/portal.json` with the `portal`
-  operation: the machine's URL template, or why there is no portal.
-
-A running command keeps the helper code it started with; the journal format
-did not change, so commands that span a replacement finish normally.
+- **keel machines** have it in their image: cube-agent comes with keel and
+  cubed never replaces it.
+- **`berth host` machines** run the helper berth was built with; when cubed
+  resumes one (every boot and every cubed start, before the agent opens) and
+  the helper's `hello` reports another `build` (the sha256 of its file) than
+  the one cubed ships, cubed sends its own with the helper's `install`
+  operation (content-addressed; it also writes the shim). A helper without
+  `install` is not replaced. A failure is logged ("the machine's cube
+  command could not be brought up to date") and does not stop the thread.
+- Every resume also writes the machine's URL template, or why there is no
+  portal, with the `portal` operation.
 
 ## The portal
 
@@ -94,15 +82,13 @@ did not change, so commands that span a replacement finish normally.
 browser ──HTTP──▶ cubed portal (CUBED_PORTAL_LISTEN:CUBED_PORTAL_PORT)
                      │ Host → thread label + service name → registered port
                      ▼
-                 cube-gateway dial route (control socket, Upgrade: cube-tcp)
+                 RunnerSession `dial` stream (machine ref, fence, port)
                      ▼
-                 Iroh frame channel → runner → guest 10.77.0.2:PORT
+                 runner → the machine's LAN → guest:PORT
 ```
 
-On a protocol-4 runner (`berth vm`) the gateway is not in the path: the
-portal opens a `dial` stream on cubed's connection to the runner, which
-connects to the guest from the machine's own LAN and allows only ports
-1024-65535 (see packages/berth/README.md).
+The runner connects to the guest from the machine's own LAN and allows only
+ports 1024-65535 (see packages/berth/README.md); `berth host` has no dial.
 
 Each service has its own origin:
 
@@ -174,19 +160,16 @@ keeps the Host header.
   `services` operation (cached 2 s), only while cubed has the thread's
   machine running and the thread is not archived or archiving. The portal
   never starts or resumes a machine: a sleeping thread answers 503.
-- Only the registered port, through the gateway's dial route, which itself
-  allows only port 22 and 1024-65535 (a protocol-4 runner's `dial`:
-  1024-65535). The request never names a target.
+- Only the registered port, through the runner's `dial`, which itself
+  allows only 1024-65535. The request never names a target.
 - Hop-by-hop headers and any `Forwarded`/`X-Forwarded-*` the browser sent
   are dropped; the portal sets `X-Forwarded-For/Host/Proto`. Cookies a
   service sets lose their `Domain` attribute, so they stay with that one
   service's host and are never shared with cube or other services.
-- At most 64 open connections per thread (the gateway gives a machine 256
-  flows for everything). Responses stream with backpressure; a browser that
+- At most 64 open connections per thread. Responses stream with backpressure; a browser that
   goes away closes the connection to the service.
 - WebSocket and other HTTP/1.1 upgrades are passed through as they came and
-  the two connections joined. The gateway closes a flow idle for 10
-  minutes, so a WebSocket needs some traffic (pings) within that time.
+  the two connections joined.
 
 Stopping a service takes it off the portal within the 2 s cache (a dial
 that fails drops the cache at once). Archiving a thread takes its services
@@ -223,14 +206,14 @@ ends open connections).
 
 ## Validation and gaps
 
-Covered offline (`pnpm test`): the CLI and the new helper operations
-(`guest_helper_test.py`, processes in place of systemd units), the
-gateway's port policy and a dial to a service port
-(`cargo test -p cube-gateway`), and the portal end to end over a local
-guest (`portal-test.ts`): helper refresh at activation, the CLI's URL,
-exact-host routing and refusals, forwarded headers, host-only cookies,
-WebSocket upgrade, an abandoned 64 MiB download, no wake of a stopped
-machine, stop and archive, and the chunked bootstrap of an old helper.
+Covered offline (`pnpm test`): the CLI and the helper operations
+(`guest_helper_test.py`, processes in place of systemd units), the portal
+over a real Iroh `dial` stream to a fake runner (`runner-dial-test.ts`), and
+the portal end to end over a local guest (`portal-test.ts`): helper refresh
+at activation, the CLI's URL, exact-host routing and refusals, forwarded
+headers, host-only cookies, WebSocket upgrade, an abandoned 64 MiB download,
+no wake of a stopped machine, stop and archive. A keel machine's services
+and dial run in `runner-vm-test.ts` (V9) with `berth vm`.
 Once, by hand: headless Chromium (with `--host-resolver-rules` mapping
 `*.sslip.io` to the offline portal, not real DNS) loaded a service's page by
 its URL, completed a WebSocket round trip through the portal, kept the
@@ -252,10 +235,6 @@ service host as Host. CI's `homebrew` job checks that curl, the system
 resolver and Safari on GitHub's macOS runner (Safari 26.6.2, macOS 26.6.2 when
 added) reach a loopback server by a `*.localhost` name, as a secure context.
 
-Not yet verified: a real VM (systemd units surviving the command's unit,
-journal logs, restart at boot, the LAN address probe, a template build with
-services, the gateway and a remote runner carrying the traffic), the
-bootstrap against a real v1 helper in a VM, a browser on a Tailscale network
-resolving sslip.io, macOS/HVF runners, and the Homebrew default on a real
-Mac with a running thread machine. These need
-`scripts/test-node-transport.sh` on a KVM host and a manual check.
+Not yet verified: a remote runner carrying the traffic, a browser on a
+Tailscale network resolving sslip.io, and the Homebrew default on a real Mac
+with a running thread machine.

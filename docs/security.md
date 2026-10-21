@@ -1,12 +1,12 @@
 # Security and the private network
 
 - **The thread machine is the sandbox.** A thread's commands run as user
-  `agent` (with sudo) inside its QEMU guest, and its file tools reach any
-  file in that guest (`/workspace`, `/home/agent`, `/tmp`, …) but never the
-  host's or another thread's. Its files, processes and network are its own; it holds no real credential; its only network is cube's
-  gateway, which allows HTTP and HTTPS to public addresses and asks cubed's
-  policy about every request. It cannot reach cubed, the runner, your LAN or
-  a metadata service.
+  `agent` inside its keel guest under QEMU on a `berth vm`, and its file
+  tools reach any file in that guest (`/workspace`, `/home/agent`, `/tmp`, …)
+  but never the host's or another thread's. Its files, processes and network
+  are its own; it holds no real credential; its only network is HTTP and
+  HTTPS to public addresses under cubed's egress policy. It cannot reach
+  cubed, the runner, your LAN or a metadata service.
 - **The host is not.** QEMU runs as the runner's account, hardened only by
   `-sandbox on` on Linux and not at all on macOS. A QEMU escape has that
   account's authority. On the one-Mac setup ([macOS with Homebrew](macos.md))
@@ -14,8 +14,7 @@
   runner can read every machine disk it hosts, and a guest escape would run as
   you. Give a runner that matters a dedicated account or machine without SSH,
   cloud, browser, Git or provider credentials.
-- **On a `berth vm`** (runner protocol 4) the thread's machine is a keel
-  guest and is still the sandbox. Its network is the runner's own LAN for
+- **On a `berth vm`** (runner protocol 4) its network is the runner's own LAN for
   that machine, which follows the egress policy cubed sends with each start
   (no policy, no egress), and it holds placeholders only: a request that
   needs a credential goes to cubed, whose gateway puts the token in. The

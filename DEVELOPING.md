@@ -23,26 +23,17 @@ bash scripts/test-node-transport.sh
 
 The Node test list is `scripts/test-offline.sh`. Add tests there. Offline tests
 run the real guest helper under a temporary root (`packages/server/test/local-guest.ts`)
-instead of a VM; they need `python3` and OpenSSH's `ssh-keygen`. The helper's
+instead of a machine; they need `python3`. The helper's
 file tools act as the agent's account outside the workspace only as root;
 `CUBE_TEST_GUEST_ROOT=1` runs that one test with `sudo -n`, and
 `CUBE_TEST_GUEST_ROOT=required` (set in CI) fails without passwordless sudo. Real runner
-tests use disposable state, keys and VMs; do not point them at an operator's
-installation. With Linux, a usable `/dev/kvm`, QEMU 7.2+ and a Debian 13
-genericcloud image, `CUBE_TEST_VM_IMAGE=/path/debian-13-genericcloud-amd64.qcow2
-bash scripts/test-node-transport.sh` also runs the real-VM acceptance
-(`smoke-runner-vm.ts`, `smoke-node-adapter.ts`, `test-vm-e2e.ts`,
-`test-vm-concurrency.ts`: two thread VMs on one runner); without them
-it prints a SKIP notice, and `CUBE_TEST_VM=required` makes that a failure. To
-run one of them after building:
-`node scripts/smoke-node-adapter.ts target/debug/cube-runner target/debug/cube-gateway <image>` or
-`node scripts/test-vm-e2e.ts target/debug/cube-runner <image>` (it builds a
-`test-hooks` gateway under `target/test-hooks`). `CUBE_SMOKE_KEEP=1` keeps their
-work directories. The real-VM scripts keep their state under `TMPDIR` (`/tmp`
-by default); where that is a small tmpfs, point `TMPDIR` at a disk: VM disks
-grow there and the runner refuses a new VM below 4 GiB free.
+tests use disposable state, keys and machines; do not point them at an
+operator's installation. `scripts/test-node-transport.sh` always runs the
+Rust tests, the real `berth host` with cubed (`runner-host-test.ts`,
+`runner-host-cubed-test.ts`) and cubed's supervision of the real
+cube-gateway (`gateway-test.ts`).
 
-The same script runs `berth vm` (runner protocol 4) with keel machines on
+It also runs `berth vm` (runner protocol 4) with keel machines on
 Linux with KVM and on macOS with HVF: `runner-vm-test.ts` (the guest channel,
 the Workspace contract, network, credentials, portal, templates, diagnosis)
 and `runner-vm-cubed-test.ts` (cubed's real code with `berth vm` as the
@@ -74,17 +65,13 @@ CUBE_TEST_BERTH_VM=required CUBE_TEST_LAYER_TOOLS=required \
   CUBE_TEST_BERTH_QEMU=/path/to/qemu-system-x86_64 CUBE_TEST_BERTH_QEMU_IMG=/path/to/qemu-img \
   CUBE_TEST_BERTH_KEEL="$PWD/packages/keel/out/x86_64" CUBE_TEST_BERTH_MKFS="$(command -v mkfs.erofs)" \
   CUBE_TEST_BERTH_IMAGE='<registry/repository@sha256:…>' \
-  CUBE_TEST_VM=required CUBE_TEST_VM_IMAGE=/path/debian-13-genericcloud-amd64.qcow2 \
   bash scripts/test-node-transport.sh
 ```
 
 On macOS use Homebrew's `qemu-system-aarch64`, `qemu-img` and erofs-utils
 (`/opt/homebrew/bin`), keel for `arm64`, and
 `CUBE_TEST_LAYER_TOOLS=mkfs.erofs,fsck.erofs,dump.erofs` (there is no
-`sfdisk`). The protocol-3 part prints `SKIP: runner acceptance with a real VM
-did NOT run` there by design and the script still exits 0; leave
-`CUBE_TEST_VM` unset, since `CUBE_TEST_VM=required` turns that skip into a
-failure. `scripts/test-local-berth.ts` runs `cubed runners init-local` with
+`sfdisk`). `scripts/test-local-berth.ts` runs `cubed runners init-local` with
 the real `berth vm` (the same `CUBE_TEST_BERTH_*` and an accelerator) and
 then again, as after a reinstall. A `berth vm` run passed when the script
 exits 0 and prints `ok: berth vm over protocol 4 (kvm|hvf): …`, `ok: cubed
@@ -128,9 +115,12 @@ against the built UI; it is a measurement, not a test.
 `ci.yml` is the pull-request gate, all on Linux and side by side: `check`
 (references, typecheck, lint, shell syntax, shellcheck), `test (K/4)` (the
 offline suites split by `CUBE_TEST_SHARD=K/4`), `browser` and
-`node-transport (linux)`. A new push to a pull request cancels its older run.
+`node-transport (linux)` (`scripts/test-node-transport.sh`: the Rust crates
+and the runner tests; the jobs keep the name of the protocol-3 package they
+once tested, which the release gate looks for). A new push to a pull request
+cancels its older run.
 `platforms.yml` runs `node-transport (macos)` and the `homebrew` formula check
-on every push to `main`, on pull requests that touch Rust, the runner scripts,
+on every push to `main`, on pull requests that touch Rust, berth's scripts,
 the Homebrew generator or CI itself, and by hand (`gh workflow run platforms.yml
 --ref <branch>`). Rust dependency builds are cached; only `main` saves the
 cache. `release.yml` builds nothing until `scripts/release-gate.sh` finds that
@@ -196,24 +186,26 @@ is also supported; allow its exact hostname and preserve Host/Origin consistentl
 The host allowlist prevents DNS rebinding; it does not restrict network ingress
 or authorize public exposure.
 
-Create and check a project through the UI/API, then initialize an immutable runner
-binding (with its base image) using `packages/node-transport/RUNNER.md`. Write its
-private connection configuration (version 2, mode 0600):
+Create and check a project through the UI/API, then set up a runner: on the
+cubed host `cubed runners init-local` (a local `berth vm`), elsewhere a
+`berth vm` from a release ([berth](packages/berth/README.md#install-from-a-release)).
+Write its private connection configuration (version 2, `"protocol": 4`,
+mode 0600):
 
 ```json
-{"version":2,"binding":{"nodeId":"node-…","threadId":"…","environmentId":1},
+{"version":2,"protocol":4,"binding":{"nodeId":"node-…","threadId":"…","environmentId":1},
  "controlKey":"/abs/control.key","serverPeer":"<runner peer>","network":"loopback|direct|relay",
  "address":"host:port"}
 ```
 
-(no `address` for relay) and register it with `scripts/enroll-runner.ts --state
-/absolute/fresh-state --config /absolute/private-runner.json --trusted-runner`;
-the script refuses a protocol-2 runner. Runners are global installation
-capacity. A new thread atomically leases any available runner until archive and
-gets its own VM there. The project's checked repository URLs, resolved branches
-and exact OIDs are checked out inside the VM through the gateway; GitHub
-repositories authenticate with the placeholder the gateway replaces by the
-host's token. Git prompting is disabled.
+(no `address` for relay) and register it with `cubed runners enroll --config
+/absolute/private-runner.json --state /absolute/fresh-state`; any other
+config (a protocol-3 runner's) is refused. Runners are global installation
+capacity. A new thread takes a slot on a `berth vm` until archive and gets
+its own machine there. The project's checked repository URLs, resolved
+branches and exact OIDs are checked out inside the machine; GitHub
+repositories authenticate with the placeholder that cube-gateway, through
+cubed, replaces by the host's token. Git prompting is disabled.
 
 Useful reads: `/api/threads` (with each machine's startup steps), `/api/projects`,
 `/api/threads/<id>/startup-log` (the running hook's log while a machine starts), `/api/threads/<id>/history`,
@@ -234,7 +226,7 @@ limits, lease, exec, operations, file and stat; see
 capabilities and acquiring the lease requires `authorization: Bearer <lease
 token>`. A Pi thread's lease is held by Pi itself, so these routes admit no second
 writable owner. `node packages/server/test/workspace-test.ts` runs the shared
-contract offline; `scripts/smoke-node-adapter.ts` runs it against a real VM. A running operation can be long-polled with `?wait=<ms>` (at
+contract offline; `runner-host-test.ts` runs it against a real `berth host`. A running operation can be long-polled with `?wait=<ms>` (at
 most 30000).
 
 A claude-code thread holds its lease in cubed for the Claude Code child, which
@@ -395,16 +387,12 @@ installation is not updated in place.
 
 Restart cubed against the same state to resume accepted Pi tasks; thread
 machines keep running meanwhile. Do not run two writable owners for a session.
-Backups of the host must be taken with cubed stopped; keep Pi databases, product
-metadata, `threads/<id>/vm` keys and `gateway/` (the installation CA) together.
-Runner backup, restore quarantine, drain and recovery acknowledgement follow the
-runbook. Never erase a retained machine disk just to retry a command.
+Backups of the host must be taken with cubed stopped; keep Pi databases,
+product metadata and `threads/<id>/vm` together (and `gateway/`, where an
+installation that ran protocol 3 has it). Never erase a retained machine
+disk just to retry a command.
 
-For the runner's foreground development profile, use `cube-runner init` once
-and `cube-runner run --home ...` thereafter as described in
-[`packages/node-transport/RUNNER.md`](packages/node-transport/RUNNER.md). Human
-runner lifecycle output is on stderr and stdout stays quiet; low-level commands
-retain JSON stdout. First Ctrl-C refuses new machines and powers the guest down,
-a second makes QEMU quit at once. A restart marks a machine that was running
-stopped and interrupted; its next start boots the same disk, and the guest
-marks unfinished commands interrupted, never reexecuting them.
+For a runner in the foreground, run `berth vm` (or `berth host`) as in
+[berth](packages/berth/README.md). Ctrl-C quits its machines' QEMUs and marks
+them interrupted; the next start of a machine boots the same disk, and the
+guest marks unfinished commands interrupted, never reexecuting them.
