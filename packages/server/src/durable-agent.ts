@@ -5,10 +5,11 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { setTimeout as delay } from "node:timers/promises";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { cleanupSessionResources, Type, type Models, type Static } from "@earendil-works/pi-ai";
-import { createRegistry, defineDoc, defineExtension, defineTool, Harness, ROOT_CONVERSATION_ID, section, type Extension, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
+import { CompactionTask, createRegistry, defineDoc, defineExtension, defineTool, Harness, LiveDoc, ROOT_CONVERSATION_ID, section, type Extension, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import { NodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CURRENT_SQLITE_SCHEMA_VERSION, SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { createEditTool, createWriteTool } from "@earendil-works/pi-durable/tools";
@@ -18,6 +19,7 @@ import { createCodemodeTool, type CodemodeLimits, type NestedTool } from "./code
 import { settleOperation, WorkspaceError, type Workspace } from "./workspace.ts";
 import { expandHome, WORKSPACE_ROOT, WorkspaceEnv, workspacePath } from "./workspace-env.ts";
 import { createLogger } from "./log.ts";
+import { sendsExtension, settleSends } from "./pi-sends.ts";
 import { piReports, reportText } from "./pi-report.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -217,8 +219,19 @@ export async function openAgent(options: {
         ...options.skills ? [section("skills", () => options.skills!, { tag: false })] : []],
     }));
     for (const extension of options.extensions ?? []) registry.install(extension);
+    // Last, so its hook runs after every other: each request's send is
+    // recorded before it leaves (pi-sends.ts).
+    let epoch = 0;
+    const gate = { closing: false, held: 0 };
+    registry.install(sendsExtension(() => harness!, () => epoch, gate));
     const thread = path.basename(options.directory);
     harness = await Harness.open(storage, { models: sessions.models, registry, onReport: piReports(log, { thread }), settings: { toolExecution: "sequential" } }, context);
+    // Before anything is scheduled: a request that was out when the last
+    // process stopped is counted and its run ends (stopped); it is never
+    // sent again on its own. A message of the user goes on.
+    const settled = await settleSends(harness, context, { notice: true });
+    epoch = settled.epoch;
+    if (settled.dropped.length) log.warn("a model request was out when cubed stopped: not sent again, its cost is unknown, its run is stopped", { thread, models: settled.dropped.map(send => send.model) });
     // A failed Storage call ends the Session: Pi aborts every task, and every
     // later call of the Harness rejects, so nothing is sent or retried in
     // this process. The agent stays down until cubed restarts (Conversations
@@ -246,7 +259,8 @@ export async function openAgent(options: {
       throw new Error("model catalog unavailable — connect a provider before starting this thread");
     }
     const conversation = existing ?? await harness.root(context, { agent: { model: { provider: options.model.provider, modelId: options.model.id } } });
-    // Continue any run the last process left unfinished.
+    // Continue any run the last process left unfinished, but for a request
+    // that was out (above).
     harness.resume();
     const opened = harness;
     let closed = false;
@@ -254,9 +268,33 @@ export async function openAgent(options: {
       harness: opened, conversation, storage,
       /** Why the agent is down, once Pi's Session failed; null while it works. */
       failure: () => down,
+      /** Before a close: no new request is sent (held back, sent once after
+       * the reopen), and a request already out, or a context summary Pi's
+       * compaction has out, gets up to `ms` to come back and be stored.
+       * Pi's own close aborts what is still out, so without this every
+       * graceful stop would end a run with one out (the next open counts it
+       * and does not send it again). Answers whether none is out now. */
+      async drain(ms: number): Promise<boolean> {
+        gate.closing = true;
+        const deadline = Date.now() + ms;
+        for (;;) {
+          const generation = (await opened.snapshot(LiveDoc, conversation.id, context).catch(() => undefined))?.generation;
+          // Pi keeps `generation` from a request's start until its answer is
+          // stored; a retry's wait, a deferred poll and a request held back
+          // here are not out.
+          const request = !!generation && !generation.retry && !generation.deferred && gate.held === 0;
+          // A summary is out from its `summarize` commit until its answer is placed.
+          const summary = !request && (await opened.inspect(context).catch(() => ({ tasks: [] }))).tasks.some(({ record }) =>
+            record.kind === CompactionTask.definition.name && record.state.status !== "terminal" && record.state.status !== "completing"
+            && (record.state.checkpoint as { phase?: string } | undefined)?.phase === "summarize");
+          if (!request && !summary) return true;
+          if (Date.now() >= deadline) return false;
+          await delay(Math.min(20, deadline - Date.now()));
+        }
+      },
       async close() {
         if (closed) return;
-        closed = true; closing = true;
+        closed = true; closing = true; gate.closing = true;
         try { await opened.close(context); }
         finally { sessions.release(); await release(); }
       },

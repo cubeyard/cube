@@ -45,7 +45,18 @@ try {
   });
   assert.equal(preserved.status, 0, preserved.stderr);
   assert.equal(preserved.stdout.trim(), "/operator/chosen/path", "an operator-owned PATH must not be overwritten");
-  console.log("cubed-service-test: managed environment preserves the operator PATH for service children");
+  // The service manager waits longer than the supervisor's 30 s SIGKILL (G1).
+  assert.match(fs.readFileSync(path.join(home, ".config/systemd/user/cubed.service"), "utf8"), /^TimeoutStopSec=45$/m);
+  const mac = path.join(root, "mac-tools");
+  fs.mkdirSync(mac);
+  fs.writeFileSync(path.join(mac, "uname"), "#!/bin/sh\nprintf 'Darwin\\n'\n", { mode: 0o755 });
+  for (const tool of ["launchctl", "plutil"]) fs.writeFileSync(path.join(mac, tool), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(mac, "gh"), "#!/bin/sh\nprintf 'gh version fixture\\n'\n", { mode: 0o755 });
+  const macInstalled = spawnSync("bash", ["scripts/cubed/service.sh", "install"], { encoding: "utf8", env: { ...process.env, HOME: home, PATH: `${mac}:/usr/bin:/bin` } });
+  assert.equal(macInstalled.status, 0, macInstalled.stderr);
+  const plist = fs.readdirSync(path.join(home, "Library/LaunchAgents")).map(name => fs.readFileSync(path.join(home, "Library/LaunchAgents", name), "utf8")).join("");
+  assert.match(plist, /<key>ExitTimeOut<\/key><integer>45<\/integer>/);
+  console.log("cubed-service-test: managed environment preserves the operator PATH for service children; stop timeouts 45 s (systemd, launchd)");
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

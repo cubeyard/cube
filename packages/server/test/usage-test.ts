@@ -304,13 +304,13 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
     assert.ok(!counted.compactor.earlier, "a new chat counts its compactor from its first call");
     assert.equal(report.optchat!.coverage, "complete");
     usage.close();
-    // Calls a close cut off after its grace: their cost is unknown, not zero.
+    // Calls out at a stop (a close past its grace, a crash): their cost is unknown, not zero.
     const cutUsage = new UsageService({ file: path.join(root, "usage-cut.sqlite"), registry, threads, live: async () => null,
       optchat: async () => ({ ...await chat.usage(), cut: { chat: { [key]: 1 }, compactor: { [key]: 2 }, tools: { spawn: 1 } } }) });
     const cut = (await cutUsage.report()).optchat!;
     assert.notEqual(cut.coverage, "complete");
     assert.equal(cut.unknownTurns, 3);
-    assert.ok(cut.notes.some(note => note.startsWith("3 model calls (chat 1, compactor 2) were cut off by a close of cubed")), JSON.stringify(cut.notes));
+    assert.ok(cut.notes.some(note => note.startsWith("3 model calls (chat 1, compactor 2) were out when cubed stopped") && note.includes("not sent again")), JSON.stringify(cut.notes));
     // Tool calls cut off are named, not counted as model calls.
     assert.ok(cut.notes.some(note => note.startsWith("1 tool calls (spawn 1) were cut off by a close of cubed: what they did is unknown")), JSON.stringify(cut.notes));
     cutUsage.close();

@@ -14,6 +14,7 @@ import { DatabaseSync } from "node:sqlite";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Usage } from "@earendil-works/pi-ai";
 import { UsageDoc, type ConversationId, type Cursor, type UsageState } from "@earendil-works/pi-durable";
+import { SendsDoc, type Sends } from "./pi-sends.ts";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { readStorage } from "./durable-agent.ts";
 import { createLogger } from "./log.ts";
@@ -23,6 +24,8 @@ import {
   type ClaudeRecord, type ClaudeTurn, type Pricing, type SubjectUsage, type UsageLine, type UsageTotals,
 } from "./usage.ts";
 
+/** A Pi store's usage and its requests out at a stop (pi-sends.ts), by `provider/model`. */
+export type PiUsage = UsageState & { interrupted?: Record<string, number> };
 const context = BACKGROUND_CONTEXT;
 const log = createLogger("usage");
 /** Bump when a snapshot's meaning changes: older rows are read again. */
@@ -39,7 +42,7 @@ export interface OptChatUsage {
   threads: string[];
   /** Calls a close cut off after its grace, by `provider/model`: their cost
    * is unknown. `tools`: tool calls cut off, by name: what they did is unknown. */
-  cut?: { chat: Record<string, number>; compactor: Record<string, number>; tools?: Record<string, number> };
+  cut?: { chat: Record<string, number>; compactor: Record<string, number>; tools?: Record<string, number>; capped?: { chat: Record<string, number>; compactor: Record<string, number> } };
 }
 
 export interface UsageReport {
@@ -62,7 +65,7 @@ export class UsageService {
   private readonly db: DatabaseSync;
   private readonly registry: Registry;
   private readonly threads: string;
-  private readonly live: (id: string) => Promise<UsageState | null>;
+  private readonly live: (id: string) => Promise<PiUsage | null>;
   private readonly optchat: () => Promise<OptChatUsage | null>;
   private readonly optchatStore: string | null;
   private readonly pricing: (provider: string, model: string) => Pricing | null;
@@ -72,7 +75,7 @@ export class UsageService {
   constructor(options: {
     file: string; registry: Registry; threads: string;
     /** The open Pi agent's usage, or null when it is not open. */
-    live: (id: string) => Promise<UsageState | null>;
+    live: (id: string) => Promise<PiUsage | null>;
     /** OptChat's own usage, or null when it is not open. */
     optchat?: () => Promise<OptChatUsage | null>;
     /** OptChat's store: while it does not exist, OptChat has used nothing. */
@@ -108,7 +111,7 @@ export class UsageService {
 
   /** Keeps a Pi agent's usage as it closes (archive, shutdown): until it
    * opens again only this reading is available. */
-  remember(id: string, state: UsageState): void {
+  remember(id: string, state: PiUsage): void {
     const thread = this.registry.getThread(id);
     if (!thread) return;
     try { this.store(this.piThread(thread, state, "live", Date.now()), null); }
@@ -119,8 +122,10 @@ export class UsageService {
     return { subject: thread.id, kind: "thread", title: thread.title, projectId: thread.projectId, agent: threadAgent(thread), archived: thread.archived };
   }
 
-  private piThread(thread: Thread, state: UsageState, read: SubjectUsage["read"], readAt: number): SubjectUsage {
-    return subject({ ...this.base(thread), lines: piLines(state, "pi", this.pricing), unknownTurns: 0, read, readAt, notes: [] });
+  private piThread(thread: Thread, state: PiUsage, read: SubjectUsage["read"], readAt: number): SubjectUsage {
+    const interrupted = Object.values(state.interrupted ?? {}).reduce((sum, n) => sum + n, 0);
+    const notes = interrupted ? [`${interrupted} model requests were out when cubed stopped: what the provider billed for them is unknown, and they were not sent again`] : [];
+    return subject({ ...this.base(thread), lines: piLines(state, "pi", this.pricing), unknownTurns: interrupted, ...interrupted ? { incomplete: true } : {}, read, readAt, notes });
   }
 
   /** One thread's usage; archived threads included. */
@@ -214,10 +219,12 @@ export class UsageService {
     const notes = chat.compactor.earlier ? [`compactor calls before ${chat.compactor.since === null ? "now" : new Date(chat.compactor.since).toISOString()} were not counted (an older cube): their usage is unknown`] : [];
     const count = (calls: Record<string, number> | undefined) => Object.values(calls ?? {}).reduce((sum, n) => sum + n, 0);
     const cutChat = count(chat.cut?.chat), cutCompactor = count(chat.cut?.compactor);
-    if (cutChat + cutCompactor) notes.push(`${cutChat + cutCompactor} model calls (chat ${cutChat}, compactor ${cutCompactor}) were cut off by a close of cubed: what the provider billed for them is unknown`);
+    if (cutChat + cutCompactor) notes.push(`${cutChat + cutCompactor} model calls (chat ${cutChat}, compactor ${cutCompactor}) were out when cubed stopped (a crash, a kill, a close past its grace, a failed save): what the provider billed for them is unknown, and they were not sent again on their own`);
+    const capped = count(chat.cut?.capped?.chat) + count(chat.cut?.capped?.compactor);
+    if (capped) notes.push(`${capped} model calls (chat ${count(chat.cut?.capped?.chat)}, compactor ${count(chat.cut?.capped?.compactor)}) were stopped at their output cap by cube: their provider reports no usage for a call cut off, so what it billed is unknown`);
     const cutTools = Object.entries(chat.cut?.tools ?? {});
     if (cutTools.length) notes.push(`${count(chat.cut?.tools)} tool calls (${cutTools.map(([name, n]) => `${name} ${n}`).join(", ")}) were cut off by a close of cubed: what they did is unknown and was not undone; the reopened chat ran them again under the same request ids`);
-    const usage = subject({ ...base, lines: [...piLines(chat.chat, "optchat", this.pricing), ...compactor], unknownTurns: cutChat + cutCompactor, incomplete: !!chat.compactor.earlier || cutChat + cutCompactor > 0, read: "live", readAt: Date.now(), notes });
+    const usage = subject({ ...base, lines: [...piLines(chat.chat, "optchat", this.pricing), ...compactor], unknownTurns: cutChat + cutCompactor + capped, incomplete: !!chat.compactor.earlier || cutChat + cutCompactor + capped > 0, read: "live", readAt: Date.now(), notes });
     this.store(usage, null);
     return { usage, threads: chat.threads };
   }
@@ -241,7 +248,7 @@ export class UsageService {
     const notes = [BILLED_NOTE];
     if (subjects.some(item => item.lines.some(line => line.source === "claude-code"))) notes.push(CLAUDE_BILLING);
     if (subjects.some(item => item.read === "snapshot")) notes.push("some threads are not open now: their last reading is shown");
-    notes.push("a model response cut off by a cubed crash before pi recorded it is not counted; the provider may still have billed it");
+    notes.push("a model request out when cubed stopped (a crash, a kill, a close past its grace, a failed save) is counted as one without a usage report and is not sent again; what the provider billed for it is unknown");
     return {
       generatedAt: Date.now(), project, totals: totals(subjects), billed: { usd: null, note: BILLED_NOTE },
       projects: [...byProject].map(([id, items]) => ({ id, name: this.registry.getProject(id)?.name ?? id, totals: totals(items) }))
@@ -264,13 +271,13 @@ function fileKey(file: string): string {
  * archived thread's), summed as Harness.usage() does. Read through
  * durable-agent's readStorage: a read-only snapshot, so the retained store is
  * never migrated or checkpointed. */
-async function readPiStore(file: string): Promise<UsageState> {
+async function readPiStore(file: string): Promise<PiUsage> {
   const state = await readStorage(file, sumUsage);
   if (!state) throw new Error("the store is gone");
   return state;
 }
 
-async function sumUsage(storage: SqliteStorage): Promise<UsageState> {
+async function sumUsage(storage: SqliteStorage): Promise<PiUsage> {
   const sum: { models: Record<string, Usage>; tools: Record<string, Usage> } = { models: {}, tools: {} };
   let cursor: Cursor | undefined;
   do {
@@ -289,7 +296,9 @@ async function sumUsage(storage: SqliteStorage): Promise<UsageState> {
     }
     cursor = page.next;
   } while (cursor);
-  return sum as UsageState;
+  const sends = await storage.findDocument({ kind: SendsDoc.definition.kind, scope: { kind: "session" } }, "current", context);
+  const interrupted = sends ? ((await storage.document(sends.id, "current", context))?.value as Sends | undefined)?.interrupted : undefined;
+  return { ...sum as UsageState, ...interrupted && Object.keys(interrupted).length ? { interrupted } : {} };
 }
 
 /** Adds `usage` into `total`, as pi-durable's ledger does. */

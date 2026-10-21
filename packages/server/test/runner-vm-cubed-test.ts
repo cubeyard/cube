@@ -48,7 +48,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { fakeGithub, git } from "../../../scripts/fake-github.ts";
-import { createCubed } from "../src/index.ts";
+import { CLOSE_MS, createCubed } from "../src/index.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
 import { portalSettings } from "../src/portal.ts";
 import { enrollRunner } from "../src/runner-enroll.ts";
@@ -212,11 +212,13 @@ process.stdout.write = ((chunk: unknown, ...rest: unknown[]) => {
 const sessionLog = (msg: string) => sessionLines.filter(line => line.startsWith(`info runner-session ${msg} `)).map(line =>
   Object.fromEntries([...line.matchAll(/(\w+)=("(?:[^"\\]|\\.)*"|\S+)/g)].map(([, name, value]) => [name!, value!.startsWith("\"") ? JSON.parse(value!) as string : value!])))
   .filter(fields => fields.runner === node);
-const app = await createCubed({ state, models, claude: null, gateway: gatewayBin, skillSource: null,
+const openCubed = () => createCubed({ state, models, claude: null, gateway: gatewayBin, skillSource: null,
   secrets: [{ name: "github", hosts: ["github.com", "api.github.com"], value: async () => token }],
   portal: portalSettings({ CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_DOMAIN: "localhost", CUBED_PORTAL_PORT: String(portalPort) }) });
+// `let`: the restart below (G1) opens cubed again on the same state.
+let app = await openCubed();
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
-const url = `http://127.0.0.1:${(app.server.address() as net.AddressInfo).port}`;
+let url = `http://127.0.0.1:${(app.server.address() as net.AddressInfo).port}`;
 const api = async (route: string, method = "GET", body?: unknown) => {
   const response = await fetch(`${url}${route}`, { method, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }) });
   const answer = await response.text();
@@ -555,9 +557,36 @@ try {
   assert.equal(app.registry.getThread(id)!.vm!.discarded, true);
   await until("the machine's directory is gone", 30000, () => !fs.existsSync(path.join(directory, vm.vmId)));
   note("discarded: berth deleted the machine's directory");
+  // cubed closes while a thread's command runs in its machine (G1): the
+  // close is bounded, the machine goes on, and the reopened cubed reattaches
+  // the command (its effect once, its own result) and finishes the turn.
+  {
+    const run = `ca-${++requests}`;
+    await api(`/api/threads/${second}/prompt`, "POST", { text: `tool ${JSON.stringify({ name: "bash", args: { command: "sleep 20; printf once >> ca-reattach; printf reattached", timeoutMs: 120000 } })}`, requestId: run });
+    await until("the command runs in the machine", 120000, async () => (await api(`/api/threads/${second}/history`)).events.some((event: { type: string; name?: string }) => event.type === "tool-call"));
+    await delay(3000);
+    const closing = Date.now();
+    app.server.closeAllConnections();
+    await app.close();
+    const closeMs = Date.now() - closing;
+    assert.ok(closeMs < CLOSE_MS, `cubed closed within its bound (${closeMs} ms)`);
+    app = await openCubed();
+    await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
+    url = `http://127.0.0.1:${(app.server.address() as net.AddressInfo).port}`;
+    const history = await until(`run ${run} after the reopen`, 300000, async () => {
+      const value = await api(`/api/threads/${second}/history`);
+      return value.status?.run === run && !["working", "idle"].includes(value.status.state) ? value : undefined;
+    });
+    assert.equal(history.status.state, "completed", JSON.stringify(history.status));
+    const results = history.events.filter((event: { type: string }) => event.type === "tool-result") as Array<{ output?: string; isError?: boolean }>;
+    assert.ok(results.some(result => !result.isError && result.output?.includes("reattached")), `the command was reattached: ${JSON.stringify(results.slice(-2))}`);
+    assert.equal(await bash(second, "cat ca-reattach"), "once", "its effect happened once");
+    note(`cubed closed in ${(closeMs / 1000).toFixed(1)} s mid-command; reopened, the command was reattached, its effect once`);
+  }
   console.log("ok: cubed with berth vm: by name and from the pool, a template built in the first thread's slot and used by the next, invalidated by a changed setup, "
     + "boot documents and policy, checkout and hooks, a tool call, push through the credential stream, "
-    + "the portal over dial, berth's diagnosis, a berth restart with resume hooks, a forced stop within the deadline, archive retained, discard");
+    + "the portal over dial, berth's diagnosis, a berth restart with resume hooks, a forced stop within the deadline, archive retained, discard, "
+    + "a cubed close mid-command within its bound and the command reattached after it");
 } finally {
   app.server.closeAllConnections();
   await app.close();

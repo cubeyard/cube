@@ -31,6 +31,9 @@ Environment="CUBED_CONFIG_FILE=$config"
 ExecStart="$launcher"
 Restart=on-failure
 RestartSec=3
+# Above the supervisor's 30 s SIGTERM-to-SIGKILL for cubed (whose own close
+# is bounded at 25 s), so systemd never cuts that short.
+TimeoutStopSec=45
 UMask=0077
 
 [Install]
@@ -48,7 +51,7 @@ EOF
 <plist version="1.0"><dict><key>Label</key><string>$label</string>
 <key>ProgramArguments</key><array><string>$xml_launcher</string></array>
 <key>EnvironmentVariables</key><dict><key>CUBED_INSTALL_ROOT</key><string>$xml_root</string><key>CUBED_CONFIG_FILE</key><string>$xml_config</string></dict>
-<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>3</integer>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>3</integer><key>ExitTimeOut</key><integer>45</integer>
 <key>StandardOutPath</key><string>$xml_root/logs/stdout.log</string><key>StandardErrorPath</key><string>$xml_root/logs/stderr.log</string>
 </dict></plist>
 EOF

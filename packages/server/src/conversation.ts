@@ -1,12 +1,14 @@
 /** Host activation and transport, never a second agent state machine. */
 import path from "node:path";
 import type { ServerResponse } from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message, Models } from "@earendil-works/pi-ai";
 import { ConversationBusy, LiveDoc, type UsageState } from "@earendil-works/pi-durable";
 import { ClaudeAgent, ClaudeBusy, CLAUDE_PROVIDER, type ClaudeRuntime } from "./claude-agent.ts";
 import { ClaudeThreadEvents } from "./claude-thread-events.ts";
 import { skillsPrompt } from "./skills.ts";
+import { SendsDoc } from "./pi-sends.ts";
 import { assertCurrentThreadStore, downText, openAgent, type Agent } from "./durable-agent.ts";
 import { createLogger } from "./log.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
@@ -29,6 +31,14 @@ const INITIAL_REQUEST = "cube:initial";
 /** How long an idle round waits for the recovery loop's check of a machine. */
 const CHECK_WAIT_MS = 60_000;
 /** Why a disk the release check let go is kept all the same. */
+/** The threads' part of cubed's close (Conversations.close). */
+export const THREADS_CLOSE_MS = 9_000;
+/** How long the close waits for the thread machines' close. */
+const MACHINES_CLOSE_MS = 1_000;
+/** How long a thread's request or summary out at a close may take to come back. */
+const DRAIN_MS = 5_000;
+/** How long the close waits for the commands still running. */
+const COMMANDS_MS = 2_000;
 const RUNNER_KEPT = "the release check was clean, but the runner kept the disk (a machine that did not stop in time or failed, or a host runner's directory)";
 /** Archive refused: the thread's agent is running. Nothing is interrupted. */
 export class ThreadWorking extends Error {
@@ -415,7 +425,7 @@ export class Conversations {
   private async closePi(id: string, loading: Promise<Agent> | undefined): Promise<void> {
     const agent = await loading?.catch(() => null);
     if (!agent) return;
-    try { if (this.onUsage) this.onUsage(id, await agent.harness.usage(context)); }
+    try { if (this.onUsage) this.onUsage(id, await piUsage(agent)); }
     catch (error) { log.warn("usage not kept at close", { thread: id, error }); }
     await agent.close();
   }
@@ -423,7 +433,7 @@ export class Conversations {
    * when its agent is not open. Never opens one. */
   async liveUsage(id: string): Promise<UsageState | null> {
     const agent = await this.agents.get(id)?.catch(() => null);
-    return agent ? agent.harness.usage(context) : null;
+    return agent ? piUsage(agent) : null;
   }
   /** An agent opens only on a machine that finished preparing: it takes the
    * workspace lease for its lifetime, which preparing the machine needs, and
@@ -747,14 +757,30 @@ export class Conversations {
     await agent.conversation.abort(context);
   }
   /** cubed stops; thread machines keep running and the next cubed attaches
-   * to them again. */
-  async close(): Promise<void> {
+   * to them again. Bounded by `ms` whatever a machine, a command or an agent
+   * does, so cubed's whole close stays under its supervisor's SIGKILL. The
+   * threads send no new request (held back, sent once after the reopen),
+   * and a request or a context summary already out gets up to DRAIN_MS to
+   * come back and be stored (Pi's own close aborts it); the machines' close
+   * before that gets MACHINES_CLOSE_MS; a command (a tell or an archive
+   * OptChat cut off) gets up to COMMANDS_MS, and the agents' own closes the
+   * rest. Past a bound the close goes on and logs what was left: a request
+   * still out is counted at the next open and not sent again (pi-sends.ts),
+   * a guest command goes on and the next cubed reattaches to it, and a tell
+   * or an archive is keyed. */
+  async close(ms = THREADS_CLOSE_MS): Promise<void> {
     this.closing = true;
+    const deadline = Date.now() + ms;
+    const left = (cap = Infinity) => Math.min(cap, Math.max(0, deadline - Date.now()));
     // A machine still booting is left to boot; the next cubed attaches to it.
-    await this.machines.close();
-    await Promise.allSettled(this.commands.values());
-    await Promise.all([...this.agents].map(([id, promise]) => this.closePi(id, promise)));
-    await Promise.all([...this.claudes.values()].map(async promise => (await promise.catch(() => null))?.close()));
+    // Its own cap, so the drain after it always gets its share.
+    await within("thread machines", this.machines.close(), left(MACHINES_CLOSE_MS));
+    const agents = [...this.agents];
+    const out = await within("threads' requests out", Promise.all(agents.map(async ([, promise]) => (await promise.catch(() => null))?.drain(left(DRAIN_MS)) ?? true)), left(DRAIN_MS + 200));
+    if (Array.isArray(out) && out.includes(false)) log.warn("a thread's request or summary was still out at the close: Pi's close aborts it, and the next open counts it and does not send it again", { threads: agents.filter((_, k) => out[k] === false).map(([id]) => id) });
+    await within("commands", Promise.allSettled(this.commands.values()), left(COMMANDS_MS));
+    await within("thread agents", Promise.all([...agents.map(([id, promise]) => this.closePi(id, promise)),
+      ...[...this.claudes.values()].map(async promise => (await promise.catch(() => null))?.close())]), left());
     this.agents.clear(); this.claudes.clear();
     for (const id of [...this.workspaces.keys()]) this.closeWorkspace(id);
   }
@@ -763,4 +789,20 @@ export class Conversations {
 function messageText(message: Message): string {
   if (typeof message.content === "string") return message.content;
   return message.content.map(part => part.type === "text" ? part.text : part.type === "thinking" ? part.thinking : "").filter(Boolean).join("\n");
+}
+
+/** A thread's Pi usage with the requests that were out at a stop (pi-sends.ts). */
+async function piUsage(agent: Agent): Promise<UsageState & { interrupted?: Record<string, number> }> {
+  const interrupted = (await agent.harness.snapshot(SendsDoc, context))?.interrupted;
+  return { ...await agent.harness.usage(context), ...interrupted && Object.keys(interrupted).length ? { interrupted: { ...interrupted } } : {} };
+}
+
+/** `work`, or false once `ms` passed; the close goes on without it. */
+async function within<T>(step: string, work: Promise<T>, ms: number): Promise<T | false> {
+  const bound = new AbortController();
+  const timedOut = Symbol("timed out");
+  const result = await Promise.race([work, delay(ms, timedOut, { signal: bound.signal }).catch(() => timedOut)]).finally(() => bound.abort());
+  if (result !== timedOut) return result as T;
+  log.warn("a step of the close did not end in time; the close goes on", { step, ms });
+  return false;
 }
