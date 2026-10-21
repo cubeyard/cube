@@ -44,11 +44,12 @@ const sent: Array<{ kind: "turn" | "compaction"; user: string }> = [];
 let turnMs = 0;
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
 faux.setResponses(Array.from({ length: 400 }, () => async (request, options) => {
+  // Counted as sent when the provider has it, before its answer.
+  const kind = request.messages.some(message => message.role === "system" && textOf(message).includes("You write the memory of OptChat")) ? "compaction" : "turn";
+  sent.push({ kind, user: textOf(request.messages.filter(message => message.role === "user").at(-1)!) });
   // An abort (a close) ends the wait, as a provider's stream ends.
   if (turnMs) await delay(turnMs, null, { signal: options?.signal }).catch(() => {});
   if (options?.signal?.aborted) return fauxAssistantMessage("", { stopReason: "aborted" });
-  const kind = request.messages.some(message => message.role === "system" && textOf(message).includes("You write the memory of OptChat")) ? "compaction" : "turn";
-  sent.push({ kind, user: textOf(request.messages.filter(message => message.role === "user").at(-1)!) });
   return fauxAssistantMessage(kind === "compaction" ? `summary ${sent.length} ${"s".repeat(20)}` : `reply ${sent.length}`);
 }));
 const models = createModels();
@@ -154,47 +155,63 @@ const talk = (chat: OptChat) => chat.memory.messages.filter(message => message.k
   console.log("ok: thread: a request out at a crash is counted once (its usage partial), not sent again; the next message is answered");
 }
 
-// A thread's close: its request out comes back and is stored (Pi's close
-// waits for it; the reopen neither drops nor sends it), and one it would
-// start is held back unsent and sent once after the reopen (G1).
+// A thread's close (G1): a request out (the provider has it, its answer
+// comes 1.5 s later) is drained, stored, and neither dropped nor sent again
+// by the reopen; one whose provider never answers is cut at the drain's
+// bound and counted by the reopen, not sent again; one the run would start
+// while closing is held back unsent and sent once after the reopen.
 {
   const directory = path.join(root, "drain", "thread");
   const files = path.join(root, "drain", "workspace");
   fs.mkdirSync(files, { recursive: true });
   const guest = new LocalGuestTransport(path.dirname(files));
   const open = () => openAgent({ directory, binding: guest.binding, workspace: new VmWorkspace({ guest, leases: new LeaseStore(directory), owner: "pi", binding: guest.binding }), models, model });
+  const key = `${model.provider}/${model.id}`;
   sent.length = 0;
-  turnMs = 600;
+  turnMs = 1500;
   let agent = await open();
   try {
     await agent.conversation.submit({ type: "input", content: "out", requestId: "out" }, context);
-    await until(() => sent.length === 1, "the request is out");
-    agent.hold();
+    await until(() => sent.length === 1, "the provider has the request");
+    const draining = Date.now();
+    assert.equal(await agent.drain(5_000), true, "it came back within the drain");
+    assert.ok(Date.now() - draining >= 1000, "the drain waited for the answer");
   } finally { await agent.close(); }
   turnMs = 0;
   agent = await open();
   try {
     await agent.conversation.waitForIdle(context);
     assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted ?? {}, {}, "nothing was out at the close");
-    // Pi's close waited for it.
     const answers = (await agent.conversation.context(context)).messages.filter(message => message.role === "assistant");
     assert.deepEqual(answers.map(message => (message as { stopReason: string }).stopReason), ["stop"], "its answer came back whole and was stored");
     assert.deepEqual(sent.map(call => call.user), ["out"], "and nothing is sent again");
-    // Now the gate: held before the request is sent.
-    agent.hold();
+    // A provider that does not answer within the drain's bound.
+    turnMs = 60_000;
+    await agent.conversation.submit({ type: "input", content: "slow", requestId: "slow" }, context);
+    await until(() => sent.length === 2, "the provider has the slow request");
+    assert.equal(await agent.drain(300), false, "still out at the bound");
+  } finally { await agent.close(); }
+  turnMs = 0;
+  agent = await open();
+  try {
+    await agent.conversation.waitForIdle(context);
+    assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted, { [key]: 1 }, "the one cut at the bound is counted");
+    assert.deepEqual(sent.map(call => call.user), ["out", "slow"], "and not sent again");
+    // Now the gate: closing before the request is sent.
+    assert.equal(await agent.drain(1_000), true);
     await agent.conversation.submit({ type: "input", content: "held", requestId: "held" }, context);
     // Prepared and at its request (the hook), then given time to be sent.
     await until(async () => sent.some(call => call.user === "held") || (await agent.harness.inspect(context)).tasks.some(task => (task.record.state as { checkpoint?: { phase?: string } }).checkpoint?.phase === "request"), "the request is ready to go");
     await delay(300);
-    assert.deepEqual(sent.map(call => call.user), ["out"], "a request is not sent while closing");
+    assert.deepEqual(sent.map(call => call.user), ["out", "slow"], "a request is not sent while closing");
   } finally { await agent.close(); }
   agent = await open();
   try {
     await agent.conversation.waitForIdle(context);
-    assert.deepEqual(sent.map(call => call.user), ["out", "held"], "the reopen sends the held request, once");
-    assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted ?? {}, {}, "never sent before, so not counted");
+    assert.deepEqual(sent.map(call => call.user), ["out", "slow", "held"], "the reopen sends the held request, once");
+    assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted, { [key]: 1 }, "never sent before, so not counted");
   } finally { await agent.close(); }
-  console.log("ok: a thread's close: a request out is stored, one not yet sent is held and sent once after the reopen");
+  console.log("ok: a thread's close: a request out is drained and stored; one past the drain's bound is counted, not sent again; one not yet sent is held and sent once after the reopen");
 }
 
 // A thread's own context summary (Pi's compaction) out at a kill: counted

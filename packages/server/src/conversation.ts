@@ -33,6 +33,8 @@ const CHECK_WAIT_MS = 60_000;
 /** Why a disk the release check let go is kept all the same. */
 /** The threads' part of cubed's close (Conversations.close). */
 export const THREADS_CLOSE_MS = 9_000;
+/** How long a thread's request out at a close may take to come back. */
+const DRAIN_MS = 5_000;
 /** How long the close waits for the commands still running. */
 const COMMANDS_MS = 2_000;
 const RUNNER_KEPT = "the release check was clean, but the runner kept the disk (a machine that did not stop in time or failed, or a host runner's directory)";
@@ -755,13 +757,14 @@ export class Conversations {
   /** cubed stops; thread machines keep running and the next cubed attaches
    * to them again. Bounded by `ms` whatever a machine, a command or an agent
    * does, so cubed's whole close stays under its supervisor's SIGKILL. The
-   * threads send no new request (held back, sent once after the reopen); a
-   * command (a tell or an archive OptChat cut off) gets up to COMMANDS_MS,
-   * and the agents' own closes the rest: Pi's waits for a request out and
-   * stores its answer. Past a bound the close goes on and logs what was
-   * left: a request still out is counted at the next open and not sent
-   * again (pi-sends.ts), a guest command goes on and the next cubed
-   * reattaches to it, and a tell or an archive is keyed. */
+   * threads send no new request (held back, sent once after the reopen),
+   * and a request already out gets up to DRAIN_MS to come back and be
+   * stored (Pi's own close aborts it); a command (a tell or an archive
+   * OptChat cut off) gets up to COMMANDS_MS, and the agents' own closes the
+   * rest. Past a bound the close goes on and logs what was left: a request
+   * still out is counted at the next open and not sent again (pi-sends.ts),
+   * a guest command goes on and the next cubed reattaches to it, and a tell
+   * or an archive is keyed. */
   async close(ms = THREADS_CLOSE_MS): Promise<void> {
     this.closing = true;
     const deadline = Date.now() + ms;
@@ -769,7 +772,8 @@ export class Conversations {
     // A machine still booting is left to boot; the next cubed attaches to it.
     await within("thread machines", this.machines.close(), left());
     const agents = [...this.agents];
-    await within("threads' new requests", Promise.all(agents.map(async ([, promise]) => (await promise.catch(() => null))?.hold())), left(500));
+    const out = await within("threads' requests out", Promise.all(agents.map(async ([, promise]) => (await promise.catch(() => null))?.drain(left(DRAIN_MS)) ?? true)), left(DRAIN_MS + 200));
+    if (Array.isArray(out) && out.includes(false)) log.warn("a thread's request was still out at the close: Pi's close aborts it, and the next open counts it and does not send it again", { threads: agents.filter((_, k) => out[k] === false).map(([id]) => id) });
     await within("commands", Promise.allSettled(this.commands.values()), left(COMMANDS_MS));
     await within("thread agents", Promise.all([...agents.map(([id, promise]) => this.closePi(id, promise)),
       ...[...this.claudes.values()].map(async promise => (await promise.catch(() => null))?.close())]), left());

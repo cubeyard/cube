@@ -184,13 +184,16 @@ socket) takes at most its cap and what is left, and the close goes on past
 it and logs which step was late, so the stores (usage, artifacts, the
 registry) are always closed. The threads (`Conversations.close`) get what
 OptChat leaves, at most 9 s: they send no new request (held back, sent
-once after the reopen), a command OptChat cut off (a `tell`, an `archive`)
-gets up to 2 s, and the agents' own closes the rest; Pi's close waits for a
-request already out and stores its answer. Past that bound a request still
-out is counted at the next open and not sent again, a guest command goes
-on and the next cubed reattaches to it, and a tell or an archive is keyed.
-`cubed-close-test.ts` closes a real cubed with a thread agent and a
-command that never end: it ends in about 9 s with its stores closed. The
+once after the reopen), and a request already out gets up to 5 s to come
+back and be stored (Pi's own close aborts what is still out); a command
+OptChat cut off (a `tell`, an `archive`) gets up to 2 s, and the agents'
+own closes the rest. Past those bounds a request still out is counted at
+the next open and not sent again, so its run stops and the user's next
+message goes on; a guest command goes on and the next cubed reattaches to
+it; a tell or an archive is keyed. `cubed-close-test.ts` closes a real
+cubed whose chat close, machines close, thread agent and command all
+hang: it ends in about 22.5 s with its stores closed, the threads having
+had at most their 9 s. The
 service managers wait longer than the supervisor: the systemd user unit
 (`scripts/cubed/service.sh`) sets `TimeoutStopSec=45`, the launchd agent
 `ExitTimeOut` 45, and Homebrew's service `stop_timeout 60` (it runs cubed
