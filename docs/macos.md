@@ -72,11 +72,15 @@ recovered by the usual upgrade commands: `cubed runners init-local` moves
 its `berth.env` to the default, keeps the earlier file beside it
 (`berth.env.official-debian.<time>`) and says so, and `brew services restart
 cubeyard/tap/cube-berth cubeyard/tap/cube` starts berth on the prepared
-image. A thread whose machine was made on the same Debian image gets ready
-on its next start, with its disk kept. One made on an older Debian image
-stays as it was (berth refuses to start it on another image); archive it
-and start a new thread. Nothing is deleted, and an image of your own that
-is not official Debian is never changed.
+image, and new threads get ready. A thread whose machine this berth made
+on official Debian and that was never ready gets a new blank disk on its
+next start (the earlier one is kept under `~/.cube/berth/kept`). A machine
+an earlier berth (v0.3.32 and before) made carries no record of whether it
+was ever ready, so it is left as it was: berth refuses to start it on
+another image, or it starts as before and does not get ready. Nothing is
+deleted, and an image of your own that is not official Debian is never
+changed. (`init-local` first asks berth, and changes nothing if berth would
+refuse the default there.)
 
 `init-local` creates cubed's control key for the runner, starts berth once
 (it binds `~/.cube/berth` to that key, pulls the image and prints its peer),

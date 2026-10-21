@@ -43,8 +43,8 @@ open http://127.0.0.1:7777
 The same commands work after `brew uninstall`: your state in `~/.cube` and
 `~/.cube-host` is kept, and `init-local` says it is already set up.
 Thread machines run cube's default image: official Debian trixie, pinned by
-digest in berth, which berth prepares for cube itself (sudo, git, gh, curl,
-ca-certificates and openssh-client from pinned Debian packages). An image of your own is
+digest in berth, which berth prepares for cube itself (sudo, git, gh, curl
+and ca-certificates from pinned Debian packages). An image of your own is
 advanced use (`--image`, [macOS](docs/macos.md#install)).
 
 Then run `gh auth login` and connect a model under **models**. After

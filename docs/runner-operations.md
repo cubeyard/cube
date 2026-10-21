@@ -172,10 +172,10 @@ deleted or rebound. So:
   manifest and every layer, its own included), and cubed's template key
   holds it, so after a change cubed builds a new template rather than pick
   one berth would refuse.
-  The packages: sudo, git, gh, curl, ca-certificates and openssh-client
-  (ssh, ssh-keygen, git's ssh signing). git over SSH is not available in a
-  guest, whose egress is HTTP and HTTPS only: use HTTPS remotes (cube's
-  credential helper serves them with `GH_TOKEN`).
+  The packages: sudo, git, gh, curl and ca-certificates, without
+  Recommends. git over SSH is not available in a guest, whose egress is
+  HTTP and HTTPS only: use HTTPS remotes (cube's credential helper serves
+  them with `GH_TOKEN`).
   See `packages/berth/src/debian.rs` for what is and is not reproduced.
 - **`--image <reference>` is your own image** (advanced). berth does not
   prepare it: it must bring bash, sudo with `/etc/sudoers.d`, util-linux's
@@ -201,12 +201,19 @@ deleted or rebound. So:
   `--image` (the same command as an upgrade) moves its `berth.env` to
   `CUBE_BERTH_IMAGE=default`, keeps the earlier file as
   `berth.env.official-debian.<time>` and says so; after the service's
-  restart berth prepares the default image. A machine made on the same
-  Debian image (the pinned digest) gets the preparation layer when it next
-  starts, with its disk kept, so its thread gets ready; one made on another
-  Debian image is refused as before (`image_changed`) and is left as it is.
-  Nothing is deleted. An image of one's own that is not official Debian is
-  never moved.
+  restart berth prepares the default image. It asks berth first (`berth
+  image check`) and changes nothing if berth would refuse the default there.
+  A machine's layers never change under its disk (overlayfs refuses an
+  upper over other lowers). Instead berth keeps, from a machine's creation
+  on, whether its guest was ever ready (`<id>/readiness.json`); a stopped
+  machine made on official Debian alone (any digest), never ready by that
+  record, not from a template and not a build machine, gets a new blank
+  disk on the default image when it next starts, and its earlier disk is
+  kept as `kept/<id>.<time>.rw.qcow2` with a note. A machine an earlier
+  berth made has no such record and is left as it was (refused as
+  `image_changed`, or started on its own layers as before). Nothing is
+  deleted. An image of one's own that is not official Debian is never
+  moved.
 
 The runner is then started by its service (`brew services restart
 cubeyard/tap/cube-berth` under Homebrew, whose service assumes the default
