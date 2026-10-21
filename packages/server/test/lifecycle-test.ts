@@ -4,7 +4,7 @@
  * start under way, an archive no reader or recovery round restarts or
  * reports as a failure, a release that failed is only retried as a release,
  * concurrent archives, and OptChat's view of each (cubeThreads). Real VMs
- * run in scripts/test-vm-e2e.ts. */
+ * run in runner-vm-cubed-test.ts. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";

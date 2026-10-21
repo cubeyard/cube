@@ -1,6 +1,7 @@
-# Build signed cubed, cube-runner, keel and berth release assets. Publishing the draft
-# remains an explicit maintainer action; runners follow the published
-# `latest` release by themselves (scripts/runner/update.sh).
+# Build signed cubed, keel and berth release assets. Publishing the draft
+# remains an explicit maintainer action. No cube-runner (protocol 3) is
+# built: a protocol-3 runner's hourly updater finds none and keeps its
+# version (docs/runner-operations.md).
 name: cubed release
 
 on:
@@ -70,11 +71,6 @@ jobs:
           node scripts/cubed/build-release.ts "$GITHUB_REF_NAME" dist "$base" "$key"
           test -f "dist/cubed-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
           test -f "dist/cubed-${{ matrix.target }}.json.sig"
-          # cube-runner: VM hosts exist for Linux x64 and macOS arm64 only.
-          if [ "${{ matrix.target }}" != linux-arm64-gnu ]; then
-            node scripts/runner/build-release.ts "$GITHUB_REF_NAME" dist "$base" "$key"
-            test -f "dist/cube-runner-${{ matrix.target }}.json.sig"
-          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cubed-${{ matrix.target }}

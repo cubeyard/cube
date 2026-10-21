@@ -18,7 +18,7 @@
  * `dropped_before` after its queue overflowed. Then (B-5, V6-V8) the
  * credential stream through the real chain: the guest -> berth vm -> cubed's
  * RunnerSession -> cube-gateway's credential proxy (built with test-hooks;
- * CUBE_TEST_BERTH_GATEWAY names another build) -> test-vm-e2e's fake GitHub
+ * CUBE_TEST_BERTH_GATEWAY names another build) -> the fake GitHub
  * (fake-github.ts): `gh api user`, `git push` (and a timed 100 MiB push),
  * the token echoed back only as the guest's placeholder (Bearer and Basic,
  * Content-Length and chunked, split across chunks), an encoded answer
@@ -800,7 +800,7 @@ try {
       // A credential through the real chain: the guest -> berth vm -> a
       // `credential` stream on cubed's connection -> cubed's RunnerSession ->
       // cube-gateway's credential proxy (a test-hooks build: github.com and
-      // api.github.com reach test-vm-e2e's fake GitHub, fake-github.ts) and
+      // api.github.com reach the fake GitHub, scripts/fake-github.ts) and
       // back. The token is only in the gateway and the fake; the guest holds
       // the placeholder PH (its GH_TOKEN). The test plays the rest of cubed:
       // its egress policy on egress.sock, the gateway's supervisor, and the

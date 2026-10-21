@@ -1,4 +1,4 @@
-/** A disposable cubed for scripts/test-vm-e2e.ts: the real product server
+/** A disposable cubed for runner-vm-cubed-v3-test.ts: the real product server
  * with real thread VMs (runner, gateway, egress policy from the environment),
  * a faux model and a fake `claude`. No model service is contacted.
  *

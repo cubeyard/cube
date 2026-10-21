@@ -1,5 +1,5 @@
-/** A local GitHub for the end-to-end tests (test-vm-e2e.ts, p3; and
- * runner-vm-test.ts, B-5): HTTPS for github.com and api.github.com with its
+/** A local GitHub for the end-to-end tests (runner-vm-test.ts, B-5, and
+ * runner-vm-cubed-test.ts): HTTPS for github.com and api.github.com with its
  * own CA, `api.github.com/user` for the token, smart HTTP for repositories
  * under `dir` through `git http-backend` with `x-access-token:<token>` as
  * Basic credentials, and a skills repository. A cube-gateway built with

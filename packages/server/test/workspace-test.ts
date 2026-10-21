@@ -1,7 +1,7 @@
 /** Offline Workspace checks: the shared contract over VmWorkspace and the
  * real guest helper under a temporary root (local guest), both in process and
  * through the HTTP routes, plus the lease across processes. The same contract
- * runs against a real VM in smoke-node-adapter.ts. */
+ * runs against a real `berth host` in runner-host-test.ts. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";

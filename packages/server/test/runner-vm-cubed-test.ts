@@ -9,7 +9,7 @@
  * thread of the project builds its template first (C-5): a build machine
  * of cubed's own (its own id and placeholder, no agent) boots from the
  * base, checks out a repository through the credential stream from
- * test-vm-e2e's fake GitHub (fake-github.ts; the host side resolves it from
+ * the fake GitHub (scripts/fake-github.ts; the host side resolves it from
  * a local mirror through GIT_CONFIG_GLOBAL), runs the project's pre-setup
  * hook (a slow one, whose log the thread's startup log shows while it runs:
  * keel's read, C-2b) and the repository's `.agents/setup`, and is published

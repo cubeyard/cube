@@ -2,7 +2,7 @@
  * WorkspaceEnv, cube's keyed bash, stop as real cancellation, and shutdown
  * leaving a command to the next process. The real guest helper under a
  * temporary root stands in for the VM (local guest); real VMs run in
- * scripts/test-vm-e2e.ts. */
+ * runner-vm-cubed-test.ts. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";

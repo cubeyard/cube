@@ -4,8 +4,8 @@
  * after it, the log of the hook running now (/api/threads/<id>/startup-log,
  * read without a lease), the diagnostics text, and a project's machine size
  * (validated, captured by its new threads). Real cubed and local guests, faux
- * model, disposable state; ThreadVms's own steps (lookup, build, boot) run
- * in vm-prepare-test.ts and scripts/test-vm-templates.ts. */
+ * model, disposable state; RunnerMachines' own steps (lookup, build, boot) run
+ * in runner-vm-templates-test.ts and runner-vm-cubed-test.ts. */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";

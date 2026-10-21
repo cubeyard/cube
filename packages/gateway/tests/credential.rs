@@ -1,5 +1,4 @@
-//! The credential proxy (credential.rs, http.rs in credential mode, B6 in
-//! reverse.rs) over its real socket, as cubed drives it: one header frame,
+//! The credential proxy (credential.rs, http.rs, B6 in reverse.rs) over its real socket, as cubed drives it: one header frame,
 //! then one HTTP/1.1 exchange. The decision server and the upstream (a TLS
 //! fake for `api.github.test` and `github.test`) are local.
 mod common;
@@ -8,7 +7,6 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use common::*;
 use cube_gateway::{
-    ca::Ca,
     decide::DecideClient,
     http::{Egress, Upstream},
 };
@@ -212,9 +210,7 @@ impl Proxy {
             ("other.github.test".to_string(), address),
         ]);
         let upstream = Arc::new(Upstream::with_test_hooks(ca.roots(), overrides).unwrap());
-        std::fs::create_dir_all(dir.path().join("gateway")).unwrap();
         let egress = Arc::new(Egress {
-            ca: Arc::new(Ca::load_or_create(&dir.path().join("gateway")).unwrap()),
             decide: Arc::new(DecideClient::new(decide_path, Duration::from_secs(5))),
             upstream,
         });

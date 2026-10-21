@@ -9,7 +9,7 @@ import zlib from "node:zlib";
 /** The product API end to end over local guests (the real guest helper under
  * temporary roots): creation, SIGKILL/startup activation, streaming, prompts,
  * stop, models, archive and a claude · max thread through a fake `claude`.
- * Run by scripts/smoke-local.ts; real VMs run in scripts/test-vm-e2e.ts. */
+ * Run by scripts/smoke-local.ts; real machines run in packages/server/test/runner-vm-cubed-test.ts. */
 export async function smokeProduct(root: string) {
   const state = path.join(root, "product");
   const machines = path.join(root, "product-machines");
