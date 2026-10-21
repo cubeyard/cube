@@ -210,10 +210,10 @@ const talk = (chat: OptChat) => chat.memory.messages.filter(message => message.k
 {
   sent.length = 0;
   const storage = await openStorage(path.join(root, "record-thread.sqlite"));
-  let harness!: Harness;
   const registry = createRegistry();
+  // The hook reads `harness` only once a request runs, after it is set.
   registry.install(sendsExtension(() => harness, () => { throw new Error("the send record failed (test)"); }));
-  harness = await Harness.open(storage, { models, registry }, context);
+  const harness = await Harness.open(storage, { models, registry }, context);
   try {
     const conversation = await harness.root(context, { agent: { model: { provider: model.provider, modelId: model.id } } });
     const submission = await conversation.submit({ type: "input", content: "refused", requestId: "refused" }, context);
