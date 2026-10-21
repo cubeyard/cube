@@ -25,7 +25,8 @@ export interface ThreadSummary {
   workspaceBase?: { remote: string; ref: string; oid: string } | null;
   project: { id: string; name: string };
   /** The thread's machine; after archive, whether its disk was kept. */
-  vm?: Pick<import("../../../server/src/registry.ts").ThreadVm, "vmId" | "retain" | "retainReason" | "discarded" | "preparation" | "hooks" | "startup" | "steps">;
+  vm?: Pick<import("../../../server/src/registry.ts").ThreadVm, "vmId" | "retain" | "retainReason" | "discarded" | "preparation" | "hooks" | "startup" | "steps"
+    | "suspension" | "notice">;
 }
 export type Project = ProjectRecord & { threadCount: number; retainedThreadCount: number; runnerCount: number; availableRunnerCount: number;
   /** Free thread machine slots over the pool; a runner hosts `maxActiveVms`. */

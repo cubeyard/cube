@@ -29,7 +29,7 @@ import { createModels, fauxAssistantMessage, fauxProvider, type Message } from "
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { openAgent, openStorage } from "../src/durable-agent.ts";
 import { OptChat } from "../src/optchat.ts";
-import { DROPPED, SendsDoc, settleSends } from "../src/pi-sends.ts";
+import { DROPPED, SendsDoc, sendsExtension, settleSends } from "../src/pi-sends.ts";
 import { PiThreadEvents, storedPiTranscript } from "../src/pi-thread-events.ts";
 import { readPiHistory } from "../src/thread-history.ts";
 import { UsageService } from "../src/usage-service.ts";
@@ -46,11 +46,12 @@ const sent: Array<{ kind: "turn" | "compaction"; user: string }> = [];
 let turnMs = 0;
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
 faux.setResponses(Array.from({ length: 400 }, () => async (request, options) => {
+  // Counted as sent when the provider has it, before its answer.
+  const kind = request.messages.some(message => message.role === "system" && textOf(message).includes("You write the memory of OptChat")) ? "compaction" : "turn";
+  sent.push({ kind, user: textOf(request.messages.filter(message => message.role === "user").at(-1)!) });
   // An abort (a close) ends the wait, as a provider's stream ends.
   if (turnMs) await delay(turnMs, null, { signal: options?.signal }).catch(() => {});
   if (options?.signal?.aborted) return fauxAssistantMessage("", { stopReason: "aborted" });
-  const kind = request.messages.some(message => message.role === "system" && textOf(message).includes("You write the memory of OptChat")) ? "compaction" : "turn";
-  sent.push({ kind, user: textOf(request.messages.filter(message => message.role === "user").at(-1)!) });
   return fauxAssistantMessage(kind === "compaction" ? `summary ${sent.length} ${"s".repeat(20)}` : `reply ${sent.length}`);
 }));
 const models = createModels();
@@ -64,7 +65,7 @@ async function until(check: () => boolean | Promise<boolean>, what: string, ms =
 }
 
 /** Runs the child until its request is out, then kills it. */
-async function crash(kind: "chat" | "compactor" | "thread", directory: string): Promise<void> {
+async function crash(kind: "chat" | "compactor" | "thread" | "compaction", directory: string): Promise<void> {
   const signal = path.join(root, `${path.basename(directory)}-${Date.now()}.signal`);
   const child = spawn(process.execPath, [path.join(import.meta.dirname, "pi-sends-child.ts"), kind, directory, signal], { stdio: ["ignore", "ignore", "inherit"] });
   const exited = new Promise(resolve => child.once("exit", resolve));
@@ -163,47 +164,138 @@ const talk = (chat: OptChat) => chat.memory.messages.filter(message => message.k
   console.log("ok: thread: a request out at a crash is counted once (its usage partial), not sent again; the next message is answered");
 }
 
-// A thread's close: its request out comes back and is stored (Pi's close
-// waits for it; the reopen neither drops nor sends it), and one it would
-// start is held back unsent and sent once after the reopen (G1).
+// A thread's close (G1): a request out (the provider has it, its answer
+// comes 1.5 s later) is drained, stored, and neither dropped nor sent again
+// by the reopen; one whose provider never answers is cut at the drain's
+// bound and counted by the reopen, not sent again; one the run would start
+// while closing is held back unsent and sent once after the reopen.
 {
   const directory = path.join(root, "drain", "thread");
   const files = path.join(root, "drain", "workspace");
   fs.mkdirSync(files, { recursive: true });
   const guest = new LocalGuestTransport(path.dirname(files));
   const open = () => openAgent({ directory, binding: guest.binding, workspace: new VmWorkspace({ guest, leases: new LeaseStore(directory), owner: "pi", binding: guest.binding }), models, model });
+  const key = `${model.provider}/${model.id}`;
   sent.length = 0;
-  turnMs = 600;
+  turnMs = 1500;
   let agent = await open();
   try {
     await agent.conversation.submit({ type: "input", content: "out", requestId: "out" }, context);
-    await until(() => sent.length === 1, "the request is out");
-    agent.hold();
+    await until(() => sent.length === 1, "the provider has the request");
+    const draining = Date.now();
+    assert.equal(await agent.drain(5_000), true, "it came back within the drain");
+    assert.ok(Date.now() - draining >= 1000, "the drain waited for the answer");
   } finally { await agent.close(); }
   turnMs = 0;
   agent = await open();
   try {
     await agent.conversation.waitForIdle(context);
     assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted ?? {}, {}, "nothing was out at the close");
-    // Pi's close waited for it.
     const answers = (await agent.conversation.context(context)).messages.filter(message => message.role === "assistant");
     assert.deepEqual(answers.map(message => (message as { stopReason: string }).stopReason), ["stop"], "its answer came back whole and was stored");
     assert.deepEqual(sent.map(call => call.user), ["out"], "and nothing is sent again");
-    // Now the gate: held before the request is sent.
-    agent.hold();
+    // A provider that does not answer within the drain's bound.
+    turnMs = 60_000;
+    await agent.conversation.submit({ type: "input", content: "slow", requestId: "slow" }, context);
+    await until(() => sent.length === 2, "the provider has the slow request");
+    assert.equal(await agent.drain(300), false, "still out at the bound");
+  } finally { await agent.close(); }
+  turnMs = 0;
+  agent = await open();
+  try {
+    await agent.conversation.waitForIdle(context);
+    assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted, { [key]: 1 }, "the one cut at the bound is counted");
+    assert.deepEqual(sent.map(call => call.user), ["out", "slow"], "and not sent again");
+    // Now the gate: closing before the request is sent.
+    assert.equal(await agent.drain(1_000), true);
     await agent.conversation.submit({ type: "input", content: "held", requestId: "held" }, context);
     // Prepared and at its request (the hook), then given time to be sent.
     await until(async () => sent.some(call => call.user === "held") || (await agent.harness.inspect(context)).tasks.some(task => (task.record.state as { checkpoint?: { phase?: string } }).checkpoint?.phase === "request"), "the request is ready to go");
     await delay(300);
-    assert.deepEqual(sent.map(call => call.user), ["out"], "a request is not sent while closing");
+    assert.deepEqual(sent.map(call => call.user), ["out", "slow"], "a request is not sent while closing");
   } finally { await agent.close(); }
   agent = await open();
   try {
     await agent.conversation.waitForIdle(context);
-    assert.deepEqual(sent.map(call => call.user), ["out", "held"], "the reopen sends the held request, once");
-    assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted ?? {}, {}, "never sent before, so not counted");
+    assert.deepEqual(sent.map(call => call.user), ["out", "slow", "held"], "the reopen sends the held request, once");
+    assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted, { [key]: 1 }, "never sent before, so not counted");
   } finally { await agent.close(); }
-  console.log("ok: a thread's close: a request out is stored, one not yet sent is held and sent once after the reopen");
+  console.log("ok: a thread's close: a request out is drained and stored; one past the drain's bound is counted, not sent again; one not yet sent is held and sent once after the reopen");
+}
+
+// A thread's own context summary (Pi's compaction) out at a kill: counted
+// once and not asked again; Pi asks for no new summary on its own after
+// the reopen, and no run is left waiting for it.
+{
+  const directory = path.join(root, "compaction", "thread");
+  await crash("compaction", directory);
+  const asked: string[] = [];
+  const small = fauxProvider({ tokensPerSecond: 100_000, models: [{ id: "faux-small", contextWindow: 60_000 }] });
+  small.setResponses(Array.from({ length: 50 }, () => async request => {
+    const summary = request.messages.some(message => message.role === "system" && textOf(message).includes("context summarization assistant"));
+    asked.push(summary ? "summary" : textOf(request.messages.filter(message => message.role === "user").at(-1)!).slice(0, 20));
+    return fauxAssistantMessage(summary ? "## Goal\nsummary" : "ok");
+  }));
+  const smallModels = createModels();
+  smallModels.setProvider(small.provider);
+  const files = path.join(root, "compaction", "workspace");
+  const guest = new LocalGuestTransport(path.dirname(files));
+  const open = () => openAgent({ directory, binding: guest.binding, workspace: new VmWorkspace({ guest, leases: new LeaseStore(directory), owner: "pi", binding: guest.binding }), models: smallModels, model: { provider: small.getModel().provider, id: "faux-small" } });
+  let agent = await open();
+  try {
+    await agent.conversation.waitForIdle(context);
+    await delay(500);
+    assert.deepEqual(asked, [], "the summary out at the kill was not asked again, nor anything else");
+    assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted, { [`${small.getModel().provider}/faux-small`]: 1 }, "it is counted as unknown");
+    assert.deepEqual((await agent.harness.inspect(context)).tasks.map(task => task.record.kind), [], "the compaction ended, and nothing waits for it");
+    await agent.close();
+    agent = await open();
+    await agent.conversation.waitForIdle(context);
+    assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted, { [`${small.getModel().provider}/faux-small`]: 1 }, "counted once across opens");
+    assert.deepEqual(asked, []);
+  } finally { await agent.close(); }
+  console.log("ok: a thread's context summary out at a crash is counted once and not asked again, nothing left waiting for it");
+}
+
+// A compactor reply whose commit fails in cube (not a Session failure): the
+// node is not built on it, and the answer stays marked out, so it is
+// counted as unknown when the node is asked again.
+{
+  sent.length = 0;
+  const chat = await chatAt(path.join(root, "reply-commit"));
+  try {
+    const harness = (chat as unknown as { harness: { commit: (change: unknown, commitContext: unknown) => Promise<unknown> } }).harness;
+    const commit = harness.commit.bind(harness);
+    let failed = 0;
+    harness.commit = (change, commitContext) => {
+      if (!failed && new Error().stack?.includes("countCompactor")) { failed++; return Promise.reject(new Error("the reply's commit failed (test)")); }
+      return commit(change, commitContext);
+    };
+    await chat.send(`message 0: ${"word ".repeat(30)}`, "r0");
+    await until(() => talk(chat) >= 1, "the turn is answered");
+    await until(async () => count("compaction") >= 2 && sum((await chat.usage()).cut?.compactor) === 1, "the node asked again, the unstored reply counted as unknown");
+    assert.equal(failed, 1, "one reply's commit failed");
+  } finally { await chat.close(); }
+  console.log("ok: a compactor reply whose commit fails is not used, and counts as unknown when its node is asked again");
+}
+
+// A thread's record that fails before storage: the hook aborts the
+// generation, then throws, so Pi does not send what it built itself.
+{
+  sent.length = 0;
+  const storage = await openStorage(path.join(root, "record-thread.sqlite"));
+  const registry = createRegistry();
+  // The hook reads `harness` only once a request runs, after it is set.
+  registry.install(sendsExtension(() => harness, () => { throw new Error("the send record failed (test)"); }));
+  const harness = await Harness.open(storage, { models, registry }, context);
+  try {
+    const conversation = await harness.root(context, { agent: { model: { provider: model.provider, modelId: model.id } } });
+    const submission = await conversation.submit({ type: "input", content: "refused", requestId: "refused" }, context);
+    const settled = await submission.wait(context);
+    assert.notEqual(settled.status, "done");
+    assert.equal(count("turn"), 0, "the thread's request was not sent");
+  } finally { await harness.close(context); }
+  console.log("ok: a thread's send record that fails before storage refuses the request: nothing sent");
 }
 
 // Settling twice before a resume, as a crash during the open does, counts once.

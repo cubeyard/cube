@@ -35,11 +35,16 @@ export function wireCapped(payload: unknown): boolean {
     || typeof body.generationConfig?.maxOutputTokens === "number" || typeof body.inferenceConfig?.maxTokens === "number";
 }
 
-/** `cap`: the cap of a call that names none (the chat's: Pi passes none). */
-export function boundedOutput(models: Models, cap?: number): Models {
-  const stream = (target: Models, model: { api: string; provider: string; id: string }, context: unknown, given: Options = {}): AssistantMessageEventStream => {
-    const options: Options = given.maxTokens || !cap ? given : { ...given, maxTokens: cap };
-    const limit = options.maxTokens;
+/** `cap`: the cap of a call that names none (the chat's: Pi passes none).
+ * No call is capped above its model's own maximum (pi-ai sends that when
+ * no cap is given). `onCapped`: a call this guard stopped, by
+ * `provider/model`: its provider reports no usage for it, so what it cost
+ * is unknown. */
+export function boundedOutput(models: Models, cap?: number, onCapped?: (model: string) => void): Models {
+  const stream = (target: Models, model: { api: string; provider: string; id: string; maxTokens?: number }, context: unknown, given: Options = {}): AssistantMessageEventStream => {
+    const wanted = given.maxTokens || cap;
+    const limit = wanted && model.maxTokens && model.maxTokens > 0 ? Math.min(wanted, model.maxTokens) : wanted;
+    const options: Options = limit ? { ...given, maxTokens: limit } : given;
     if (!limit) return (target.streamSimple as (...args: unknown[]) => AssistantMessageEventStream).call(target, model, context, options);
     const stop = new AbortController();
     const signal = options.signal ? AbortSignal.any([options.signal, stop.signal]) : stop.signal;
@@ -62,6 +67,7 @@ export function boundedOutput(models: Models, cap?: number): Models {
             const partial = event.type === "error" ? event.error : event.message;
             const message: AssistantMessage = { ...partial, stopReason: "length", errorMessage: `cube stopped the answer at its output cap (${limit} tokens): the provider takes no cap of its own` };
             outer.push({ type: "done", reason: "length", message });
+            try { onCapped?.(`${model.provider}/${model.id}`); } catch { /* counting is the caller's; the stream is done */ }
             break;
           }
           continue;

@@ -11,9 +11,11 @@ OFFLINE_TESTS=(
   scripts/keel-boot-check-test.ts
   scripts/keel-release-test.ts
   scripts/berth-release-test.ts
+  scripts/fake-github-test.ts
   packages/server/test/log-test.ts
   packages/server/test/registry-test.ts
   packages/server/test/runner-slots-test.ts
+  packages/server/test/runner-suspend-test.ts
   packages/server/test/runner-placement-test.ts
   packages/server/test/runner-host-placement-test.ts
   packages/server/test/runner-probe-test.ts
@@ -24,6 +26,7 @@ OFFLINE_TESTS=(
   packages/server/test/iroh-node-test.ts
   packages/server/test/runner-proto-test.ts
   packages/server/test/runner-enroll-test.ts
+  packages/server/test/runner-status-test.ts
   packages/server/test/guest-helper-test.ts
   packages/server/test/workspace-test.ts
   packages/server/test/vm-seed-test.ts
@@ -97,6 +100,7 @@ OFFLINE_TESTS=(
   packages/web/test/images-test.ts
   packages/web/test/outbox-test.ts
   packages/web/test/startup-test.ts
+  packages/web/test/thread-state-test.ts
   packages/server/test/github-auth-test.ts
   packages/server/test/github-read-test.ts
   packages/server/test/onboarding-test.ts

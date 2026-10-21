@@ -131,8 +131,10 @@ function commandOnce(what: string, thread: string, file: string, done: History):
   const results = done.events.filter(event => event.type === "tool-result") as Array<{ output?: string; isError?: boolean }>;
   assert.ok(effect === "" || effect === "once", `${what}: its effect at most once (${JSON.stringify(effect)})`);
   if (effect === "once") assert.ok(results.some(result => !result.isError), `${what}: reattached, its own result`);
-  else assert.ok(results.length === 1 && results[0]!.isError && /outcome is unknown/.test(results[0]!.output ?? ""), `${what}: an honest unknown outcome: ${JSON.stringify(results)}`);
-  log(`${what}: ${effect === "once" ? "reattached, its effect once" : "outcome unknown (the guest did not outlive cubed), never run twice"}`);
+  // An unknown outcome, or the termination the guest saw: never a success it did not have.
+  else assert.ok(results.length === 1 && ((results[0]!.isError && /outcome is unknown/.test(results[0]!.output ?? "")) || /\[exit=null; signalled\]/.test(results[0]!.output ?? "")),
+    `${what}: an honest outcome: ${JSON.stringify(results)}`);
+  log(`${what}: ${effect === "once" ? "reattached, its effect once" : `${/signalled/.test(results[0]!.output ?? "") ? "terminated with its guest" : "outcome unknown"} (the guest did not outlive cubed), never run twice`}`);
   const commands = (summary.commands ??= {}) as Record<string, string>;
   commands[what] = effect === "once" ? "reattached" : "unknown";
 }

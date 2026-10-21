@@ -42,7 +42,7 @@ export interface OptChatUsage {
   threads: string[];
   /** Calls a close cut off after its grace, by `provider/model`: their cost
    * is unknown. `tools`: tool calls cut off, by name: what they did is unknown. */
-  cut?: { chat: Record<string, number>; compactor: Record<string, number>; tools?: Record<string, number> };
+  cut?: { chat: Record<string, number>; compactor: Record<string, number>; tools?: Record<string, number>; capped?: { chat: Record<string, number>; compactor: Record<string, number> } };
 }
 
 export interface UsageReport {
@@ -220,9 +220,11 @@ export class UsageService {
     const count = (calls: Record<string, number> | undefined) => Object.values(calls ?? {}).reduce((sum, n) => sum + n, 0);
     const cutChat = count(chat.cut?.chat), cutCompactor = count(chat.cut?.compactor);
     if (cutChat + cutCompactor) notes.push(`${cutChat + cutCompactor} model calls (chat ${cutChat}, compactor ${cutCompactor}) were out when cubed stopped (a crash, a kill, a close past its grace, a failed save): what the provider billed for them is unknown, and they were not sent again on their own`);
+    const capped = count(chat.cut?.capped?.chat) + count(chat.cut?.capped?.compactor);
+    if (capped) notes.push(`${capped} model calls (chat ${count(chat.cut?.capped?.chat)}, compactor ${count(chat.cut?.capped?.compactor)}) were stopped at their output cap by cube: their provider reports no usage for a call cut off, so what it billed is unknown`);
     const cutTools = Object.entries(chat.cut?.tools ?? {});
     if (cutTools.length) notes.push(`${count(chat.cut?.tools)} tool calls (${cutTools.map(([name, n]) => `${name} ${n}`).join(", ")}) were cut off by a close of cubed: what they did is unknown and was not undone; the reopened chat ran them again under the same request ids`);
-    const usage = subject({ ...base, lines: [...piLines(chat.chat, "optchat", this.pricing), ...compactor], unknownTurns: cutChat + cutCompactor, incomplete: !!chat.compactor.earlier || cutChat + cutCompactor > 0, read: "live", readAt: Date.now(), notes });
+    const usage = subject({ ...base, lines: [...piLines(chat.chat, "optchat", this.pricing), ...compactor], unknownTurns: cutChat + cutCompactor + capped, incomplete: !!chat.compactor.earlier || cutChat + cutCompactor + capped > 0, read: "live", readAt: Date.now(), notes });
     this.store(usage, null);
     return { usage, threads: chat.threads };
   }

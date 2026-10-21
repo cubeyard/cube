@@ -101,8 +101,12 @@ only. `max_tokens` is not part of the cached prefix.
 The chat's own requests are capped too (O1): `CHAT_OUTPUT_TOKENS` (32,000)
 for an answer, its tool calls and adaptive thinking together, where pi-ai
 would send the model's maximum (128,000 on recent models); on a ChatGPT
-sign-in by the same guard. A turn whose answer reaches it ends there, as
-Pi stores a `length` stop. `optchat.ts` is the service: Pi setup, the tools, the turn
+sign-in by the same guard. No call is capped above its model's own maximum
+(16,384 on `gpt-4o`, say). A turn whose answer reaches it ends there, as
+Pi stores a `length` stop. A call the guard stopped has no usage from its
+provider (Codex reports usage only at the end), so it is counted in
+`cube.optchat.cut`'s `capped` and the usage report shows it as a call
+without a usage report, not as zero. `optchat.ts` is the service: Pi setup, the tools, the turn
 loop (a turn waits until every line of the view is a summary), the compactor
 pump (eight jobs) and the thread watchers. `optchat-threads.ts` connects it
 to cube's registry and threads.
@@ -194,13 +198,16 @@ socket) takes at most its cap and what is left, and the close goes on past
 it and logs which step was late, so the stores (usage, artifacts, the
 registry) are always closed. The threads (`Conversations.close`) get what
 OptChat leaves, at most 9 s: they send no new request (held back, sent
-once after the reopen), a command OptChat cut off (a `tell`, an `archive`)
-gets up to 2 s, and the agents' own closes the rest; Pi's close waits for a
-request already out and stores its answer. Past that bound a request still
-out is counted at the next open and not sent again, a guest command goes
-on and the next cubed reattaches to it, and a tell or an archive is keyed.
-`cubed-close-test.ts` closes a real cubed with a thread agent and a
-command that never end: it ends in about 9 s with its stores closed.
+once after the reopen), and a request already out gets up to 5 s to come
+back and be stored (Pi's own close aborts what is still out); a command
+OptChat cut off (a `tell`, an `archive`) gets up to 2 s, and the agents'
+own closes the rest. Past those bounds a request still out is counted at
+the next open and not sent again, so its run stops and the user's next
+message goes on; a guest command goes on and the next cubed reattaches to
+it; a tell or an archive is keyed. `cubed-close-test.ts` closes a real
+cubed whose chat close, machines close, thread agent and command all
+hang: it ends in about 22.5 s with its stores closed, the threads having
+had at most their 9 s.
 `scripts/gate-close.ts` has the real supervisor SIGTERM a real cubed
 process (`serve`'s own lifecycle, `serveUntilStopped`, a faux model and
 local guests) with a guest command running, and with a request out at a
@@ -241,7 +248,10 @@ goes on. The same commit appends a data-only entry (`cube.send-dropped`,
 which no request carries), so the stopped run says why to the thread's
 readers (live, stored and its history) and in OptChat's report (`stopped:
 cubed stopped while this run's model request was out, so it was not sent
-again …: send a message to go on`), until the thread's next message. Tools are not changed: every OptChat tool is read-only or keyed
+again …: send a message to go on`), until the thread's next message. Pi's own context compaction of a thread sends its summary request
+right after entering its `summarize` phase, with no hook to record it in:
+a compaction found there at an open is counted (once per task and attempt)
+and aborted, and Pi asks for no new summary on its own after it. Tools are not changed: every OptChat tool is read-only or keyed
 (`TOOL_REPLAY`), a thread's file and bash tools are keyed workspace
 operations, and Pi reports a call of a tool that is neither as
 `interrupted` rather than running it again.
