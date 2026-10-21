@@ -37,7 +37,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -640,12 +640,16 @@ pub struct Env {
     pub tls_upstream: FakeUpstream,
     pub plain_upstream: FakeUpstream,
     pub ca: Arc<Ca>,
+    /// Set to drop every frame both ways, as if the guest had died.
+    pub cut: Arc<AtomicBool>,
 }
 
-struct ChannelSink(mpsc::UnboundedSender<Bytes>);
+struct ChannelSink(mpsc::UnboundedSender<Bytes>, Arc<AtomicBool>);
 impl FrameSink for ChannelSink {
     fn send(&mut self, frame: &[u8]) {
-        let _ = self.0.send(Bytes::copy_from_slice(frame));
+        if !self.1.load(Ordering::Relaxed) {
+            let _ = self.0.send(Bytes::copy_from_slice(frame));
+        }
     }
 }
 
@@ -664,6 +668,10 @@ impl Env {
     }
 
     pub async fn with_timeout(decide: DecideFn, timeout: Duration) -> Self {
+        Self::with_limits(decide, timeout, LanLimits::default()).await
+    }
+
+    pub async fn with_limits(decide: DecideFn, timeout: Duration, limits: LanLimits) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let decide_path = dir.path().join("egress.sock");
         let decide_server = FakeDecide::start(decide_path.clone(), decide);
@@ -680,21 +688,25 @@ impl Env {
             upstream: upstream.clone(),
         });
         let (to_guest, guest_rx) = mpsc::unbounded_channel();
+        let cut = Arc::new(AtomicBool::new(false));
         let lan = Lan::spawn(
             LanConfig {
                 vm_id: VM_ID.into(),
                 mac: GUEST_MAC,
-                limits: LanLimits::default(),
+                limits,
             },
-            Box::new(ChannelSink(to_guest)),
+            Box::new(ChannelSink(to_guest, cut.clone())),
             Arc::new(VmEgress::new(egress, VM_ID.into(), THREAD_ID.into())),
             Arc::new(HostResolver::new(upstream)),
         );
         let input = lan.input();
+        let guest_cut = cut.clone();
         let guest = TestGuest::start(
             guest_rx,
             Box::new(move |frame| {
-                input.push(frame);
+                if !guest_cut.load(Ordering::Relaxed) {
+                    input.push(frame);
+                }
             }),
         );
         Self {
@@ -705,6 +717,7 @@ impl Env {
             tls_upstream,
             plain_upstream,
             ca,
+            cut,
         }
     }
 

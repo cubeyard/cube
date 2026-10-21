@@ -35,11 +35,15 @@ On an Apple Silicon Mac, with [Homebrew](https://brew.sh):
 ```sh
 brew trust cubeyard/tap
 brew install cubeyard/tap/cube
-cubed runners init-local    # one time: Debian's arm64 cloud image (~340 MB) and the local runner
-brew services start cubeyard/tap/cube-runner
-brew services start cubeyard/tap/cube
+cubed runners init-local --image <registry/repository@sha256:…>   # later runs change nothing
+brew services restart cubeyard/tap/cube-berth cubeyard/tap/cube
 open http://127.0.0.1:7777
 ```
+
+The same commands work after `brew uninstall`: your state in `~/.cube` and
+`~/.cube-host` is kept, and `init-local` says it is already set up.
+`--image` is needed only the first time: the image every thread machine is
+built on, pinned by digest ([macOS](docs/macos.md#install)).
 
 Then run `gh auth login` and connect a model under **models**. After
 `==> Installing cubeyard/tap/cube`, Homebrew prints nothing for a while
@@ -52,8 +56,8 @@ setup is in [macOS with Homebrew](docs/macos.md). Linux and source checkouts:
 
 ```sh
 brew update
-brew upgrade cubeyard/tap/cube cubeyard/tap/cube-runner
-brew services restart cubeyard/tap/cube-runner cubeyard/tap/cube
+brew upgrade cubeyard/tap/cube cubeyard/tap/cube-berth
+brew services restart cubeyard/tap/cube-berth cubeyard/tap/cube
 ```
 
 `brew update` fetches the tap now; without it Homebrew may not see a new

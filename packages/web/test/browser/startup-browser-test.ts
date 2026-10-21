@@ -4,7 +4,9 @@
  * error, the memory, the end of its log, and the advice with a link to the
  * project's machine size), the next try; once the machine is ready the
  * steps fold away and the machine label opens them again. The project page
- * sets the machine size. Desktop and phone, in Chromium and, when
+ * sets the machine size. A suspended, waking or waiting machine and its
+ * notice stay in print in the strip, also on a phone with the details
+ * closed (P7-5). Desktop and phone, in Chromium and, when
  * Playwright has it, WebKit. Screenshots go to CUBE_SCREENSHOTS when it is
  * set. Needs a built UI (pnpm build). */
 import assert from "node:assert/strict";
@@ -53,10 +55,13 @@ try {
     // The OOM killer stops it: the full error, the memory, its log, the advice.
     fs.writeFileSync(path.join(guest(), "oom"), "");
     await first.locator(".lamp.on-red").waitFor({ timeout: 20_000 });
-    assert.equal(await first.locator(".startup-detail.bad").innerText(),
+    // Read as text, open or not: cubed's recovery loop (every 30 s) may start
+    // the next try at once, and the failed one folds then.
+    const text = async (selector: string) => (await first.locator(selector).textContent() ?? "").trim();
+    assert.equal(await text(".startup-detail.bad"),
       "pre-setup was stopped: the machine ran out of memory (this command used up to 3.5 GB; the machine has 3.8 GB); cube tries again");
-    assert.match(await first.locator(".startup-detail:not(.bad)").innerText(), /^memory: this command used up to 3\.5 GB; the machine has 3\.8 GB; 1 process was killed for want of memory$/);
-    assert.match(await first.locator("pre.startup-log").innerText(), /installing postgresql\nbuilding the services/);
+    assert.match(await text(".startup-detail:not(.bad)"), /^memory: this command used up to 3\.5 GB; the machine has 3\.8 GB; 1 process was killed for want of memory$/);
+    assert.match(await text("pre.startup-log"), /installing postgresql\nbuilding the services/);
     const advice = panel.locator(".strip-note.bad");
     assert.match(await advice.innerText(), /the machine ran out of memory during prepare · try 1 \(it used up to 3\.5 GB; the machine has 3\.8 GB\)/);
     assert.equal(await advice.locator("a.key", { hasText: "machine size" }).getAttribute("href"), `#/projects/${project.id}`);
@@ -91,9 +96,49 @@ try {
     await panel.locator("button.startup-close").click();
     await panel.waitFor({ state: "detached" });
     assert.equal(await label.getAttribute("aria-expanded"), "false");
+
+    // P7-5: the machine's sleep in the strip, in print on a phone with the
+    // details closed (U-207-1), and what the composer says while a wake waits.
+    if (layout === "phone") await page.locator(".strip-details-key").click();
+    const strip = page.locator("section.thread-strip");
+    const state = strip.locator(".strip-state:not(.strip-reason, .strip-notice)");
+    const lamp = strip.locator(".lamp").first();
+    const composer = page.locator(".composer textarea");
+    const seen = async (text: string) => {
+      await state.filter({ hasText: text }).waitFor({ timeout: 15_000 });
+      assert.ok(await state.filter({ hasText: text }).isVisible(), `"${text}" is in print (${size}, details closed)`);
+    };
+    host.sleep(thread, { suspension: { state: "suspended", at: Date.now() } });
+    await seen("suspended");
+    assert.doesNotMatch(await lamp.getAttribute("class") ?? "", /on-/, "a suspended machine is an unlit lens");
+    assert.equal(await composer.isEnabled(), true);
+    assert.equal(await composer.getAttribute("placeholder"), "message this thread", "a message wakes it");
+    await shot(page, `${size}-5-suspended`);
+    const waiting = "waiting for a free slot on runner node-browser: the machine is suspended and resumes once one frees";
+    host.sleep(thread, { suspension: { state: "waking", at: Date.now(), waiting } });
+    await seen("waiting for a free slot");
+    assert.equal(await state.filter({ hasText: "waiting for a free slot" }).getAttribute("title"), waiting);
+    assert.match(await lamp.getAttribute("class") ?? "", /on-amber blink/);
+    await page.locator(`.composer textarea[placeholder="waiting for a free slot…"]`).waitFor({ timeout: 15_000 });
+    assert.equal(await strip.locator(".strip-reason").isVisible(), false, "the full reason is the label's title, or a line of the details");
+    await shot(page, `${size}-6-waiting`);
+    if (layout === "phone") {
+      await page.locator(".strip-details-key").click();
+      assert.equal(await strip.locator(".strip-reason").innerText(), waiting, "the details say why in full");
+      await shot(page, `${size}-7-waiting-details`);
+      await page.locator(".strip-details-key").click();
+    }
+    const notice = "restarted after an update; running commands were interrupted";
+    host.sleep(thread, { notice: { text: notice, at: Date.now() } });
+    await strip.locator(".strip-notice", { hasText: notice }).waitFor({ timeout: 15_000 });
+    assert.ok(await strip.locator(".strip-notice").isVisible(), `the notice is in print (${size}, details closed)`);
+    assert.match(await lamp.getAttribute("class") ?? "", /on-green/);
+    await shot(page, `${size}-8-notice`);
+    host.sleep(thread, {});
+    await strip.locator(".strip-notice").waitFor({ state: "detached", timeout: 15_000 });
     await page.close();
     await host.archive(thread);
-    console.log(`ok (${size}): steps, the live log, the out-of-memory try with its advice, the next try, and the steps after ready`);
+    console.log(`ok (${size}): steps, the live log, the out-of-memory try with its advice, the next try, the steps after ready, and the machine's sleep in the strip`);
   }
   }
 

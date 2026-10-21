@@ -9,7 +9,9 @@
 //!                                stop, migrate memory.part (mapped-ram, cpr-reboot)
 //!                                completed, sync, rename memory
 //!   a failure or SUSPEND_WAIT: migrate_cancel, cont, rejoin (hello,
-//!   machine_setup again), partial file deleted: RUNNING, UNAVAILABLE/snapshot
+//!   machine_setup again), partial file deleted: RUNNING, UNAVAILABLE/snapshot;
+//!   an undo past TAIL_WAIT kills QEMU: STOPPED
+//!   ops not had within OPS_WAIT: FAILED_PRECONDITION/busy, nothing sent
 //!
 //! machine_start on SUSPENDED   key fits (K-7) ─► new QEMU -S -incoming defer
 //!   (a free slot, B7-2)          migrate-incoming, completed
@@ -44,10 +46,21 @@ use super::{
     record::{self, Dropped, MEMORY, MEMORY_PART, MachineRecord, Snapshot, SnapshotKey},
 };
 
-/// A whole save, from `snapshot_prepare` to the renamed memory file (K-8):
-/// shorter than cubed's wait for `machine_suspend` (90 s, as for a stop), so
-/// the runner answers first. Past it the save is undone.
+/// How long `machine_suspend` waits for the runner's `ops` (another
+/// machine's create, start, stop or suspend). Past it the call is refused as
+/// busy and the machine keeps running; a suspend that waited longer could
+/// run after cubed gave up on it, without cubed's idle rules (B-207-3).
+pub const OPS_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 5 });
+/// A whole save, from `snapshot_prepare` to the renamed memory file (K-8).
+/// Past it the save is undone.
 pub const SUSPEND_WAIT: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 60 });
+/// What follows the save: its undo, or quitting QEMU after it. Past it QEMU
+/// is killed (N-8). OPS_WAIT + SUSPEND_WAIT + TAIL_WAIT + KILL_WAIT stays
+/// below cubed's wait for `machine_suspend` (90 s, as for a stop), so the
+/// runner always answers first and never suspends after cubed gave up.
+pub const TAIL_WAIT: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 15 });
+/// After SIGKILL, the reaper.
+const KILL_WAIT: Duration = Duration::from_secs(5);
 /// The agent sees the runner leave cube.0 (a port change after the close,
 /// which QMP reports at most once a second per port).
 /// In tests 1 s, below the test's SUSPEND_WAIT, so a deaf agent fails on
@@ -374,13 +387,47 @@ impl VmRunner {
                     "suspended",
                     &format!("{} MiB of memory saved; QEMU is quit", memory_bytes >> 20),
                 );
-                self.quit(&id).await;
+                if tokio::time::timeout(TAIL_WAIT, self.quit(&id))
+                    .await
+                    .is_err()
+                {
+                    event(
+                        &dir,
+                        "suspended",
+                        &format!(
+                            "QEMU did not quit within {} s; it is killed",
+                            TAIL_WAIT.as_secs()
+                        ),
+                    );
+                    self.kill_and_reap(&id).await;
+                }
                 let state = self.state.lock().unwrap();
                 Ok(self.current(&state, &id))
             }
             Err(error) => {
                 let message = format!("{error:#}");
-                self.unsave(&id, &dir, &guest, &progress).await;
+                if tokio::time::timeout(TAIL_WAIT, self.unsave(&id, &dir, &guest, &progress))
+                    .await
+                    .is_err()
+                {
+                    // QEMU no longer answers: the guest may be paused behind
+                    // a RUNNING journal. It is killed, so the machine is
+                    // STOPPED (its disk kept) and the runner's `ops` is free.
+                    self.kill_and_reap(&id).await;
+                    for name in [MEMORY_PART, MEMORY] {
+                        let _ = std::fs::remove_file(dir.join(name));
+                    }
+                    let undo = format!(
+                        "the undo did not finish within {} s; QEMU is killed and the machine is stopped (its disk is kept)",
+                        TAIL_WAIT.as_secs()
+                    );
+                    event(&dir, "suspend failed", &format!("{message}; {undo}"));
+                    return Err(refuse(
+                        Code::Unavailable,
+                        "snapshot",
+                        &format!("the machine was not suspended: {message}; {undo}"),
+                    ));
+                }
                 event(&dir, "suspend failed", &message);
                 Err(refuse(
                     Code::Unavailable,
@@ -389,6 +436,16 @@ impl VmRunner {
                 ))
             }
         }
+    }
+
+    /// SIGKILL the machine's QEMU and wait at most KILL_WAIT for the reaper,
+    /// which marks the machine STOPPED.
+    async fn kill_and_reap(&self, id: &str) {
+        let Some(mut exited) = self.exited_watch(id) else {
+            return;
+        };
+        self.kill(id);
+        let _ = tokio::time::timeout(KILL_WAIT, exited.wait_for(|e| *e)).await;
     }
 
     /// The save itself: the allocated bytes of the renamed memory file.

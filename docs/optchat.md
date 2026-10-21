@@ -194,13 +194,16 @@ socket) takes at most its cap and what is left, and the close goes on past
 it and logs which step was late, so the stores (usage, artifacts, the
 registry) are always closed. The threads (`Conversations.close`) get what
 OptChat leaves, at most 9 s: they send no new request (held back, sent
-once after the reopen), a command OptChat cut off (a `tell`, an `archive`)
-gets up to 2 s, and the agents' own closes the rest; Pi's close waits for a
-request already out and stores its answer. Past that bound a request still
-out is counted at the next open and not sent again, a guest command goes
-on and the next cubed reattaches to it, and a tell or an archive is keyed.
-`cubed-close-test.ts` closes a real cubed with a thread agent and a
-command that never end: it ends in about 9 s with its stores closed. The
+once after the reopen), and a request already out gets up to 5 s to come
+back and be stored (Pi's own close aborts what is still out); a command
+OptChat cut off (a `tell`, an `archive`) gets up to 2 s, and the agents'
+own closes the rest. Past those bounds a request still out is counted at
+the next open and not sent again, so its run stops and the user's next
+message goes on; a guest command goes on and the next cubed reattaches to
+it; a tell or an archive is keyed. `cubed-close-test.ts` closes a real
+cubed whose chat close, machines close, thread agent and command all
+hang: it ends in about 22.5 s with its stores closed, the threads having
+had at most their 9 s. The
 service managers wait longer than the supervisor: the systemd user unit
 (`scripts/cubed/service.sh`) sets `TimeoutStopSec=45`, the launchd agent
 `ExitTimeOut` 45, and Homebrew's service `stop_timeout 60` (it runs cubed
@@ -229,7 +232,10 @@ restarts. Not exactly-once: nothing is without provider idempotency.
 Thread agents (`durable-agent.ts`) record their requests the same way: a
 request out at a stop is counted in the thread's `cube.sends` (its usage
 report partial) and its run stopped, never sent again; its next message
-goes on. Tools are not changed: every OptChat tool is read-only or keyed
+goes on. Pi's own context compaction of a thread sends its summary request
+right after entering its `summarize` phase, with no hook to record it in:
+a compaction found there at an open is counted (once per task and attempt)
+and aborted, and Pi asks for no new summary on its own after it. Tools are not changed: every OptChat tool is read-only or keyed
 (`TOOL_REPLAY`), a thread's file and bash tools are keyed workspace
 operations, and Pi reports a call of a tool that is neither as
 `interrupted` rather than running it again.

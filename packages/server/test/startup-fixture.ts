@@ -53,6 +53,10 @@ export async function startStartupHost() {
     guest: (id: string) => machines.guest(app.registry.getThread(id)!).root,
     /** Archives a thread, which frees its runner slot. */
     archive: async (id: string) => { await fetch(`${url}/api/threads/${id}`, { method: "DELETE" }); },
+    /** Sets what the registry says of the thread's machine's sleep (P7-5):
+     * suspended, being woken, waiting for a slot, or a notice. */
+    sleep: (id: string, vm: { suspension?: { state: "suspended" | "waking"; at: number; waiting?: string }; notice?: { text: string; at: number } }) =>
+      void app.registry.updateThreadVm(id, { suspension: vm.suspension, notice: vm.notice }),
     /** The recovery loop's next round for one thread, now. */
     retry: (id: string) => void app.conversations.activate(id),
     project: () => app.registry.getProject(project.id)!,

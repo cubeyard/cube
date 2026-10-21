@@ -28,9 +28,13 @@ const context = BACKGROUND_CONTEXT;
 const log = createLogger("threads");
 /** The registry's first message is submitted once under this request id. */
 const INITIAL_REQUEST = "cube:initial";
+/** How long an idle round waits for the recovery loop's check of a machine. */
+const CHECK_WAIT_MS = 60_000;
 /** Why a disk the release check let go is kept all the same. */
 /** The threads' part of cubed's close (Conversations.close). */
 export const THREADS_CLOSE_MS = 9_000;
+/** How long a thread's request out at a close may take to come back. */
+const DRAIN_MS = 5_000;
 /** How long the close waits for the commands still running. */
 const COMMANDS_MS = 2_000;
 const RUNNER_KEPT = "the release check was clean, but the runner kept the disk (a machine that did not stop in time or failed, or a host runner's directory)";
@@ -83,6 +87,11 @@ export class Conversations {
    * so none overlaps the release check or the release. */
   private readonly archiveHolds = new Set<string>();
   private readonly commands = new Map<string, Promise<unknown>>();
+  /** Threads whose machine an idle round is suspending: the recovery loop
+   * leaves them alone meanwhile (it would wake what is being saved). */
+  private readonly suspends = new Set<string>();
+  /** The idle round under way: rounds do not overlap. */
+  private suspendRound: Promise<void> | null = null;
   private readonly feeds = new WeakMap<Agent, PiThreadEvents>();
   private readonly claudes = new Map<string, Promise<ClaudeAgent>>();
   private readonly claudeFeeds = new WeakMap<ClaudeAgent, ClaudeThreadEvents>();
@@ -115,10 +124,17 @@ export class Conversations {
       if (releaseUnfinished(thread)) {
         work.push(this.command(thread.id, () => this.release(thread.id)).catch(() => {}));
       }
+      // A suspended machine stays so until something needs it (P7-5); one
+      // being woken (a wake a restart cut short) goes on.
+      else if (thread.vm?.suspension?.state === "suspended" || this.suspends.has(thread.id)) continue;
       else work.push(this.activate(thread.id));
     }
     await Promise.all(work);
   }
+  /** One round of cubed's recovery loop (index.ts, every 30 s): every open
+   * thread's activation (for a running machine under an open agent only a
+   * check) beside the idle round, which waits for those checks. */
+  async recover(): Promise<void> { await Promise.all([this.boot(), this.suspendIdle()]); }
   error(id: string): string | null { return this.failures.get(id) ?? null; }
   /** Why the thread's Pi agent is down (its Session failed), if it is. */
   down(id: string): string | null { return this.downs.get(id) ?? null; }
@@ -458,7 +474,61 @@ export class Conversations {
     finally { if (this.commands.get(id) === promise) this.commands.delete(id); }
   }
   submit(id: string, text: string, requestId: string): Promise<{ runId: string }> {
-    return this.command(id, async () => { await this.settled(id); return this.accept(id, text, requestId); });
+    return this.command(id, async () => { await this.settled(id); await this.wakeFor(id); return this.accept(id, text, requestId); });
+  }
+  /** A message to a thread whose machine is suspended wakes it first, so
+   * the agent's run never meets a machine that starts again from its disk
+   * (B7-5). With a full runner the activation records that it waits, and
+   * the run's first guest call waits on (runner-machines.ts `wake`). */
+  private async wakeFor(id: string): Promise<void> {
+    if (this.registry.getThread(id)?.vm?.suspension) await this.activate(id);
+  }
+  /** Suspends the machines that have been idle for 5 minutes (B7-1; the
+   * runner side decides idleness from guest calls, commands and portal
+   * connections, machine-idle.ts) and run nothing cubed knows of. Run by
+   * the recovery loop. Each thread's attempt is queued with its commands,
+   * so a message waits for it and then wakes the machine. */
+  suspendIdle(): Promise<void> {
+    if (this.closing || !this.machines.suspendIfIdle) return Promise.resolve();
+    this.suspendRound ??= Promise.all(this.registry.listThreads().map(thread => this.suspendOne(thread)))
+      .then(() => {}).finally(() => { this.suspendRound = null; });
+    return this.suspendRound;
+  }
+  private async suspendOne(thread: Thread): Promise<void> {
+    const machines = this.machines;
+    const id = thread.id;
+    const skip = (current: Thread | null) => !current || current.archived || current.workspaceState !== "available" || !!current.vm?.suspension || releaseUnfinished(current);
+    if (skip(thread)) return;
+    // The recovery loop's check of a machine that runs is not activity:
+    // its end is waited for (B-207-1). A start is.
+    // A check that became a start (the machine was down) is not waited for
+    // past CHECK_WAIT_MS: the round goes on, and the start counts as activity.
+    const check = this.checks.has(id) ? this.activations.get(id) : undefined;
+    if (check) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([check, new Promise(resolve => { timer = setTimeout(resolve, CHECK_WAIT_MS); })]);
+      clearTimeout(timer);
+    }
+    const current = this.registry.getThread(id);
+    if (skip(current)) return;
+    if (this.commands.has(id) || this.activations.has(id) || this.archiveHolds.has(id)) { machines.touch?.(current!); return; }
+    this.suspends.add(id);
+    try { await this.command(id, () => machines.suspendIfIdle!(this.registry.getThread(id) ?? current!, () => this.busy(id))); }
+    catch (error) { log.warn("suspending an idle machine failed", { thread: id, error: error instanceof Error ? error.message : String(error) }); }
+    finally { this.suspends.delete(id); }
+  }
+  /** What cubed runs for the thread now, or null (B7-1, B7-3): a start, an
+   * archive, the agent's run or its background agents. */
+  private async busy(id: string): Promise<string | null> {
+    if (this.closing) return "cubed is stopping";
+    if (this.activations.has(id)) return "the machine is starting";
+    if (this.archiveHolds.has(id)) return "the thread is being archived";
+    const claude = await this.claudes.get(id)?.catch(() => null);
+    if (claude?.running) return "the agent is working";
+    if (claude?.waiting.length) return "the agent's background agents run";
+    const pi = await this.agents.get(id)?.catch(() => null);
+    if (pi && (await pi.harness.snapshot(LiveDoc, pi.conversation.id, context))?.run) return "the agent is working";
+    return null;
   }
   private async accept(id: string, text: string, requestId: string): Promise<{ runId: string }> {
     if (this.isClaude(id)) {
@@ -687,13 +757,14 @@ export class Conversations {
   /** cubed stops; thread machines keep running and the next cubed attaches
    * to them again. Bounded by `ms` whatever a machine, a command or an agent
    * does, so cubed's whole close stays under its supervisor's SIGKILL. The
-   * threads send no new request (held back, sent once after the reopen); a
-   * command (a tell or an archive OptChat cut off) gets up to COMMANDS_MS,
-   * and the agents' own closes the rest: Pi's waits for a request out and
-   * stores its answer. Past a bound the close goes on and logs what was
-   * left: a request still out is counted at the next open and not sent
-   * again (pi-sends.ts), a guest command goes on and the next cubed
-   * reattaches to it, and a tell or an archive is keyed. */
+   * threads send no new request (held back, sent once after the reopen),
+   * and a request already out gets up to DRAIN_MS to come back and be
+   * stored (Pi's own close aborts it); a command (a tell or an archive
+   * OptChat cut off) gets up to COMMANDS_MS, and the agents' own closes the
+   * rest. Past a bound the close goes on and logs what was left: a request
+   * still out is counted at the next open and not sent again (pi-sends.ts),
+   * a guest command goes on and the next cubed reattaches to it, and a tell
+   * or an archive is keyed. */
   async close(ms = THREADS_CLOSE_MS): Promise<void> {
     this.closing = true;
     const deadline = Date.now() + ms;
@@ -701,7 +772,8 @@ export class Conversations {
     // A machine still booting is left to boot; the next cubed attaches to it.
     await within("thread machines", this.machines.close(), left());
     const agents = [...this.agents];
-    await within("threads' new requests", Promise.all(agents.map(async ([, promise]) => (await promise.catch(() => null))?.hold())), left(500));
+    const out = await within("threads' requests out", Promise.all(agents.map(async ([, promise]) => (await promise.catch(() => null))?.drain(left(DRAIN_MS)) ?? true)), left(DRAIN_MS + 200));
+    if (Array.isArray(out) && out.includes(false)) log.warn("a thread's request was still out at the close: Pi's close aborts it, and the next open counts it and does not send it again", { threads: agents.filter((_, k) => out[k] === false).map(([id]) => id) });
     await within("commands", Promise.allSettled(this.commands.values()), left(COMMANDS_MS));
     await within("thread agents", Promise.all([...agents.map(([id, promise]) => this.closePi(id, promise)),
       ...[...this.claudes.values()].map(async promise => (await promise.catch(() => null))?.close())]), left());

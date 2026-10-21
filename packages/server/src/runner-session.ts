@@ -45,7 +45,8 @@ export const PUBLISH_TIMEOUT_MS = 600000;
  * a publication for the agent's. */
 export function callTimeout(verb: string | undefined): number {
   if (verb === "templatePublish") return PUBLISH_TIMEOUT_MS;
-  return verb === "machineStop" || verb === "machineDelete" ? STOP_TIMEOUT_MS : CALL_TIMEOUT_MS;
+  // `machine_suspend` (K-8): berth saves for at most 60 s, then undoes.
+  return verb === "machineStop" || verb === "machineDelete" || verb === "machineSuspend" ? STOP_TIMEOUT_MS : CALL_TIMEOUT_MS;
 }
 const GUEST_TIMEOUT_MS = 60000;
 /** Bytes per read from a dial stream (the binding copies each into an array). */
