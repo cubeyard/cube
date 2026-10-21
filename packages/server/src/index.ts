@@ -1071,8 +1071,8 @@ async function runnersInitLocal(state: string, options: NonNullable<CubedCli["lo
   console.log(`  slots:   ${local.maxMachines} machine${local.maxMachines === 1 ? "" : "s"} at once`);
   if (local.recovered) {
     console.log(`recovered: berth.env named official Debian alone; it now names cube's default image (the earlier file is ${local.recovered}).`
-      + " New threads get ready. A machine this berth made on official Debian and that was never ready gets a new disk on its next start (the earlier one is kept);"
-      + " a machine an earlier berth made has no record of that and is left as it was. Nothing was deleted.");
+      + " New threads get ready. A machine on official Debian that provably never got ready gets a new blank disk on its next start (the earlier one is kept under berth/kept);"
+      + " one berth cannot prove never ready is left as it was and says so in its events.log. Nothing was deleted.");
   }
   if (local.already) {
     console.log(`already set up and enrolled in ${state}; nothing changed`);

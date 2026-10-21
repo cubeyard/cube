@@ -469,7 +469,7 @@ try {
   assert.match(recovering.stdout, /next: start or restart its service/);
   assert.doesNotMatch(recovering.stdout, /already set up and enrolled/);
   assert.deepEqual(calls().slice(callsBeforeRecovery), [`image check --dir ${path.join(plain, "berth")} --image default`], "only berth's check runs; nothing is started");
-  assert.match(recovering.stdout, /a machine an earlier berth made has no record of that and is left as it was\. Nothing was deleted\./);
+  assert.match(recovering.stdout, /one berth cannot prove never ready is left as it was and says so in its events\.log\. Nothing was deleted\./);
   assert.deepEqual(readBerthSettings(fs.readFileSync(settingsPath, "utf8")), { image: "default", maxMachines: 2, listen: plainAddress });
   const keptFiles = fs.readdirSync(plain).filter(name => name.startsWith("berth.env.official-debian."));
   assert.equal(keptFiles.length, 1);

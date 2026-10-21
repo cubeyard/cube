@@ -72,15 +72,17 @@ recovered by the usual upgrade commands: `cubed runners init-local` moves
 its `berth.env` to the default, keeps the earlier file beside it
 (`berth.env.official-debian.<time>`) and says so, and `brew services restart
 cubeyard/tap/cube-berth cubeyard/tap/cube` starts berth on the prepared
-image, and new threads get ready. A thread whose machine this berth made
-on official Debian and that was never ready gets a new blank disk on its
-next start (the earlier one is kept under `~/.cube/berth/kept`). A machine
-an earlier berth (v0.3.32 and before) made carries no record of whether it
-was ever ready, so it is left as it was: berth refuses to start it on
-another image, or it starts as before and does not get ready. Nothing is
-deleted, and an image of your own that is not official Debian is never
-changed. (`init-local` first asks berth, and changes nothing if berth would
-refuse the default there.)
+image, and new threads get ready. A thread whose machine never got ready
+on official Debian gets a new blank disk on the default image on its next
+start; that is a clean start, not a migration (nothing is copied from the
+earlier disk, which is kept untouched under `~/.cube/berth/kept`). berth
+does this only when it can prove the machine was never ready: by its
+`readiness.json`, or, for one an earlier berth made, because its layers are
+exactly that official Debian image's own. A machine it cannot prove so is
+left as it was and says why in its `events.log`. Nothing is deleted, and an
+image of your own that is not official Debian is never changed.
+(`init-local` first asks berth, and changes nothing if berth would refuse
+the default there.)
 
 `init-local` creates cubed's control key for the runner, starts berth once
 (it binds `~/.cube/berth` to that key, pulls the image and prints its peer),

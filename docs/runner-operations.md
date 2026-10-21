@@ -205,15 +205,20 @@ deleted or rebound. So:
   image check`) and changes nothing if berth would refuse the default there.
   A machine's layers never change under its disk (overlayfs refuses an
   upper over other lowers). Instead berth keeps, from a machine's creation
-  on, whether its guest was ever ready (`<id>/readiness.json`); a stopped
-  machine made on official Debian alone (any digest), never ready by that
-  record, not from a template and not a build machine, gets a new blank
-  disk on the default image when it next starts, and its earlier disk is
-  kept as `kept/<id>.<time>.rw.qcow2` with a note. A machine an earlier
-  berth made has no such record and is left as it was (refused as
-  `image_changed`, or started on its own layers as before). Nothing is
-  deleted. An image of one's own that is not official Debian is never
-  moved.
+  on, whether its guest was ever ready (`<id>/readiness.json`). A stopped
+  machine made on official Debian alone (any digest), not from a template
+  and not a build machine, that provably never got ready gets a new blank
+  disk on the default image when it next starts; its earlier disk is kept
+  untouched as `kept/<id>.<time>.rw.qcow2` with a note, and nothing is
+  copied from it. Provably: its `readiness.json` says never ready, or, for
+  a machine an earlier berth made (no file), its layers are exactly that
+  official Debian image's own as its record in `images/` says: keel calls a
+  machine ready only with sudo, git, gh and curl in its root, which
+  official Debian lacks and nothing can add before it is ready. A machine
+  berth cannot prove so is left as it was (refused as `image_changed`, or
+  started on its own layers) and gets a `not renewed` event saying so; the
+  operator decides. Nothing is deleted. An image of one's own that is not
+  official Debian is never moved.
 
 The runner is then started by its service (`brew services restart
 cubeyard/tap/cube-berth` under Homebrew, whose service assumes the default
