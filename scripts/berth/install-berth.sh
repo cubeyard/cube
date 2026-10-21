@@ -20,7 +20,10 @@
 # Without --image (or with default) thread machines run cube's default image:
 # official Debian trixie pinned by this berth, which berth prepares for cube
 # itself (a layer of pinned Debian packages: sudo, git, gh, curl,
-# ca-certificates, openssh-client). --image <reference> is your own image instead, which must
+# ca-certificates, openssh-client). An existing --dir keeps the image it served:
+# without --image the installer refuses one that served an image of its own
+# (berth image check) before writing anything.
+# --image <reference> is your own image instead, which must
 # bring bash, sudo, flock, git, gh, curl and a CA bundle.
 set -euo pipefail
 
@@ -118,6 +121,14 @@ version_json=$("$berth_src" version)
 version=$(printf '%s' "$version_json" | sed -n 's/.*"softwareVersion":"\([0-9][0-9.]*\)".*/\1/p')
 protocol=$(printf '%s' "$version_json" | sed -n 's/.*"protocolVersion":\([0-9]*\).*/\1/p')
 [ -n "$version" ] && [ "$protocol" = 4 ] || fail "this berth does not say runner protocol 4: $version_json"
+
+# An existing runner directory keeps the image it served: without --image
+# (or with default) berth refuses one that served an image of its operator's
+# own (berth image check, packages/berth/src/served.rs). Checked before
+# anything is written; the move itself is the operator's, by hand.
+if [ -d "$dir" ] && ! "$berth_src" image check --dir "$dir" --image "$image"; then
+  fail "$dir keeps its image: give --image <the reference it serves>, or move it to cube's default on purpose first (while that runner is stopped): $berth_src image check --dir $dir --change-image (nothing was written)"
+fi
 
 libexec=$prefix/libexec/berth-$version
 berth=$libexec/berth

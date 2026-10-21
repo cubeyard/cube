@@ -55,7 +55,12 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   a template on another layer list is refused as `template_image_changed`).
   It applies to the image whose manifest is the plan's, by default or by
   `--image`; any other image is the operator's own and must bring those
-  tools. berth pulls the image when it starts (masterplan B-7), under the
+  tools. A directory keeps the image it served (`src/served.rs`): without
+  `--image` berth refuses to start where that was an image of the
+  operator's own, unless `--change-image` (or once `berth image check
+  --change-image`) moves it on purpose; official Debian alone, which never
+  got ready, moves without it. `Platform.image_id` names what machines are
+  made from. berth pulls the image when it starts (masterplan B-7), under the
   directory's lock and **before it listens**, unless its record and every
   layer file are in `--dir` already; then nothing goes over the network. A
   layer file that is gone is fetched again. Until the image is there cubed
