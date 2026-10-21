@@ -12,7 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Models } from "@earendil-works/pi-ai";
 import { ClaudeAgent, ClaudeBusy, claudeEnvironment, type ClaudeRuntime } from "../src/claude-agent.ts";
-import { expectReady } from "../src/claude-ready.ts";
+import { expectReady, markReady } from "../src/claude-ready.ts";
 import { ClaudeThreadEvents } from "../src/claude-thread-events.ts";
 import { ModelAuth } from "../src/model-auth.ts";
 import type { ThreadTranscript } from "../src/thread-events.ts";
@@ -279,6 +279,27 @@ try {
       assert.ok(Date.now() - stopping < 3000, "at once, not after the stop's grace");
       assert.ok(!fs.existsSync(path.join(root, "host-ran-stop")));
     } finally { await waiting.close(); }
+  }
+  // A stop, then at once that child's own ready: the ready comes before the
+  // kill lands, and still no prompt is written (child.stopped).
+  if (fs.existsSync("/proc/self/environ")) {
+    const racing = await ClaudeAgent.open({ directory: path.join(root, "modless-race"), threadId: "t1", workspace, model: "sonnet",
+      runtime: { ...runtime, modReadyMs: 10_000, stopGraceMs: 10_000, env: { ...runtime.env, FAKE_CLAUDE_MOD: "missing" } } });
+    try {
+      const writes: string[] = [];
+      const internals = racing as unknown as { write: (child: unknown, message: { type: string }) => void; child?: { process: { pid: number } } };
+      const write = internals.write.bind(racing);
+      internals.write = (child, message) => { writes.push(message.type); write(child, message); };
+      await racing.submit("m1", `run touch ${path.join(root, "host-ran-race")}`);
+      const pid = await until(() => internals.child?.process.pid, "the child");
+      const nonce = await until(() => /(?:^|\0)CUBE_MOD_NONCE=([0-9a-f]{64})/.exec(fs.readFileSync(`/proc/${pid}/environ`, "utf8"))?.[1], "the child's nonce");
+      void racing.stop();
+      assert.equal(markReady("t1", nonce), true, "the child's ready arrives after the stop");
+      const shown = await until(() => racing.state().submissions[0]!.state !== "running" && racing.state().submissions[0]!, "the stopped turn");
+      assert.equal(shown.state, "stopped");
+      await delay(200);
+      assert.deepEqual(writes.filter(type => type === "user"), [], "no prompt was written to the stopped child");
+    } finally { await racing.close(); }
   }
   // The ready route: only cubed's own lease (no TTL), only the thread's own
   // nonce, and only where the route names its thread (cubed's socket).
