@@ -205,6 +205,17 @@ exec ${berth} vm --dir ${dir}/state \\
   assert.match(again.stderr, /refusing to overwrite .*start-b2-fix-berth\.sh/);
   assert.deepEqual(fs.readFileSync(start), before);
 
+  // Without --image: cube's default image, which berth prepares itself.
+  const withoutImage = (name: string) => args(name, "systemd").filter((a, i, all) => a !== "--image" && all[i - 1] !== "--image");
+  const plain = install(withoutImage("b2-default"));
+  assert.equal(plain.status, 0, plain.stdout + plain.stderr);
+  assert.match(plain.stdout, /the check pulls cube's default image \(Debian trixie\) and prepares it for cube/);
+  assert.match(lastCheck(), / --image default --accel /);
+  assert.match(fs.readFileSync(path.join(prefix, "bin/start-b2-default.sh"), "utf8"), /^ {2}--image default \\$/m);
+  const unpinned = install([...withoutImage("b2-unpinned"), "--image", "debian:trixie"]);
+  assert.equal(unpinned.status, 1);
+  assert.match(unpinned.stderr, /--image must be default .* or pinned/);
+
   // launchd, with the image seeded from a berth directory that has it.
   const seed = path.join(dir, "seed");
   write(path.join(seed, "images", "sha256:x.json"), "{}");

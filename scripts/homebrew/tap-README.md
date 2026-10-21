@@ -6,15 +6,18 @@ each in its own virtual machine on your Mac. Apple Silicon only.
 ```sh
 brew trust cubeyard/tap      # Homebrew asks you to trust a third-party tap once
 brew install cubeyard/tap/cube
-cubed runners init-local --image <registry/repository@sha256:…>
+cubed runners init-local
 brew services restart cubeyard/tap/cube-berth cubeyard/tap/cube
 ```
 
 This installs `cubed` (the control plane, with its own Node runtime and
 `cube-gateway`), `cube-berth` (the runner, `berth vm`, with keel's guest
 kernel and base), QEMU, erofs-utils and `gh`. `cubed runners init-local` sets
-up the runner under `~/.cube` and enrolls it; `--image` is needed only the
-first time. The same commands work for an upgrade and after `brew uninstall`:
+up the runner under `~/.cube` and enrolls it. Thread machines run cube's
+default image, official Debian trixie pinned by berth, which berth prepares
+for cube itself (sudo, git, gh, curl and ca-certificates from pinned Debian
+packages) the first time it starts; `--image` naming your own image is for
+those who build one. The same commands work for an upgrade and after `brew uninstall`:
 `init-local` changes nothing that is there and says so, and `brew services
 restart` starts the services or replaces ones left running. Then follow
 [macOS with Homebrew](https://github.com/cubeyard/cube/blob/main/docs/macos.md)

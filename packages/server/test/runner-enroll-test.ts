@@ -51,7 +51,7 @@ const address = await freePort();
 
 // The fake berth: berth's arguments; `vm` binds its directory on the first
 // run (and refuses another control peer or node later), pulls only
-// FAKE_IMAGE (waiting for FAKE_PULL_GATE, if set, to exist), then its runner
+// FAKE_IMAGE or berth's own default (waiting for FAKE_PULL_GATE, if set, to exist), then its runner
 // binds --listen, prints the banner and waits for SIGTERM.
 const log = path.join(root, "berth.log");
 const fakeBerth = path.join(root, "bin", "berth");
@@ -78,7 +78,7 @@ case "$1" in
       echo "image: pulling $image" >&2
     fi
     # As berth: the image is pulled after the directory is bound, before it listens.
-    [ "$image" = "$FAKE_IMAGE" ] || { echo "Error: pulling $image: manifest unknown" >&2; exit 1; }
+    [ "$image" = "$FAKE_IMAGE" ] || [ "$image" = default ] || { echo "Error: pulling $image: manifest unknown" >&2; exit 1; }
     while [ -n "\${FAKE_PULL_GATE:-}" ] && [ ! -e "\${FAKE_PULL_GATE:-}" ]; do sleep 0.1; done
     FAKE_LOG="${log}" exec "${process.execPath}" "${path.resolve("packages/server/test/fake-berth-runner.ts")}" "$dir" "$node" "$peer" "$listen" ;;
   *) exit 2 ;;
@@ -126,11 +126,10 @@ try {
   assert.match(answersAs, /^node-berth-[a-z0-9-]+$/);
   assert.notEqual(answersAs.replace("node-berth-", "node-local-"), answersAs, "never a protocol-3 local runner's id");
 
-  // Refused before anything is written: no image the first time, an unpinned
-  // image, a non-loopback listen, a bad node id or limit, a stray option.
+  // Refused before anything is written: an unpinned image, a non-loopback
+  // listen, a bad node id or limit, a stray option.
   for (const [args, pattern] of [
-    [[], /--image <registry\/repository@sha256:…> is needed the first time/],
-    [["--image", "debian:trixie"], /must be pinned/],
+    [["--image", "debian:trixie"], /--image must be default \(cube's default image; the same as leaving it out\) or your own image pinned/],
     [["--image", IMAGE, "--listen", "0.0.0.0:7779"], /loopback IPv4 address/],
     [["--image", IMAGE, "--listen", "127.0.0.1:70000"], /port from 1 to 65535/],
     [["--image", IMAGE, "--node-id", "laptop"], /node-/],
@@ -201,6 +200,8 @@ try {
     assert.equal(again.status, 0, again.stdout + again.stderr);
     assert.match(again.stdout, new RegExp(`already set up and enrolled in ${state}; nothing changed`));
     assert.match(again.stdout, /next: start or restart its service/);
+    // A runner on its own image keeps it, also when no run gives --image.
+    assert.match(again.stdout, /image: +docker\.io\/library\/debian@sha256:c+ \(your own: it must bring bash, sudo, flock, git, gh, curl and a CA bundle/);
   }
   assert.equal(calls().length, callsBefore, "a run with everything in place starts nothing, not even berth version");
   assert.deepEqual(snapshot(home), done, "nothing changed");
@@ -222,8 +223,9 @@ try {
   // Only berth.env gone (the user removed it): written again, nothing else, nothing started.
   fs.rmSync(path.join(home, "berth.env"));
   const settingsOnly = await init([]);
-  assert.equal(settingsOnly.status, 1, "without it the image is not known");
-  assert.match(settingsOnly.stderr, /--image .* is needed the first time/);
+  assert.equal(settingsOnly.status, 1, "without it the image is not known, and never guessed as the default");
+  assert.match(settingsOnly.stderr, /berth\.env is gone, and runner node-berth-[a-z0-9-]+ is enrolled: give --image as it was/);
+  assert.ok(!fs.existsSync(path.join(home, "berth.env")));
   const rewritten = await init(["--image", IMAGE]);
   assert.equal(rewritten.status, 0, rewritten.stdout + rewritten.stderr);
   assert.match(rewritten.stdout, /enrolled in .* already; wrote only what was missing/);
@@ -308,9 +310,12 @@ try {
   assert.ok(fs.existsSync(path.join(fourth, "berth", ".berth", "vm.json")), "berth bound its directory before the pull, as berth does");
   assert.ok(!fs.existsSync(path.join(fourth, "berth.env")) && !fs.existsSync(path.join(fourth, "berth.json")), "the wrong image is recorded nowhere");
   const bound = snapshot(fourth);
-  const unknown = await cubed(fourArgs);
+  // Without --image it is cube's default image (here berth then fails on
+  // the accelerator); still nothing records it.
+  const unknown = await cubed(fourArgs, { ...paths(), FAKE_VM_FAIL: "1" });
   assert.equal(unknown.status, 1);
-  assert.match(unknown.stderr, /--image .* is needed the first time \(until a run gets berth started\)/);
+  assert.match(unknown.stderr, /accelerator hvf is not available/);
+  assert.match(calls().filter(line => line.startsWith("vm --dir ")).at(-1)!, / --image default /);
   assert.deepEqual(snapshot(fourth), bound);
 
   // Meanwhile a berth holds the directory (a service set up by hand, another
@@ -407,13 +412,38 @@ try {
   assert.match((await cubed(fiveArgs)).stdout, /already set up and enrolled/);
   assert.deepEqual(snapshot(fifth), enrolled5);
 
+  // The normal first install: no --image. berth is started with its own
+  // default (official Debian trixie, which it prepares for cube), and that
+  // is what berth.env records, so the service follows berth's default.
+  const plain = path.join(root, "cube-default");
+  const statePlain = path.join(root, "state-default");
+  const plainAddress = await freePort();
+  const plainArgs = ["runners", "init-local", "--state", statePlain, "--home", plain, "--node-id", "node-berth-plain"];
+  const fresh = await cubed([...plainArgs, "--listen", plainAddress]);
+  assert.equal(fresh.status, 0, fresh.stdout + fresh.stderr);
+  assert.match(fresh.stdout, /for the first time: it makes its key and pulls cube's default image \(Debian trixie\), then prepares it for cube/);
+  assert.match(fresh.stdout, /image: +default \(official Debian trixie, pinned by berth, which adds sudo, git, gh, curl and ca-certificates/);
+  assert.match(fresh.stdout, new RegExp(`enrolled in ${statePlain}`));
+  assert.match(calls().filter(line => line.startsWith("vm --dir ")).at(-1)!, / --image default --max-machines 2 /);
+  assert.deepEqual(readBerthSettings(fs.readFileSync(path.join(plain, "berth.env"), "utf8")), { image: "default", maxMachines: 2, listen: plainAddress });
+  const plainDone = snapshot(plain);
+  for (const args of [[], ["--image", "default"]]) {
+    const again = await cubed([...plainArgs, ...args]);
+    assert.equal(again.status, 0, again.stdout + again.stderr);
+    assert.match(again.stdout, /already set up and enrolled/);
+  }
+  const own = await cubed([...plainArgs, "--image", IMAGE]);
+  assert.equal(own.status, 1);
+  assert.match(own.stderr, /names the image default; init-local changes nothing/);
+  assert.deepEqual(snapshot(plain), plainDone, "nothing changed");
+
   // A berth host directory is not taken for a berth vm.
   const third = path.join(root, "cube-three");
   fs.mkdirSync(path.join(third, "berth", ".berth"), { recursive: true });
   fs.writeFileSync(path.join(third, "berth", ".berth", "host.json"), "{}");
   const hostDir = await cubed(["runners", "init-local", "--state", state2, "--home", third, "--image", IMAGE]);
   assert.match(hostDir.stderr, /is a berth host directory/);
-  console.log("ok: runners init-local sets up and enrolls a local berth vm, and every later run (reinstall, moved state, failed first run, an unknown image digest then the corrected one, a listen port in use then another, a held directory with and without a config) changes only what is missing");
+  console.log("ok: runners init-local sets up and enrolls a local berth vm, and every later run (reinstall, moved state, failed first run, the default image without --image, an unknown image digest then the corrected one, a listen port in use then another, a held directory with and without a config) changes only what is missing");
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

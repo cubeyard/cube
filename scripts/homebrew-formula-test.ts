@@ -58,7 +58,7 @@ try {
   assert.match(cube, /CUBED_VERSION="v9\.8\.7" CUBED_COMMIT="0123456789abcdef0123456789abcdef01234567"/);
   assert.match(cube, /depends_on "cubeyard\/tap\/cube-berth"/);
   assert.doesNotMatch(cube, /cube-runner"|CUBE_RUNNER/, "nothing of the protocol-3 runner is installed or set");
-  assert.match(cube, /cubed runners init-local --image <registry\/repository@sha256:\.\.\.>\n\s+brew services restart cubeyard\/tap\/cube-berth cubeyard\/tap\/cube\n/,
+  assert.match(cube, /\n\s+cubed runners init-local\n\s+brew services restart cubeyard\/tap\/cube-berth cubeyard\/tap\/cube\n/,
     "one sequence for a first install, an upgrade and a reinstall; restart also replaces a process brew uninstall left running");
   assert.match(cube, /Dir\.glob\(libexec\/"app\/\*\*\/native\/\*\/prebuilds\/\*", File::FNM_DOTMATCH\)/, "other platforms' prebuilt native modules are pruned, under node_modules/.pnpm too");
   assert.match(cube, /name\.start_with\?\("darwin-"\) && name\.include\?\("arm64"\)/, "every darwin arm64 build stays");
@@ -110,7 +110,7 @@ try {
   const serve = () => spawnSync("/bin/sh", ["-c", `sleep() { :; }\n${service}`], { encoding: "utf8", env: { HOME: home, PATH: "/usr/bin:/bin" } });
   const unset = serve();
   assert.equal(unset.status, 78, unset.stderr);
-  assert.match(unset.stderr, /cube-berth: not set up yet: run cubed runners init-local --image/);
+  assert.match(unset.stderr, /cube-berth: not set up yet: run cubed runners init-local\n/);
   fs.mkdirSync(path.join(home, ".cube/berth/.berth"), { recursive: true });
   fs.writeFileSync(path.join(home, ".cube/berth/.berth/vm.json"), "{}");
   const image = `docker.io/library/debian@sha256:${"c".repeat(64)}`;
@@ -136,6 +136,12 @@ try {
   assert.equal(started.stdout.trim(), `berth vm --dir ${home}/.cube/berth --qemu ${root}/opt/qemu/bin/qemu-system-aarch64 --qemu-img ${root}/opt/qemu/bin/qemu-img`
     + ` --mkfs-erofs ${root}/opt/erofs-utils/bin/mkfs.erofs --keel ${root}/opt/cube-berth/libexec/keel --image ${image} --max-machines 2 --listen 127.0.0.1:7781`);
   assert.deepEqual(readBerthSettings(settings), { image, maxMachines: 2, listen: "127.0.0.1:7781" }, "what the service reads is what cubed reads");
+  // A normal install records berth's own default image, passed as it is.
+  fs.writeFileSync(path.join(home, ".cube/berth.env"), settings.replace(image, "default"));
+  const plain = serve();
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.match(plain.stdout.trim(), / --image default --max-machines 2 --listen 127\.0\.0\.1:7781$/);
+  assert.equal(readBerthSettings(settings.replace(image, "default")).image, "default");
 
   // cubed's launcher, run as the service would (cubed replaced by printing
   // its environment): the portal is on loopback under *.localhost unless the

@@ -109,8 +109,11 @@ export interface LocalBerthOptions {
   state: string;
   /** The local runner's directory (default `~/.cube`). */
   home: string;
-  /** The image every machine is built on, pinned by digest; needed the
-   * first time, then read from `berth.env`. */
+  /** The image every machine is built on: `default` (cube's default,
+   * official Debian trixie pinned by berth, which berth prepares for cube),
+   * else the operator's own, pinned by digest, which must bring cube's
+   * tools itself. Read from `berth.env` once it is recorded; `default` when
+   * nothing says otherwise. */
   image?: string;
   /** The loopback address berth listens on (default 127.0.0.1:7779). */
   listen?: string;
@@ -140,6 +143,16 @@ export interface LocalBerth {
 export const DEFAULT_LOCAL_BERTH_LISTEN = "127.0.0.1:7779";
 export const DEFAULT_LOCAL_BERTH_MACHINES = 2;
 const PINNED_IMAGE = /^[A-Za-z0-9._/:-]+@sha256:[0-9a-f]{64}$/;
+/** berth's own default image (berth `--image default`, packages/berth/debian/trixie.json). */
+export const DEFAULT_LOCAL_BERTH_IMAGE = "default";
+const imageAccepted = (image: string) => image === DEFAULT_LOCAL_BERTH_IMAGE || PINNED_IMAGE.test(image);
+
+/** The image as people read it. */
+export function describeBerthImage(image: string): string {
+  return image === DEFAULT_LOCAL_BERTH_IMAGE
+    ? "default (official Debian trixie, pinned by berth, which adds sudo, git, gh, curl and ca-certificates from pinned Debian packages)"
+    : `${image} (your own: it must bring bash, sudo, flock, git, gh, curl and a CA bundle, or no machine becomes ready)`;
+}
 /** berth keeps `<dir>/<16-hex machine id>/qmp.sock` within 100 bytes. */
 const MAX_DIR_BYTES = 100 - 26;
 
@@ -163,8 +176,8 @@ export function readBerthSettings(text: string): { image: string; maxMachines: n
   const raw = value("CUBE_BERTH_MAX_MACHINES") ?? "";
   const listen = value("CUBE_BERTH_LISTEN") ?? "";
   const maxMachines = Number(raw);
-  if (!PINNED_IMAGE.test(image) || !/^[1-9]\d?$/.test(raw) || maxMachines > 64 || !loopbackListen(listen)) {
-    throw new Error("is not a berth.env of cubed's (CUBE_BERTH_IMAGE=<registry/repository@sha256:…>, CUBE_BERTH_MAX_MACHINES=1…64, CUBE_BERTH_LISTEN=127.x.x.x:<port>)");
+  if (!imageAccepted(image) || !/^[1-9]\d?$/.test(raw) || maxMachines > 64 || !loopbackListen(listen)) {
+    throw new Error("is not a berth.env of cubed's (CUBE_BERTH_IMAGE=default or <registry/repository@sha256:…>, CUBE_BERTH_MAX_MACHINES=1…64, CUBE_BERTH_LISTEN=127.x.x.x:<port>)");
   }
   return { image, maxMachines, listen };
 }
@@ -251,10 +264,11 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   const berthHome = exists(vmHome) ? JSON.parse(fs.readFileSync(vmHome, "utf8")) as { nodeId?: string; allowedPeer?: string; listen?: string | null } : null;
   const peer = exists(files.controlKey) ? controlPeer(files.controlKey) : null;
 
-  if (options.image !== undefined && !PINNED_IMAGE.test(options.image)) throw new Error("--image must be pinned: <registry/repository>@sha256:<64 hex>");
+  if (options.image !== undefined && !imageAccepted(options.image)) {
+    throw new Error("--image must be default (cube's default image; the same as leaving it out) or your own image pinned: <registry/repository>@sha256:<64 hex>");
+  }
   if (recorded && options.image !== undefined && options.image !== recorded.image) throw conflict(`${files.settings} names the image ${recorded.image}`);
-  const image = options.image ?? recorded?.image;
-  if (!image) throw new Error("--image <registry/repository@sha256:…> is needed the first time (until a run gets berth started): the image every thread machine is built on");
+  const image = options.image ?? recorded?.image ?? DEFAULT_LOCAL_BERTH_IMAGE;
   if (options.maxMachines !== undefined && (!Number.isInteger(options.maxMachines) || options.maxMachines < 1 || options.maxMachines > 64)) {
     throw new Error("--max-machines must be 1 through 64");
   }
@@ -308,7 +322,12 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
       }
       if (!berthHome) throw conflict(`runner ${nodeId} is enrolled in ${state}, but its directory ${files.dir} is gone`);
       if (!recorded) {
-        // Only the service's settings are missing: written again, nothing else.
+        // Only the service's settings are missing: written again, nothing
+        // else. The image they named is not known here, so it is never
+        // guessed: a runner on its own image must not move to the default.
+        if (options.image === undefined) {
+          throw new Error(`${files.settings} is gone, and runner ${nodeId} is enrolled: give --image as it was (default, or your own image's pinned reference) to write it again`);
+        }
         fs.writeFileSync(files.settings, berthSettingsText(image, maxMachines, listen), { mode: 0o600, flag: "wx" });
         log(`wrote ${files.settings}`);
       }
@@ -345,7 +364,7 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   // listens: until then a run may give another --image, --max-machines or
   // --listen, and the service does not start.
 
-  log(berthHome ? `starting berth vm in ${files.dir} to enroll it` : `starting berth vm in ${files.dir} for the first time: it makes its key and pulls ${image}`);
+  log(berthHome ? `starting berth vm in ${files.dir} to enroll it` : `starting berth vm in ${files.dir} for the first time: it makes its key and pulls ${image === DEFAULT_LOCAL_BERTH_IMAGE ? "cube's default image (Debian trixie), then prepares it for cube" : image}`);
   const child = spawn(berth, ["vm", "--dir", files.dir, "--qemu", qemu, "--qemu-img", qemuImg, "--keel", keel, "--mkfs-erofs", mkfs,
     "--image", image, "--max-machines", String(maxMachines), "--allow-peer", allowPeer, "--node-id", nodeId, "--network", "loopback", "--listen", listen],
   { stdio: ["ignore", "ignore", "pipe"] });

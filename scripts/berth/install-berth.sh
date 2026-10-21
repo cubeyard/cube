@@ -12,11 +12,16 @@
 # Usage (from the unpacked bundle, berth-<release>-<platform>/share/berth/):
 #   install-berth.sh --prefix /abs --dir /abs/state --keel /abs/keel/<arch> \
 #     --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img --mkfs-erofs /abs/mkfs.erofs \
-#     --image <registry/repository@sha256:…> --network loopback|direct|relay [--relay-only] \
+#     [--image default|<registry/repository@sha256:…>] --network loopback|direct|relay [--relay-only] \
 #     [--listen <ip:port>] --node-id node-<name> --allow-peer <control peer> --max-machines N \
 #     --unit-dir /abs --unit-name <name> --kind systemd|launchd \
 #     [--seed-from /abs/berth-dir]   # a directory holding the image already (images/, layers/)
 # Without --seed-from the check pulls the image into the throwaway directory.
+# Without --image (or with default) thread machines run cube's default image:
+# official Debian trixie pinned by this berth, which berth prepares for cube
+# itself (a layer of pinned Debian packages: sudo, git, gh, curl,
+# ca-certificates). --image <reference> is your own image instead, which must
+# bring bash, sudo, flock, git, gh, curl and a CA bundle.
 set -euo pipefail
 
 fail() { echo "install-berth: $*" >&2; exit 1; }
@@ -26,7 +31,7 @@ here=$(cd "$(dirname "$0")" && pwd -P)
 berth_src=$(cd "$here/../.." && pwd -P)/bin/berth
 [ -x "$berth_src" ] || fail "no berth beside this script ($berth_src); run it from the unpacked bundle"
 
-prefix='' dir='' keel='' qemu='' qemu_img='' mkfs='' image='' network='' relay_only=0 listen=''
+prefix='' dir='' keel='' qemu='' qemu_img='' mkfs='' image=default network='' relay_only=0 listen=''
 node_id='' allow_peer='' max_machines='' unit_dir='' unit_name='' kind='' seed=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -86,8 +91,8 @@ physical() {
 dir_physical=$(physical "$dir")
 [ $((${#dir_physical} + socket_tail)) -le "$socket_max" ] ||
   fail "--dir $dir_physical is too long: berth needs <dir>/<16-hex machine id>/qmp.sock within $socket_max bytes"
-printf '%s\n' "$image" | grep -Eq '^[A-Za-z0-9._/:-]+@sha256:[0-9a-f]{64}$' ||
-  fail "--image must be pinned: <registry/repository>@sha256:<64 hex>"
+[ "$image" = default ] || printf '%s\n' "$image" | grep -Eq '^[A-Za-z0-9._/:-]+@sha256:[0-9a-f]{64}$' ||
+  fail "--image must be default (cube's default image, the same as leaving it out) or pinned: <registry/repository>@sha256:<64 hex>"
 case "$network" in
 loopback | direct) [ -n "$listen" ] || fail "--network $network needs --listen <ip:port>" ;;
 relay) ;;
@@ -169,7 +174,11 @@ if [ -n "$seed" ]; then
   [ ! -d "$seed/layers" ] || cp -R "$seed/layers" "$check/dir/layers"
   echo "install-berth: the check uses the image in $seed (copied, not changed)"
 else
-  echo "install-berth: the check pulls $image into a throwaway directory (no --seed-from)"
+  if [ "$image" = default ]; then
+    echo "install-berth: the check pulls cube's default image (Debian trixie) and prepares it for cube in a throwaway directory (no --seed-from)"
+  else
+    echo "install-berth: the check pulls $image into a throwaway directory (no --seed-from)"
+  fi
 fi
 "$berth_src" vm --dir "$check/dir" --qemu "$qemu" --qemu-img "$qemu_img" --keel "$keel" --mkfs-erofs "$mkfs" \
   --image "$image" --accel "$accel" --network loopback --listen 127.0.0.1:0 --allow-peer "$allow_peer" \
