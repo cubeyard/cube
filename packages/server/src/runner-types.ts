@@ -5,10 +5,12 @@
 /** A runner's identity in the registry. */
 export interface NodeBinding { nodeId: string; environmentId: number; threadId: string }
 
-/** Machine bounds a protocol-3 runner advertised; kept in its old reports. */
+/** The largest machine a runner accepts: a protocol-4 VM runner's hello
+ * `limits`, or (with the other fields) a protocol-3 runner's old report. */
 export interface VmLimits {
-  maxFrameBytes: number; requestTimeoutMs: number; maxVcpus: number; maxMemoryMiB: number; maxDiskGiB: number;
-  maxSeedBytes: number; maxActiveVms: number;
+  maxVcpus: number; maxMemoryMiB: number; maxDiskGiB: number;
+  /** Only in a protocol-3 runner's report. */
+  maxFrameBytes?: number; requestTimeoutMs?: number; maxSeedBytes?: number; maxActiveVms?: number;
 }
 
 export interface TrustedRunnerHealth {
@@ -29,7 +31,8 @@ export interface TrustedRunnerHealth {
    * recorded before cubed kept it. */
   platform?: string;
   capabilities?: string[];
-  /** Only in a protocol-3 runner's report. */
+  /** The largest machine it accepts; absent when the runner names none
+   * (berth host) or the report predates cubed keeping it. */
   limits?: VmLimits;
 }
 

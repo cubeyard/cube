@@ -191,7 +191,7 @@ async fn answer(request: hyper::Request<Incoming>, seen: Seen) -> Answer {
 }
 
 struct Proxy {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     socket: PathBuf,
     decide: FakeDecide,
     seen: Seen,
@@ -199,6 +199,11 @@ struct Proxy {
 
 impl Proxy {
     async fn start(decide: DecideFn) -> Self {
+        Self::start_with(decide, Duration::from_secs(5)).await
+    }
+
+    /// With cubed's decision bounded by `decide_timeout`.
+    async fn start_with(decide: DecideFn, decide_timeout: Duration) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let decide_path = dir.path().join("egress.sock");
         let decide = FakeDecide::start(decide_path.clone(), decide);
@@ -211,14 +216,14 @@ impl Proxy {
         ]);
         let upstream = Arc::new(Upstream::with_test_hooks(ca.roots(), overrides).unwrap());
         let egress = Arc::new(Egress {
-            decide: Arc::new(DecideClient::new(decide_path, Duration::from_secs(5))),
+            decide: Arc::new(DecideClient::new(decide_path, decide_timeout)),
             upstream,
         });
         let socket = dir.path().join("credential.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         tokio::spawn(cube_gateway::credential::serve(listener, egress));
         Self {
-            _dir: dir,
+            dir,
             socket,
             decide,
             seen,
@@ -529,4 +534,164 @@ async fn a_bad_header_frame_closes_the_connection_unanswered() {
     assert!(matches!(read, Ok(Ok(0)) | Ok(Err(_))));
     assert!(proxy.seen.lock().unwrap().is_empty());
     assert!(proxy.decide.requests.lock().unwrap().is_empty());
+}
+
+// The refusals the gateway's protocol-3 LAN tests (tests/lan.rs, removed
+// with it) were the only end-to-end checks of: the same handler serves every
+// credential stream, the one process that holds the real token.
+
+#[tokio::test]
+async fn a_non_public_upstream_is_refused_even_when_cubed_allows_it() {
+    let proxy = Proxy::start(substitute()).await;
+    // Not in the test hooks' overrides: resolved here, and checked.
+    for host in [
+        "localhost",
+        "127.0.0.1",
+        "10.1.2.3",
+        "192.168.1.1",
+        "169.254.169.254",
+        "100.64.0.1",
+    ] {
+        let (status, headers, _) = proxy
+            .send(host, with(host, "/echo", &format!("Bearer {GH}")))
+            .await;
+        assert_eq!(status, 403, "{host}");
+        assert_eq!(
+            headers["x-cube-denied"], "upstream address is not public",
+            "{host}"
+        );
+    }
+    assert_eq!(
+        proxy.decide.requests.lock().unwrap().len(),
+        6,
+        "each was allowed by cubed first"
+    );
+    assert!(proxy.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_gateway_hosts_own_public_addresses_are_refused() {
+    // A public address of this host would be dialled over loopback, past
+    // perimeter firewalls. A host without one has nothing to check here;
+    // netstack's addr.rs covers the rule itself.
+    let own: Vec<_> = cube_gateway::addr::local_addresses()
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.is_ipv4() && cube_gateway::addr::is_public(*a))
+        .collect();
+    if own.is_empty() {
+        eprintln!("this machine has no public IPv4 address; skipped");
+        return;
+    }
+    let proxy = Proxy::start(substitute()).await;
+    for address in own {
+        let host = address.to_string();
+        let (status, headers, _) = proxy
+            .send(&host, with(&host, "/echo", &format!("Bearer {GH}")))
+            .await;
+        assert_eq!(status, 403, "{host}");
+        assert_eq!(
+            headers["x-cube-denied"], "upstream address is not public",
+            "{host}"
+        );
+    }
+    assert!(proxy.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn connect_and_upgrade_are_refused_before_any_decision() {
+    let proxy = Proxy::start(substitute()).await;
+    let upgrade = get(
+        "api.github.test",
+        "/socket",
+        &[
+            ("connection", "upgrade".to_string()),
+            ("upgrade", "websocket".to_string()),
+            ("authorization", format!("Bearer {GH}")),
+        ],
+    );
+    let (status, headers, _) = proxy.send("api.github.test", upgrade).await;
+    assert_eq!(status, 403);
+    assert_eq!(
+        headers["x-cube-denied"],
+        "protocol upgrades are not supported"
+    );
+    let connect = hyper::Request::connect("api.github.test:443")
+        .header("host", "api.github.test")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let (status, headers, _) = proxy.send("api.github.test", connect).await;
+    assert_eq!(status, 403);
+    assert_eq!(headers["x-cube-denied"], "CONNECT is not supported");
+    assert!(proxy.decide.requests.lock().unwrap().is_empty());
+    assert!(proxy.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_second_host_header_is_refused_before_any_decision() {
+    let proxy = Proxy::start(substitute()).await;
+    let request = get(
+        "api.github.test",
+        "/echo",
+        &[
+            ("host", "other.github.test".to_string()),
+            ("authorization", format!("Bearer {GH}")),
+        ],
+    );
+    let (status, headers, _) = proxy.send("api.github.test", request).await;
+    assert_eq!(status, 400);
+    assert_eq!(headers["x-cube-denied"], "more than one Host header");
+    assert!(proxy.decide.requests.lock().unwrap().is_empty());
+    assert!(proxy.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_late_malformed_or_missing_decision_denies() {
+    // Later than the gateway waits.
+    let late = Proxy::start_with(
+        Arc::new(|_| {
+            (
+                Duration::from_secs(3),
+                serde_json::json!({"allow": true, "substitute": {GH: TOKEN}}),
+            )
+        }),
+        Duration::from_millis(300),
+    )
+    .await;
+    let (status, headers, _) = late
+        .send(
+            "api.github.test",
+            with("api.github.test", "/echo", &format!("Bearer {GH}")),
+        )
+        .await;
+    assert_eq!(status, 403);
+    assert_eq!(headers["x-cube-denied"], "policy decision timed out");
+    assert!(late.seen.lock().unwrap().is_empty());
+    // An answer that is not a decision.
+    let malformed = Proxy::start(Arc::new(|_| {
+        (Duration::ZERO, serde_json::json!({"allow": "yes"}))
+    }))
+    .await;
+    let (status, headers, _) = malformed
+        .send(
+            "api.github.test",
+            with("api.github.test", "/echo", &format!("Bearer {GH}")),
+        )
+        .await;
+    assert_eq!(status, 403);
+    assert_eq!(headers["x-cube-denied"], "policy decision unavailable");
+    // No decision socket at all.
+    std::fs::remove_file(malformed.dir.path().join("egress.sock")).unwrap();
+    let (status, headers, _) = malformed
+        .send(
+            "api.github.test",
+            with("api.github.test", "/echo", &format!("Bearer {GH}")),
+        )
+        .await;
+    assert_eq!(status, 403);
+    assert_eq!(headers["x-cube-denied"], "policy decision unavailable");
+    assert!(
+        malformed.seen.lock().unwrap().is_empty(),
+        "nothing went upstream, so no token left"
+    );
 }
