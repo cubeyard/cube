@@ -302,7 +302,20 @@ const talk = (chat: OptChat) => chat.memory.messages.filter(message => message.k
       assert.equal(sum((await harness.snapshot(SendsDoc, context))?.interrupted), 1, `open ${k + 1}: counted once`);
     } finally { await harness.close(context); }
   }
-  console.log("ok: a crash during the open (settled, never resumed) counts the request once");
+  // The same for a thread's context summary out at the kill (no memo: its
+  // count is fenced by `compactions`).
+  const summary = path.join(root, "fence-compaction", "thread");
+  await crash("compaction", summary);
+  for (let k = 0; k < 3; k++) {
+    const storage = await openStorage(path.join(summary, "pi.sqlite"));
+    const harness = await Harness.open(storage, { models, registry: createRegistry() }, context).catch(async error => { await storage.close(context); throw error; });
+    try {
+      const { dropped } = await settleSends(harness, context);
+      assert.equal(dropped.length, 1, "the summary is still live: its abort never ran");
+      assert.equal(sum((await harness.snapshot(SendsDoc, context))?.interrupted), 1, `summary, open ${k + 1}: counted once`);
+    } finally { await harness.close(context); }
+  }
+  console.log("ok: a crash during the open (settled, never resumed) counts the request once, and a thread's summary once");
 }
 // A send whose record cannot be stored is not sent: the storage fails on
 // that commit (a full disk, an I/O error), so Pi's Session fails with it.
