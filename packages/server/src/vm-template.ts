@@ -60,7 +60,9 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 /** What a template's preparation depends on, as far as cubed knows before a
  * machine boots. Not in it: the pre-resume hook (resume hooks run on every
  * machine and are never cached) and `.agents/setup` (see `setupBlob`). */
-export type TemplateKeyInput = { allocation: WorkspaceAllocation; hooks: ProjectHooks; runner: { baseImageSha256: string; platform: string }; diskGiB: number };
+export type TemplateKeyInput = { allocation: WorkspaceAllocation; hooks: ProjectHooks;
+  /** `imageId`: a VM runner's `Platform.image_id`, what its machines are made from (berth vm); absent or empty without one. */
+  runner: { baseImageSha256: string; platform: string; imageId?: string }; diskGiB: number };
 export function templateKey(input: TemplateKeyInput): string {
   const helper = guestHelper();
   return sha256(JSON.stringify({
@@ -77,10 +79,11 @@ export function templateKey(input: TemplateKeyInput): string {
 }
 
 /** A keel template's key (`berth vm`): its own format, so it never equals a
- * p3 key, and without p3's guest helper and packages. The runner's base
- * image (`Platform.base_image_sha256`) and platform are in it, so a lookup
- * never picks a template the runner would refuse as made on another image
- * (`template_image_changed`). */
+ * p3 key, and without p3's guest helper and packages. The runner's keel
+ * base (`Platform.base_image_sha256`), platform and image
+ * (`Platform.image_id`: the OCI image and berth's own layers, such as its
+ * Debian preparation) are in it, so a lookup never picks a template the
+ * runner would refuse as made on another image (`template_image_changed`). */
 export function keelTemplateKey(input: TemplateKeyInput): string {
   return sha256(JSON.stringify({
     kind: "keel",
@@ -89,6 +92,8 @@ export function keelTemplateKey(input: TemplateKeyInput): string {
     repositories: input.allocation.repositories.map(repository => ({ url: repository.url, base: repository.base, checkoutName: repository.checkoutName })),
     preSetup: sha256(input.hooks.preSetup),
     image: input.runner.baseImageSha256,
+    // Only when the runner says it: a runner that does not keeps its keys.
+    ...(input.runner.imageId ? { workloadImage: input.runner.imageId } : {}),
     platform: input.runner.platform,
     diskGiB: input.diskGiB,
   }));
@@ -115,10 +120,14 @@ export function templateParts(input: TemplateKeyInput): TemplateParts {
 }
 export function keelTemplateParts(input: TemplateKeyInput): TemplateParts {
   const short = (value: unknown) => sha256(JSON.stringify(value)).slice(0, 16);
+  // The runner's image is part of "image" only when it has one, so a
+  // template made before runners said theirs reads as made on the same.
+  const image = input.runner.imageId ? [input.runner.baseImageSha256, input.runner.platform, input.runner.imageId]
+    : [input.runner.baseImageSha256, input.runner.platform];
   return {
     repositories: short(input.allocation.repositories.map(repository => [repository.url, repository.base, repository.checkoutName])),
     preSetup: short(input.hooks.preSetup),
-    image: short([input.runner.baseImageSha256, input.runner.platform]),
+    image: short(image),
     disk: short(input.diskGiB),
   };
 }

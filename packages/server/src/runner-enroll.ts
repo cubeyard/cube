@@ -138,6 +138,9 @@ export interface LocalBerth {
   /** The admission, or null when berth could not be started or asked here (`runnerError`). */
   enrollment: Enrollment | null;
   runnerError: string | null;
+  /** berth.env named official Debian alone and now says `default`: the
+   * earlier file, kept beside it. */
+  recovered: string | null;
 }
 
 export const DEFAULT_LOCAL_BERTH_LISTEN = "127.0.0.1:7779";
@@ -146,11 +149,17 @@ const PINNED_IMAGE = /^[A-Za-z0-9._/:-]+@sha256:[0-9a-f]{64}$/;
 /** berth's own default image (berth `--image default`, packages/berth/debian/trixie.json). */
 export const DEFAULT_LOCAL_BERTH_IMAGE = "default";
 const imageAccepted = (image: string) => image === DEFAULT_LOCAL_BERTH_IMAGE || PINNED_IMAGE.test(image);
+/** Official Debian (any tag), pinned. It has no sudo, git, gh, curl or CA
+ * bundle, so keel never calls a machine on it ready: as an image of one's
+ * own it cannot work, and berth's default is official Debian trixie with
+ * what cube needs added. */
+const OFFICIAL_DEBIAN = /^(?:docker\.io\/)?(?:library\/)?debian(?::[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$/;
+export function isOfficialDebian(image: string): boolean { return OFFICIAL_DEBIAN.test(image); }
 
 /** The image as people read it. */
 export function describeBerthImage(image: string): string {
   return image === DEFAULT_LOCAL_BERTH_IMAGE
-    ? "default (official Debian trixie, pinned by berth, which adds sudo, git, gh, curl and ca-certificates from pinned Debian packages)"
+    ? "default (official Debian trixie, pinned by berth, which adds sudo, git, gh, curl, ca-certificates and openssh-client from pinned Debian packages)"
     : `${image} (your own: it must bring bash, sudo, flock, git, gh, curl and a CA bundle, or no machine becomes ready)`;
 }
 /** berth keeps `<dir>/<16-hex machine id>/qmp.sock` within 100 bytes. */
@@ -267,6 +276,25 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   if (options.image !== undefined && !imageAccepted(options.image)) {
     throw new Error("--image must be default (cube's default image; the same as leaving it out) or your own image pinned: <registry/repository>@sha256:<64 hex>");
   }
+  if (options.image !== undefined && isOfficialDebian(options.image)) {
+    throw new Error(`--image ${options.image} is official Debian alone, which lacks sudo, git, gh, curl and a CA bundle, so no thread machine would get ready: leave out --image (cube's default is official Debian trixie, which berth prepares for cube)`);
+  }
+  // Recovery: a berth.env an earlier cube wrote for official Debian alone
+  // (its machines never got ready). It now says default; the earlier file
+  // is kept beside it, and nothing else changes here (berth adds the
+  // preparation layer to such machines when they start).
+  let recovered: string | null = null;
+  if (recorded && options.image === undefined && isOfficialDebian(recorded.image)) {
+    const kept = `${files.settings}.official-debian.${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    fs.copyFileSync(files.settings, kept, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(kept, 0o600);
+    const temporary = `${files.settings}.tmp-${process.pid}`;
+    fs.writeFileSync(temporary, berthSettingsText(DEFAULT_LOCAL_BERTH_IMAGE, recorded.maxMachines, recorded.listen), { mode: 0o600, flag: "wx" });
+    fs.renameSync(temporary, files.settings);
+    log(`${files.settings} named ${recorded.image}, official Debian alone, on which no thread machine gets ready: it now names cube's default image (official Debian trixie, prepared by berth); the earlier file is ${kept}`);
+    recorded = { ...recorded, image: DEFAULT_LOCAL_BERTH_IMAGE };
+    recovered = kept;
+  }
   if (recorded && options.image !== undefined && options.image !== recorded.image) throw conflict(`${files.settings} names the image ${recorded.image}`);
   const image = options.image ?? recorded?.image ?? DEFAULT_LOCAL_BERTH_IMAGE;
   if (options.maxMachines !== undefined && (!Number.isInteger(options.maxMachines) || options.maxMachines < 1 || options.maxMachines > 64)) {
@@ -307,7 +335,7 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   const dir = physical(files.dir);
   if (Buffer.byteLength(dir) > MAX_DIR_BYTES) throw new Error(`${dir} is too long: berth needs <dir>/<machine id>/qmp.sock within 100 bytes (choose a shorter --home)`);
 
-  const result: LocalBerth = { home, files, nodeId, address: listen, image, maxMachines, already: false, enrollment: null, runnerError: null };
+  const result: LocalBerth = { home, files, nodeId, address: listen, image, maxMachines, already: false, enrollment: null, runnerError: null, recovered };
 
   // Enrolled in this state already: nothing is left to do.
   const registry = new Registry(path.join(state, "registry.sqlite"));
@@ -331,7 +359,7 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
         fs.writeFileSync(files.settings, berthSettingsText(image, maxMachines, listen), { mode: 0o600, flag: "wx" });
         log(`wrote ${files.settings}`);
       }
-      result.already = recorded !== null;
+      result.already = recorded !== null && recovered === null;
       return result;
     }
   } finally { registry.close(); }

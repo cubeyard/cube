@@ -180,7 +180,8 @@ class CubeBerth < Formula
         brew services restart cubeyard/tap/cube-berth
       Thread machines run cube's default image, official Debian trixie pinned
       by berth, which berth prepares for cube with pinned Debian packages
-      (sudo, git, gh, curl, ca-certificates) before it first listens.
+      (sudo, git, gh, curl, ca-certificates, openssh-client) before it first
+      listens.
       Its state (key, disks, layer cache) is ~/.cube/berth, with berth.json,
       berth.control.key and berth.env beside it in ~/.cube; uninstalling keeps
       them, and installing again uses them as they are.

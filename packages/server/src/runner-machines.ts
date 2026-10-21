@@ -545,7 +545,8 @@ export class RunnerMachines implements ThreadMachines {
       return fresh(`the runner has no machine templates (${KEEL_TEMPLATE_CAPABILITIES.join(", ")})`);
     }
     const keyInput = { allocation: thread.allocation, hooks: thread.allocation.hooks ?? NO_HOOKS, diskGiB: size.diskGib ?? 0,
-      runner: { baseImageSha256: runner.platform?.baseImageSha256 ?? "", platform: [runner.platform?.os, runner.platform?.arch].filter(Boolean).join("-") } };
+      runner: { baseImageSha256: runner.platform?.baseImageSha256 ?? "", platform: [runner.platform?.os, runner.platform?.arch].filter(Boolean).join("-"),
+        imageId: runner.platform?.imageId ?? "" } };
     const key = keelTemplateKey(keyInput);
     let templates: RunnerTemplate[];
     try { templates = await this.listTemplates(session); }

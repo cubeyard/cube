@@ -20,7 +20,7 @@
 # Without --image (or with default) thread machines run cube's default image:
 # official Debian trixie pinned by this berth, which berth prepares for cube
 # itself (a layer of pinned Debian packages: sudo, git, gh, curl,
-# ca-certificates). --image <reference> is your own image instead, which must
+# ca-certificates, openssh-client). --image <reference> is your own image instead, which must
 # bring bash, sudo, flock, git, gh, curl and a CA bundle.
 set -euo pipefail
 

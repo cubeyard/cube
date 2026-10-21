@@ -241,7 +241,16 @@ try {
   assert.notEqual(keelTemplateKey({ ...keyInput, diskGiB: 32 }), key);
   assert.notEqual(keelTemplateKey({ ...keyInput, hooks: { ...keyInput.hooks, preSetup: "other" } }), key);
   assert.equal(keelTemplateKey({ ...keyInput, hooks: { ...keyInput.hooks, preResume: "other" } }), key, "resume hooks are never cached");
-  console.log("ok: the keel key is its own format with image, platform, disk, repositories and pre-setup");
+  // The runner's image (Platform.image_id: the OCI image and berth's own
+  // layers): another one, another key and another "image" part; none, the
+  // key of a runner that does not say it.
+  assert.equal(keelTemplateKey({ ...keyInput, runner: { ...keyInput.runner, imageId: "" } }), key, "no image_id: the key as before");
+  const onImage = (imageId: string) => ({ ...keyInput, runner: { ...keyInput.runner, imageId } });
+  assert.notEqual(keelTemplateKey(onImage("1".repeat(64))), key);
+  assert.notEqual(keelTemplateKey(onImage("1".repeat(64))), keelTemplateKey(onImage("2".repeat(64))), "another image, another key");
+  assert.notEqual(keelTemplateParts(onImage("1".repeat(64))).image, keelTemplateParts(onImage("2".repeat(64))).image);
+  assert.equal(keelTemplateParts(onImage("")).image, keelTemplateParts(keyInput).image);
+  console.log("ok: the keel key is its own format with image, the runner's image_id, platform, disk, repositories and pre-setup");
 
   // A host runner: no lookup, no build, no template call.
   const onHost = newThread("p", "node-host1");
@@ -452,6 +461,34 @@ try {
   const unsealedBuild = of("machineCreate").filter(call => call.value.spec.build).at(-1)!.value.ref.id;
   assert.deepEqual(of("machineDelete").filter(call => call.value.ref.id === unsealedBuild).map(call => call.value.retain), [false], "an unpublished build machine is deleted");
   console.log("ok: no room for the build (RESOURCE_EXHAUSTED, no backoff) or a refused publication: the base with the reason; an unpublished build machine is deleted");
+
+  // The runner's image changes (berth prepared another image, or another
+  // --image): the project's template made on the old one is not picked
+  // (berth would refuse it), a new one is built for the new image and used.
+  const platformOf = vmSession.runner!.platform!;
+  platformOf.imageId = "1".repeat(64);
+  const onFirst = newThread("p");
+  await vms.start(onFirst);
+  const firstTemplate = registry.getThread(onFirst.id)!.vm!.preparation!;
+  assert.equal(firstTemplate.source, "template", JSON.stringify(firstTemplate));
+  const firstKey = templates.get(firstTemplate.templateId!)!.key;
+  calls.length = 0;
+  platformOf.imageId = "2".repeat(64);
+  const onSecond = newThread("p");
+  await vms.start(onSecond);
+  const secondTemplate = registry.getThread(onSecond.id)!.vm!.preparation!;
+  assert.match(step(onSecond, "lookup").detail!, /^the runner's base image or platform changed since template [0-9a-f]{16}: building one$/);
+  assert.equal(secondTemplate.source, "template");
+  assert.notEqual(secondTemplate.templateId, firstTemplate.templateId, "never the template made on the other image");
+  assert.notEqual(templates.get(secondTemplate.templateId!)!.key, firstKey);
+  assert.equal(created(onSecond).at(-1)!.value.spec.source.value, secondTemplate.templateId);
+  // And back on the first image, the first image's template, not the second's.
+  platformOf.imageId = "1".repeat(64);
+  const back = newThread("p");
+  await vms.start(back);
+  assert.notEqual(registry.getThread(back.id)!.vm!.preparation!.templateId, secondTemplate.templateId);
+  platformOf.imageId = "";
+  console.log("ok: a template is keyed on the runner's image (Platform.image_id): after a change the old one is not picked, a new one is built");
 
   // A build machine an earlier cubed left: deleted before the lookup, and at release.
   calls.length = 0;
