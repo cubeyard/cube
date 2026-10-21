@@ -1,40 +1,48 @@
 # Handoff
 
-Status of cube as of 2026-10-05, release **v0.3.2**. Start here; the plans
-in `docs/plans/` hold the reasoning and the detailed evidence.
+Status of cube on `main` after release **v0.3.32** (2026-10-21). Start here;
+the plans in `docs/plans/` hold the reasoning and the detailed evidence. The
+sections after "Shipping a change" are a record, each as of its branch or
+release.
 
 ## What cube is now
 
 - **cubed** runs the agents on the host. Pi uses pi-durable 1.3.0 with
   SQLite; Claude Code threads use the unmodified `claude` with the user's own
   login. Both work on the thread's `Workspace`.
-- **Every thread has its own VM on a runner** (runner protocol 3; see
-  `docs/plans/2026-10-04-vm-runner.md`):
-  - one QEMU VM per active thread, several per runner (`--max-active-vms`);
-  - Debian 13 genericcloud, with a qcow2 overlay per thread;
-  - a cloud-init seed written by the runner.
+- **Every thread has its own machine on a runner** (runner protocol 4; see
+  ARCHITECTURE.md, "Runner protocol 4 and the host runner"):
+  - a keel machine under QEMU on a `berth vm`, several per runner
+    (`--max-machines`), the image's layers read-only and a writable disk
+    per thread;
+  - or, only when started on it by name, a directory on a `berth host`
+    (unsandboxed, for developing runners).
 
   The guest is the thread's sandbox. The runner host as a whole is not (see
   ARCHITECTURE.md for what the boundary covers).
-- **cube-gateway**, supervised by cubed, is each VM's only network:
-  - Frames travel runner → Iroh datagrams → gateway, which runs a smoltcp LAN
-    with DHCP and DNS.
-  - Only HTTP/HTTPS to public addresses gets out. HTTPS is intercepted with the
-    installation CA, and cubed decides each request (`egress-policy.ts`).
-  - The guest holds a GitHub placeholder; the gateway puts in the host's token
-    for github.com and api.github.com only, so `gh` and `git push` work
+- **A `berth vm` machine's network** is its own LAN in the runner:
+  - Only HTTP/HTTPS to public addresses gets out, under the egress policy
+    cubed sends with each start; HTTPS is intercepted with the runner's CA.
+  - The guest holds a GitHub placeholder; a request to github.com or
+    api.github.com goes through cubed to **cube-gateway**, the credential
+    proxy, which puts in the host's token, so `gh` and `git push` work
     normally in a thread.
 - **Tools** (Pi's read/write/edit/bash/codemode, the Claude Code mod) run in
-  the guest through the guest helper `cube-guest`. cubed reaches it with
-  OpenSSH via `cube-gateway dial`, with pinned host keys.
+  the guest through keel's `cube-agent` (`cube-guest` on a host runner),
+  over the runner's guest streams.
+- **Protocol 3 is retired** (phase 9, after v0.3.32): `cube-runner`, its
+  Debian VMs, SSH and the gateway's LAN are gone from the code. A runner
+  enrolled with protocol 3 keeps its row and its threads' history; cubed
+  never contacts or places on it (docs/runner-operations.md, "Protocol-3
+  runners").
 - **A new thread runs the repository's `.agents/setup`** after the checkout.
   For cube that installs Node 26, pnpm, Rust and build-essential, then runs
   `pnpm install` and builds the web app. The log is `~/.cache/cube/setup.log`
   in the guest. A failed setup still leaves the thread usable.
-- **Machine templates and hooks** (branch `vm-snapshots`, cube-runner 0.8.0,
-  not released): a project has external pre-setup and pre-resume hooks; a
-  project's first thread on a runner builds a template in a build machine
-  (checkout, pre-setup, `.agents/setup`, seal, power-off, publish) and later
+- **Machine templates and hooks**: a project has external pre-setup and
+  pre-resume hooks; a project's first thread on a `berth vm` builds a
+  template in a build machine (checkout, pre-setup, `.agents/setup`,
+  `template_publish`) and later
   threads start from it, skipping setup; resume hooks run on every machine
   boot. Semantics and defaults: ARCHITECTURE.md, "Machine templates and
   hooks"; decisions: `docs/plans/2026-10-05-machine-templates.md`.
@@ -48,23 +56,18 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
   ordinary agent work that is committed and pushed is deleted with the
   disk. The operator deletes retained disks from the project page
   ("retained machines") or with `POST /api/threads/<id>/discard`
-  (`vm.discard`, cube-runner 0.5.0+).
+  (`machine_discard`; not for a disk on a protocol-3 runner, which stays on
+  that host).
 
 ## How an installation runs
 
 - One cubed host: the managed launcher with a user service and the signed
   update feed (`docs/cubed-updates.md`).
-- Any number of runners, each with its own control key (enrollment refuses a
-  shared key). Each runner hosts up to `--max-active-vms` thread VMs at once
-  (`auto` by default: what fits at the per-VM maximum, 1 to 4; a new VM
-  needs 4 GiB free disk; cube-runner 0.7.0+, older runners host one). A
-  self-update to 0.7.0 applies `auto` on its own. Runners:
-  - **Linux x86-64:** `cube-runner.service`, a dedicated account in group
-    `kvm`;
-  - **macOS arm64:** the per-user LaunchAgent profile from
-    `install.sh --service`, using HVF.
-
-  Install, enroll, drain and upgrade: `docs/runner-operations.md`.
+- Any number of `berth vm` runners, each with its own directory, control key
+  (enrollment refuses a shared key) and `--max-machines`; installed from a
+  release (`share/berth/install-berth.sh`) or, on the cubed host,
+  `cubed runners init-local`. Install, enroll, upgrade and retire:
+  `docs/runner-operations.md`.
 - **One Apple Silicon Mac** (2026-10-08; berth and keel from the release
   after v0.3.31): `brew install cubeyard/tap/cube` installs cubed,
   `cube-berth` (berth with keel arm64), QEMU, erofs-utils and `gh` from the
@@ -89,17 +92,12 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
 1. Merge to `main` after CI (`ci.yml`; `platforms.yml` when it runs).
 2. Push a `vX.Y.Z` tag on a commit of `main`. `release.yml` waits until that
    commit passed `ci` and `node-transport (macos)` on `main`, then builds and
-   signs cubed for three platforms and cube-runner bundles for
-   `linux-x64-gnu` and `darwin-arm64`, all into a draft release.
-3. Publishing the draft makes it `latest`:
-   - cubed updates through its feed (browser, or `install.sh` with the
-     downloaded assets);
-   - **runners update themselves.** An hourly job (root systemd timer on
-     Linux, launchd job on macOS) verifies the signed manifest with the pinned
-     key, waits while a thread VM is active, and runs the bundle's
-     `upgrade.sh` (drain, switch, readiness, rollback).
-
-   No sudo is needed per release once a runner is on 0.6.0.
+   signs cubed for three platforms, keel for both architectures and berth
+   for `linux-x64-gnu` and `darwin-arm64`, all into a draft release. No
+   cube-runner is built any more.
+3. Publishing the draft makes it `latest`: cubed updates through its feed
+   (browser, or `install.sh` with the downloaded assets); berth runners are
+   upgraded by their operator (docs/runner-operations.md, "berth vm").
 
 Released on 2026-10-04/05:
 
@@ -116,12 +114,12 @@ A thread on the cube project gets a VM with the toolchain installed, ready in
 about 60-100 s. Verified inside the VM on 2026-10-05:
 - `pnpm typecheck` takes about 15 s;
 - `pnpm test` passes all 28 offline suites in about 2 min;
-- `cargo build -p cube-runner -p cube-gateway` takes about 1.5 min;
+- `cargo build -p berth -p cube-gateway` takes about 1.5 min;
 - `cargo test -p cube-gateway` passes.
 
-The guest has no KVM, so `scripts/test-node-transport.sh` with a real VM
-(`CUBE_TEST_VM=required`) has to run on a runner-capable host, not inside a
-thread.
+The guest has no KVM, so `scripts/test-node-transport.sh` runs the `berth
+host` parts there and skips `berth vm`; `CUBE_TEST_BERTH_VM=required` has to
+run on a runner-capable host, not inside a thread.
 
 ## Verified
 
@@ -402,15 +400,33 @@ fails in the machine, which has no credentials for it.
   `snapshot_prepare`/`snapshot_done`, `GuestInfo.limits`/`epoch`, what
   `ready` means for keel, the `Boot.documents` names that replace the seed,
   and the QEMU floor (with `mapped-ram` required).
-- Protocol 3 (`cube-runner` 0.8.x) is unchanged and keeps serving every
-  thread that is not on a p4 runner. Next: the rest of `cube-agent`, then
-  `berth vm`.
+- (Since then `berth vm` is built and is the pool, and protocol 3 is
+  retired: see "Protocol 3 retired" below.)
+
+## Protocol 3 retired (phase 9, after v0.3.32)
+
+Phase 8 stopped the protocol-3 runners on their hosts (server1's service and
+update timer disabled, the Mac's runner and updater booted out; the Mac's
+six retained disks kept). Phase 9 removes the code: `packages/node-transport`
+(cube-runner, the `cube/l2/1` frame channel), `ThreadVms`, the protocol-3
+client, the SSH transport, the cloud-init seed and p3 template key, p3
+enrollment and relocation, the gateway's LAN, control socket and CA (it is
+the credential proxy only now), `scripts/runner/` and the release's
+cube-runner bundles. A protocol-3 runner's registry row, last report and
+threads are kept and readable; its threads refuse to start, archive without
+contacting it and cannot discard their disks; its registration can be
+retired without a check (`protocol3-history-test.ts`, `api-test.ts`,
+`runner-observe-test.ts`, `runners-browser-test.ts`). Nothing in state is
+migrated. What is left on the hosts: docs/runner-operations.md,
+"Protocol-3 runners". The guest helper `cube-guest.py` still has its
+Debian-VM subcommands (`ssh`, `init`, `seal`, `packages`, `recover`, the
+systemd launcher): berth host and the offline local guest use the same file
+in its process mode, so pruning them is its own change.
 
 ## Known gaps and next steps
 
-- **Machine templates:** built on `vm-snapshots`, verified on Linux/KVM only
-  (`scripts/test-vm-templates.ts`); macOS/HVF templates are not verified. Not
-  done: building in the background on idle capacity, adopting a failed build
+- **Machine templates** on `berth vm`: not done: building in the background
+  on idle capacity, adopting a failed build
   machine as the thread's machine (a failed build costs a second cold boot),
   a template's checkout refresh against a real remote in a VM test (covered
   offline), per-project TTLs.
@@ -419,13 +435,8 @@ fails in the machine, which has no credentials for it.
 - **Gateway egress limits:** HTTP/2, WebSocket and CONNECT from the guest are refused (the portal's inbound WebSocket is separate). Clients that
   pin certificates fail. There is no IPv6.
 - **Not verified:**
-  - more than one active VM per runner on production hosts, macOS/HVF and
-    load (verified: two guests on one Linux/KVM runner in
-    `scripts/test-vm-concurrency.ts`, on a small nested-KVM host);
   - load;
-  - a guest that ignores ACPI power-down;
   - a real model driving `gh`/`git` on its own initiative in a long task;
-  - the macOS updater's first scheduled run;
   - a released berth binary end to end in production (installed from a
     release and running a thread).
 - **Other:**

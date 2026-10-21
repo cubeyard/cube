@@ -1,15 +1,23 @@
-/** cubed's supervision of cube-gateway, against a fake gateway that keeps
- * the real process contract (ready line, stdin lifeline, control socket):
- * start and ready, restart with backoff, every attached VM attached again
- * after a restart, the lifeline on stop, and no gateway failing visibly. */
+/** cubed's supervision of cube-gateway (the credential proxy of runner
+ * protocol 4), against a fake gateway that keeps the real process contract
+ * (ready line, stdin lifeline, credential socket): start and ready, the
+ * arguments, restart with backoff, the lifeline on stop, and no gateway
+ * failing visibly. With a real gateway's path (scripts/test-node-transport.sh
+ * passes target/debug/cube-gateway) also the real binary: its ready line, its
+ * socket, a credential stream decided by cubed's real egress policy, and its
+ * lifeline.
+ *
+ *   node packages/server/test/gateway-test.ts [target/debug/cube-gateway] */
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { GatewayClient, GatewaySupervisor, GatewayUnavailable, locateGateway, widestNetwork } from "../src/gateway.ts";
-import { ThreadVms } from "../src/vm.ts";
-import type { Registry } from "../src/registry.ts";
+import { create, toJsonString } from "@bufbuild/protobuf";
+import { EgressPolicy, serveEgress } from "../src/egress-policy.ts";
+import { GatewaySupervisor, GatewayUnavailable, locateGateway } from "../src/gateway.ts";
+import { CredentialHeaderSchema } from "../src/gen/runner_pb.js";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-gateway-"));
 const binary = path.join(root, "cube-gateway");
@@ -23,61 +31,36 @@ async function until(check: () => boolean, what: string, ms = 10000) {
 const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return quiet; } };
 const supervisors: GatewaySupervisor[] = [];
 const supervise = (options: Partial<ConstructorParameters<typeof GatewaySupervisor>[0]> = {}) => {
-  const supervisor = new GatewaySupervisor({ state: path.join(root, "state"), control: path.join(root, "gateway.sock"),
-    decide: path.join(root, "egress.sock"), network: "loopback", binary, backoff: { minMs: 100, maxMs: 400 }, log: quiet,
-    env: { FAKE_GATEWAY_LOG: logFile, FAKE_GATEWAY_CRASH: "3" }, ...options });
+  const supervisor = new GatewaySupervisor({ decide: path.join(root, "egress.sock"), credential: path.join(root, "credential.sock"),
+    binary, backoff: { minMs: 100, maxMs: 400 }, log: quiet, env: { FAKE_GATEWAY_LOG: logFile, FAKE_GATEWAY_CRASH: "3" }, ...options });
   supervisors.push(supervisor);
   return supervisor;
 };
 try {
-  assert.equal(widestNetwork([]), "loopback");
-  assert.equal(widestNetwork(["loopback", "relay", "direct"]), "relay");
   assert.equal(locateGateway({ CUBED_GATEWAY: binary }), binary);
   assert.equal(locateGateway({ CUBED_GATEWAY: path.join(root, "absent") }), null);
 
-  // No binary: VM threads fail visibly; there is no fallback.
+  // No binary: a credential stream fails visibly; there is no fallback.
   const absent = supervise({ binary: null });
   assert.match(absent.unavailable ?? "", /cube-gateway was not found/);
   await assert.rejects(absent.ready(), (error: unknown) => error instanceof GatewayUnavailable && /gateway unavailable: cube-gateway was not found/.test(error.message));
 
-  // Start, ready line, control API, arguments.
+  // Start, ready line, arguments: the credential proxy only.
   const supervisor = supervise();
-  const vms = new ThreadVms({ registry: {} as Registry, threads: path.join(root, "threads"), run: root, gateway: supervisor, log: quiet });
-  // Two VMs this process has attached (as ThreadVms.start records them).
-  const attached = (vms as unknown as { attached: Map<string, unknown> }).attached;
-  const spec = (thread: string) => ({ threadId: thread, runner: { peer: "c".repeat(64), network: "loopback" as const, address: "127.0.0.1:1" }, frameToken: "d".repeat(64), mac: "02:00:00:00:00:01" });
-  attached.set("0000000000000001", spec("t1"));
-  attached.set("0000000000000002", spec("t2"));
   supervisor.start();
-  const { client, hello } = await supervisor.ready();
-  assert.equal(hello.peer, "a".repeat(64));
-  assert.equal(client.control, path.join(root, "gateway.sock"));
-  assert.deepEqual(client.dialCommand("0000000000000001"), [binary, "dial", "--control", client.control, "--vm", "0000000000000001", "--port", "22"]);
+  assert.deepEqual(await supervisor.ready(), { version: "fake" });
   const first = events().find(event => event.event === "start")!;
-  assert.deepEqual(first.args, ["serve", "--state", path.join(root, "state"), "--control", path.join(root, "gateway.sock"),
-    "--decide", path.join(root, "egress.sock"), "--network", "loopback"]);
-  assert.equal(fs.statSync(path.join(root, "gateway.sock")).mode & 0o777, 0o600);
+  assert.deepEqual(first.args, ["serve", "--decide", path.join(root, "egress.sock"), "--credential", path.join(root, "credential.sock")]);
+  assert.equal(fs.statSync(path.join(root, "credential.sock")).mode & 0o777, 0o600);
 
-  // Crashes: restarted with growing backoff; every attached VM attached again each time.
+  // Crashes: restarted with growing backoff.
   await until(() => events().filter(event => event.event === "start").length >= 4, "three restarts");
-  const ready = await supervisor.ready();
-  await until(() => events().filter(event => event.event === "attach").length >= 6, "re-attach after every restart");
+  await supervisor.ready();
   const starts = events().filter(event => event.event === "start").map(event => event.at as number);
-  const gaps = starts.slice(1).map((at, index) => at - starts[index]);
-  assert.ok(gaps[1] > gaps[0] && gaps[2] > gaps[1], `backoff grows: ${gaps.join(", ")} ms`);
+  const gaps = starts.slice(1).map((at, index) => at - starts[index]!);
+  assert.ok(gaps[1]! > gaps[0]! && gaps[2]! > gaps[1]!, `backoff grows: ${gaps.join(", ")} ms`);
   assert.equal(supervisor.restarts, 3);
-  const attaches = events().filter(event => event.event === "attach").map(event => event.vmId);
-  assert.deepEqual(new Set(attaches), new Set(["0000000000000001", "0000000000000002"]));
-  assert.equal((await ready.client.status("0000000000000001"))?.link, "up");
-  assert.equal(await ready.client.status("00000000000000ff"), null);
-  assert.equal((await ready.client.list()).length, 2);
-  await ready.client.detach("0000000000000002");
-  assert.equal((await ready.client.list()).length, 1);
-
-  // A wider runner restarts the gateway in the wider mode.
-  await supervisor.ensureNetwork("direct");
-  await until(() => events().filter(event => event.event === "start").some(event => (event.args as string[]).includes("direct")), "restart in direct mode");
-  assert.equal((await supervisor.ready()).hello.network, "direct");
+  assert.equal(supervisor.unavailable, null);
 
   // Stop ends the lifeline; nothing restarts afterwards.
   const before = events().filter(event => event.event === "start").length;
@@ -86,8 +69,44 @@ try {
   await delay(600);
   assert.equal(events().filter(event => event.event === "start").length, before);
   await assert.rejects(supervisor.ready(), GatewayUnavailable);
-  await assert.rejects(new GatewayClient(binary, path.join(root, "gateway.sock")).hello(), GatewayUnavailable);
-  console.log("ok: gateway supervision: ready line, arguments, restart with growing backoff, every attached VM attached again, wider network restart, lifeline stop, no binary fails visibly");
+  console.log("ok: gateway supervision: ready line, credential-proxy arguments, restart with growing backoff, lifeline stop, no binary fails visibly");
+
+  // The real gateway, when its path is given.
+  const real = process.argv[2] ? path.resolve(process.argv[2]) : null;
+  if (real) {
+    const run = fs.mkdtempSync(path.join(os.tmpdir(), "cube-gw-"));
+    fs.chmodSync(run, 0o700);
+    const egress = await serveEgress(path.join(run, "egress.sock"), new EgressPolicy({ vms: { vm: () => null }, secrets: [], log: quiet as never }));
+    const credential = path.join(run, "credential.sock");
+    const gateway = supervise({ binary: real, credential, decide: path.join(run, "egress.sock"), env: {} });
+    gateway.start();
+    try {
+      assert.match((await gateway.ready()).version, /^\d+\.\d+\.\d+/);
+      assert.equal(fs.statSync(credential).mode & 0o777, 0o600);
+      // A stream for a machine cubed's policy does not know: denied before anything leaves.
+      const header = Buffer.from(toJsonString(CredentialHeaderSchema, create(CredentialHeaderSchema, { ref: { owner: "thread-x", id: "0123456789abcdef" }, credential: "github",
+        sni: "api.github.com", host: "api.github.com", port: 443 })));
+      const answer = await new Promise<string>((resolve, reject) => {
+        const socket = net.connect(credential);
+        let text = "";
+        socket.on("data", chunk => { text += chunk; });
+        socket.on("end", () => resolve(text));
+        socket.on("error", reject);
+        const length = Buffer.alloc(4);
+        length.writeUInt32BE(header.length);
+        socket.write(Buffer.concat([length, header, Buffer.from("GET /user HTTP/1.1\r\nhost: api.github.com\r\n\r\n")]));
+      });
+      assert.match(answer, /^HTTP\/1\.1 403 /);
+      assert.match(answer, /x-cube-denied: unknown thread machine/i);
+      await gateway.stop();
+      assert.equal(fs.existsSync(credential), false, "the gateway removes its socket when it stops");
+    } finally {
+      await gateway.stop();
+      await egress.close();
+      fs.rmSync(run, { recursive: true, force: true });
+    }
+    console.log(`ok: the real cube-gateway (${real}): ready line, a 0600 credential socket, a stream for an unknown machine denied by cubed's policy, lifeline stop`);
+  }
 } finally {
   for (const supervisor of supervisors) await supervisor.stop();
   fs.rmSync(root, { recursive: true, force: true });

@@ -168,7 +168,7 @@ rather than change them. New machines get the project's size, else
 
 | Path | Holds |
 |---|---|
-| `~/.cube-host` | cubed's state: projects, threads and their transcripts, OptChat, artifacts, the gateway's installation CA |
+| `~/.cube-host` | cubed's state: projects, threads and their transcripts, OptChat, artifacts (and, from protocol 3, the old gateway's CA, unused) |
 | `~/.cube/berth` | the runner's key, journal, machine disks, templates and layer cache |
 | `~/.cube/berth.json`, `~/.cube/berth.control.key` | cubed's config and key for reaching the runner |
 | `~/.cube/berth.env` | the image and the machines at once the service starts the runner with |
@@ -215,10 +215,11 @@ nothing in cube deletes them.
 protocol-3 runner `cube-runner`, with its state in `~/.cube/runner`,
 `~/.cube/runner.json` and `~/.cube/control.key`. It is no longer updated and
 `cube` no longer depends on it; `init-local` and `cube-berth` never read or
-touch its files. Archive its threads and retire it ([runner
-operations](runner-operations.md#status-drain-and-stop)), then `brew services
-stop cubeyard/tap/cube-runner` and `brew uninstall cubeyard/tap/cube-runner`.
-Its files stay until you delete them.
+touch its files, and cubed no longer contacts it. Archive its threads and
+retire it ([runner operations](runner-operations.md#protocol-3-runners-retired)),
+then `brew services stop cubeyard/tap/cube-runner` and `brew uninstall
+cubeyard/tap/cube-runner`. Its files, retained disks included, stay until
+you delete them.
 
 ## The runner and this Mac
 

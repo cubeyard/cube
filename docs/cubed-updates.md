@@ -132,8 +132,9 @@ Pi state remain in `CUBED_STATE`; model credentials remain in Pi's configured
 credential directory. The current migration contract is deliberately narrow:
 state schema 102 may update only to a release declaring minimum 102, maximum 102
 and rollback-safe-from 102, whose own metadata and self-check also report 102.
-No other migration compatibility is implied. Schema 102 is the move to thread
-VMs (runner protocol 3, runner config version 2): a schema 100 or 101
+No other migration compatibility is implied. Schema 102 began with thread
+VMs (runner config version 2); runners are protocol 4 now and a protocol-3
+runner's rows are kept, not migrated. A schema 100 or 101
 installation is refused an in-place update and must be reinstalled on a fresh
 `CUBED_STATE` with re-enrolled runners (see DEVELOPING.md); cubed also refuses
 to open a thread directory that still holds the old Pi session store.

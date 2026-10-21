@@ -43,7 +43,7 @@ import { CallResultSchema, CallSchema, Code, GuestInfoSchema, HelloAnswerSchema,
 import { Conversations } from "../src/conversation.ts";
 import { EgressPolicy } from "../src/egress-policy.ts";
 import { DEFAULT_EXEC_TIMEOUT_MS, EXEC_GRACE_MS, IDLE_MS, MachineActivity } from "../src/machine-idle.ts";
-import type { GuestTransport } from "../src/guest-ssh.ts";
+import type { GuestTransport } from "../src/guest-transport.ts";
 import { createModels } from "@earendil-works/pi-ai";
 import { Registry, type Thread } from "../src/registry.ts";
 import { RunnerMachines } from "../src/runner-machines.ts";

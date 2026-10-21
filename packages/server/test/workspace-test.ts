@@ -1,7 +1,7 @@
 /** Offline Workspace checks: the shared contract over VmWorkspace and the
  * real guest helper under a temporary root (local guest), both in process and
  * through the HTTP routes, plus the lease across processes. The same contract
- * runs against a real VM in smoke-node-adapter.ts. */
+ * runs against a real `berth host` in runner-host-test.ts. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -12,7 +12,7 @@ import { WorkspaceError } from "../src/workspace.ts";
 import { HttpWorkspace } from "../src/workspace-http.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
-import type { GuestTransport } from "../src/guest-ssh.ts";
+import type { GuestTransport } from "../src/guest-transport.ts";
 import { LocalGuestTransport } from "./local-guest.ts";
 import { serveWorkspace, workspaceContract, workspaceServicesContract } from "./workspace-contract.ts";
 

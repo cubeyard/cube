@@ -2,7 +2,7 @@
  * replay. Limit checks call the tool directly with stand-in nested tools; the
  * agent checks run pi-durable with cube's real workspace tools over a local
  * guest (the real guest helper under a temporary root). Real VMs run in
- * scripts/test-vm-e2e.ts. */
+ * runner-vm-cubed-test.ts. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";

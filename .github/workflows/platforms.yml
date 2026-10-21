@@ -1,5 +1,5 @@
-# The macOS checks: the Rust runner and its launchd packaging, and the
-# Homebrew formulas. Every push to main runs them, a pull request only when it
+# The macOS checks: berth, keel's layers, cube-gateway and their tests, and
+# the Homebrew formulas. Every push to main runs them, a pull request only when it
 # touches what they check, anyone by hand. release.yml requires
 # `node-transport (macos)` on the tagged commit (DEVELOPING.md, "CI").
 name: platforms
@@ -14,7 +14,6 @@ on:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
-      - packages/node-transport/**
       - packages/gateway/**
       - packages/netstack/**
       - packages/runner-protocol/**
@@ -29,10 +28,10 @@ on:
       - packages/server/test/runner-vm-cubed-v3-test.ts
       - packages/server/test/runner-vm-v13-test.ts
       - packages/server/test/leak-scan*.ts
+      - packages/server/test/gateway-test.ts
+      - packages/server/test/fake-gateway.ts
       - scripts/test-node-transport.sh
       - scripts/test-local-berth.ts
-      - scripts/runner-production-test.ts
-      - scripts/runner/**
       - scripts/berth/**
       - scripts/berth-release-test.ts
       - scripts/homebrew/**

@@ -4,7 +4,7 @@
 in [`../runner-protocol/proto/runner.proto`](../runner-protocol/proto/runner.proto)).
 Where [keel](../keel) is what cube puts inside a thread machine, berth is
 where those machines lie: it creates, holds and reports them for cubed. It
-replaces `cube-runner` (protocol 3, `packages/node-transport`) step by step.
+replaced `cube-runner` (protocol 3), which is retired.
 
 It has two modes: `berth vm`, whose machines are keel guests under QEMU,
 and `berth host`, unsandboxed, for developing runners.
@@ -220,7 +220,7 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   becomes `DIRECTORY/templates/<id>.erofs` (the build machine's id): its
   record written as `publishing`, the disk renamed, cut to the layer's
   size, made read-only (0444) and hashed, the record `ready`. The build
-  machine is deleted, as p3 releases its build VM. Asked again with the
+  machine is deleted. Asked again with the
   same key and meta, the same template (another: `ALREADY_EXISTS
   template`). The agent has 10 min (`completion_unknown` after). The call
   holds the runner's one-mutation-at-a-time lock only to begin (checks,
@@ -245,7 +245,7 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   (`FAILED_PRECONDITION template_image_changed`, masterplan B-8 D3) and
   stays until it is deleted. `template_delete` makes it `REMOVING`; it goes
   (file and record) once no machine that is not deleted, retained ones
-  too, is made from it (p3's rule; gone: `NOT_FOUND`). `template_list` and
+  too, is made from it (gone: `NOT_FOUND`). `template_list` and
   `Runner.templates` (hello and watch) list ready and removing ones, with
   `users` and `bytes`. Templates are not the layer cache's (B-8 D2): never
   trimmed and not in its limit, though on the same disk; while one exists,
@@ -266,7 +266,8 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   and does not use the guest channel. Evidence that is missing or from an
   earlier boot says so (`present`, `current`, `reason`). Every string is
   made safe for a terminal, and keys, tokens, `password=`-style values and
-  `cube_ph_` placeholders are redacted (node-transport's cleaning, copied);
+  `cube_ph_` placeholders are redacted (the cleaning cube-runner's
+  diagnosis had, copied);
   when the document would be larger than 256 KiB, the console goes first,
   then the events, and `bounds.dropped` says what went. A thread's
   commands run in a root whose `/dev` has no console, so the console's
@@ -369,8 +370,8 @@ Debian:
 A release carries `berth-<release>-<platform>.tar.gz` for `linux-x64-gnu`
 and `darwin-arm64`, each with a signed `berth-<platform>.json`, and keel's
 kernel and base for the same release (`packages/keel/README.md`, Releases).
-There is no upgrade path from the protocol-3 `cube-runner`: a `berth vm` is
-a new runner with its own directory and key.
+A `berth vm` has its own directory and key; nothing of a protocol-3
+`cube-runner`'s state is carried over.
 
 1. **Verify** the downloaded release from a checkout of its tag (never with
    a script from inside the bundle):

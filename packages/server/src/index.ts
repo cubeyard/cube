@@ -13,14 +13,14 @@ import { NO_HOOKS, projectHooks, projectMachine, Registry, threadAgent, type Pro
 import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { Conversations, THREADS_CLOSE_MS } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
-import { loadRunnerConfig, type RunnerNetwork, type TrustedRunnerHealth } from "./iroh-node.ts";
+import type { TrustedRunnerHealth } from "./runner-types.ts";
 import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
-import { GatewaySupervisor, locateGateway, widestNetwork } from "./gateway.ts";
-import { errorText, machineFor, ThreadVms, vmSizes, type ThreadMachines } from "./vm.ts";
+import { GatewaySupervisor, locateGateway } from "./gateway.ts";
+import { errorText, machineFor, vmSizes, type ThreadMachines } from "./vm.ts";
 import { RunnerMachines } from "./runner-machines.ts";
 import { registryCredentialRoute } from "./runner-credentials.ts";
 import { closeRunnerSessions, routeCredentials } from "./runner-session.ts";
-import { ProtocolMachines, runnerHealth as protocolRunnerHealth } from "./runner-select.ts";
+import { ProtocolMachines, runnerHealth as protocolRunnerHealth, runnerProtocol } from "./runner-select.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
@@ -72,8 +72,10 @@ options:
 cubed stays in the foreground. It has no application-level user authentication;
 keep it on loopback or behind an authenticated, access-controlled private network.
 
-runners enroll admits the runner a private version-2 config describes to the
-installation's global pool, after an authenticated protocol-3 hello.
+runners enroll admits the berth runner a private protocol-4 config describes,
+after an authenticated hello: a berth vm joins the global pool, a berth host
+takes only threads started on it by name. Protocol-3 runners (cube-runner)
+are no longer admitted or contacted; their registry rows and threads stay.
 runners init-local sets up a berth vm on this host and enrolls it: cubed's
 control key, berth's directory, berth.env (the image and the machines at once
 its service starts it with) and berth.json under <home> (default ~/.cube),
@@ -119,8 +121,9 @@ function claudeMod(state: string): string {
 
 /** cubed's private sockets: `workspace.sock` (the Claude Code mod reaches
  * the thread workspace on it; workspace routes only, the lease token is the
- * authorization), `gateway.sock` (served by cube-gateway) and `egress.sock`
- * (cubed's decision API for the gateway). All 0600 in a 0700 directory. */
+ * authorization), `credential.sock` (served by cube-gateway) and
+ * `egress.sock` (cubed's decision API for the gateway). All 0600 in a 0700
+ * directory. */
 async function runDirectory(state: string): Promise<{ directory: string; socket: string; temporary: string | null }> {
   const directory = path.join(state, "run");
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -141,15 +144,6 @@ async function runDirectory(state: string): Promise<{ directory: string; socket:
   if (live) throw new Error(`another cubed is serving this CUBED_STATE (${socket} answers); run one cubed per state`);
   fs.rmSync(socket, { force: true });
   return { directory, socket, temporary: null };
-}
-
-/** The gateway's network mode: the widest among enrolled runners. */
-function gatewayNetwork(registry: Registry): RunnerNetwork {
-  const modes: RunnerNetwork[] = [];
-  for (const runner of registry.listRunners()) {
-    try { modes.push(loadRunnerConfig(runner.configPath).config.network); } catch { /* reported when used */ }
-  }
-  return widestNetwork(modes);
 }
 
 /** Test builds of cube-gateway only (`test-hooks`): extra serve arguments. */
@@ -257,8 +251,8 @@ export async function createCubed(options: {
   /** Tests: how long a protocol-4 machine must be idle before the recovery
    * loop suspends it (default IDLE_MS, 5 min; runner-vm-cubed-suspend-test). */
   suspendIdleMs?: number;
-  /** Thread machines; default: each thread on its runner's protocol (VMs
-   * through a supervised cube-gateway, or protocol-4 host machines).
+  /** Thread machines; default: each thread on its runner's protocol
+   * (protocol 4: `berth vm` and `berth host`; protocol 3 is refused).
    * Offline tests pass local guests, or a factory given the registry. */
   machines?: ThreadMachines | ((registry: Registry, threads: string) => ThreadMachines);
   /** The cube-gateway binary (null: none); default: locateGateway(). */
@@ -298,8 +292,7 @@ export async function createCubed(options: {
   let p4: RunnerMachines | null = null;
   if (!machines) {
     const credential = path.join(run, "credential.sock");
-    gateway = new GatewaySupervisor({ state: path.join(options.state, "gateway"), control: path.join(run, "gateway.sock"),
-      decide: path.join(run, "egress.sock"), credential, network: gatewayNetwork(registry), extraArgs: gatewayTestArgs(process.env),
+    gateway = new GatewaySupervisor({ decide: path.join(run, "egress.sock"), credential, extraArgs: gatewayTestArgs(process.env),
       ...(options.gateway === undefined ? {} : { binary: options.gateway }) });
     gateway.start();
     // Protocol-4 runners' credential streams go to the gateway's proxy.
@@ -307,7 +300,7 @@ export async function createCubed(options: {
     routeCredentials(registryCredentialRoute({ registry, threads: threadsDirectory, socket: () => supervised.running ? credential : null }));
     // Each thread on its runner's protocol (runner-select.ts).
     p4 = new RunnerMachines({ registry, threads: threadsDirectory, policy, idleMs: options.suspendIdleMs });
-    machines = new ProtocolMachines({ registry, p3: new ThreadVms({ registry, threads: threadsDirectory, run, gateway }), p4 });
+    machines = new ProtocolMachines({ registry, p4 });
   }
   let portal: Portal | null = null;
   let artifacts: Artifacts | null = null;
@@ -342,6 +335,8 @@ export async function createCubed(options: {
     if (!runner) throw new Error("runner not found");
     const current = runnerView(id);
     if (current?.retiredAt) return current;
+    // A protocol-3 runner is never contacted: its row keeps what it last said.
+    if (runnerProtocol(runner) === 3) return current!;
     try {
       registry.recordRunnerProbe(id, { health: await runnerHealth(runner) });
     } catch (error) {
@@ -777,7 +772,7 @@ export async function createCubed(options: {
           const projectId = text("projectId");
           const requestId = text("requestId");
           const prompt = text("text");
-          // A runner by name (node id or id): the only way onto a protocol-3 or host runner.
+          // A runner by name (node id or id): the only way onto a host runner.
           const runnerId = typeof body.runner === "string" && body.runner.trim() ? registry.namedRunnerId(body.runner) : undefined;
           // A replayed request gets its thread back at the commits it started at.
           const resolved = registry.threadByRequest(projectId, requestId) ? undefined : await latestCommits(projectId);
@@ -936,7 +931,9 @@ export async function createCubed(options: {
     probing = true;
     try {
       for (const runner of registry.runnerStatuses()) {
-        if (!runner.retiredAt) await probeRunner(runner.id).catch(() => {});
+        // A protocol-3 runner is never contacted; its last report stays as it was.
+        const enrolled = registry.getRunner(runner.id);
+        if (!runner.retiredAt && enrolled && runnerProtocol(enrolled) === 4) await probeRunner(runner.id).catch(() => {});
       }
     } finally { probing = false; }
   };
@@ -1111,6 +1108,7 @@ async function runnersStatus(state: string): Promise<number> {
       return 0;
     }
     const results = await Promise.all(runners.map(async runner => {
+      if (runnerProtocol(runner) === 3) return { runner, reachable: false as const, retired: true as const };
       try {
         const health = await protocolRunnerHealth(runner);
         return { runner, reachable: true as const, health };
@@ -1120,9 +1118,10 @@ async function runnersStatus(state: string): Promise<number> {
     }));
     for (const result of results) {
       if (result.reachable) console.log(`${result.runner.nodeId}: reachable; lifecycle=${result.health.lifecycle}; machines=${result.health.activeVms} of ${result.health.maxActiveVms}; retained=${result.health.retainedVms}`);
+      else if ("retired" in result) console.log(`${result.runner.nodeId}: protocol 3 (cube-runner), no longer supported; not contacted`);
       else console.log(`${result.runner.nodeId}: unreachable; ${result.error}`);
     }
-    return results.some(result => !result.reachable) ? 1 : 0;
+    return results.some(result => !result.reachable && !("retired" in result)) ? 1 : 0;
   } finally {
     // A protocol-4 health read opens this process's cached RunnerSession
     // (its endpoint, connection and watch keep Node alive); a one-shot

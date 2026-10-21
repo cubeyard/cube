@@ -1,7 +1,7 @@
 /** Process-level smokes over local guests (the real guest helper under
  * temporary roots, no VM): four Pi SIGKILL boundaries and the product API
  * with SIGKILL restarts and a claude · max thread through a fake `claude`.
- * Real VMs, the runner and the gateway run in scripts/test-vm-e2e.ts. */
+ * Real machines on berth run in packages/server/test/runner-vm-cubed-test.ts. */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

@@ -3,14 +3,14 @@
  * (`node.status` and the `node.hello` before it) or from cubed's registry;
  * what neither says is listed as unknown, never guessed. Nothing here
  * contacts a runner: the background probe keeps the reports current. */
-import type { TrustedRunnerHealth } from "./iroh-node.ts";
+import type { TrustedRunnerHealth } from "./runner-types.ts";
 import { pooledRunner, type Registry, type RunnerContactStatus } from "./registry.ts";
 
 /** A report older than this many probe intervals is stale even if the latest
  * probe has not failed yet (cubed was down, or the probe loop is stuck). */
 const FRESH_INTERVALS = 3;
 
-/** Unknown for every runner: protocol 3 does not report it. */
+/** Unknown for every runner: the runner protocol does not report it. */
 export const NOT_REPORTED = [
   "capacity mode: whether --max-active-vms is auto or an explicit number (only the effective bound is reported)",
   "self-update: when the runner's updater last ran, what it found and whether an upgrade is pending",
@@ -42,11 +42,12 @@ export interface RunnerObservation {
   /** `host`: berth host (protocol 4), unsandboxed; it takes only the
    * threads started on it by name and is never part of the pool. */
   kind: "vm" | "host";
-  /** The runner protocol it was enrolled with: 3 (`cube-runner`) or 4
-   * (`berth`). */
+  /** The runner protocol it was enrolled with: 4 (`berth`), or 3
+   * (`cube-runner`, retired: never contacted or placed on; its row, last
+   * report and threads stay readable). */
   protocol: 3 | 4;
-  /** It takes only the threads started on it by name (a protocol-3 or host
-   * runner, pooledRunner): never part of the pool. */
+  /** It takes only the threads started on it by name (a host runner,
+   * pooledRunner): never part of the pool. */
   byName: boolean;
   contact: { status: RunnerContactStatus; lastAttemptAt: number | null; lastContactAt: number | null; unreachableSince: number | null; error: string | null };
   /** The last report the runner sent; null if it never answered. */
@@ -75,10 +76,11 @@ export interface CapacityGroup {
 export interface RunnersObservation {
   observedAt: number; probeIntervalMs: number;
   pool: { runners: number; allocatable: number; slots: number; reserved: number; free: number };
-  /** By protocol, with every open thread on a protocol-3 runner. The pool
-   * is the protocol-4 VM runners (`berth vm`); a protocol-3 or host runner
-   * takes only threads started on it by name. */
-  capacity: { p3: CapacityGroup & { openThreads: number }; p4: { vm: CapacityGroup; host: CapacityGroup } };
+  /** By protocol. The pool is the protocol-4 VM runners (`berth vm`); a
+   * host runner takes only threads started on it by name. Protocol-3
+   * runners take none: only how many are still enrolled and their threads
+   * that are not archived. */
+  capacity: { p3: { runners: number; openThreads: number }; p4: { vm: CapacityGroup; host: CapacityGroup } };
   runners: RunnerObservation[];
   notReported: readonly string[];
 }
@@ -118,14 +120,16 @@ export function observeRunners(registry: Registry, probeIntervalMs: number, now 
       else if (!known && !host) unknown.push(`os, architecture and accelerator: platform ${health.platform} is not one cubed knows`);
       if (!report.fresh) unknown.push("current state: the report below is the last one received, not the runner's state now");
     } else unknown.push("everything the runner reports (version, platform, lifecycle, machines): it has not answered a probe");
+    const retiredProtocol = runner?.protocol !== 4;
+    if (retiredProtocol) unknown.push("current state: protocol 3 (cube-runner) is no longer supported, so cubed does not contact this runner");
     const retirement = status.retiredAt ? "retired" : status.allocationState === "retiring" ? "retiring" : "none";
     const kind = runner?.kind === "host" ? "host" : "vm";
-    const byName = runner ? !pooledRunner(runner) : false;
+    const byName = runner ? !retiredProtocol && !pooledRunner(runner) : false;
     // The pool: what a thread started without naming a runner may get.
-    const allocatable = retirement === "none" && kind === "vm" && !byName;
+    const allocatable = retirement === "none" && kind === "vm" && !byName && !retiredProtocol;
     const total = status.maxActiveVms;
     return {
-      id: status.id, nodeId: status.nodeId, enrolledAt: status.enrolledAt, kind, protocol: runner?.protocol === 4 ? 4 : 3, byName,
+      id: status.id, nodeId: status.nodeId, enrolledAt: status.enrolledAt, kind, protocol: retiredProtocol ? 3 : 4, byName,
       contact: { status: status.contactStatus, lastAttemptAt: status.lastAttemptAt, lastContactAt: status.lastContactAt,
         unreachableSince: status.unreachableSince, error: status.error },
       report,
@@ -155,7 +159,7 @@ export function observeRunners(registry: Registry, probeIntervalMs: number, now 
       free: allocatable.reduce((sum, runner) => sum + runner.slots.free, 0) },
     capacity: {
       // The same open threads that reserve slots (registry OPEN_THREAD), on every protocol-3 runner.
-      p3: { ...group(p3), openThreads: p3.reduce((sum, runner) => sum + runner.slots.reserved, 0) },
+      p3: { runners: p3.filter(runner => runner.retirement !== "retired").length, openThreads: p3.reduce((sum, runner) => sum + runner.slots.reserved, 0) },
       p4: { vm: group(p4.filter(runner => runner.kind === "vm")), host: group(p4.filter(runner => runner.kind === "host")) },
     },
     runners: observed,
@@ -181,10 +185,10 @@ export function describeRunners(view: RunnersObservation): string {
     return `${group.free} of ${group.slots} slots free on ${group.runners} ${group.runners === 1 ? "runner" : "runners"}${notNow.length ? ` (not current: ${notNow.join("; ")})` : ""}`;
   };
   const { p3, p4 } = view.capacity;
-  const lines = [`capacity: p3 (protocol 3, cube-runner: only threads started on the runner by name) ${slotsText(p3)}, ${p3.openThreads} open p3 threads; `
-    + `p4 (protocol 4, berth) VM runners (the pool, which takes any thread that names no runner) ${slotsText(p4.vm)}, `
+  const lines = [`capacity: p4 (protocol 4, berth) VM runners (the pool, which takes any thread that names no runner) ${slotsText(p4.vm)}, `
     + `host runners (only threads started on the runner by name) ${slotsText(p4.host)}. `
-    + "slots count cubed's open threads, not the machines a runner hosts.",
+    + "slots count cubed's open threads, not the machines a runner hosts."
+    + (p3.runners || p3.openThreads ? ` ${p3.runners} protocol-3 runners (cube-runner, no longer supported: never contacted, no slots) are still enrolled, with ${p3.openThreads} unarchived threads.` : ""),
   `runners as cubed last heard from them (probed every ${Math.round(view.probeIntervalMs / 60_000) || "<1"} min; nothing below is inferred from a release being published):`];
   for (const runner of listed) {
     const { report, contact, slots } = runner;
@@ -197,10 +201,11 @@ export function describeRunners(view: RunnersObservation): string {
       lines.push("  protocol-4 VM runner (berth vm): in the pool; a thread on it never moves to another runner, "
         + "and while it is down, its threads wait.");
     } else {
-      lines.push("  protocol-3 VM runner (cube-runner): takes only threads started on it by name (spawn with runner); "
-        + "the pool never places a thread here.");
+      lines.push("  protocol-3 VM runner (cube-runner): NO LONGER SUPPORTED. cubed never contacts it and no thread starts on it; "
+        + "its threads' history stays readable, their machines do not start again, and an archive leaves any disk on that runner's host.");
     }
-    const contactText = contact.status === "reachable" ? "reachable"
+    const contactText = runner.protocol === 3 ? "not contacted (protocol 3)"
+      : contact.status === "reachable" ? "reachable"
       : contact.status === "unknown" ? "not probed yet"
       : `${contact.status}${contact.unreachableSince ? ` since ${ago(view.observedAt - contact.unreachableSince)}` : ""}${contact.error ? ` (${errorCode(contact.error)})` : ""}`;
     lines.push(`  contact: ${contactText}; last answer ${contact.lastContactAt ? ago(view.observedAt - contact.lastContactAt) : "never"}`);

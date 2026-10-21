@@ -14,7 +14,7 @@
  * (RunnerWait).
  *
  * On `berth vm` a new machine starts from its project's template on that
- * runner when there is one (vm-template.ts), as on protocol 3: the newest
+ * runner when there is one (vm-template.ts): the newest
  * fresh one for its key, or one built now in the thread's slot before its
  * own machine exists, or the base. The build machine is cubed's own: its
  * own id and placeholders (`vm.build`), made from the base with a template
@@ -41,8 +41,8 @@ import type { Duplex } from "node:stream";
 import type { MessageInitShape } from "@bufbuild/protobuf";
 import { MachineStatus_Phase, Runner_Kind, Template_State, type EgressPolicySchema, type GuestInfo, type Machine, type Runner, type SizeSchema,
   type Template } from "./gen/runner_pb.js";
-import type { GuestTransport } from "./guest-ssh.ts";
-import type { RunnerTemplate } from "./iroh-node.ts";
+import type { GuestTransport } from "./guest-transport.ts";
+import type { RunnerTemplate } from "./runner-types.ts";
 import { createLogger, type Logger } from "./log.ts";
 import { newPlaceholder } from "./egress-policy.ts";
 import { NO_HOOKS, placement, threadAgent, type HookOutcome, type Registry, type StartupStep, type Thread } from "./registry.ts";
@@ -66,7 +66,7 @@ const MAX_DIAGNOSIS_BYTES = 256 * 1024;
 const MAX_REASON = 512;
 /** keel's hooks (hooks.rs `HOOKS`), the only names a guest's outcomes are shown for. */
 const HOOK_NAMES = ["pre-setup", "setup", "pre-resume", "resume"];
-/** How long cubed's preparation command in a build machine may run (as p3's). */
+/** How long cubed's preparation command in a build machine may run. */
 const BUILD_PREPARE_TIMEOUT_MS = 30 * 60 * 1000;
 /** What a runner says it can do when it suspends machines (berth vm with
  * `--suspend-disk-margin-gib`). */
@@ -523,10 +523,9 @@ export class RunnerMachines implements ThreadMachines {
   }
 
   /** Decides what a new machine's disk on a VM runner is made from and
-   * records it on the thread (`vm.preparation`), as vm.ts `prepare` does
-   * for protocol 3: the newest fresh template of the project on this
-   * runner for its key, or one built now, or the base. Returns the
-   * updated thread. */
+   * records it on the thread (`vm.preparation`): the newest fresh template
+   * of the project on this runner for its key, or one built now, or the
+   * base. Returns the updated thread. */
   private async prepare(thread: Thread, session: RunnerSession, runner: Runner, size: MessageInitShape<typeof SizeSchema>): Promise<Thread> {
     const { registry } = this.options;
     registry.beginStartupStep(thread.id, { name: "lookup" });
@@ -566,7 +565,7 @@ export class RunnerMachines implements ThreadMachines {
     const flight = `${thread.runnerId}:${key}`;
     // One build per runner and key: a thread that comes meanwhile starts fresh.
     if (this.builds.has(flight)) return fresh(`${missing}; another thread is preparing the project's template now`);
-    // As p3: a failed build is not tried again for an hour with the same
+    // A failed build is not tried again for an hour with the same
     // key, machine size and commit.
     const attempt = `${flight}:${size.vcpus}:${size.memoryMib}:${thread.allocation.repositories[0]?.baseOid ?? ""}`;
     const failed = this.failedBuilds.get(attempt);
@@ -586,7 +585,7 @@ export class RunnerMachines implements ThreadMachines {
       if (error instanceof RunnerError && error.code === "UNAVAILABLE") throw error;
       const text = message(error);
       // No room (B-8 C2, or no free machine): the thread cannot move, so it
-      // starts fresh; as on p3 a refusal is no failed build and sets no backoff.
+      // starts fresh; a refusal is no failed build and sets no backoff.
       if (!(error instanceof RunnerError && error.code === "RESOURCE_EXHAUSTED")) this.failedBuilds.set(attempt, { at: Date.now(), error: text });
       this.log.warn("template build failed; starting fresh", { thread: thread.id, runner: session.nodeId, error: text });
       return registry.updateThreadVm(thread.id, { preparation: { source: "fresh", reason: `the template build failed: ${text}` } });
@@ -848,7 +847,6 @@ export class RunnerMachines implements ThreadMachines {
       events: this.events.read(thread.id),
       runner: this.onVm(thread) ? await this.runnerDiagnosis(thread)
         : { status: "unsupported", reason: "a host runner (protocol 4) has no machine diagnosis" },
-      gateway: { status: "none", reason: "protocol 4 has no gateway" },
       guest: guest ? { status: "observed", at: Date.now(), ready: guest.ready, ms: 0, error, ...(agent ? { agent } : {}) }
         : { status: "none", reason: "the runner has not reported this machine's guest" },
     };

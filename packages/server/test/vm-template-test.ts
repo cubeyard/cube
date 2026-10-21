@@ -1,20 +1,20 @@
 /** Machine templates and hooks, offline: the hook order and failure rules
  * with the real guest helper under a temporary root (vm.ts scripts), resume
  * once per boot, a template's checkout refresh and stale setup, the template
- * key and its invalidation, selection and collection, the seed's hook files,
- * and project hook validation. Real VMs: scripts/test-vm-templates.ts. */
+ * key and its invalidation, selection and collection, the hooks in a keel
+ * machine's boot documents, and project hook validation. Templates on
+ * berth vm: runner-vm-templates-test.ts and runner-vm-cubed-test.ts. */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { gunzipSync } from "node:zlib";
-import type { RunnerTemplate } from "../src/iroh-node.ts";
+import type { RunnerTemplate } from "../src/runner-types.ts";
 import { MAX_HOOK_BYTES, NO_HOOKS, projectHooks, type WorkspaceAllocation } from "../src/registry.ts";
 import { provisionWorkspace, readStartupLog, resumeWorkspace, StepFailure } from "../src/vm.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
-import { GUEST_HOOKS_DIRECTORY, GUEST_PACKAGES, vmSeed } from "../src/vm-seed.ts";
-import { DEFAULT_TEMPLATE_TTL_MS, TEMPLATE_FORMAT, obsoleteTemplates, pickTemplate, templateKey, templateMeta, templateSettings } from "../src/vm-template.ts";
+import { bootDocuments } from "../src/vm-seed.ts";
+import { DEFAULT_TEMPLATE_TTL_MS, TEMPLATE_FORMAT, keelTemplateKey as templateKey, obsoleteTemplates, pickTemplate, templateMeta, templateSettings } from "../src/vm-template.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
 import { LocalGuestTransport } from "./local-guest.ts";
 
@@ -204,7 +204,7 @@ try {
       { ...base, runner: { ...runner, platform: "macos-aarch64" } },
       { ...base, diskGiB: 64 },
     ]) assert.notEqual(templateKey(changed), key, JSON.stringify(changed).slice(0, 120));
-    console.log("ok: template key covers project, repositories, pre-setup, base image, platform, disk, guest helper; not commits or resume hooks");
+    console.log("ok: template key covers project, repositories, pre-setup, base image, platform, disk; not commits or resume hooks");
   }
 
   // 5. Selection and collection.
@@ -233,25 +233,14 @@ try {
     console.log("ok: newest fresh template of the key is chosen; expired, unreadable, orphaned and superseded ones are removed");
   }
 
-  // 6. The seed carries the hooks; a template's machine skips the package refresh.
+  // 6. The boot documents carry the hooks; the largest hooks still fit berth's bound.
   {
-    execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", path.join(root, "host")]);
-    const input = { vmId: "0123456789abcdef", hostKey: { privateKey: fs.readFileSync(path.join(root, "host"), "utf8"), publicKey: fs.readFileSync(path.join(root, "host.pub"), "utf8") },
-      clientKeyPub: fs.readFileSync(path.join(root, "host.pub"), "utf8"), caPem: "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n", placeholders: {} };
-    const config = (seed: { userData: string }) => JSON.parse(seed.userData.slice("#cloud-config\n".length));
-    const withHooks = config(vmSeed({ ...input, hooks: { preSetup: "echo a", preResume: "#!/bin/sh\necho b" } }));
-    const hook = (name: string) => withHooks.write_files.find((file: { path: string }) => file.path === `${GUEST_HOOKS_DIRECTORY}/${name}`);
-    assert.equal(gunzipSync(Buffer.from(hook("pre-setup").content, "base64")).toString(), "#!/bin/bash\necho a\n");
-    assert.equal(gunzipSync(Buffer.from(hook("pre-resume").content, "base64")).toString(), "#!/bin/sh\necho b\n");
-    assert.equal(hook("pre-setup").permissions, "0755");
-    assert.deepEqual([withHooks.package_update, withHooks.packages], [true, GUEST_PACKAGES]);
-    const none = config(vmSeed({ ...input, hooks: NO_HOOKS }));
-    assert.ok(!none.write_files.some((file: { path: string }) => file.path.startsWith(GUEST_HOOKS_DIRECTORY)));
-    const onTemplate = config(vmSeed({ ...input, fromTemplate: true }));
-    assert.deepEqual([onTemplate.package_update, onTemplate.packages], [false, undefined]);
-    // The largest hooks still fit the runner's seed limit.
-    vmSeed({ ...input, hooks: { preSetup: "#".repeat(MAX_HOOK_BYTES), preResume: "#".repeat(MAX_HOOK_BYTES) } });
-    console.log("ok: seed writes the hooks as executables; a template machine skips the package refresh; maximal hooks fit");
+    const documents = bootDocuments({ vmId: "0123456789abcdef", placeholders: {}, hooks: { preSetup: "echo a", preResume: "#!/bin/sh\necho b" } });
+    assert.equal(Buffer.from(documents["hooks/pre-setup"]!).toString(), "#!/bin/bash\necho a\n");
+    assert.equal(Buffer.from(documents["hooks/pre-resume"]!).toString(), "#!/bin/sh\necho b\n");
+    assert.ok(!Object.keys(bootDocuments({ vmId: "0123456789abcdef", placeholders: {}, hooks: NO_HOOKS })).some(name => name.startsWith("hooks/")));
+    bootDocuments({ vmId: "0123456789abcdef", placeholders: {}, hooks: { preSetup: "#".repeat(MAX_HOOK_BYTES), preResume: "#".repeat(MAX_HOOK_BYTES) } });
+    console.log("ok: boot documents carry the hooks as scripts; maximal hooks fit");
   }
 
   // 7. Project hook validation.

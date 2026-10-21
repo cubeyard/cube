@@ -2,28 +2,21 @@
 
 ## Support matrix
 
-| | cubed | cube-runner (thread machines) |
+| | cubed | berth vm (thread machines, keel) |
 |---|---|---|
-| macOS, Apple Silicon | signed release (`darwin-arm64`), Homebrew or `install.sh` | HVF; Homebrew QEMU. Verified as a remote runner in production; the same-Mac loopback setup ([macOS with Homebrew](macos.md)) is unverified on real hardware |
-| macOS, Intel | no release; source checkout only | not supported: the runner refuses `x86_64` macOS |
-| Linux x86-64 (glibc) | signed release | KVM, QEMU 7.2+; verified with real guests |
-| Linux arm64 (glibc) | signed release | no runner release |
+| macOS, Apple Silicon | signed release (`darwin-arm64`), Homebrew or `install.sh` | HVF; Homebrew's QEMU 11.1.x, without `-sandbox` ([berth vm on a Mac](macos.md#berth-vm-on-a-mac)) |
+| macOS, Intel | no release; source checkout only | no |
+| Linux x86-64 (glibc) | signed release | KVM, glibc 2.39 or newer; a QEMU at or above keel's floor (QEMU 11.1.2 at an explicit path; Ubuntu 24.04's 8.2.2 is refused), run with `-sandbox on` |
+| Linux arm64 (glibc) | signed release | no berth release |
 | Windows, musl | no | no |
 
-`berth vm`, the protocol-4 VM runner ([runner
-operations](runner-operations.md#berth-vm-runner-protocol-4)), is released
-for two platforms, each with keel's kernel and base from the same release:
-
-| | berth vm (keel machines) |
-|---|---|
-| Linux x86-64, glibc 2.39 or newer | KVM; a QEMU at or above keel's floor (QEMU 11.1.2 at an explicit path; Ubuntu 24.04's 8.2.2 is refused), run with `-sandbox on` |
-| macOS, Apple Silicon | HVF; Homebrew's QEMU 11.1.x, without `-sandbox` ([berth vm on a Mac](macos.md#berth-vm-on-a-mac)) |
-
-Other platforms have no berth release.
+`berth vm` is the runner ([runner
+operations](runner-operations.md#berth-vm-runner-protocol-4)); each release
+carries it with keel's kernel and base. The protocol-3 runner `cube-runner`
+is retired ([runner operations](runner-operations.md#protocol-3-runners-retired)).
 
 Everything needs Node 26 only when running from source (releases bundle it),
-Git, OpenSSH (`ssh`, `ssh-keygen`), and a Debian 13 genericcloud image for the
-runner's architecture. Pi-based threads need a model provider Pi supports;
+Git, and an OCI image pinned by digest for the machines (`--image`). Pi-based threads need a model provider Pi supports;
 Claude Code threads need Claude Code and a Claude Max login on the cubed host.
 
 ## Linux and source checkouts
@@ -54,7 +47,7 @@ one. Development checks: [DEVELOPING.md](../DEVELOPING.md).
 
 ## Fresh state, not migration
 
-State schema 102 (thread machines, runner protocol 3) does **not migrate**
+State schema 102 does **not migrate**
 older registries or execution stacks: cubed refuses a v100/v101 registry, a
 version-1 runner config and a protocol-2 runner. For a fresh start, stop cubed
 and choose a different empty `CUBED_STATE` directory; create projects and

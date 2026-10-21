@@ -1,15 +1,16 @@
-/** The thread Workspace over the guest helper in the thread's VM.
+/** The thread Workspace over the guest in the thread's machine (keel's
+ * cube-agent, or cube-guest on a berth host).
  *
  * Workspace semantics (journaled keys, epoch fencing, retained output, where
  * a path leads in the machine) live in the helper; this class checks limits, enforces
  * the lease and translates. Every helper operation is idempotent by its key
- * (or read-only), so a transport failure — a gateway restart, a dead SSH
- * master — is retried for a bounded time. When that runs out, a read is
+ * (or read-only), so a transport failure — a runner restart, a lost guest
+ * stream — is retried for a bounded time. When that runs out, a read is
  * NODE_UNAVAILABLE and a mutation's outcome is unknown (COMPLETION_UNKNOWN);
  * the key can be inspected again. */
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { GuestTransportError, type GuestAnswer, type GuestCallOptions, type GuestOp, type GuestTransport } from "./guest-ssh.ts";
+import { GuestTransportError, type GuestAnswer, type GuestCallOptions, type GuestOp, type GuestTransport } from "./guest-transport.ts";
 import type { LeaseStore } from "./workspace-lease.ts";
 import {
   WORKSPACE_CAPABILITIES, WORKSPACE_LIMIT_KEYS, WORKSPACE_OWNERS, WorkspaceError, errorCode, execSpec, filePath, invalid, operation, validKey,
@@ -20,8 +21,8 @@ import {
 
 /** The guest helper's own long poll bound. */
 const MAX_GUEST_WAIT_MS = 20000;
-/** How long transport failures are retried (a gateway restart takes seconds;
- * a dead SSH master is noticed within 30 s). */
+/** How long transport failures are retried (a runner restart takes seconds;
+ * a lost connection is noticed within 30 s). */
 const DEFAULT_RETRY_MS = 90000;
 const SHA = /^[0-9a-f]{64}$/;
 const STATES = new Set(["Accepted", "Running", "Unknown", "Succeeded", "Written", "Failed", "Interrupted"]);

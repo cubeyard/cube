@@ -9,25 +9,28 @@
   allocation, access boundary, HTTP/SSE and activation of Pi's open operations.
   For a claude-code thread, the Claude Code child process and the thread record
   (accepted prompts, printed messages, session ID); Claude Code owns its session.
-- **runner:** one QEMU VM per active thread, up to its `--max-active-vms`
-  at once (allocate, start, stop, inspect, release; protocol 3) and the frame pump that carries the VM's Ethernet frames
-  to the gateway. It runs no command of its own and cannot read Pi sessions or
-  model credentials through the protocol.
+- **runner (`berth vm`, protocol 4):** one keel machine under QEMU per open
+  thread, up to its `--max-machines` at once (create, start, stop, suspend,
+  delete, discard, templates, diagnosis), each with its own LAN and the
+  egress policy cubed sends. It runs no command of its own and cannot read Pi
+  sessions or model credentials through the protocol. Runners enrolled with
+  protocol 3 (`cube-runner`) are retired: cubed keeps their rows and threads
+  but never contacts them (docs/runner-operations.md).
 - **host runner (protocol 4):** `berth host --dir DIRECTORY`, a
   foreground process a person starts on a Mac or Linux host. Its machines
   are subdirectories of DIRECTORY; each guest operation runs
   `cube-guest host MACHINE call OP` as a child, unsandboxed, as that user.
   See "Runner protocol 4 and the host runner".
-- **thread VM:** the workspace (`/workspace`) and, in its guest helper
-  `cube-guest`, durable deduplication and result retention for commands and
-  writes, and the agent's `cube service` (supervised web servers and their
-  registrations).
-- **cube-gateway:** started and supervised by cubed; each VM's only network
-  (DHCP, DNS, TCP termination, HTTP/HTTPS egress with TLS interception and a
-  per-request decision from cubed's egress policy, secret substitution). The
-  stack itself (LAN, DNS, address check, CA, the guest-facing half of HTTP) is
-  the library `cube-netstack` (`packages/netstack`); decisions, secrets and
-  the runner link stay in the gateway.
+- **thread machine:** the workspace (`/workspace`) and, in its guest agent
+  (keel's `cube-agent`; `cube-guest` on a host runner), durable deduplication
+  and result retention for commands and writes, and the agent's `cube
+  service` (supervised web servers and their registrations).
+- **cube-gateway:** started and supervised by cubed; the credential proxy:
+  a `berth vm`'s request a credential rule matches comes over a `credential`
+  stream through cubed, is decided by cubed's egress policy and gets the real
+  secret here, the only process that holds it. The network stack (LAN, DNS,
+  address check, CA, the guest-facing half of HTTP) is the library
+  `cube-netstack` (`packages/netstack`), which berth vm runs per machine.
 - **OptChat:** the user's one endless chat (`optchat*.ts`). A second
   in-process pi-durable Harness on `CUBED_STATE/optchat/pi.sqlite`: its
   entries are the chat's log, a model-free conversation holds the summary tree,
@@ -121,15 +124,13 @@ not settle within 10 seconds of the script ending blocks the next script until
 it does. Nothing is retried automatically. The worker is fault containment for
 cubed, not a sandbox; the tools themselves act in the thread's VM.
 
-Stop aborts Pi's tasks and cancels a running guest command; a host shutdown
-leaves a direct `bash` command running in its transient systemd unit and the
-next process reattaches to it. Codemode's nested commands are cancelled on
+Stop aborts Pi's tasks and cancels a running guest command; a cubed shutdown
+leaves a direct `bash` command running in its machine and the next process
+reattaches to it. Codemode's nested commands are cancelled on
 shutdown too, because codemode is never rerun. The guest helper never silently
 reexecutes Interrupted operations or evicts IDs to create room. A lost response
-therefore does not imply a second effect. Runner protocol 3 is VM lifecycle
-only; a protocol-2 runner is incompatible and must be re-enrolled; see
-[RUNNER.md](packages/node-transport/RUNNER.md) and the
-[VM runner plan](docs/plans/2026-10-04-vm-runner.md).
+therefore does not imply a second effect. Runner protocol 4 is machine
+lifecycle and guest streams; see "Runner protocol 4 and the host runner".
 
 Pi recovery is a durable task state machine, not complete-history replay. Partial
 model responses can be interrupted and retried under Pi policy; a provider may
@@ -140,14 +141,14 @@ bill both attempts. SIGKILL tests are not proof of power-loss durability.
 `Workspace` (`packages/server/src/workspace.ts`) is the one contract for a
 thread's workspace: `lease`, `exec`, `operation`, `cancel`, `readFile`,
 `writeFile`, `stat`, `capabilities()` and `limits()`. `VmWorkspace`
-(`vm-workspace.ts`) implements it over the guest helper `cube-guest` in the
-thread's VM, reached with the system OpenSSH client through `cube-gateway dial`
-(`guest-ssh.ts`: one ControlMaster per VM, host keys cubed generated and pins,
-a client key that may only run the helper). Workspace semantics stay in the
-helper (a journal under `/var/lib/cube/ops`, commands in transient systemd units
-running as `agent`, atomic writes); cubed only translates, checks capabilities
-and limits, and enforces the lease. Every helper operation is idempotent by key,
-so a transport failure (a gateway restart) is retried for a bounded time before
+(`vm-workspace.ts`) implements it over the guest in the thread's machine,
+reached over the runner's `guest` streams (`RunnerGuestTransport`,
+`runner-session.ts`; `guest-transport.ts` has the request and answer
+framing). Workspace semantics stay in the guest (its journal, commands
+running as `agent`, atomic writes); cubed only translates, checks
+capabilities and limits, and enforces the lease. Every guest operation is
+idempotent by key, so a transport failure (a runner restart, a lost stream)
+is retried for a bounded time before
 it becomes `NODE_UNAVAILABLE` or `COMPLETION_UNKNOWN`. The HTTP routes under `/api/threads/:id/workspace` are a thin
 transport over the same interface, and `HttpWorkspace` implements it again for
 out-of-process agents. One contract suite runs against both.
@@ -444,32 +445,30 @@ creation request keys. `CUBED_STATE/threads/<id>/pi.sqlite` is the thread's
 pi-durable storage (`claude.sqlite` and the `claude/` working directory for a
 claude-code thread); `threads/<id>/lease.sqlite` keeps the thread's lease epoch
 and owner, `lease.lock` is only held while a lease is, and `threads/<id>/vm/`
-holds the VM's SSH client key, its pinned host key and the VM epoch.
+holds the machine's epoch (a thread from protocol 3 also kept its VM's SSH
+keys there; they are left as they are).
 `CUBED_STATE/usage.sqlite` caches the last usage reading of each thread and
 of OptChat (derived, rebuildable from the stores above).
 `CUBED_STATE/artifacts.sqlite` holds work artifacts, their revisions,
 comments and action runs.
-`CUBED_STATE/gateway/` holds the gateway's Iroh key and the installation CA;
-`CUBED_STATE/run/` the private sockets (`workspace.sock`, `gateway.sock`,
-`egress.sock`) and SSH ControlMaster sockets. The state schema is 102 and older
+`CUBED_STATE/run/` holds the private sockets (`workspace.sock`,
+`credential.sock`, `egress.sock`); `CUBED_STATE/gateway/`, the protocol-3
+gateway's Iroh key and CA, is kept where it exists and no longer read. The
+state schema is 102 and older
 registries are refused, not migrated (see the reset workflow in DEVELOPING.md);
 cubed also refuses to open a thread directory that still holds the old Pi store
 (`session/` or `owner.sqlite`). One cubed serves one `CUBED_STATE`: a second
 refuses to start while the first's workspace socket answers.
 
-A runner has one permanent node/environment admission (runner config version 2)
-and belongs to the Cube installation, not a project. It hosts up to
-`maxActiveVms` thread machines at once, each its own QEMU, disk, seed, frame
-channel and gateway LAN. The runner decides the bound (`--max-active-vms`,
-`auto` by default: what fits if every VM uses the installation's per-VM
-maximum, 1 to 4) and enforces it under its mutation lock; cubed records it at
-enrollment, runner checks and machine starts. An open thread holds one slot on
-its runner from creation until its archive finishes, failed or releasing
-machines included; the runner row's
-`available/allocating/busy/releasing/failed` is a summary of those threads in
-the shape a one-machine runner always had, `available` while a slot is free;
-the runner journal persists each VM record and reconciles interrupted
-transitions without deleting a disk. Thread creation fetches each repository
+A runner has one permanent node/environment admission (runner config version 2,
+`"protocol": 4`) and belongs to the Cube installation, not a project. A
+`berth vm` hosts up to `limits.max_machines` thread machines at once, each its
+own QEMU, disks and LAN; cubed records the bound at enrollment, runner checks
+and machine starts. An open thread holds one slot on its runner from creation
+until its archive finishes, failed or releasing machines included (a
+suspended machine holds none); the runner row's
+`available/allocating/busy/releasing/failed` is a summary of those threads,
+`available` while a slot is free. Thread creation fetches each repository
 again and resolves its configured branch, or the default branch the remote
 advertises now, to an exact base OID: a new thread starts at the latest
 commits, never at the project's last check, and a fetch that fails starts no
@@ -479,13 +478,12 @@ project revision (a project edited meanwhile fails the creation), each
 repository's normalized URL, resolved branch and base OID, allocates a runner
 and returns. A replayed creation request returns its thread with its original
 pins, and retries, reattach and template reuse check out those pins, never a
-newer commit. `ThreadVms` (`vm.ts`) then allocates the VM, starts it with a cloud-init seed (`vm-seed.ts`: the pinned host key,
-the restricted client key, the CA, the placeholders and the guest helper),
-attaches it to the gateway and waits until the guest helper answers ready (the
-thread is `starting` meanwhile). The first activation provisions the pinned
+newer commit. `RunnerMachines` (`runner-machines.ts`) then creates the
+machine, starts it and waits until its guest is ready in the runner's watch
+(the thread is `starting` meanwhile). The first activation provisions the pinned
 checkouts with an ordinary workspace command under `cube:provision:<n>`:
 `/workspace` plus references in `/repos`, fetching only each declared branch
-through the gateway, verifying the pinned commit and checking it out detached;
+through the credential path, verifying the pinned commit and checking it out detached;
 an empty project gets an empty `/workspace`. A failed try is never rerun under
 its key, and a force-pushed branch that no longer holds the pinned commit fails
 closed. Archive runs the release check: no uncommitted changes (ignored files
@@ -499,72 +497,61 @@ one or an interrupted one is retained on the runner with the reason. The guest
 is agent-controlled, but an agent that would fake the check could as well
 delete its own work: the check guards against losing work, not against the
 agent. `VmWorkspace` still records that the agent ran a command or wrote a file
-(the clean reason says so). A runner that keeps a disk cubed let go (a guest
-that did not power off within the stop grace is marked interrupted) answers
-retained, and cubed records it so it is listed and can be discarded. While an archive runs,
-activation and the recovery loop do not reopen the thread.
+(the clean reason says so). A runner that keeps a disk cubed let go answers
+retained, and cubed records it so it is listed and can be discarded. While an
+archive runs, activation and the recovery loop do not reopen the thread.
 
-On a cubed restart machines keep running; activation starts each again (which
-rotates its frame token), attaches it and Pi reattaches to running commands by
-key. On a gateway restart cubed re-attaches every VM and the SSH masters
-reconnect; running commands survive in their units. On a runner restart the VM
-is stopped and marked interrupted; the next activation (or the 30 s recovery
-loop) boots it again from the same disk and the guest marks unfinished
-operations interrupted.
+On a cubed restart machines keep running; activation finds each in the
+runner's watch and Pi reattaches to running commands by key. On a runner
+restart its machines are stopped and marked interrupted; the next activation
+(or the 30 s recovery loop) boots each again from the same disk and the guest
+marks unfinished operations interrupted.
 
 Registry allocation counts a runner's open threads and inserts the new one in
 one `BEGIN IMMEDIATE` transaction, so concurrent requests, also from another
-process, cannot take a runner's last slot. It chooses by the runner's last
-observation (`runnerFitness`: `ready` if it answered ready within two minutes,
-`down` if its last contact failed or it was not ready and its retry, 5 s
-doubling to 60 s, is not due, otherwise `unverified`), then the lowest share
-of used slots, runners with a failed machine last. A runner that reports no
-bound (before 0.7.0) has one slot.
+process, cannot take a runner's last slot. It chooses among the pool (the
+`berth vm` runners) by the runner's last observation (`runnerFitness`:
+`ready` if it answered ready within two minutes, `down` if its last contact
+failed or it was not ready and its retry, 5 s doubling to 60 s, is not due,
+otherwise `unverified`), then the lowest share of used slots, runners with a
+failed machine last; a thread started on a runner by name goes there. A
+thread never moves to another runner: one whose runner cannot take it now
+waits (`RunnerWait`): its workspace stays `allocating`, it holds its slot, it
+reads as starting (`waiting` in the API and OptChat's thread state give the
+reason), and the recovery loop tries again. cubed keeps one session per
+runner, so the threads' runner calls share one Iroh connection. Project
+deletion never owns or deletes a runner and remains blocked while any thread
+history references the project. Runner contact is an authenticated hello. A
+failed latest check is `unreachable`; it becomes `stale` only after seven
+continuous days without a successful check. Success clears that interval.
+Retirement is installation-global and first reserves the runner against
+allocation. Both reservation and commit read the global runner/thread
+allocation snapshot and require no active allocation. A reachable runner
+must also report no active machine and cubed must have no open thread on it;
+an unreachable runner must be stale (a protocol-3 runner, which is never
+contacted, needs neither). Changed status or allocation fails closed. The
+permanent tombstone removes global capacity while retaining immutable
+identity, thread links, reason, probe evidence, runner journals and retained
+disks.
 
-A thread's placement on its runner is `provisional` (no `vm.allocate` for its
-machine reached the runner), `requested` (kept before the allocation is sent)
-or `allocated` (the runner returned the machine, from `vm.allocate` or
-`vm.inspect`). Before anything of a provisional thread is sent, an
-`unverified` runner is asked `node.status` (one question per runner at a time)
-and a `down` one is not asked. A thread whose runner does not answer, is not
-ready or refuses the machine moves, in one registry transaction, to another
-runner with a free slot that is not down, provided it is provisional and its
-agent storage and lease store do not exist yet. A requested thread moves only
-after its runner refused a request fenced by the thread's newest epoch
-(`CAPACITY_EXCEEDED`, `DRAINING`) and `vm.inspect` then found no machine, so
-no older request can still make one; a lost answer or a runner that does not
-answer keeps it there. An allocated thread never moves. A thread that cannot
-start for want of a runner waits (`RunnerWait`): its workspace stays
-`allocating`, it holds its slot, it reads as starting (`waiting` in the API
-and OptChat's thread state give the reason), and the recovery loop tries
-again. A thread on a runner that is down sends it nothing until its retry is
-due; a template build machine left on a runner the thread moved away from is
-deleted once that runner answers. cubed keeps one client per
-runner, so the threads' runner calls queue on one Iroh identity. Project deletion never owns or
-deletes a runner and remains blocked while any thread history references the
-project. Runner contact is authenticated `node.status` evidence. A failed latest
-check is `unreachable`; it becomes `stale` only after seven continuous days
-without a successful check. Success clears that interval. Retirement is
-installation-global and first reserves the runner against allocation. Both
-reservation and commit read the global runner/thread allocation snapshot and
-require no active allocation. A reachable runner must also report no active
-machine and cubed must have no open thread on it; an unreachable runner must be
-stale. Changed status or allocation fails
-closed. The permanent tombstone removes global capacity while retaining
-immutable identity, thread links, reason, probe evidence, runner journals and
-retained disks.
+A runner enrolled with protocol 3 (`cube-runner`, retired; its row has no
+`"protocol": 4`) keeps its row, its last report and its threads, but cubed
+never contacts or places on it (`runner-select.ts`): a start of one of its
+threads' machines is refused with the reason, an archive contacts nothing and
+records the disk of an allocated machine as kept, a discard is refused (the
+disk stays on that host), and the thread's stored history reads as before.
+Nothing is migrated; docs/runner-operations.md has the host-side steps.
 
-The thread's VM is its sandbox, and the boundary is precise. It covers the
-agent's processes and files (they live in the guest, as `agent` with sudo
-there, and cannot see the runner account, its keys or journal, or another
-thread), its network (raw frames to the gateway only: HTTP and HTTPS to public
-addresses, never cubed, the runner, the gateway host's own addresses, a LAN or
-a metadata service, each request decided by cubed in `egress-policy.ts`;
-inbound only cubed's SSH to port 22 and, through the portal, registered
-service ports) and
-its credentials (placeholders only; the gateway replaces the GitHub
-placeholder with the host's token only for github.com and api.github.com over
-HTTPS). It does not cover a QEMU escape (QEMU runs as the runner account,
+The thread's machine on a `berth vm` is its sandbox, and the boundary is
+precise. It covers the agent's processes and files (they live in the guest,
+as `agent`, and cannot see the runner account, its keys or journal, or
+another thread), its network (its own LAN in the runner: HTTP and HTTPS to
+public addresses under the egress policy cubed sends, never cubed, the
+runner host's own addresses, a LAN or a metadata service; inbound only,
+through the portal, registered service ports) and its credentials
+(placeholders only; a credential request goes through cubed to the gateway,
+which replaces the GitHub placeholder with the host's token only for
+github.com and api.github.com over HTTPS, as `egress-policy.ts` decides). It does not cover a QEMU escape (QEMU runs as the runner account,
 hardened only by `-sandbox on` on Linux, nothing on macOS), so the runner host
 as a whole is not a sandbox. It does not stop the agent sending what it can
 read to any public HTTPS host, or using the host's GitHub authority on GitHub.
@@ -592,11 +579,11 @@ RunnerSession ── one Iroh connection ──────▶ accept from the e
   guest   Open{guest}+request bytes → StreamAnswer + `cube-guest host MACHINE call OP` answer
 ```
 
-- `runner-select.ts` is the one place cubed chooses: a thread whose runner
-  was enrolled with `"protocol": 4` gets `RunnerMachines` and a
-  `RunnerGuestTransport`; every other thread keeps `ThreadVms`, SSH and the
-  gateway, unchanged. Runner health for placement and `cubed runners status`
-  goes through the same module.
+- `runner-select.ts` is the one place cubed tells protocols apart: a thread
+  whose runner was enrolled with `"protocol": 4` gets `RunnerMachines` and a
+  `RunnerGuestTransport`; a thread on a runner enrolled with protocol 3 gets
+  `RetiredProtocolMachines`, which contacts nothing. Runner health for
+  placement and `cubed runners status` goes through the same module.
 - A machine on a host runner is `DIRECTORY/<vm id>`: `workspace/` and
   `repos/` beside it, the journal in `state/`, the helper and the agent's
   `cube` in `bin/`, hook logs in `logs/`. `/workspace` in a file tool names
@@ -614,17 +601,17 @@ RunnerSession ── one Iroh connection ──────▶ accept from the e
   only by naming it (OptChat `spawn` with `runner`); such a thread is pinned,
   never moves, and waits (RunnerWait) while the runner is down.
 
-The guest channel of a protocol-4 VM runner is specified but not built:
-`runner.proto`'s header and `DaemonFrame`, `DaemonRequest`, `DaemonAnswer`
-and `MachineSetup` define how the runner talks to keel's `cube-agent` over
-the virtio-serial port `cube.0`, and `read_daemon_frame` in
-`cube-runner-protocol` holds a frame to its rules. The guest those runners
-boot is keel (docs/plans/2026-10-10-vm-base-and-image-layers.md).
+The guest channel of a protocol-4 VM runner: `runner.proto`'s header and
+`DaemonFrame`, `DaemonRequest`, `DaemonAnswer` and `MachineSetup` define how
+the runner talks to keel's `cube-agent` over the virtio-serial port `cube.0`,
+and `read_daemon_frame` in `cube-runner-protocol` holds a frame to its rules.
+The guest those runners boot is keel
+(docs/plans/2026-10-10-vm-base-and-image-layers.md).
 
 keel's layer tooling is a library, `keel-layers` (`packages/keel/layers`):
 an OCI layer converted to EROFS by `mkfs.erofs`, a cache by `diff_id` with
 atomic publish and LRU eviction, and the per-machine layer disk (GPT, VMDK
-descriptor with `FLAT` extents only). No runner calls it yet.
+descriptor with `FLAT` extents only), which `berth vm` uses.
 
 keel's PID 1 is `cube-init` (`packages/keel/init/cube-init.c`, static C): it
 mounts the pseudo filesystems, enables the cgroup v2 controllers, brings up
@@ -661,18 +648,15 @@ request a credential rule matches goes over a runner-opened `credential`
 stream (row B-5): cubed's RunnerSession checks that the runner owns the
 machine at the thread's current epoch and carries the HTTP/1.1 exchange
 unread to cube-gateway's credential proxy (`--credential`, the same
-process), which substitutes the token, as for p3, and turns it back into
+process), which substitutes the token and turns it back into
 the placeholder in the answer; the token never reaches cubed's Node
 process, the runner or the guest. The pool is the `berth vm` runners
 (registry.ts `pooledRunner`; the user's decision of 2026-10-16): a thread
 that names no runner goes to one of them, by fitness, a failed machine
 last, then load, and is refused when none has a free slot, never placed on
-a protocol-3 or host runner; while its `berth vm` is down it waits there.
-A protocol-3 runner takes a thread only by name (OptChat `spawn` with
-`runner`, or `runner` in `POST /api/threads`), pinned. A thread never
-moves between protocols: `relocateThread` moves only an unpinned thread on
-a protocol-3 runner (one placed before this rule), and only to another
-protocol-3 runner. On it,
+a host runner; while its `berth vm` is down it waits there. A host runner
+takes a thread only by name (OptChat `spawn` with `runner`, or `runner` in
+`POST /api/threads`), pinned; a protocol-3 runner takes none. On it,
 `RunnerMachines` creates the thread's machine with its size and
 starts it, every time, with its boot documents (`hostname`, `env` with the
 placeholders, the project's `hooks/pre-setup` and `hooks/pre-resume`;
@@ -693,16 +677,15 @@ keeps as `templates/<id>.erofs` (read-only, outside the layer cache's
 limit, removed only by `template_delete` once no machine uses it) while
 the build machine is deleted. A machine made from a template gets it above
 the image's layers, and only on the image it was built on
-(`template_image_changed`). cubed uses them (RunnerMachines, row C-5) as
-it uses p3's, below, when the hello names all three template
-capabilities; `berth host` gets none. The differences: the key is its own
-format (`keelTemplateKey`: no guest helper or packages; the runner's
-`Platform.base_image_sha256` and platform are in it), the build machine is
-created with `build: true` and started with its own boot documents and
-policy, there is no seal and so no `build-seal` step (keel's
-`template_publish` cleans and checks the layer; cubed waits up to 600 s
-and asks the same call once more if the answer is lost), a published build
-machine is deleted by berth and only forgotten by cubed (B-8 C1), and cubed
+(`template_image_changed`). cubed uses them (RunnerMachines, row C-5; see
+"Machine templates and hooks") when the hello names all three template
+capabilities; `berth host` gets none. The key is `keelTemplateKey` (the
+runner's `Platform.base_image_sha256` and platform are in it), the build
+machine is created with `build: true` and started with its own boot
+documents and policy, keel's `template_publish` cleans and checks the layer
+(cubed waits up to 600 s and asks the same call once more if the answer is
+lost), a published build machine is deleted by berth and only forgotten by
+cubed (B-8 C1), and cubed
 deletes only templates whose metadata it reads as its own (C7:
 `template_delete` has no owner or fence). The credential route accepts the
 thread's unfinished build machine on the thread's runner at the thread's
@@ -726,11 +709,12 @@ thread's diagnostics. Beside it cubed shows what the keel agent last said
 of itself in the watch (`GuestInfo`, row C-2): why it is not ready (also
 in the `boot` step when it never got ready), its version, build, kernel,
 boot id and hooks' outcomes as of its last status (keel sends one after
-each `machine_setup`). A thread's startup log on `berth vm` is read like
-protocol 3's, with keel's `read` of `~/.cache/cube` at the current epoch;
+each `machine_setup`). A thread's startup log on `berth vm` is read with
+keel's `read` of `~/.cache/cube` at the current epoch;
 `berth host` keeps its hooks' logs on that host and shows none.
 
-Not built yet (later stages): snapshots.
+Suspend and resume are built (phase 7, `machine_suspend`; off unless a
+runner starts with `--suspend-disk-margin-gib`).
 
 ## Machine templates and hooks
 
@@ -738,7 +722,8 @@ Not built yet (later stages): snapshots.
 `hooks.preResume`, at most 16 KiB each, kept in the project record, edited on
 the project page or by OptChat's `project_hooks_write`; threads read the ones
 their machine runs with `cube hooks`; see docs/project-hooks.md). A thread captures them at creation, like its pinned
-commits, and its machine's seed writes them to `/etc/cube/hooks/`. Each hook
+commits, and every start of its machine sends them as boot documents, which
+keel writes to `/etc/cube/hooks/` (a host runner gets none). Each hook
 runs as `agent` in `/workspace` with its output in `~/.cache/cube/<hook>.log`.
 The repository's own `.agents/setup` and `.agents/resume` run too; neither
 replaces the other:
@@ -759,56 +744,38 @@ thread strip shows failures. A failing checkout
 fails the thread as before. Hooks are not secret storage: the agent can read
 them and the guest holds only placeholders.
 
-**Templates.** A new thread's machine starts from its project's template on
-its runner when there is one: a read-only qcow2 (`templates/<id>/disk.qcow2`,
-cube-runner 0.8.0) under the machine's own overlay. Then the machine skips
+**Templates.** A new thread's machine on a `berth vm` starts from its
+project's template on that runner when there is one: a read-only EROFS layer
+(`templates/<id>.erofs`) above the image's layers. Then the machine skips
 preparation: the template's checkouts are moved to the thread's pinned
 commits (fetch, `checkout -f`, reflogs expired), pre-setup and setup are
 `skipped`, and resume runs as on every boot. If the pinned `.agents/setup`
 blob differs from the one the template ran (its metadata), pre-setup and
 setup run in this machine and the template is removed so the next thread
 builds a new one. Without a template the thread's slot is first used by a
-**build machine**: the base image, a throwaway identity (its own VM id, keys
-and GitHub placeholder, registered so the gateway serves it), the thread's
-pinned checkouts, pre-setup and `.agents/setup`. Only if all of that succeeds
-does cubed run `cube-guest seal` and power it off: at shutdown the guest
-removes its SSH host keys, machine id, cloud-init instance state, the
-helper's journal and epoch, `/etc/cube` (keys, placeholders, hooks), the
-build's hook logs, DHCP leases, the random seed, `/tmp`, shell history and the
-system journal; the freed blocks are discarded (the bulk before power-off,
-because the runner counts a stop that takes over 30 s as interrupted). A
-clean power-off (not `interrupted`) is required for the runner to publish the
-disk (`vm.publish` moves it, read-only); then
-the thread's own machine is allocated on it. Anything else deletes the build
-machine and the thread starts fresh (a build that failed is not retried for
-the same key, machine size and primary commit on that runner for an hour;
-another size or a new commit builds at once; the backoff is in cubed's
-memory, so a restart forgets it). Toolchains, package caches and the
+**build machine** (`build: true`): the base, its own machine id and GitHub
+placeholder (registered so the credential path serves it), the thread's
+pinned checkouts, pre-setup and `.agents/setup`. Only if all of that
+succeeds does cubed call `template_publish`: keel's agent cleans the
+writable layer of cube's things (the runner's CA, mount points, the agent
+account, identity) and writes it as one EROFS layer, which berth checks and
+keeps, read-only, while it deletes the build machine. Anything else deletes
+the build machine and the thread starts fresh (a build that failed is not
+retried for the same key, machine size and primary commit on that runner for
+an hour; another size or a new commit builds at once; the backoff is in
+cubed's memory, so a restart forgets it). Toolchains, package caches and the
 prepared checkout stay; that is the point.
 
-A seal that could not clean something says so in a marker; the first boot
-of each machine made from the template empties the helper's journal anyway
-and its helper reports the failure (also when the seal never ran), and cubed
-then records it on that thread's preparation and removes the template (checked
-once that thread's preparation succeeded).
-
 Isolation: no agent ever runs in a build machine; every machine writes only
-its own overlay; each gets a new VM id, MAC, host key, client key,
-placeholder, machine id, hostname and instance from its own seed, and the
-first boot of a template's machine starts the helper's journal empty. A
-template is per project and runner, never shared between projects. Its
-content is what the project's pre-setup and setup produced, so it is as
-trusted as they are (the seal itself runs inside a machine where the
-repository's setup had root through sudo, and each machine's seed rewrites
-the helper, keys and `/etc/cube` regardless); a deleted file's bytes may survive in a partly used
-qcow2 cluster of the template, which is why only the build machine's
-throwaway identity (useless after its release) was ever in it. Agent
-sessions live on the cubed host and never enter a guest.
+its own writable disk and gets its own id, placeholder, hostname and
+journal. A template is per project and runner, never shared between
+projects. Its content is what the project's pre-setup and setup produced,
+so it is as trusted as they are. Agent sessions live on the cubed host and
+never enter a guest.
 
 **Key and lifetime.** A template is reused when its key matches: the
 project, its repositories (URL, branch, checkout name), the pre-setup hook,
-the guest packages and helper, the runner's base image and platform and the
-disk size. The commit is not in it (the checkout is refreshed) and neither
+the runner's base image and platform and the disk size (`keelTemplateKey`). The commit is not in it (the checkout is refreshed) and neither
 are resume hooks (they always run). It is reused for 24 hours
 (`CUBED_TEMPLATE_TTL_HOURS`; the age compares the runner's clock at
 publication with cubed's, so clock skew between the hosts shifts it), which bounds how stale dependencies that
@@ -816,65 +783,64 @@ publication with cubed's, so clock skew between the hosts shifts it), which boun
 put what must be fresh per thread in a resume hook. Publishing a template
 removes the project's older ones on that runner; expired templates and those
 of deleted projects are removed when the next machine is allocated there.
-The runner deletes a removed template once no VM depends on it (retained
-ones included). One build per runner and key runs at a time: a thread that
-comes meanwhile starts fresh. `CUBED_TEMPLATES=off` or a runner before 0.8.0
-means every machine starts fresh. A template's metadata also keeps short
+The runner deletes a removed template once no machine depends on it
+(retained ones included). One build per runner and key runs at a time: a
+thread that comes meanwhile starts fresh. `CUBED_TEMPLATES=off`, a runner
+without the template capabilities or a `berth host` means every machine
+starts fresh. A template's metadata also keeps short
 hashes of its key's parts, so a thread that finds none can say why: none
-yet, expired, or which part changed (repositories, pre-setup, the guest
-helper or packages, the base image, the disk size). The startup phases (`allocate`,
+yet, expired, or which part changed (repositories, pre-setup, the base
+image, the disk size). The startup phases (`allocate`,
 `build-*`, `boot`, `prepare`, `resume`) and the total from creation to ready
 are logged ("machine ready for the agent") and kept in `thread.vm.startup`.
 
 **Startup steps.** What the thread shows while its machine starts is
 `thread.vm.steps` (registry, at most 40, oldest first): `lookup` (the
 template found, or why none, and whether a build starts), `build-boot`,
-`build-prepare`, `build-seal`, `build-publish`, `boot`, `prepare` (one per
+`build-prepare`, `build-publish`, `boot`, `prepare` (one per
 try, `attempt` = the `cube:provision:<n>` key) and `resume`, each with its
 state (`running`, `ok`, `failed`, `interrupted` when cubed began it again),
 times, a detail, the command's memory and, for a failed hook, the end of its
-log (4 KiB, escaped and redacted). ThreadVms (and RunnerMachines on `berth
-vm`, without `build-seal`) writes the lookup, build and boot steps; Conversations the preparation and resume. Each activation
+log (4 KiB, escaped and redacted). RunnerMachines writes the lookup, build
+and boot steps; Conversations the preparation and resume. Each activation
 first marks every step still running as interrupted (one thread has one
 activation at a time, so such a step is one an earlier activation or a
 stopped cubed never ended); a preparation try marked so that ended in the
 guest meanwhile still ends in its place. They are evidence only: a registry
 error never fails a start. The thread list leaves the ends of failed hooks'
-logs out (`hasLog`); `GET /api/threads/<id>/steps` has them. The guest helper adds to each
-command's result systemd's `$SERVICE_RESULT` and the unit's cgroup
-`memory.peak` and `memory.events` `oom_kill` (read in `ExecStopPost`) with
-the machine's MemTotal; a command the OOM killer stopped is reported as
-such instead of as a failed checkout. While a hook runs,
+logs out (`hasLog`); `GET /api/threads/<id>/steps` has them. The guest adds
+to each command's result its cgroup's `memory.peak` and `oom_kill` count with
+the machine's MemTotal; a command the OOM killer stopped is reported as such
+instead of as a failed checkout. While a hook runs,
 `~/.cache/cube/running` names it; `GET /api/threads/<id>/startup-log` reads
 the end of its log through the guest's unfenced `read` (no lease, nothing
 changed) from the build machine while one prepares, else from the thread's
 attached machine. A project's `machine` (`memoryMiB`, `vcpus`) is captured
 in a new thread's allocation like its hooks and clamped by the runner.
 A machine that does not get there leaves evidence: cubed's machine events
-(`threads/<id>/machine-events.jsonl`) and the runner's (`vms/<n>/events.log`,
-cube-runner 0.8.3), read with the rest by `GET /api/threads/<id>/diagnostics`
-and OptChat's `diagnose` (`vm-diagnostics.ts`, `vm.diagnose`; read only,
+(`threads/<id>/machine-events.jsonl`) and berth's (`<machine>/events.log`),
+read with the rest by `GET /api/threads/<id>/diagnostics` and OptChat's
+`diagnose` (`vm-diagnostics.ts`, `machine_diagnose`; read only,
 escaped and redacted; see docs/runner-operations.md, "Diagnosing a machine
 that does not start").
 
 ## Services and the portal
 
-`cube service` (the guest helper's CLI, `/usr/local/bin/cube`) runs an
-agent's web server as a persistent systemd unit (`cube-service-NAME`)
-outside the transient unit of the command that started it, and registers
-its port under `/var/lib/cube/services`. Nothing in the guest calls cubed:
-cubed reads registrations with the helper's `services` operation. When cubed
-resumes a machine it brings the helper to the one it ships (`install`, or a
-one-time chunked replacement of a helper from before `install`) and writes
-the machine's portal URL template (`portal`).
+`cube service` (the guest's CLI, `/usr/local/bin/cube`) runs an agent's web
+server supervised outside the command that started it, and registers its
+port. Nothing in the guest calls cubed: cubed reads registrations with the
+guest's `services` operation. When cubed resumes a machine it writes the
+machine's portal URL template (`portal`); on a `berth host` it also brings
+`cube-guest` to the one it ships (`install`). keel's agent comes with its
+image and is never replaced.
 
 The portal (`portal.ts`, off unless `CUBED_PORTAL_IP` is set; the Homebrew
 launcher sets a loopback one under `*.localhost`) is a second
 HTTP listener on a private address. A request's Host must be exactly
 `<service>-<thread label>.<suffix>:<port>` (label: an HMAC of the thread id
 under `CUBED_STATE/portal/key`; suffix: by default `<ip>.sslip.io`); cubed
-then dials the registered port through the gateway's dial route (which
-allows 22 and 1024-65535) and proxies HTTP/1.1 and upgrades. It only reaches
+then dials the registered port over the runner's `dial` stream (1024-65535)
+and proxies HTTP/1.1 and upgrades. It only reaches
 machines cubed already runs, never starts one, serves nothing of cube's and
 strips cookie domains. Details, setup and caveats: [docs/services.md](docs/services.md).
 
@@ -882,26 +848,22 @@ strips cookie domains. Details, setup and caveats: [docs/services.md](docs/servi
 
 `pnpm test` runs the offline suites, among them the guest helper's own tests,
 the Workspace contract over `VmWorkspace` with the real helper under a
-temporary root (a "local guest" with a process launcher instead of systemd),
-seed, egress policy and gateway supervision tests, and the process-level smokes
-(`scripts/smoke-local.ts`: four Pi SIGKILL boundaries, the product API with
-restarts and a claude · max thread through a fake `claude`).
-`scripts/test-node-transport.sh` runs the Rust checks and, where KVM, QEMU and a
-Debian image (`CUBE_TEST_VM_IMAGE`) are available, the real pieces: the runner
-with a guest (`smoke-runner-vm.ts`), cubed's side of it
-(`smoke-node-adapter.ts`: protocol-3 client, gateway supervision, the Workspace
-contract over SSH, egress, runner SIGKILL, retained release) and the product
-end to end (`test-vm-e2e.ts`: Pi tools in the guest, cubed and gateway SIGKILL
-mid-command, egress, `gh`/`git push` with secret substitution against a local
-GitHub fake, a Claude Code thread, clean and retained archives) and two thread
-VMs on one runner (`test-vm-concurrency.ts`: the bound, side-by-side boots and
-commands, separate machines, slots returned at archive) and machine templates
-(`test-vm-templates.ts`: a build machine, publication, identity and
-isolation of machines on one template, invalidation by a changed pre-setup,
-resume after a runner restart, a failed build falling back to a fresh
-machine). Hook order and failure rules, the template checkout refresh and
-stale setup, keys and selection run offline in `vm-template-test.ts` with the
-real guest helper. Mocks are not
+temporary root (a "local guest" with a process launcher), boot documents,
+egress policy and gateway supervision tests, RunnerMachines against fake
+protocol-4 runners over real Iroh, a protocol-3 runner's rows and threads
+after its retirement (`protocol3-history-test.ts`), and the process-level
+smokes (`scripts/smoke-local.ts`: four Pi SIGKILL boundaries, the product API
+with restarts and a claude · max thread through a fake `claude`).
+`scripts/test-node-transport.sh` runs the Rust checks, the real `berth host`
+with cubed and the real cube-gateway, and, where KVM or HVF and the
+`CUBE_TEST_BERTH_*` paths are available, `berth vm` with keel machines: the
+runner itself (`runner-vm-test.ts`: the guest channel, egress, credentials
+through the real gateway, dial, templates, diagnosis), cubed on it
+(`runner-vm-cubed-test.ts`, V3 kills in `runner-vm-cubed-v3-test.ts`), two
+machines kept apart (`runner-vm-v13-test.ts`), suspend and `init-local`.
+Hook order and failure rules, the template checkout refresh and stale setup,
+keys and selection run offline in `vm-template-test.ts` with the real guest
+helper. Mocks are not
 runner acceptance. `scripts/check-claude-mod.sh` validates and tests the mod
 with the installed `claude` CLI without calling a model; the real CLI is never
 started by tests. These use controlled models and disposable data, never live

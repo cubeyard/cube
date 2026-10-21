@@ -5,7 +5,7 @@
  *
  * cubed is a child process here (e2e-fixture.ts: the real product server,
  * a faux model scripted by `tool {…}` prompts, the test-hooks cube-gateway),
- * as in scripts/test-vm-e2e.ts, so it can be SIGKILLed and started again on
+ * so it can be SIGKILLed and started again on
  * the same state and port. berth vm is enrolled into that state before
  * cubed starts and is the whole pool; one project (the fake GitHub's
  * repository), one thread on the pool, then in order:

@@ -11,7 +11,6 @@ import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import { SecretKey } from "@number0/iroh/index.js";
 import { Registry } from "./registry.ts";
-import { IrohRunnerClient } from "./iroh-node.ts";
 import { Runner_Kind } from "./gen/runner_pb.js";
 import { loadSessionConfig, RunnerSession } from "./runner-session.ts";
 
@@ -24,27 +23,17 @@ export interface Enrollment {
   next: string;
 }
 
-/** Admits the runner a version-2 config describes to the installation (it
- * takes only threads started on it by name, pooledRunner), after an authenticated protocol-3 hello (a protocol-2 runner
- * is refused) and a status exchange. Each runner needs its own control key:
- * two endpoints publishing one Iroh identity break each other's calls. */
+/** Admits the berth runner a protocol-4 config (`"protocol": 4`)
+ * describes. A config without it is a protocol-3 runner's (`cube-runner`),
+ * which is no longer admitted. Each runner needs its own control key: two
+ * endpoints publishing one Iroh identity break each other's calls. */
 export async function enrollRunner(options: { state: string; configPath: string }): Promise<Enrollment> {
   const { state, configPath } = options;
   if (!path.isAbsolute(state) || !path.isAbsolute(configPath)) throw new Error("the state directory and the runner config must be absolute paths");
   let protocol: unknown;
   try { protocol = (JSON.parse(fs.readFileSync(configPath, "utf8")) as { protocol?: unknown }).protocol; } catch { protocol = undefined; }
-  if (protocol === 4) return enrollProtocol4(state, configPath);
-  const client = new IrohRunnerClient({ configPath });
-  const registry = new Registry(path.join(state, "registry.sqlite"));
-  try {
-    sharedControlKey(registry, configPath, client.binding.nodeId);
-    const described = await client.describe();
-    const health = await client.health();
-    registry.enrollRunner({ ...client.binding, configPath, configHash: client.configHash, maxActiveVms: health.maxActiveVms });
-    return { ...client.binding, profile: "vm-runner", admitted: true, softwareVersion: described.softwareVersion,
-      platform: described.platform, baseImageSha256: described.baseImageSha256, maxActiveVms: health.maxActiveVms,
-      next: `restart cubed if this runner's network mode is wider than the others; start a thread on it by name: ask OptChat to start one on runner ${client.binding.nodeId} (a protocol-3 runner is not in the pool)` };
-  } finally { registry.close(); }
+  if (protocol !== 4) throw new Error(`${configPath} is not a protocol-4 (berth) runner config; protocol-3 runners (cube-runner) are no longer admitted`);
+  return enrollProtocol4(state, configPath);
 }
 
 function sharedControlKey(registry: Registry, configPath: string, nodeId: string): void {

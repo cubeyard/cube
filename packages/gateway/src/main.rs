@@ -1,13 +1,11 @@
-//! `cube-gateway serve | dial | --version`. See the library docs.
+//! `cube-gateway serve | --version`. See the library docs.
 use anyhow::{Context, Result, bail};
-use cube_gateway::{ServeOptions, decide::DECIDE_TIMEOUT, dial, http::Upstream, lan::LanLimits};
-use cube_node_transport::NetworkMode;
+use cube_gateway::{ServeOptions, decide::DECIDE_TIMEOUT, http::Upstream};
 use std::{collections::BTreeMap, path::PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const USAGE: &str = "usage:
-  cube-gateway serve --state DIR --control SOCK --decide SOCK --network loopback|direct|relay [--listen ADDR] [--credential SOCK]
-  cube-gateway dial --control SOCK --vm ID --port 22
+  cube-gateway serve --decide SOCK --credential SOCK
   cube-gateway --version";
 
 #[cfg(feature = "test-hooks")]
@@ -90,37 +88,16 @@ fn upstream(options: &mut Options) -> Result<Upstream> {
 }
 
 async fn serve(mut options: Options) -> Result<()> {
-    let network = match options.take("network")?.as_str() {
-        "loopback" => NetworkMode::Loopback,
-        "direct" => NetworkMode::Direct,
-        "relay" => NetworkMode::Relay,
-        other => bail!("unknown network mode {other}"),
-    };
-    let listen = options
-        .values
-        .remove("listen")
-        .map(|l| l.parse())
-        .transpose()
-        .context("invalid --listen")?;
-    let state = PathBuf::from(options.take("state")?);
-    let control = PathBuf::from(options.take("control")?);
     let decide = PathBuf::from(options.take("decide")?);
-    let credential = options.values.remove("credential").map(PathBuf::from);
+    let credential = PathBuf::from(options.take("credential")?);
     let upstream = upstream(&mut options)?;
     options.done()?;
-    let running = cube_gateway::start_with_credential(
-        ServeOptions {
-            state,
-            control,
-            decide,
-            network,
-            listen,
-            upstream,
-            decide_timeout: DECIDE_TIMEOUT,
-            limits: LanLimits::default(),
-        },
+    let running = cube_gateway::start(ServeOptions {
+        decide,
         credential,
-    )
+        upstream,
+        decide_timeout: DECIDE_TIMEOUT,
+    })
     .await?;
     let mut stdout = tokio::io::stdout();
     stdout
@@ -158,17 +135,6 @@ async fn main() {
             Ok(options) => serve(options).await,
             Err(e) => Err(e),
         },
-        Some("dial") => {
-            async {
-                let mut options = parse(&args[1..])?;
-                let control = PathBuf::from(options.take("control")?);
-                let vm = options.take("vm")?;
-                let port: u16 = options.take("port")?.parse().context("invalid --port")?;
-                options.done()?;
-                dial::run(&control, &vm, port).await
-            }
-            .await
-        }
         _ => {
             #[cfg(feature = "test-hooks")]
             eprintln!("{USAGE}\n{TEST_USAGE}");

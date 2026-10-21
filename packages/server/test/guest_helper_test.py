@@ -1,7 +1,7 @@
 """Unit tests of the guest helper (packages/server/guest/cube-guest.py) with
 a test launcher injected; run by guest-helper-test.ts. The workspace
-contract over the helper runs in workspace-test.ts (local guest) and against
-a real VM in smoke-node-adapter.ts."""
+contract over the helper runs in workspace-test.ts (local guest) and on a
+real `berth host` in runner-host-test.ts."""
 import contextlib
 import hashlib
 import importlib.util

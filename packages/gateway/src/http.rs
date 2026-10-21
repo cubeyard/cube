@@ -1,14 +1,9 @@
-//! HTTP and HTTPS egress for guest flows to ports 80 and 443.
-//!
-//! HTTPS is terminated with a leaf for the ClientHello's SNI (no SNI: the
-//! flow is closed). Each request is parsed by hyper, checked (`Host` must
-//! match SNI, no CONNECT or Upgrade), decided by cubed, given its secrets and
-//! sent to the SNI/Host name's public address. Bodies stream unmodified.
-//!
-//! The same handler serves the credential proxy (credential.rs): one request
-//! per connection from cubed, a runner's `credential` stream, as HTTPS for
-//! the stream's server name. There every placeholder must be of the
-//! stream's credential, the request asks for `Accept-Encoding: identity`,
+//! The credential proxy's HTTP (credential.rs): one request per connection
+//! from cubed, a runner's `credential` stream, as HTTPS for the stream's
+//! server name. Each request is parsed by hyper, checked (`Host` must match
+//! the server name, no CONNECT or Upgrade, every placeholder of the stream's
+//! credential), decided by cubed, given its secret and sent over TLS to the
+//! name's public address. The request asks for `Accept-Encoding: identity`,
 //! an encoded answer is refused (502), and what the gateway substituted is
 //! turned back into the guest's placeholder in the answer (B6, reverse.rs).
 use anyhow::{Context as _, Result};
@@ -25,17 +20,13 @@ use tokio::{
 };
 
 use crate::{
-    ca::Ca,
     decide::{DecideClient, DecideRequest, Decision},
-    lan::{FlowHandler, FlowInfo, FlowStream},
     reverse::{Pairs, Reversed},
     secrets,
 };
 #[cfg(feature = "test-hooks")]
 pub use cube_netstack::http::TEST_HOST_ADDRESS;
-use cube_netstack::http::{
-    HANDSHAKE_TIMEOUT, Scheme, accept_tls, authority, client, strip_hop_by_hop,
-};
+use cube_netstack::http::{HANDSHAKE_TIMEOUT, Scheme, authority, client, strip_hop_by_hop};
 pub use cube_netstack::http::{HostResolver, MAX_HEAD, Upstream, UpstreamError};
 
 const HEADER_TIMEOUT: Duration = Duration::from_secs(60);
@@ -44,66 +35,10 @@ pub const ERROR_HEADER: &str = "x-cube-error";
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
-/// Shared by every VM.
+/// Shared by every credential stream.
 pub struct Egress {
-    pub ca: Arc<Ca>,
     pub decide: Arc<DecideClient>,
     pub upstream: Arc<Upstream>,
-}
-
-/// Flow handler of one VM's LAN.
-#[derive(Clone)]
-pub struct VmEgress {
-    egress: Arc<Egress>,
-    vm_id: String,
-    thread_id: String,
-}
-
-impl VmEgress {
-    pub fn new(egress: Arc<Egress>, vm_id: String, thread_id: String) -> Arc<Self> {
-        Arc::new(Self {
-            egress,
-            vm_id,
-            thread_id,
-        })
-    }
-}
-
-impl VmEgress {
-    fn connection(&self, scheme: Scheme) -> Arc<Connection> {
-        Arc::new(Connection {
-            egress: self.egress.clone(),
-            vm_id: self.vm_id.clone(),
-            thread_id: self.thread_id.clone(),
-            scheme,
-            credential: None,
-            upstream: Mutex::new(None),
-        })
-    }
-
-    /// Terminates TLS with a leaf for the ClientHello's SNI. Without SNI
-    /// there is nothing to name the upstream by, so the flow is closed.
-    async fn serve_tls(self: Arc<Self>, stream: FlowStream) -> Result<()> {
-        let Some((name, tls)) = accept_tls(&self.egress.ca, stream).await? else {
-            return Ok(());
-        };
-        self.connection(Scheme::Https(name)).serve(tls).await
-    }
-}
-
-impl FlowHandler for VmEgress {
-    fn spawn(&self, info: FlowInfo, stream: FlowStream) {
-        let this = Arc::new(self.clone());
-        tokio::spawn(async move {
-            // Guest-side failures (bad TLS, resets, timeouts) are routine and
-            // only end this flow.
-            let _ = match info.destination.port() {
-                443 => this.serve_tls(stream).await,
-                80 => this.connection(Scheme::Http).serve(stream).await,
-                _ => Ok(()),
-            };
-        });
-    }
 }
 
 /// One request of a runner's `credential` stream, as HTTPS for `sni`: the
@@ -121,7 +56,7 @@ pub async fn serve_credential<S: AsyncRead + AsyncWrite + Unpin + Send + 'static
         vm_id,
         thread_id,
         scheme: Scheme::Https(sni),
-        credential: Some(credential),
+        credential,
         upstream: Mutex::new(None),
     })
     .serve(io)
@@ -132,9 +67,10 @@ struct Connection {
     egress: Arc<Egress>,
     vm_id: String,
     thread_id: String,
+    /// Always `Https` of the stream's server name.
     scheme: Scheme,
-    /// Credential mode: the stream's credential name.
-    credential: Option<String>,
+    /// The stream's credential name.
+    credential: String,
     /// One upstream connection per guest connection, reused while alive.
     upstream: Mutex<Option<(String, SendRequest<Incoming>)>>,
 }
@@ -147,7 +83,7 @@ impl Connection {
         let this = self.clone();
         hyper::server::conn::http1::Builder::new()
             // A credential stream carries one request.
-            .keep_alive(self.credential.is_none())
+            .keep_alive(false)
             .max_buf_size(MAX_HEAD)
             .timer(TokioTimer::new())
             .header_read_timeout(HEADER_TIMEOUT)
@@ -175,22 +111,21 @@ impl Connection {
         };
         let https = matches!(self.scheme, Scheme::Https(_));
         let placeholders = secrets::scan_headers(request.headers());
-        if let Some(name) = &self.credential {
-            if placeholders
-                .iter()
-                .any(|p| secrets::placeholder_name(p) != Some(name.as_str()))
-            {
-                return denied(
-                    StatusCode::FORBIDDEN,
-                    &format!("only {name} placeholders go through this credential"),
-                );
-            }
-            // B6 reads every answer, so it must not be encoded.
-            request.headers_mut().insert(
-                header::ACCEPT_ENCODING,
-                HeaderValue::from_static("identity"),
+        let name = &self.credential;
+        if placeholders
+            .iter()
+            .any(|p| secrets::placeholder_name(p) != Some(name.as_str()))
+        {
+            return denied(
+                StatusCode::FORBIDDEN,
+                &format!("only {name} placeholders go through this credential"),
             );
         }
+        // B6 reads every answer, so it must not be encoded.
+        request.headers_mut().insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
         let decision = self
             .egress
             .decide
@@ -223,13 +158,11 @@ impl Connection {
         };
         // B6: exactly what was substituted, to turn back in the answer.
         let mut pairs = Pairs::default();
-        if self.credential.is_some() {
-            for (placeholder, value) in &substitute {
-                pairs.add(value.as_bytes(), placeholder.as_bytes());
-            }
-            for (upstream, guest) in basic {
-                pairs.add(upstream, guest);
-            }
+        for (placeholder, value) in &substitute {
+            pairs.add(value.as_bytes(), placeholder.as_bytes());
+        }
+        for (upstream, guest) in basic {
+            pairs.add(upstream, guest);
         }
         drop(substitute);
         let head = request.method() == Method::HEAD;
@@ -258,9 +191,6 @@ impl Connection {
         *self.upstream.lock().await = Some((format!("{host}:{port}"), sender));
         let (mut parts, body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
-        if self.credential.is_none() {
-            return Response::from_parts(parts, body.boxed());
-        }
         if encoded(&parts.headers) {
             return failed("the credential proxy refuses an encoded answer");
         }

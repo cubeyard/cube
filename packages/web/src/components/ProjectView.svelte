@@ -453,7 +453,7 @@
 
     </section>
 
-    <p class="config-note">ready projects share one global runner pool. each new thread starts at the latest commit of each repository’s branch and keeps it. each thread works in its own virtual machine on a runner; its only network is cube’s gateway, which allows http and https and decides every request.</p>
+    <p class="config-note">ready projects share one global runner pool. each new thread starts at the latest commit of each repository’s branch and keeps it. each thread works in its own virtual machine on a berth vm runner, which lets it reach public hosts over http and https only; cube adds the github token only to requests to github.</p>
 
     {#if project}<RunnerPanel onChanged={() => void refresh()} />{/if}
     {#if project}<UsagePanel projectId={project.id} />{/if}

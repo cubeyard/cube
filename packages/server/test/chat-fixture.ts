@@ -13,11 +13,11 @@ import { createCubed } from "../src/index.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 import { LocalMachines } from "./local-guest.ts";
 import type { SkillSource } from "../src/skills.ts";
-import type { TrustedRunnerHealth } from "../src/iroh-node.ts";
+import type { TrustedRunnerHealth } from "../src/runner-types.ts";
 import type { Registry, Runner } from "../src/registry.ts";
 
 export async function startChatHost(options: { renderMs?: number; models?: string[]; setup?: boolean; skillSource?: SkillSource;
-  runnerHealth?: (runner: Runner) => Promise<TrustedRunnerHealth> } = {}): Promise<{ url: string; models: Models; registry: Registry; close(): Promise<void> }> {
+  runnerHealth?: (runner: Runner) => Promise<TrustedRunnerHealth> } = {}): Promise<{ url: string; state: string; models: Models; registry: Registry; close(): Promise<void> }> {
   if (options.renderMs) {
     const prototype = PiThreadEvents.prototype as unknown as { render: (...args: unknown[]) => Promise<unknown> };
     const render = prototype.render;
@@ -51,6 +51,7 @@ export async function startChatHost(options: { renderMs?: number; models?: strin
   if (!options.setup) await fetch(`${url}/api/onboarding`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   return {
     url,
+    state: path.join(root, "state"),
     models,
     registry: app.registry,
     async close() {

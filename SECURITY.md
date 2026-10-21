@@ -58,14 +58,13 @@ preserve the external state and credential directories, but only the exact
 state-schema/rollback contract in a signed manifest is supported. Runner
 software is outside this update mechanism.
 
-Thread machines: a runner runs no command of its own for a thread. Each active
-thread gets a QEMU virtual machine on its runner, and the agent's commands run
-as user `agent` inside that guest (with passwordless sudo in the guest). The
+Thread machines: a runner runs no command of its own for a thread. Each open
+thread gets a keel machine under QEMU on its `berth vm` runner, and the
+agent's commands run as user `agent` inside that guest. The
 guest is the thread's sandbox, the isolation boundary between a thread and the
 runner host. QEMU
 itself runs as the runner account and is hardened only by
-`-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`
-on Linux (nothing on macOS); a guest escape through a QEMU bug has that
+`-sandbox on` on Linux (nothing on macOS); a guest escape through a QEMU bug has that
 account's authority, so the runner host as a whole is not a sandbox. Give the
 runner account no control-plane, provider, GitHub, SSH or cloud credentials,
 no sudo and no privileged group other than `kvm`. A retained machine disk
@@ -84,40 +83,39 @@ Run it only in a terminal you watch, on a host and account whose authority
 you accept for the agent, and stop it with Ctrl-C when done; commands it
 started keep running until they end.
 
-A guest's only network is raw Ethernet frames, carried by the runner over Iroh
-to `cube-gateway` next to cubed. The gateway gives each VM a private LAN and
-terminates every TCP connection: only ports 80 and 443 are served, other TCP
-is reset, and an upstream is refused unless every address it resolves to is
-public unicast (no loopback, RFC 1918, link-local/metadata, CGNAT, ULA or
-mapped forms) and none of the gateway host's own interface addresses, so a
-guest cannot reach cubed, the runner, the LAN or a cloud metadata service. A
-request with more than one Host header is refused before any decision.
-This round the policy allows every public host: the boundary does not stop
-an agent sending what it can read (its workspace, the project's repositories)
-to a public HTTPS server. HTTPS is intercepted with a per-installation CA
-(`CUBED_STATE/gateway/ca.key`, 0600, never leaves that directory; treat it as
-an installation credential and back it up with the state). cubed decides every
-request (method, host, path, thread) on a 0600 socket; a deny, a timeout or a
-malformed answer is a 403. Clients that pin certificates or ignore the system
-CA bundle fail against the interception.
+A guest's only network is one virtio-net device on a LAN of its own inside
+berth (cube-netstack): DNS, and TCP to ports 80 and 443 only (other TCP is
+reset, other UDP dropped). An upstream is refused unless every address it
+resolves to is public unicast (no loopback, RFC 1918, link-local/metadata,
+CGNAT, ULA or mapped forms) and none of the runner host's own addresses or
+the addresses it reaches cubed at, so a guest cannot reach cubed, the
+runner, the LAN or a cloud metadata service (over a relay-only connection
+only the policy's `deny_hosts` keeps it from cubed's hosts). Each start
+carries cubed's egress policy for the machine; this round it allows every
+public host, so the boundary does not stop an agent sending what it can
+read (its workspace, the project's repositories) to a public HTTPS server.
+HTTPS is intercepted with the runner's own CA (`<dir>/.berth/ca/`, 0600 key,
+made on the runner's first start); clients that pin certificates or ignore
+the system CA bundle fail against the interception.
 
-Secrets never enter a guest, its seed or the runner. The guest sees a
-placeholder (`GH_TOKEN=cube_ph_github_…`); the gateway substitutes the host's
-GitHub token only when cubed's policy returns it, and the policy returns it
-only for that VM's own placeholder, over HTTPS, to github.com and
-api.github.com. The token is the host's `gh auth token` (or
-`CUBED_GITHUB_TOKEN`), so the agent acts with that account's GitHub authority
-on those hosts, including pushes; use an account whose repository access you
-accept for agents. The gateway keeps no secret beyond the request it serves.
+Secrets never enter a guest or a runner. The guest sees a placeholder
+(`GH_TOKEN=cube_ph_github_…`); a request a credential rule matches (HTTPS to
+github.com or api.github.com) goes from the runner over a `credential`
+stream to cubed, which checks the machine and its fence and carries it to
+`cube-gateway`. The gateway asks cubed's policy, which returns the host's
+GitHub token only for that machine's own placeholder, over HTTPS, to
+github.com and api.github.com, substitutes it, and turns it back into the
+placeholder in the answer. The token is the host's `gh auth token` (or
+`CUBED_GITHUB_TOKEN`), so the agent acts with that account's GitHub
+authority on those hosts, including pushes; use an account whose repository
+access you accept for agents. The gateway keeps no secret beyond the request
+it serves.
 
-cubed reaches the guest with the system OpenSSH client through the gateway; it
-generates each VM's host key and pins it, and its per-VM client key may only
-run the guest helper (`restrict,command=`). Nothing listens on the runner for
-the guest. The runner's frame channel is authorized per VM by the latest
-epoch-fenced `vm.start` (gateway peer and a per-start token). See the
-[runner security and operations runbook](docs/runner-operations.md).
-Snapshots, finer per-request policy (macaroons) and a separate download exit
-are later work.
+cubed reaches the guest only over the runner's authenticated, epoch-fenced
+`guest` and `dial` streams; nothing listens on the guest except what the
+portal dials (ports 1024-65535). See the [runner security and operations
+runbook](docs/runner-operations.md). Finer per-request policy (macaroons) and
+a separate download exit are later work.
 
 Work artifacts ([docs/artifacts.md](docs/artifacts.md)) are agent-written
 documents the browser renders as data: raw HTML is shown as text, links are

@@ -70,7 +70,8 @@
   }
 
   async function checkAll(): Promise<void> {
-    await Promise.all(runners.filter((runner) => !runner.retiredAt).map(check));
+    // A protocol-3 runner is never contacted.
+    await Promise.all(runners.filter((runner) => !runner.retiredAt && !legacy(runner)).map(check));
   }
 
   function openRetirement(runner: RunnerStatus): void {
@@ -95,12 +96,16 @@
   }
 
   const bytes = (value: number) => value >= 1e9 ? `${(value / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(value / 1e6))} MB`;
+  /** Enrolled with protocol 3 (cube-runner): never contacted, retired without a check. */
+  const legacy = (runner: RunnerStatus) => observation(runner)?.protocol === 3;
   const canRetire = (runner: RunnerStatus) => runner.allocationState === "available" && runner.activeThreads === 0 &&
-    (runner.contactStatus === "stale" || (runner.contactStatus === "reachable" && runner.health?.activeVms === 0));
-  const lampClass = (runner: RunnerStatus) => runner.contactStatus === "reachable" ? "on-green"
+    (legacy(runner) || runner.contactStatus === "stale" || (runner.contactStatus === "reachable" && runner.health?.activeVms === 0));
+  const lampClass = (runner: RunnerStatus) => legacy(runner) ? "off" : runner.contactStatus === "reachable" ? "on-green"
     : runner.contactStatus === "unreachable" || runner.contactStatus === "stale" ? "on-red"
     : "off";
-  const contactCopy = (runner: RunnerStatus) => runner.contactStatus === "reachable"
+  const contactCopy = (runner: RunnerStatus) => legacy(runner) && !runner.retiredAt
+    ? "protocol 3: cube no longer contacts this runner; its last report is shown"
+    : runner.contactStatus === "reachable"
     ? "authenticated contact succeeded"
     : runner.contactStatus === "unreachable" ? "latest authenticated check failed"
     : runner.contactStatus === "stale" ? "unreachable continuously for at least 7 days"
@@ -108,10 +113,11 @@
     : "not checked since this registry learned runner observations";
 
   const observation = (runner: RunnerStatus) => observed?.runners.find((item) => item.id === runner.id);
+  const onLegacy = (thread: ThreadSummary) => observed?.runners.find((item) => item.id === thread.runnerId)?.protocol === 3;
   /** The runner's protocol, and whether it is in the pool or takes only threads started on it by name. */
   const protocolLabel = (runner: RunnerStatus) => {
     const item = observation(runner);
-    return !item ? null : item.protocol === 3 ? "p3 · by name only" : item.kind === "host" ? "p4 host · unsandboxed, by name only" : "p4 vm · pool";
+    return !item ? null : item.protocol === 3 ? "p3 · no longer supported" : item.kind === "host" ? "p4 host · unsandboxed, by name only" : "p4 vm · pool";
   };
   const nodeOf = (id: string) => observed?.runners.find((item) => item.id === id)?.nodeId ?? id;
   const slotsCopy = (group: CapacityGroup) => `${group.free} free of ${group.slots} ${group.slots === 1 ? "slot" : "slots"}`;
@@ -140,14 +146,16 @@
 
   {#if observed && runners.length}
     {@const { p3, p4 } = observed.capacity}
-    {@const late = notCurrent(p3, p4.vm, p4.host)}
+    {@const late = notCurrent(p4.vm, p4.host)}
     <div class="runner-capacity" aria-label="capacity">
-      <p class="capacity-p3">p3 by name · {slotsCopy(p3)} on {p3.runners} {p3.runners === 1 ? "runner" : "runners"} · open p3 threads: {p3.openThreads}</p>
       <p class="capacity-p4">p4 · {p4.vm.runners || p4.host.runners
         ? [p4.vm.runners ? `vm pool ${slotsCopy(p4.vm)}` : "", p4.host.runners ? `host by name ${slotsCopy(p4.host)}` : ""].filter(Boolean).join(" · ")
         : "no runners"}</p>
+      {#if p3.runners || p3.openThreads}
+        <p class="capacity-p3">p3 · no longer supported: {p3.runners} {p3.runners === 1 ? "runner" : "runners"} still enrolled, never contacted · unarchived p3 threads: {p3.openThreads}</p>
+      {/if}
       {#if late.length}<p class="capacity-late">not current: {late.join(", ")}</p>{/if}
-      <p class="capacity-note">a new thread goes to the pool, the p4 vm runners; p3 and p4 host runners take only threads started on them by name. a slot is an open thread in cube, not a machine on the runner.</p>
+      <p class="capacity-note">a new thread goes to the pool, the p4 vm runners; p4 host runners take only threads started on them by name. a slot is an open thread in cube, not a machine on the runner.</p>
     </div>
   {/if}
 
@@ -186,13 +194,13 @@
           </div>
           <div class="runner-controls">
             {#if !runner.retiredAt}
-              <button class="key" onclick={() => check(runner)} disabled={checking.includes(runner.id)}>check</button>
+              {#if !legacy(runner)}<button class="key" onclick={() => check(runner)} disabled={checking.includes(runner.id)}>check</button>{/if}
               <button class="key danger-text" onclick={() => openRetirement(runner)} disabled={!canRetire(runner)}>retire</button>
             {/if}
           </div>
           {#if !runner.retiredAt && !canRetire(runner)}
             <p class="runner-blocked">{runner.activeThreads || runner.allocationState !== "available" || runner.allocationProjectId
-              ? "retirement is blocked while the global allocation snapshot records a thread"
+              ? legacy(runner) ? "retirement waits until its threads are archived" : "retirement is blocked while the global allocation snapshot records a thread"
               : runner.contactStatus === "reachable" && runner.health?.activeVms
                 ? "retirement is blocked while the runner reports an active thread machine"
                 : "an unavailable runner must remain unreachable for 7 days before retirement"}</p>
@@ -238,12 +246,13 @@
           </div>
           <div class="runner-evidence">
             <span>{thread.vm?.retainReason ?? "kept"}</span>
+            {#if onLegacy(thread)}<span>on a protocol-3 runner: cube no longer reaches it, so the disk stays on that runner's host</span>{/if}
           </div>
           <div class="runner-controls">
             {#if confirmDiscard === thread.id}
               <button class="key" onclick={() => (confirmDiscard = null)} disabled={discarding === thread.id}>keep</button>
               <button class="key danger-text" onclick={() => discard(thread)} disabled={discarding === thread.id}>{discarding === thread.id ? "discarding…" : "delete disk"}</button>
-            {:else}
+            {:else if !onLegacy(thread)}
               <button class="key danger-text" onclick={() => (confirmDiscard = thread.id)}>discard</button>
             {/if}
           </div>

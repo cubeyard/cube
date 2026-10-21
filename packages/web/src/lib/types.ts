@@ -24,6 +24,8 @@ export interface ThreadSummary {
   agent?: import("../../../server/src/thread-events.ts").ThreadAgent;
   workspaceBase?: { remote: string; ref: string; oid: string } | null;
   project: { id: string; name: string };
+  /** The runner the thread's machine is on. */
+  runnerId?: string;
   /** The thread's machine; after archive, whether its disk was kept. */
   vm?: Pick<import("../../../server/src/registry.ts").ThreadVm, "vmId" | "retain" | "retainReason" | "discarded" | "preparation" | "hooks" | "startup" | "steps"
     | "suspension" | "notice">;

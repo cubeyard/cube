@@ -10,7 +10,7 @@ import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { GuestTransport } from "../src/guest-ssh.ts";
+import type { GuestTransport } from "../src/guest-transport.ts";
 import { Portal, portalSettings } from "../src/portal.ts";
 import type { Thread } from "../src/registry.ts";
 import type { MachineRef, RunnerSession } from "../src/runner-session.ts";

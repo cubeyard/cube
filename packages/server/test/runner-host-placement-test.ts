@@ -1,7 +1,8 @@
 /** Placement with a host runner (berth host, protocol 4) and a protocol-3
- * runner: neither is ever in the pool (only a berth vm is), a thread gets
- * there only by naming it, and a thread started on a runner by name never
- * moves. Registry only; offline. */
+ * runner (retired): neither is ever in the pool (only a berth vm is), a
+ * thread gets onto a host runner only by naming it and never onto a
+ * protocol-3 runner, and a full pool never falls back to either. Registry
+ * only; offline. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -24,21 +25,19 @@ try {
   assert.equal(pinned.pinned, true);
   assert.equal(pinned.vm?.placement, "provisional");
 
-  // A protocol-3 runner with free slots: still not the pool. By name only, pinned.
+  // A protocol-3 runner with free slots: not the pool, and not even by name.
   registry.enrollRunner({ nodeId: "node-p3", environmentId: 3, threadId: "runner-p3", configPath: "/private/p3.json", configHash: "p3", maxActiveVms: 3 });
   assert.deepEqual(registry.runnerSlots(), { free: 0, total: 0, runners: 0 }, "a protocol-3 runner adds nothing to the pool");
-  assert.throws(() => registry.createThread("project", "unnamed-p3", model, "x"), /no berth vm runner in the global runner pool: start the thread on a runner by name/,
+  assert.throws(() => registry.createThread("project", "unnamed-p3", model, "x"), /no berth vm runner in the global runner pool: start the thread on a berth host by name/,
     "a thread that names no runner never lands on a protocol-3 runner");
-  const onP3 = registry.createThread("project", "named-p3", model, "x", "pi", undefined, { runnerId: registry.namedRunnerId("node-p3") });
-  assert.deepEqual([onP3.runnerId, onP3.pinned], ["runner-p3", true]);
-  assert.equal(registry.relocateThread(onP3.id), null, "a thread started on a protocol-3 runner by name never moves");
+  assert.throws(() => registry.createThread("project", "named-p3", model, "x", "pi", undefined, { runnerId: registry.namedRunnerId("node-p3") }),
+    /runner node-p3 uses protocol 3 \(cube-runner\), which cube no longer runs; start the thread on a berth runner/);
 
   registry.enrollRunner({ nodeId: "node-pool", environmentId: 2, threadId: "runner-pool", configPath: "/private/pool.json", configHash: "pool", maxActiveVms: 3,
     protocol: 4, kind: "vm" });
   const pooled = registry.createThread("project", "pooled", model, "x");
   assert.equal(pooled.runnerId, "runner-pool", "the berth vm is the pool");
   assert.equal(pooled.pinned, undefined);
-  assert.equal(registry.relocateThread(pinned.id), null, "a pinned thread never moves, even while provisional");
   assert.equal(registry.getThread(pinned.id)!.runnerId, "node-mac");
 
   registry.createThread("project", "named-2", model, "x", "pi", undefined, { runnerId: "node-mac" });
@@ -50,7 +49,8 @@ try {
   for (const name of ["pooled-2", "pooled-3"]) registry.createThread("project", name, model, "x");
   assert.throws(() => registry.createThread("project", "pooled-4", model, "x"), /no free thread machine in the global runner pool \(its berth vm runners\)[^]*start the thread on a runner by name/,
     "a full pool never falls back to a protocol-3 or host runner");
+  assert.equal(registry.listThreads().filter(thread => thread.runnerId === "runner-p3").length, 0, "nothing was placed on the protocol-3 runner");
   // A replayed request finds its thread, wherever it was named to.
   assert.equal(registry.createThread("project", "named", model, "x", "pi", undefined, { runnerId: "node-mac" }).id, pinned.id);
-  console.log("ok: host and protocol-3 runners stay out of the pool, threads reach them only by name, a full berth vm pool refuses, pinned threads never move, named capacity");
+  console.log("ok: host and protocol-3 runners stay out of the pool, threads reach a host runner only by name and a protocol-3 runner never, a full berth vm pool refuses, named capacity");
 } finally { registry.close(); fs.rmSync(root, { recursive: true, force: true }); }
