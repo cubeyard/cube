@@ -560,10 +560,17 @@ try {
   // cubed closes while a thread's command runs in its machine (G1): the
   // close is bounded, the machine goes on, and the reopened cubed reattaches
   // the command (its effect once, its own result) and finishes the turn.
+  // Its own live thread: every thread above is archived or discarded by
+  // now, and an archived thread answers 404 (archived-thread-test).
   {
+    const reattach = (await threads.spawn({ project: "ca", task: "a command across a cubed close" }, "req-vm-4")).id;
+    await waitReady(reattach, "the reattach thread's machine is ready");
+    await firstTurn(reattach);
+    const toolCalls = async () => (await api(`/api/threads/${reattach}/history`)).events.filter((event: { type: string }) => event.type === "tool-call").length;
+    assert.equal(await toolCalls(), 0, "no tool call before the command, so the wait below sees this one");
     const run = `ca-${++requests}`;
-    await api(`/api/threads/${second}/prompt`, "POST", { text: `tool ${JSON.stringify({ name: "bash", args: { command: "sleep 20; printf once >> ca-reattach; printf reattached", timeoutMs: 120000 } })}`, requestId: run });
-    await until("the command runs in the machine", 120000, async () => (await api(`/api/threads/${second}/history`)).events.some((event: { type: string; name?: string }) => event.type === "tool-call"));
+    await api(`/api/threads/${reattach}/prompt`, "POST", { text: `tool ${JSON.stringify({ name: "bash", args: { command: "sleep 20; printf once >> ca-reattach; printf reattached", timeoutMs: 120000 } })}`, requestId: run });
+    await until("the command runs in the machine", 120000, async () => await toolCalls() > 0);
     await delay(3000);
     const closing = Date.now();
     app.server.closeAllConnections();
@@ -574,13 +581,13 @@ try {
     await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
     url = `http://127.0.0.1:${(app.server.address() as net.AddressInfo).port}`;
     const history = await until(`run ${run} after the reopen`, 300000, async () => {
-      const value = await api(`/api/threads/${second}/history`);
+      const value = await api(`/api/threads/${reattach}/history`);
       return value.status?.run === run && !["working", "idle"].includes(value.status.state) ? value : undefined;
     });
     assert.equal(history.status.state, "completed", JSON.stringify(history.status));
     const results = history.events.filter((event: { type: string }) => event.type === "tool-result") as Array<{ output?: string; isError?: boolean }>;
     assert.ok(results.some(result => !result.isError && result.output?.includes("reattached")), `the command was reattached: ${JSON.stringify(results.slice(-2))}`);
-    assert.equal(await bash(second, "cat ca-reattach"), "once", "its effect happened once");
+    assert.equal(await bash(reattach, "cat ca-reattach"), "once", "its effect happened once");
     note(`cubed closed in ${(closeMs / 1000).toFixed(1)} s mid-command; reopened, the command was reattached, its effect once`);
   }
   console.log("ok: cubed with berth vm: by name and from the pool, a template built in the first thread's slot and used by the next, invalidated by a changed setup, "
