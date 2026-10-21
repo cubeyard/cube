@@ -204,6 +204,10 @@ const talk = (chat: OptChat) => chat.memory.messages.filter(message => message.k
     await until(async () => sent.some(call => call.user === "held") || (await agent.harness.inspect(context)).tasks.some(task => (task.record.state as { checkpoint?: { phase?: string } }).checkpoint?.phase === "request"), "the request is ready to go");
     await delay(300);
     assert.deepEqual(sent.map(call => call.user), ["out", "slow"], "a request is not sent while closing");
+    // A request held back is not out: the drain does not wait for it.
+    const holding = Date.now();
+    assert.equal(await agent.drain(5_000), true, "nothing is out");
+    assert.ok(Date.now() - holding < 1_000, `the drain did not wait for the held request (${Date.now() - holding} ms)`);
   } finally { await agent.close(); }
   agent = await open();
   try {
@@ -212,6 +216,57 @@ const talk = (chat: OptChat) => chat.memory.messages.filter(message => message.k
     assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted, { [key]: 1 }, "never sent before, so not counted");
   } finally { await agent.close(); }
   console.log("ok: a thread's close: a request out is drained and stored; one past the drain's bound is counted, not sent again; one not yet sent is held and sent once after the reopen");
+}
+
+// A thread's context summary out at a close is drained too: its answer,
+// 1.5 s after the provider has it, is placed before Pi's close; the reopen
+// counts nothing, asks nothing again, and the run that waited goes on.
+{
+  const directory = path.join(root, "drain-summary", "thread");
+  const files = path.join(root, "drain-summary", "workspace");
+  fs.mkdirSync(files, { recursive: true });
+  const guest = new LocalGuestTransport(path.dirname(files));
+  const asked: string[] = [];
+  let summaryMs = 1_500;
+  const small = fauxProvider({ tokensPerSecond: 100_000, models: [{ id: "faux-small", contextWindow: 60_000 }] });
+  small.setResponses(Array.from({ length: 80 }, () => async (request, options) => {
+    const summary = request.messages.some(message => message.role === "system" && textOf(message).includes("context summarization assistant"));
+    asked.push(summary ? "summary" : "turn");
+    if (summary && summaryMs) await delay(summaryMs, null, { signal: options?.signal }).catch(() => {});
+    if (options?.signal?.aborted) return fauxAssistantMessage("", { stopReason: "aborted" });
+    return fauxAssistantMessage(summary ? "## Goal\nsummary" : "ok");
+  }));
+  const smallModels = createModels();
+  smallModels.setProvider(small.provider);
+  const key = `${small.getModel().provider}/faux-small`;
+  const open = () => openAgent({ directory, binding: guest.binding, workspace: new VmWorkspace({ guest, leases: new LeaseStore(directory), owner: "pi", binding: guest.binding }), models: smallModels, model: { provider: small.getModel().provider, id: "faux-small" } });
+  let agent = await open();
+  let waiting: string | undefined;
+  try {
+    for (let k = 0; k < 12 && !asked.includes("summary"); k++) {
+      const submission = await agent.conversation.submit({ type: "input", content: `long ${k} ${"word ".repeat(16_000)}`, requestId: `long-${k}` }, context);
+      waiting = `long-${k}`;
+      await Promise.race([submission.wait(context), until(() => asked.includes("summary"), "a summary", 60_000)]);
+    }
+    assert.ok(asked.includes("summary"), "Pi compacted the context");
+    const draining = Date.now();
+    assert.equal(await agent.drain(5_000), true, "the summary came back within the drain");
+    assert.ok(Date.now() - draining >= 1_000, `the drain waited for the summary (${Date.now() - draining} ms)`);
+  } finally { await agent.close(); }
+  summaryMs = 0;
+  const before = asked.filter(kind => kind === "summary").length;
+  agent = await open();
+  try {
+    await agent.conversation.waitForIdle(context);
+    assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted ?? {}, {}, "nothing was out at the close");
+    assert.equal(asked.filter(kind => kind === "summary").length, before, "the summary was not asked again");
+    assert.ok(waiting, "a run waited for it");
+    assert.deepEqual((await agent.harness.inspect(context)).tasks.map(task => task.record.kind), [], "nothing is left waiting");
+    const last = (await agent.conversation.context(context)).messages.filter(message => message.role === "assistant").at(-1) as { content: Array<{ type: string; text?: string }>; stopReason: string } | undefined;
+    assert.deepEqual([last?.stopReason, last?.content.map(part => part.text).join("")], ["stop", "ok"], "the run that waited for the summary went on and was answered");
+    void key;
+  } finally { await agent.close(); }
+  console.log("ok: a thread's context summary out at a close is drained: placed before Pi's close, not counted, not asked again");
 }
 
 // A thread's own context summary (Pi's compaction) out at a kill: counted
