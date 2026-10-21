@@ -7,13 +7,14 @@ import { spawn, spawnSync } from "node:child_process";
 import { on, once } from "node:events";
 import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
-import type { TrustedRunnerHealth } from "../src/iroh-node.ts";
+import { DatabaseSync } from "node:sqlite";
+import type { TrustedRunnerHealth } from "../src/runner-types.ts";
 
 const state = fs.mkdtempSync(path.join(os.tmpdir(), "cube-api-"));
 const models = createModels();
 const faux = fauxProvider(); models.setProvider(faux.provider);
 const runnerHealth = new Map<string, TrustedRunnerHealth>();
-// No cube-gateway: thread machines must fail visibly, never fall back.
+// No cube-gateway (the credential proxy): it is reported, never replaced.
 const app = await createCubed({ state, models, claude: null, gateway: null, runnerHealth: async runner => {
   const health = runnerHealth.get(runner.nodeId);
   if (!health) throw new Error("NODE_UNAVAILABLE");
@@ -62,11 +63,11 @@ try {
   const input = { projectId: project.id, requestId: "retry", text: "inspect workspace", model: { provider: faux.getModel().provider, id: faux.getModel().id } };
   assert.equal((await write("/api/threads", input)).status, 409);
   app.registry.enrollRunner({ nodeId: "broken-node", threadId: "broken-thread", environmentId: 1,
-    configPath: path.join(state, "absent.json"), configHash: "missing" });
-  // A protocol-3 runner takes a thread only by name (the user's decision of 2026-10-16).
+    configPath: path.join(state, "absent.json"), configHash: "missing", protocol: 4, kind: "host" });
+  // A host runner takes a thread only by name.
   const unnamed = await write("/api/threads", input);
   assert.equal(unnamed.status, 409);
-  assert.match((await unnamed.json()).error, /no berth vm runner in the global runner pool: start the thread on a runner by name/);
+  assert.match((await unnamed.json()).error, /no berth vm runner in the global runner pool: start the thread on a berth host by name/);
   const unknown = await write("/api/threads", { ...input, runner: "node-nobody" });
   assert.equal(unknown.status, 409);
   assert.match((await unknown.json()).error, /no runner node-nobody/);
@@ -90,11 +91,11 @@ try {
   };
   const threads = await settledThreads();
   assert.equal(threads.length, 1); assert.equal(threads[0].state, "error");
-  assert.match(threads[0].error, /workspace allocation failed.*IO_ERROR/);
+  assert.match(threads[0].error, /workspace allocation failed.*absent\.json/);
   const idleHealth: TrustedRunnerHealth = { lifecycle: "ready", draining: false, error: null, activeVms: 0, runningVms: 0, maxActiveVms: 1,
-    retainedVms: 1, retainedBytes: 1024, softwareVersion: "test", protocolVersion: 3 };
+    retainedVms: 1, retainedBytes: 1024, softwareVersion: "test", protocolVersion: 4, kind: "vm" };
   app.registry.enrollRunner({ nodeId: "node-operator", threadId: "operator-binding", environmentId: 2,
-    configPath: path.join(state, "operator.json"), configHash: "operator" });
+    configPath: path.join(state, "operator.json"), configHash: "operator", protocol: 4, kind: "vm" });
   runnerHealth.set("node-operator", { ...idleHealth, activeVms: 1, runningVms: 1 });
   const runnerCheck = await write("/api/runners/operator-binding/check", {});
   assert.equal(runnerCheck.status, 200);
@@ -117,40 +118,50 @@ try {
   assert.equal(projectAfterRetire.availableRunnerCount, 0, "retired runner contributes no available capacity");
   // The system page's view: protocol per runner and capacity by protocol.
   const observed = await (await fetch(`${base}/api/runners/observed`)).json();
-  assert.deepEqual(observed.runners.map((runner: { id: string; protocol: number }) => [runner.id, runner.protocol]), [["broken-thread", 3], ["operator-binding", 3]]);
-  assert.equal(observed.capacity.p3.runners, 1, "the retired runner is listed, not counted");
-  assert.equal(observed.capacity.p3.openThreads, 1, "the failed thread is open and holds its slot");
-  assert.deepEqual([observed.capacity.p3.slots, observed.capacity.p3.reserved, observed.capacity.p3.free], [1, 1, 0]);
-  assert.deepEqual(observed.capacity.p4, { vm: { runners: 0, slots: 0, reserved: 0, free: 0, stale: [], unreported: [] },
-    host: { runners: 0, slots: 0, reserved: 0, free: 0, stale: [], unreported: [] } });
+  assert.deepEqual(observed.runners.map((runner: { id: string; protocol: number }) => [runner.id, runner.protocol]), [["broken-thread", 4], ["operator-binding", 4]]);
+  assert.deepEqual(observed.capacity.p3, { runners: 0, openThreads: 0 });
+  assert.deepEqual(observed.capacity.p4.vm, { runners: 0, slots: 0, reserved: 0, free: 0, stale: [], unreported: [] }, "the retired runner is listed, not counted");
+  assert.deepEqual([observed.capacity.p4.host.runners, observed.capacity.p4.host.reserved], [1, 1], "the failed thread is open and holds its slot");
   assert.equal((await write("/api/runners/broken-thread/retire", { confirm: "broken-node", reason: "still allocated" })).status, 409,
     "host allocation blocks retirement before a runner probe");
   assert.equal((await fetch(`${base}/api/threads/broken-thread/history/extra`)).status, 404);
-  // A well-formed runner, but no cube-gateway on this host: the thread fails visibly.
-  const controlKey = path.join(state, "control.key");
-  fs.writeFileSync(controlKey, Buffer.alloc(32, 7), { mode: 0o600 });
-  const validConfig = path.join(state, "valid-runner.json");
-  fs.writeFileSync(validConfig, JSON.stringify({ version: 2, binding: { nodeId: "node-valid", threadId: "valid-binding", environmentId: 3 },
-    controlKey, serverPeer: "c".repeat(64), address: "127.0.0.1:9", network: "loopback" }), { mode: 0o600 });
-  const { createHash } = await import("node:crypto");
-  app.registry.enrollRunner({ nodeId: "node-valid", threadId: "valid-binding", environmentId: 3, configPath: validConfig,
-    configHash: createHash("sha256").update(fs.readFileSync(validConfig)).digest("hex") });
-  const gatewayless = await (await write("/api/threads", { ...input, requestId: "no-gateway", runner: "valid-binding" })).json();
-  const failed = (await settledThreads()).find((thread: { id: string }) => thread.id === gatewayless.id);
-  assert.equal(failed.state, "error");
-  assert.match(failed.error, /gateway unavailable: cube-gateway was not found/);
-  // Its diagnostics say what happened and what could not be asked, read only.
-  const diagnosed = await fetch(`${base}/api/threads/${gatewayless.id}/diagnostics`);
-  assert.equal(diagnosed.status, 200);
-  const { diagnostics } = await diagnosed.json();
-  assert.equal(diagnostics.thread.id, gatewayless.id);
-  assert.equal(diagnostics.thread.runnerNode, "node-valid");
-  assert.match(diagnostics.activation.error, /gateway unavailable/);
-  assert.equal(diagnostics.machine.runner.status, "none", "no allocation reached the runner");
-  assert.equal(diagnostics.machine.gateway.status, "none", "no gateway runs, and the diagnosis does not start one");
-  assert.equal(diagnostics.machine.guest.status, "none");
-  assert.ok(diagnostics.machine.events.entries.some((event: { event: string; detail?: string }) => event.event === "start failed" && /gateway unavailable/.test(event.detail ?? "")));
-  assert.equal(JSON.stringify(diagnostics).includes("configPath"), false, "no private adapter paths");
+  // A protocol-3 runner (retired) with a thread from before: it is never
+  // contacted, its thread does not start, says why, archives without the
+  // runner and keeps its disk's record; its history stays readable.
+  app.registry.enrollRunner({ nodeId: "node-legacy", threadId: "legacy-binding", environmentId: 3, configPath: path.join(state, "legacy-runner.json"),
+    configHash: "legacy", protocol: 4, kind: "vm" });
+  const legacyThread = await (await write("/api/threads", { ...input, requestId: "legacy", runner: "node-legacy" })).json();
+  app.registry.markPlacement(legacyThread.id, "legacy-binding", ["provisional", "requested"], "allocated");
+  const sqlite = new DatabaseSync(path.join(state, "registry.sqlite"));
+  sqlite.prepare("UPDATE runner SET data=json_remove(data,'$.protocol','$.kind') WHERE id='legacy-binding'").run();
+  sqlite.close();
+  runnerHealth.set("node-legacy", idleHealth);
+  const legacyChecked = (await (await write("/api/runners/legacy-binding/check", {})).json()).runner;
+  assert.deepEqual([legacyChecked.lastAttemptAt, legacyChecked.health], [null, null], "a check of a protocol-3 runner contacts nothing and records nothing");
+  await app.conversations.activate(legacyThread.id).catch(() => {});
+  const legacyListed = (await settledThreads()).find((thread: { id: string }) => thread.id === legacyThread.id);
+  assert.equal(legacyListed.state, "error");
+  assert.match(legacyListed.error, /this thread's runner uses protocol 3 \(cube-runner\), which cube no longer runs/);
+  assert.equal(await app.conversations.storedHistory(legacyThread.id), null, "its stored history reads without the machine (none was written here)");
+  const legacyDiagnosed = (await (await fetch(`${base}/api/threads/${legacyThread.id}/diagnostics`)).json()).diagnostics;
+  assert.deepEqual([legacyDiagnosed.machine.status, legacyDiagnosed.thread.runnerNode], ["unsupported", "node-legacy"]);
+  assert.match(legacyDiagnosed.machine.reason, /protocol 3/);
+  const legacyArchived = await (await fetch(`${base}/api/threads/${legacyThread.id}`, { method: "DELETE" })).json();
+  assert.equal(legacyArchived.retained, true, "the disk it may have on that runner's host is kept, not deleted");
+  assert.equal(app.registry.getThread(legacyThread.id)!.archived, true);
+  const discard = await write(`/api/threads/${legacyThread.id}/discard`, {});
+  assert.equal(discard.status, 409, "a disk on a protocol-3 runner is not discarded through cubed");
+  assert.match((await discard.json()).error, /protocol 3/);
+  assert.equal(app.registry.getThread(legacyThread.id)!.vm!.discarded, undefined);
+  assert.equal(await app.conversations.storedHistory(legacyThread.id), null, "and after the archive (protocol3-history-test.ts reads a real one)");
+  const legacyObserved = (await (await fetch(`${base}/api/runners/observed`)).json()).runners.find((runner: { id: string }) => runner.id === "legacy-binding");
+  assert.deepEqual([legacyObserved.protocol, legacyObserved.slots.allocatable, legacyObserved.byName], [3, false, false]);
+  // Its registration can still be retired, without contacting it (phase 8's step, run by the operator).
+  const legacyRetired = await write("/api/runners/legacy-binding/retire", { confirm: "node-legacy", reason: "protocol 3 retired" });
+  assert.equal(legacyRetired.status, 200, await legacyRetired.clone().text());
+  assert.equal((await legacyRetired.json()).runner.contactStatus, "retired");
+  assert.equal(app.registry.getThread(legacyThread.id)!.archived, true, "its thread and history are kept");
+  assert.equal(JSON.stringify(legacyDiagnosed).includes("configPath"), false, "no private adapter paths");
   assert.equal((await fetch(`${base}/api/threads/missing-thread/diagnostics`)).status, 404);
   assert.equal((await fetch(`${base}/api/threads/missing-thread/workspace/operations/key`)).status, 404);
   const cli = path.resolve("packages/server/src/index.ts");
@@ -162,6 +173,7 @@ try {
   assert.equal(version.status, 0); assert.match(version.stdout, /^cubed \d+\.\d+\.\d+/);
   const status = spawnSync(process.execPath, [cli, "runners", "status", "--state", state], { encoding: "utf8" });
   assert.equal(status.status, 1); assert.match(status.stdout, /broken-node: unreachable/);
+  assert.match(status.stdout, /node-legacy: protocol 3 \(cube-runner\), no longer supported; not contacted/);
   for (const host of [undefined, "0.0.0.0"]) {
     const directory = path.join(state, host ?? "default");
     fs.mkdirSync(directory);
@@ -230,6 +242,7 @@ try {
   flagChild.kill("SIGTERM"); assert.equal((await flagClosed)[0], 0);
   console.log("ok: actual CLI loopback default and all-IPv4 opt-in; explicit private hosts allowed, unknown hosts/cross-origin rejected");
   console.log("ok: CLI help/version/flag precedence/live unreachable status and idempotent SIGINT/SIGTERM shutdown");
-  console.log("ok: host/origin and JSON guards, method/path routing, repository validation, durable allocation despite failed activation, no gateway fails visibly");
+  console.log("ok: host/origin and JSON guards, method/path routing, repository validation, durable allocation despite failed activation, no gateway reported");
+  console.log("ok: a protocol-3 runner's thread: never contacted, refuses to start with the reason, archives keeping its disk record, no discard, history readable");
   console.log("ok: runner status privacy, exact confirmation, active-work/allocation guards, retirement audit path and capacity exclusion");
 } finally { await app.close(); fs.rmSync(state, { recursive: true, force: true }); }

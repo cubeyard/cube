@@ -6,7 +6,7 @@
  * it the header, answers `StreamAnswer`, and then only carries bytes both
  * ways: one HTTP/1.1 exchange it never reads. The token exists only in the
  * gateway; cubed holds no secret here and the runner and guest see only
- * placeholders. No limit on size or time, as for p3; the exchange ends when
+ * placeholders. No limit on size or time; the exchange ends when
  * either side does. */
 import fs from "node:fs";
 import net from "node:net";

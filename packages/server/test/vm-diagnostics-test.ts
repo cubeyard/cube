@@ -1,9 +1,7 @@
 /** Diagnostics of a thread's machine: cleaning (terminal controls escaped,
- * secrets redacted, idempotent, bounded), cubed's machine event log, and
- * ThreadVms.diagnose against fake runners: the full runner evidence, a runner
- * before vm.diagnose (vm.inspect only), a dead runner, a runner that never
- * answers (bounded time), a machine never allocated, and that it asks only
- * the thread's own machine and changes nothing. Then the bundle, its text
+ * secrets redacted, idempotent, bounded), cubed's machine event log, then
+ * the bundle of a machine's evidence (as RunnerMachines.diagnose collects it
+ * from a berth vm; runner-vm-machines-test.ts asks a fake one), its text
  * form, the HTTP route's assembly and OptChat's diagnose tool, which reads
  * only the chat's own threads. No VM; not runner acceptance. */
 import assert from "node:assert/strict";
@@ -13,16 +11,11 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
-import type { GatewaySupervisor } from "../src/gateway.ts";
-import { GuestTransportError, type GuestTransport } from "../src/guest-ssh.ts";
-import { IrohNodeError, type IrohRunnerClient } from "../src/iroh-node.ts";
 import { OptChat, type OptThreads } from "../src/optchat.ts";
 import { Registry, type Thread } from "../src/registry.ts";
-import { ThreadVms } from "../src/vm.ts";
-import { clean, EVENT_LOG_LIMIT, formatDiagnostics, MachineEvents, redact, safeText, threadDiagnostics } from "../src/vm-diagnostics.ts";
+import { clean, EVENT_LOG_LIMIT, formatDiagnostics, MachineEvents, redact, safeText, threadDiagnostics, type MachineEvidence } from "../src/vm-diagnostics.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-diagnostics-"));
-const silent = { info() {}, warn() {}, error() {}, debug() {} };
 const c = (...codes: number[]) => String.fromCodePoint(...codes);
 const ESC = c(0x1b);
 /** ESC sequences, an OSC title with BEL, CR, a C1 CSI, a bidi override, a
@@ -153,114 +146,27 @@ try {
     console.log("ok: cubed's machine events are kept bounded and cleaned; none recorded reads as null");
   }
 
-  // ThreadVms.diagnose against fake runners.
+  // A protocol-4 machine's evidence as RunnerMachines.diagnose collects it
+  // (runner-vm-machines-test.ts asks a fake berth vm for it).
   const registry = new Registry(path.join(root, "registry.sqlite"));
   registry.saveProject({ id: "p", name: "cube", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
-  registry.enrollRunner({ nodeId: "node-mac", threadId: "mac", environmentId: 1, configPath: "/private/mac.json", configHash: "mac", maxActiveVms: 2 });
-  type Ref = { threadId: string; vmId: string };
-  type Mode = "full" | "old" | "dead" | "hang";
-  let mode: Mode = "full";
-  const asked: Array<{ method: string; ref: Ref }> = [];
-  const record = (ref: Ref) => ({ vmId: ref.vmId, threadId: ref.threadId, state: "running", interrupted: false, diskBytes: 1, startedAt: 1 });
-  const fail = () => { throw new Error("diagnostics must not change a machine"); };
-  const client = {
-    nodeId: "node-mac",
-    vmDiagnose: async (ref: Ref, signal?: AbortSignal) => {
-      asked.push({ method: "vm.diagnose", ref });
-      if (mode === "old") throw new IrohNodeError("UNSUPPORTED");
-      if (mode === "dead") throw new IrohNodeError("NODE_UNAVAILABLE");
-      if (mode === "hang") return await new Promise<never>(() => { void signal; });
-      return { vm: record(ref), runner: { softwareVersion: "0.8.3", platform: "macos-aarch64" }, process: { tracked: true, pid: 7, exists: true, cpuMs: 1200 },
-        qmp: { asked: true, answered: true, answers: { "query-status": { status: "running", running: true } } },
-        frames: { gatewayConnected: true, framesFromGuest: 0, framesToGuest: 12 },
-        launch: { source: "recorded", argv: ["-machine", "virt,accel=hvf", "-name", `guest=${ref.vmId}`] },
-        logs: { console: { present: true, bytes: 40, complete: true, modifiedAt: 1, text: `EFI stub: Booting Linux Kernel...\n${HOSTILE}\n${SECRET_TEXT}` },
-          qemu: { present: false } },
-        events: { entries: [{ at: 1, event: "qemu started", detail: "pid 7" }], omitted: 0, unreadable: 0 } };
-    },
-    vmInspect: async (ref: Ref) => {
-      asked.push({ method: "vm.inspect", ref });
-      return { vm: record(ref), consoleTail: `UEFI firmware\n${HOSTILE}\n${CUT_KEY_CONSOLE}` };
-    },
-    vmStart: fail, vmAllocate: fail, vmStop: fail, vmRelease: fail, vmDiscard: fail, vmPublish: fail,
-  };
-  let attached = true;
-  const gatewayClient = { status: async (vmId: string) => attached ? { vmId, threadId: "x", link: "up", leased: false, guestIp: null, flows: 0, rxBytes: 0, txBytes: 0,
-    lastError: `dhcp: no lease ${ESC}[31m` } : null, attach: fail, detach: fail };
-  let gatewayRuns = true;
-  const gateway = { binary: "/bin/false", unavailable: null, control: "/nonexistent", onRestart: () => {}, ensureNetwork: async () => {},
-    get running() { return gatewayRuns ? { client: gatewayClient, hello: { peer: "0".repeat(64), caPem: "" } } : undefined; },
-    ready: async () => { throw new Error("a diagnosis must not start the gateway"); } };
-  const hellos: string[] = [];
-  const guest: GuestTransport = {
-    async call(op) { hellos.push(op); throw new GuestTransportError("ssh could not reach the guest: Connection timed out during banner exchange"); },
-    async close() {},
-  };
-  class TestVms extends ThreadVms { override guest(_thread: Thread) { return guest as never; } }
-  const vms = new TestVms({ registry, threads: path.join(root, "threads"), run: path.join(root, "run"), gateway: gateway as unknown as GatewaySupervisor,
-    templates: { enabled: false, ttlMs: 3600000 }, runnerClient: () => client as unknown as IrohRunnerClient, diagnoseTimeoutMs: 300, log: silent as never });
+  registry.enrollRunner({ nodeId: "node-mac", threadId: "mac", environmentId: 1, configPath: "/private/mac.json", configHash: "mac", maxActiveVms: 2, protocol: 4, kind: "vm" });
   const created = registry.createThread("p", "r1", { provider: "faux", id: "faux" }, "hello", "pi", undefined, { runnerId: "mac" });
-  const other = registry.createThread("p", "r2", { provider: "faux", id: "faux" }, "other", "pi", undefined, { runnerId: "mac" });
-  const allocated = (thread: Thread) => registry.markPlacement(thread.id, thread.runnerId, ["provisional"], "allocated");
-  {
-    const thread = registry.getThread(created.id)!;
-    let evidence = await vms.diagnose(thread);
-    assert.equal(evidence.runner.status, "none", "a machine never allocated is not asked about");
-    assert.deepEqual(asked, []);
-
-    allocated(thread);
-    hellos.length = 0;
-    evidence = await vms.diagnose(registry.getThread(thread.id)!);
-    assert.equal(evidence.runner.status, "observed");
-    assert.ok(evidence.runner.status === "observed" && evidence.runner.method === "vm.diagnose");
-    assert.deepEqual(asked, [{ method: "vm.diagnose", ref: { threadId: thread.id, vmId: thread.vm!.vmId } }], "only the thread's own machine is asked about");
-    assert.equal(evidence.gateway.status, "observed");
-    assert.ok(evidence.guest.status === "observed" && !evidence.guest.ready && /banner exchange/.test(evidence.guest.error!));
-    assert.equal(hellos.length, 1, "one bounded hello, read only");
-    assert.deepEqual(evidence.cubed, { startInProgress: false, attached: false, lastGuestProbe: null });
-    assert.notEqual(other.vm!.vmId, thread.vm!.vmId);
-    console.log("ok: a diagnosis asks the runner about the thread's own machine, the gateway and the guest, and changes nothing");
-
-    mode = "old"; asked.length = 0;
-    evidence = await vms.diagnose(registry.getThread(thread.id)!);
-    assert.ok(evidence.runner.status === "observed" && evidence.runner.method === "vm.inspect");
-    assert.match(evidence.runner.status === "observed" ? evidence.runner.note! : "", /predates vm\.diagnose \(cube-runner 0\.8\.3\)/);
-    assert.deepEqual((asked as Array<{ method: string }>).map(a => a.method), ["vm.diagnose", "vm.inspect"]);
-    assertNoBody(JSON.stringify(clean(evidence)));
-    console.log("ok: a runner before vm.diagnose gives its record and console tail, and the bundle says what is missing");
-
-    mode = "dead";
-    evidence = await vms.diagnose(registry.getThread(thread.id)!);
-    assert.ok(evidence.runner.status === "unavailable" && /NODE_UNAVAILABLE/.test(evidence.runner.reason), JSON.stringify(evidence.runner));
-    assert.equal(evidence.gateway.status, "observed", "the rest is still collected");
-    console.log("ok: a dead runner is reported unavailable, with the rest of the evidence");
-
-    mode = "hang";
-    const started = Date.now();
-    evidence = await vms.diagnose(registry.getThread(thread.id)!);
-    assert.ok(Date.now() - started < 3000, "bounded in time");
-    assert.ok(evidence.runner.status === "unavailable" && /no answer within 0\.3 s/.test(evidence.runner.reason), JSON.stringify(evidence.runner));
-    console.log("ok: a runner that never answers is reported after the diagnosis's deadline");
-
-    attached = false; mode = "full";
-    hellos.length = 0;
-    evidence = await vms.diagnose(registry.getThread(thread.id)!);
-    assert.equal(evidence.guest.status, "none");
-    assert.equal(hellos.length, 0, "no hello to a machine the gateway does not have");
-    attached = true;
-
-    gatewayRuns = false;
-    evidence = await vms.diagnose(registry.getThread(thread.id)!);
-    assert.ok(evidence.gateway.status === "none" && /no gateway runs now/.test(evidence.gateway.reason), "a diagnosis never starts the gateway");
-    gatewayRuns = true;
-
-    // Callers at the same time share one diagnosis: one runner request.
-    asked.length = 0;
-    const [a, b] = await Promise.all([vms.diagnose(thread), vms.diagnose(thread)]);
-    assert.equal(a, b);
-    assert.equal(asked.length, 1);
-    console.log("ok: a diagnosis never starts the gateway, and concurrent ones are shared");
-  }
+  registry.markPlacement(created.id, created.runnerId, ["provisional"], "allocated");
+  const evidence: MachineEvidence = {
+    cubed: { startInProgress: false, attached: false, lastGuestProbe: null },
+    events: (() => {
+      const events = new MachineEvents(path.join(root, "machine-events"));
+      events.record(created.id, "start failed", `the guest did not answer ${HOSTILE}`);
+      return events.read(created.id);
+    })(),
+    runner: { status: "observed", at: 1, method: "machine_diagnose", ms: 12, diagnosis: {
+      machine: { id: created.vm!.vmId, phase: "RUNNING" }, qemu: { pid: 7, log: { present: false } }, qmp: { status: "running" },
+      guest: { connected: false }, egress: { flows: 0 }, iroh: { relay: null },
+      events: { lines: ["1 qemu started: pid 7"] },
+      console: { present: true, bytes: 40, complete: true, text: `EFI stub: Booting Linux Kernel...\n${HOSTILE}\n${SECRET_TEXT}\n${CUT_KEY_CONSOLE}` } } },
+    guest: { status: "observed", at: 1, ready: false, ms: 300, error: `the guest did not answer in time ${ESC}[31m` },
+  };
 
   // The bundle as the route builds it, and its text form.
   {
@@ -268,7 +174,7 @@ try {
     const sources = {
       registry,
       conversations: { error: () => `the machine did not become ready: ${ESC}[2J`, waiting: () => null, starting: () => true, agentOpen: () => false, archivingNow: () => false },
-      machine: (t: Thread) => vms.diagnose(t),
+      machine: async (_thread: Thread) => evidence,
       runner: () => null,
       version: "test",
     };
@@ -283,21 +189,22 @@ try {
     const text = formatDiagnostics(bundle);
     assertPrintable(text, "text");
     for (const secret of SECRETS) assert.ok(!text.includes(secret), `${secret} leaked into the text`);
-    for (const fact of [/workspace allocating/, /runner node-mac/, /placement allocated/, /qmp: .*"status":"running"/, /frames: .*"framesFromGuest":0/,
-      /launch \(recorded\): -machine virt,accel=hvf/, /runner events:\n {2}\S+ qemu started: pid 7/, /console log: 40 bytes/, /EFI stub: Booting Linux Kernel/,
-      /qemu log: absent/, /guest hello: not ready in \d+ ms: ssh could not reach the guest/, /gateway: attached true, link up, guest ip null/]) {
+    for (const fact of [/workspace allocating/, /runner node-mac/, /placement allocated/, /machine \(berth vm\): .*"phase":"RUNNING"/, /qmp: .*"status":"running"/,
+      /runner events:\n {2}1 qemu started: pid 7/, /console: 40 bytes/, /EFI stub: Booting Linux Kernel/, /qemu log: absent/,
+      /guest hello: not ready in 300 ms: the guest did not answer in time/]) {
       assert.match(text, fact);
     }
-    assert.doesNotMatch(text, /guest agent:/, "protocol 3's guest hello has no keel agent line");
+    assertNoBody(text);
+    assert.doesNotMatch(text, /guest agent:/, "no keel agent line before the agent described itself");
     // A keel agent (protocol 4, C-2b): one line, its secrets cleaned with the bundle.
     const keel = structuredClone(bundle) as { machine: { guest: Record<string, unknown> } };
     keel.machine.guest.agent = { version: "0.1.0", build: "cd".repeat(32), kernel: "6.18.0", bootId: "boot-1", hooks: { "pre-setup": "ok", setup: "absent" } };
     assert.match(formatDiagnostics(keel), /\nguest agent: 0\.1\.0, build cdcdcdcdcdcd, kernel 6\.18\.0, boot boot-1; hooks at its last status: pre-setup ok, setup absent\n/);
     keel.machine.guest.agent = { version: "", build: "", kernel: "", bootId: "", hooks: {} };
     assert.match(formatDiagnostics(keel), /\nguest agent: \?, build \?, kernel \?, boot \?; hooks at its last status: none yet\n/);
-    const odd = structuredClone(bundle) as { machine: { runner: { diagnosis: { events: { entries: Array<{ at: number }> } } } } };
-    odd.machine.runner.diagnosis.events.entries[0]!.at = Number.MAX_VALUE; // too large for a Date, as a u64 from the runner can be
-    assert.match(formatDiagnostics(odd), /1.7976931348623157e\+308 qemu started/, "a time no Date holds is shown, not thrown");
+    const odd = structuredClone(bundle) as { machine: { events: { entries: Array<{ at: number; event: string }> } } };
+    odd.machine.events = { ...odd.machine.events, entries: [{ at: Number.MAX_VALUE, event: "started" }] }; // too large for a Date
+    assert.match(formatDiagnostics(odd), /1.7976931348623157e\+308 started/, "a time no Date holds is shown, not thrown");
     const short = formatDiagnostics(bundle, 600);
     assert.ok(short.length < 800 && short.endsWith("the whole bundle is at GET /api/threads/<id>/diagnostics]"), short);
     console.log("ok: the bundle and its text are cleaned, bounded and say what is missing");

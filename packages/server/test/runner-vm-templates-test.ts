@@ -23,6 +23,7 @@
  * credential stream) is runner-vm-cubed-test.ts. Offline. */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -36,7 +37,7 @@ import { registryCredentialRoute } from "../src/runner-credentials.ts";
 import { RunnerMachines } from "../src/runner-machines.ts";
 import { callTimeout, PUBLISH_TIMEOUT_MS, RunnerError, type RunnerSession } from "../src/runner-session.ts";
 import { currentMachineEpoch } from "../src/vm.ts";
-import { DEFAULT_TEMPLATE_TTL_MS, TEMPLATE_FORMAT, keelTemplateKey, keelTemplateParts, templateKey, templateMeta } from "../src/vm-template.ts";
+import { DEFAULT_TEMPLATE_TTL_MS, TEMPLATE_FORMAT, keelTemplateKey, keelTemplateParts, templateMeta } from "../src/vm-template.ts";
 import { LocalGuestTransport } from "./local-guest.ts";
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cube-vm-templates-")));
@@ -231,11 +232,14 @@ try {
   for (const verb of ["templateList", "templateDelete", "machineCreate", "machineStart"]) assert.equal(callTimeout(verb), 15000);
   console.log("ok: template_publish gets 600 s; template_list, template_delete and the rest 15 s");
 
-  // The keel key: its own format (never a p3 key), the image and platform in it, no guest helper.
+  // The keel key: its own format (`kind: keel`, never a p3 key), the image and platform in it, no guest helper.
   const allocation = newThread("p").allocation;
   const keyInput = { allocation, hooks: allocation.hooks!, runner: { baseImageSha256: IMAGE, platform: "linux-x86_64" }, diskGiB: 16 };
   const key = keelTemplateKey(keyInput);
-  assert.notEqual(key, templateKey(keyInput), "a p3 key and a keel key never match");
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+  assert.equal(key, sha(JSON.stringify({ kind: "keel", format: TEMPLATE_FORMAT, project: allocation.projectId,
+    repositories: allocation.repositories.map(repository => ({ url: repository.url, base: repository.base, checkoutName: repository.checkoutName })),
+    preSetup: sha(allocation.hooks!.preSetup), image: IMAGE, platform: "linux-x86_64", diskGiB: 16 })), "the key's format is unchanged: published templates still match");
   assert.notEqual(keelTemplateKey({ ...keyInput, runner: { ...keyInput.runner, baseImageSha256: "d".repeat(64) } }), key, "another base image, another key");
   assert.notEqual(keelTemplateKey({ ...keyInput, runner: { ...keyInput.runner, platform: "macos-aarch64" } }), key);
   assert.notEqual(keelTemplateKey({ ...keyInput, diskGiB: 32 }), key);

@@ -20,7 +20,7 @@ import { CallResultSchema, CallSchema, Code, EgressReportSchema, HelloAnswerSche
 import { carryCredential, MAX_CREDENTIAL_HEADER, type CredentialRoute } from "./runner-credentials.ts";
 import { createLogger, type Logger } from "./log.ts";
 import { decodeGuestAnswer, encodeGuestRequest, GuestTransportError, type GuestAnswer, type GuestCallOptions, type GuestOp,
-  type GuestTransport } from "./guest-ssh.ts";
+  type GuestTransport } from "./guest-transport.ts";
 
 export const PROTOCOL = 4;
 const ALPN = Array.from(Buffer.from("cubeyard/runner/4"));
@@ -60,7 +60,7 @@ const NODE_ID = /^node-[a-zA-Z0-9-]{1,123}$/;
 
 export type RunnerNetwork = "loopback" | "direct" | "relay";
 /** A protocol-4 runner config: version 2 with `protocol: 4`, mode 0600.
- * `binding` is the registry's identity for the runner, as for protocol 3. */
+ * `binding` is the registry's identity for the runner. */
 export interface SessionConfig {
   version: 2; protocol: 4;
   binding: { nodeId: string; threadId: string; environmentId: number };
@@ -603,7 +603,7 @@ class DialStream extends Duplex {
 
 /** `GuestTransport` over a runner's `guest` stream: the same request and
  * answer bytes `cube-guest call OP` reads and writes. A runner refusal or a
- * lost stream is a transport failure, as an ssh failure is for protocol 3. */
+ * lost stream is a transport failure. */
 export class RunnerGuestTransport implements GuestTransport {
   readonly ref: MachineRef;
   private readonly session: RunnerSession;

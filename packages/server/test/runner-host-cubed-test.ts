@@ -1,11 +1,11 @@
-/** cubed with a real `berth host` (protocol 4) beside a protocol-3
- * runner and no berth vm: enrollment, OptChat's spawn naming the host
+/** cubed with a real `berth host` (protocol 4) beside a protocol-3 runner
+ * (retired) and no berth vm: enrollment, OptChat's spawn naming the host
  * runner, the thread's checkout and hooks in a directory on this host, a
  * thread started without a runner refused (neither is in the pool), one
- * named to the protocol-3 runner, a pinned thread waiting while its runner
- * is down, and archive keeping the directory. The protocol-3 runner is a
- * local guest (no VM); the host runner is real, on loopback, unsandboxed,
- * in a temporary directory.
+ * named to the protocol-3 runner refused, a pinned thread waiting while its
+ * runner is down, and archive keeping the directory. The protocol-3 runner
+ * is only a registry row; the host runner is real, on loopback,
+ * unsandboxed, in a temporary directory.
  *
  *   node packages/server/test/runner-host-cubed-test.ts target/debug/berth */
 import assert from "node:assert/strict";
@@ -23,7 +23,6 @@ import { describeRunners, observeRunners } from "../src/runner-observe.ts";
 import { enrollRunner } from "../src/runner-enroll.ts";
 import { RunnerMachines } from "../src/runner-machines.ts";
 import { ProtocolMachines, runnerHealth } from "../src/runner-select.ts";
-import { LocalMachines } from "./local-guest.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
 assert.ok(fs.existsSync(binary), `${binary}: build berth first (cargo build -p berth)`);
@@ -73,9 +72,8 @@ const faux = fauxProvider({ tokensPerSecond: 100_000 });
 faux.setResponses(Array.from({ length: 20 }, () => () => fauxAssistantMessage("done")));
 const models = createModels();
 models.setProvider(faux.provider);
-const local = new LocalMachines(path.join(root, "local"));
 const app = await createCubed({ state, models, claude: null, gateway: null,
-  machines: (registry, threads) => new ProtocolMachines({ registry, p3: local, p4: new RunnerMachines({ registry, threads }) }) });
+  machines: (registry, threads) => new ProtocolMachines({ registry, p4: new RunnerMachines({ registry, threads }) }) });
 try {
   // enrollment: the host runner by its hello; a protocol-3 runner beside it
   const enrolled = await enrollRunner({ state, configPath });
@@ -130,11 +128,10 @@ try {
   assert.ok(steps.includes("boot:ok") && steps.includes("prepare:ok") && steps.includes("resume:ok"), steps.join(", "));
 
   // spawn without a runner: refused, never the host runner or the protocol-3 runner (no berth vm)
-  await assert.rejects(threads.spawn({ project: "terra", task: "pool" }, "req-pool"), /no berth vm runner in the global runner pool: start the thread on a runner by name/);
-  // spawn naming the protocol-3 runner: there, pinned
-  const pooled = await threads.spawn({ project: "terra", task: "p3", runner: "node-pool" }, "req-p3");
-  assert.equal(app.registry.getThread(pooled.id)!.runnerId, "runner-pool");
-  assert.equal(app.registry.getThread(pooled.id)!.pinned, true);
+  await assert.rejects(threads.spawn({ project: "terra", task: "pool" }, "req-pool"), /no berth vm runner in the global runner pool: start the thread on a berth host by name/);
+  // spawn naming the protocol-3 runner: refused, nothing written
+  await assert.rejects(threads.spawn({ project: "terra", task: "p3", runner: "node-pool" }, "req-p3"), /runner node-pool uses protocol 3 \(cube-runner\), which cube no longer runs/);
+  assert.equal(app.registry.listThreads().filter(row => row.runnerId === "runner-pool").length, 0);
   await assert.rejects(threads.spawn({ project: "terra", task: "x", runner: "node-missing" }, "req-missing"), /no runner node-missing/);
 
   // the host runner stops: a new thread named to it waits, and stays there
@@ -154,11 +151,10 @@ try {
   }
   assert.equal(archived.retained, true, JSON.stringify(archived));
   assert.ok(fs.existsSync(path.join(machine, "workspace", "README")), "archive never deletes a host machine's directory");
-  console.log("ok: cubed with berth host: enrollment, spawn by runner name, checkout and hooks in the host directory, no thread without a runner and no berth vm, a p3 thread by name, a pinned thread waits, archive retains");
+  console.log("ok: cubed with berth host: enrollment, spawn by runner name, checkout and hooks in the host directory, no thread without a runner and no berth vm, none on a p3 runner, a pinned thread waits, archive retains");
 } finally {
   app.server.closeAllConnections();
   await app.close();
-  await local.close();
   await stop(runner.child);
   try { execFileSync("pkill", ["-KILL", "-f", directory], { stdio: "ignore" }); } catch { /* none left */ }
   fs.rmSync(root, { recursive: true, force: true });

@@ -1,10 +1,9 @@
 /** Read-only evidence about a thread's machine, for an operator or OptChat
  * to see what actually happened when it does not start: cubed's record of
  * the thread (placement, startup phases, hooks), cubed's own machine events,
- * its last report from the runner, the runner's evidence (`vm.diagnose`;
- * on a runner before cube-runner 0.8.3 only `vm.inspect`), the gateway's
- * link and a bounded guest hello. Nothing here starts, stops, attaches or
- * moves a machine.
+ * its last report from the runner, the runner's evidence (`machine_diagnose`)
+ * and a bounded guest hello. Nothing here starts, stops, attaches or moves a
+ * machine.
  *
  * Every string in a bundle is cleaned: no character a terminal acts on or
  * that hides text, and no secret-looking value. Evidence that could not be
@@ -217,13 +216,12 @@ export class MachineEvents {
 export type Evidence<T> = ({ status: "observed"; at: number } & T)
   | { status: "unavailable" | "unsupported" | "none"; at?: number; reason: string };
 
-/** What ThreadVms collects about a machine (see `ThreadVms.diagnose`). */
+/** What RunnerMachines collects about a machine (`RunnerMachines.diagnose`). */
 export interface MachineEvidence {
   /** This cubed's live view: a start under way, the machine attached. */
   cubed: { startInProgress: boolean; attached: boolean; lastGuestProbe: { at: number; ready: boolean; error: string | null } | null };
   events: ReturnType<MachineEvents["read"]>;
-  runner: Evidence<{ method: "vm.diagnose" | "vm.inspect" | "machine_diagnose"; ms: number; diagnosis?: Record<string, unknown>; vm?: unknown; consoleTail?: string | null; note?: string }>;
-  gateway: Evidence<{ attached: boolean; link?: string; leased?: boolean; guestIp?: string | null; flows?: number; rxBytes?: number; txBytes?: number; lastError?: string | null }>;
+  runner: Evidence<{ method: "machine_diagnose"; ms: number; diagnosis?: Record<string, unknown> }>;
   guest: Evidence<{ ready: boolean; ms: number; error: string | null; agent?: GuestAgent }>;
 }
 
@@ -248,7 +246,8 @@ export async function threadDiagnostics(sources: DiagnosticsSources, threadId: s
   const { conversations } = sources;
   const vm = thread.vm;
   const machine: MachineEvidence | { status: "unsupported"; reason: string } = !vm ? { status: "unsupported", reason: "the thread has no machine" }
-    : sources.machine ? await sources.machine(thread) : { status: "unsupported", reason: "this cubed's machines do not report diagnostics" };
+    : sources.machine ? await sources.machine(thread).catch((error: unknown) => ({ status: "unsupported" as const, reason: error instanceof Error ? error.message : String(error) }))
+      : { status: "unsupported", reason: "this cubed's machines do not report diagnostics" };
   return clean({
     bundle: BUNDLE_VERSION,
     collectedAt: Date.now(),
@@ -313,11 +312,9 @@ export function formatDiagnostics(bundle: Record<string, unknown>, maxChars = 12
   if (get(machine, "status") === "unsupported") lines.push(`machine evidence: ${String(get(machine, "reason"))}`);
   else {
     const runner = get(machine, "runner") as Record<string, unknown>;
-    const gateway = get(machine, "gateway") as Record<string, unknown>;
     const guest = get(machine, "guest") as Record<string, unknown>;
     const cubed = get(machine, "cubed") as Record<string, unknown>;
     lines.push(`cubed: start in progress ${String(cubed.startInProgress)}, attached ${String(cubed.attached)}, last guest probe ${JSON.stringify(cubed.lastGuestProbe)}`);
-    lines.push(`gateway: ${gateway.status === "observed" ? `attached ${String(gateway.attached)}, link ${String(gateway.link)}, guest ip ${String(gateway.guestIp)}, rx ${String(gateway.rxBytes)} B, tx ${String(gateway.txBytes)} B${gateway.lastError ? `, last error ${String(gateway.lastError)}` : ""}` : `${String(gateway.status)}: ${String(gateway.reason)}`}`);
     lines.push(`guest hello: ${guest.status === "observed" ? `${guest.ready ? "ready" : "not ready"} in ${String(guest.ms)} ms${guest.error ? `: ${String(guest.error)}` : ""}` : `${String(guest.status)}: ${String(guest.reason)}`}`);
     const agent = guest.agent as GuestAgent | undefined;
     if (agent) {
@@ -326,7 +323,7 @@ export function formatDiagnostics(bundle: Record<string, unknown>, maxChars = 12
         + `boot ${agent.bootId || "?"}; hooks at its last status: ${hooks || "none yet"}`);
     }
     if (runner.status !== "observed") lines.push(`runner evidence: ${String(runner.status)}: ${String(runner.reason)}`);
-    else if (runner.method === "machine_diagnose") {
+    else {
       // berth vm's document (protocol 4, masterplan B-9).
       const d = runner.diagnosis as Record<string, unknown>;
       lines.push(`machine (berth vm): ${JSON.stringify(d.machine)}`, `qemu: ${JSON.stringify({ ...get(d, "qemu") as object, log: undefined })}`,
@@ -337,23 +334,6 @@ export function formatDiagnostics(bundle: Record<string, unknown>, maxChars = 12
         const log = (name === "console" ? get(d, "console") : get(d, "qemu", "log")) as Record<string, unknown> | undefined;
         if (!log?.present) { lines.push(`${name}: absent`); continue; }
         lines.push(`${name}: ${String(log.bytes)} bytes${log.complete ? "" : `, ${String(log.omittedBytes)} bytes omitted`}; its last lines:`,
-          ...lastLines(String(log.text), name === "console" ? 40 : 10));
-      }
-    } else if (runner.method === "vm.inspect") {
-      lines.push(`runner evidence (vm.inspect only): ${String(runner.note)}`, `record: ${JSON.stringify(runner.vm)}`);
-      if (typeof runner.consoleTail === "string") lines.push("console tail:", ...lastLines(runner.consoleTail, 40));
-    } else {
-      const d = runner.diagnosis as Record<string, unknown>;
-      lines.push(`runner: ${JSON.stringify(d.runner)}`, `record: ${JSON.stringify(d.vm)}`, `process: ${JSON.stringify(d.process)}`,
-        `qmp: ${JSON.stringify(d.qmp)}`, `frames: ${JSON.stringify(d.frames)}`, `disk: ${JSON.stringify(d.disk)}`,
-        `launch (${String(get(d, "launch", "source"))}): ${(get(d, "launch", "argv") as string[] | undefined)?.join(" ") ?? String(get(d, "launch", "note"))}`);
-      const events = get(d, "events", "entries") as Array<Record<string, unknown>> | undefined;
-      lines.push(events ? "runner events:" : "runner events: none recorded (cube-runner 0.8.3+ records them)",
-        ...(events ?? []).slice(-25).map(e => `  ${iso(e.at)} ${String(e.event)}${e.detail ? `: ${String(e.detail)}` : ""}`));
-      for (const name of ["qemu", "console"]) {
-        const log = get(d, "logs", name) as Record<string, unknown> | undefined;
-        if (!log?.present) { lines.push(`${name} log: absent`); continue; }
-        lines.push(`${name} log: ${String(log.bytes)} bytes, changed ${ago(log.modifiedAt, now)}${log.complete ? "" : `, ${String(log.omittedBytes)} bytes omitted`}; its last lines:`,
           ...lastLines(String(log.text), name === "console" ? 40 : 10));
       }
     }

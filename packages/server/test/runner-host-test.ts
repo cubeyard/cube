@@ -14,7 +14,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { Code, MachineStatus_Phase, Runner_Kind } from "../src/gen/runner_pb.js";
 import { RunnerError, RunnerSession, loadSessionConfig } from "../src/runner-session.ts";
-import { GuestTransportError } from "../src/guest-ssh.ts";
+import { GuestTransportError } from "../src/guest-transport.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
 import { workspaceContract } from "./workspace-contract.ts";
