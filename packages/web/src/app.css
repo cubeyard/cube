@@ -519,6 +519,10 @@ header .spacer { margin-left: auto; }
   color: var(--ink-3);
 }
 .strip-state.error { color: var(--bad); }
+.strip-notice { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* why a wake waits, in full: the label's title on a desktop, a line of the
+   details on a phone */
+.strip-reason { display: none; }
 .strip-project {
   flex: 0 1 auto; min-width: 0; max-width: 14rem; overflow: hidden; text-overflow: ellipsis;
   color: var(--ink-3); font-size: 11px; font-weight: 550;
@@ -1561,7 +1565,11 @@ select.compose-input {
   .mobile-thread-switch { flex: 1 1 0; }
   .strip-details-key { display: inline-flex; order: 1; margin-left: auto; }
   /* a failure stays in print, beside the details key */
-  .thread-strip:has(> .strip-details-key):not(.details-open) > :is(.strip-project, .strip-base, .strip-machine:not(.error), .strip-state:not(.error), .strip-usage, .strip-model, .bank-note, .key-bank, .strip-toggle:not(.strip-details-key)) { display: none; }
+  /* …and so does the machine's sleep (suspended, waking, waiting for a
+     slot) and what the user should know about it (B7-2, B7-5) */
+  .thread-strip:has(> .strip-details-key):not(.details-open) > :is(.strip-project, .strip-base, .strip-machine:not(.error), .strip-state:not(.error, .attention), .strip-usage, .strip-model, .bank-note, .key-bank, .strip-toggle:not(.strip-details-key)) { display: none; }
+  .thread-strip.details-open > .strip-reason { display: inline; flex-basis: 100%; white-space: normal; }
+  .thread-strip > .strip-notice { flex-basis: 100%; white-space: normal; }
   .thread-strip.details-open { padding-bottom: 0.45rem; }
   .thread-strip.details-open::before { content: ""; order: 2; flex-basis: 100%; }
   .thread-strip:has(> .strip-details-key) > :is(.strip-model, .key-bank, .strip-toggle:not(.strip-details-key)) { order: 3; }

@@ -444,3 +444,117 @@ async fn bulk_transfer_in_both_directions() {
         .unwrap();
     assert!(back == expected);
 }
+
+// F-T4-1: smoltcp aborts a flow `tcp_timeout` after the guest's last packet,
+// even with nothing to acknowledge. These run with a short timeout.
+const TCP_TIMEOUT: Duration = Duration::from_secs(2);
+
+async fn quiet_dial_env() -> (Env, cube_gateway::lan::FlowStream, GuestTcp) {
+    let limits = cube_gateway::lan::LanLimits {
+        tcp_timeout: TCP_TIMEOUT,
+        tcp_keep_alive: Duration::from_millis(500),
+        ..Default::default()
+    };
+    let env = Env::with_limits(allow_with(&[]), Duration::from_secs(5), limits).await;
+    env.guest.wait_for_lease().await;
+    let listener = env.guest.listen(22);
+    let mut flow = env.lan.dial(22).await.unwrap();
+    let mut guest_side = env.guest.accept(listener).await;
+    flow.write_all(b"open").await.unwrap();
+    let mut buf = [0u8; 4];
+    guest_side.read_exact(&mut buf).await.unwrap();
+    guest_side.write_all(&buf).await.unwrap();
+    flow.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"open");
+    (env, flow, guest_side)
+}
+
+#[tokio::test]
+async fn a_quiet_dial_outlives_the_tcp_timeout() {
+    let (_env, mut flow, mut guest_side) = quiet_dial_env().await;
+    tokio::time::sleep(3 * TCP_TIMEOUT).await;
+    flow.write_all(b"still").await.unwrap();
+    let mut buf = [0u8; 5];
+    guest_side.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"still");
+    guest_side.write_all(&buf).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), flow.read_exact(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buf, b"still");
+}
+
+#[tokio::test]
+async fn a_quiet_half_closed_flow_still_drains() {
+    // The guest is done sending; the application's reply comes later.
+    let (_env, mut flow, mut guest_side) = quiet_dial_env().await;
+    guest_side.shutdown().await.unwrap();
+    let mut rest = vec![];
+    flow.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty());
+    tokio::time::sleep(3 * TCP_TIMEOUT).await;
+    flow.write_all(b"reply").await.unwrap();
+    flow.shutdown().await.unwrap();
+    let mut got = vec![];
+    tokio::time::timeout(Duration::from_secs(5), guest_side.read_to_end(&mut got))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got, b"reply");
+}
+
+#[tokio::test]
+async fn a_quiet_flow_closed_by_the_lan_still_takes_guest_data() {
+    let (_env, mut flow, mut guest_side) = quiet_dial_env().await;
+    let (mut flow_read, mut flow_write) = tokio::io::split(&mut flow);
+    flow_write.shutdown().await.unwrap();
+    let mut rest = vec![];
+    guest_side.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty());
+    tokio::time::sleep(3 * TCP_TIMEOUT).await;
+    guest_side.write_all(b"late").await.unwrap();
+    guest_side.shutdown().await.unwrap();
+    let mut got = vec![];
+    tokio::time::timeout(Duration::from_secs(5), flow_read.read_to_end(&mut got))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got, b"late");
+}
+
+/// Waits for the LAN to give up on `flow` and returns how long that took.
+async fn time_to_abort(flow: &mut cube_gateway::lan::FlowStream) -> Duration {
+    let start = tokio::time::Instant::now();
+    let mut buf = [0u8; 16];
+    let read = tokio::time::timeout(Duration::from_secs(20), flow.read(&mut buf))
+        .await
+        .expect("a dead guest's flow is still open");
+    assert!(matches!(read, Ok(0) | Err(_)), "unexpected data: {read:?}");
+    start.elapsed()
+}
+
+#[tokio::test]
+async fn a_dead_guest_is_still_dropped_after_the_tcp_timeout() {
+    let (env, mut flow, _guest_side) = quiet_dial_env().await;
+    env.cut.store(true, Ordering::Relaxed);
+    let took = time_to_abort(&mut flow).await;
+    assert!(
+        took >= TCP_TIMEOUT - Duration::from_millis(300) && took < 2 * TCP_TIMEOUT,
+        "aborted after {took:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_dead_guest_with_unacknowledged_data_is_dropped_after_the_tcp_timeout() {
+    let (env, mut flow, _guest_side) = quiet_dial_env().await;
+    tokio::time::sleep(TCP_TIMEOUT / 2).await;
+    env.cut.store(true, Ordering::Relaxed);
+    // smoltcp counts from the write here, not from the guest's last packet.
+    flow.write_all(b"lost").await.unwrap();
+    let took = time_to_abort(&mut flow).await;
+    assert!(
+        took >= TCP_TIMEOUT - Duration::from_millis(300) && took < 2 * TCP_TIMEOUT,
+        "aborted after {took:?}"
+    );
+}

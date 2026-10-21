@@ -30,7 +30,7 @@ on:
       - packages/server/test/runner-vm-v13-test.ts
       - packages/server/test/leak-scan*.ts
       - scripts/test-node-transport.sh
-      - scripts/test-local-runner.ts
+      - scripts/test-local-berth.ts
       - scripts/runner-production-test.ts
       - scripts/runner/**
       - scripts/berth/**
@@ -72,12 +72,15 @@ jobs:
 
   # The Homebrew formulas this checkout generates, installed from the latest
   # published release on a real Mac: install, audit, formula tests, the
-  # launchers. The generator checks that release's contract (state schema,
-  # protocol) against this checkout, so the job fails on a change to the
-  # contract until the next release ships; the release gate does not require
-  # it (homebrew.yml tests the release's own formulas before publishing). No
-  # thread machine: GitHub's macOS runners have no nested virtualization, so
-  # the runner service and HVF are not exercised here.
+  # launchers, then the lifecycle a user goes through: the services started,
+  # brew uninstall with them still loaded, brew install again, the same
+  # restart, and the state under ~/.cube and ~/.cube-host kept byte for byte.
+  # The generator checks that release's contract (state schema, protocol)
+  # against this checkout, so the job fails on a change to the contract until
+  # the next release ships; the release gate does not require it (homebrew.yml
+  # tests the release's own formulas before publishing). No thread machine:
+  # GitHub's macOS runners have no nested virtualization, so berth's service
+  # runs only to its "not set up yet" and HVF is not exercised here.
   homebrew:
     runs-on: macos-latest
     timeout-minutes: 30
@@ -94,7 +97,8 @@ jobs:
           version="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
           [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           mkdir -p "$RUNNER_TEMP/assets" "$RUNNER_TEMP/formula"
-          gh release download "$version" --repo "$GITHUB_REPOSITORY" --pattern 'cubed-darwin-arm64.json*' --pattern 'cube-runner-darwin-arm64.json*' --dir "$RUNNER_TEMP/assets"
+          gh release download "$version" --repo "$GITHUB_REPOSITORY" --pattern 'cubed-darwin-arm64.json*' --pattern 'berth-darwin-arm64.json*' \
+            --pattern 'keel-arm64.json*' --dir "$RUNNER_TEMP/assets"
           node scripts/homebrew/formula.ts "$version" --assets "$RUNNER_TEMP/assets" --out "$RUNNER_TEMP/formula"
       - name: install, audit and test
         env:
@@ -105,13 +109,56 @@ jobs:
           cp "$RUNNER_TEMP"/formula/*.rb "$(brew --repository cubeyard/tap)/Formula/"
           brew trust cubeyard/tap
           brew install cubeyard/tap/cube
-          brew audit --strict cubeyard/tap/cube cubeyard/tap/cube-runner
-          brew test cubeyard/tap/cube cubeyard/tap/cube-runner
+          brew audit --strict cubeyard/tap/cube cubeyard/tap/cube-berth
+          brew test cubeyard/tap/cube cubeyard/tap/cube-berth
           cubed --version
           help="$(cubed --help)"; grep -q 'runners status' <<<"$help"
-          runner="$(cube-runner version)"; grep -q '"protocolVersion":3' <<<"$runner"
+          berth="$("$(brew --prefix)/opt/cube-berth/bin/berth" version)"; grep -q '"protocolVersion":4' <<<"$berth"
+          ! brew list cubeyard/tap/cube-runner 2>/dev/null
           sysctl -n kern.hv_support || true
           brew services list
+      - name: brew uninstall with the services loaded, then brew install again
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          set -euo pipefail
+          prefix="$(brew --prefix)"
+          log="$prefix/var/log/cube-berth.log"
+          # A set-up Mac's runner files (sentinels; without berth/.berth/vm.json the service stops at "not set up yet").
+          mkdir -p ~/.cube/berth ~/.cube/runner
+          printf 'CUBE_BERTH_IMAGE=docker.io/library/debian@sha256:%064d\nCUBE_BERTH_MAX_MACHINES=2\n' 0 > ~/.cube/berth.env
+          head -c 32 /dev/urandom > ~/.cube/berth.control.key
+          echo '{"sentinel":"berth.json"}' > ~/.cube/berth.json
+          echo 'a protocol-3 runner journal' > ~/.cube/runner/journal.db
+          chmod 600 ~/.cube/berth.env ~/.cube/berth.control.key ~/.cube/berth.json
+          files() { find ~/.cube -type f -exec shasum -a 256 {} + | sort; }
+          files > "$RUNNER_TEMP/before"
+          healthy() { for _ in $(seq 60); do curl -fsS http://127.0.0.1:7777/api/health >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+          said() { for _ in $(seq 60); do [ "$(grep -c 'not set up yet' "$log" 2>/dev/null || true)" -ge "$1" ] && return 0; sleep 1; done; return 1; }
+          brew services restart cubeyard/tap/cube-berth cubeyard/tap/cube
+          healthy
+          said 1
+          pid="$(pgrep -f "$prefix/Cellar/cube/.*/libexec/bin/node" | head -1)"
+          test -s ~/.cube-host/registry.sqlite
+          brew services list
+          # brew uninstall stops nothing: the services stay loaded and cubed keeps running from the removed keg.
+          brew uninstall cubeyard/tap/cube cubeyard/tap/cube-berth
+          if kill -0 "$pid" 2>/dev/null; then echo "after brew uninstall cubed $pid still runs (H-2)"; else echo "after brew uninstall cubed $pid is gone"; fi
+          files | diff "$RUNNER_TEMP/before" -
+          test -s ~/.cube-host/registry.sqlite
+          brew install cubeyard/tap/cube
+          lines="$(grep -c 'not set up yet' "$log")"
+          # The documented step: restart starts a stopped service and replaces a stale one.
+          brew services restart cubeyard/tap/cube-berth cubeyard/tap/cube
+          healthy
+          said $((lines + 1))
+          fresh="$(pgrep -f "$prefix/Cellar/cube/.*/libexec/bin/node" | head -1)"
+          test -n "$fresh" && [ "$fresh" != "$pid" ]
+          ! kill -0 "$pid" 2>/dev/null
+          files | diff "$RUNNER_TEMP/before" -
+          brew services list
+          brew services stop cubeyard/tap/cube cubeyard/tap/cube-berth
       # The formula's default portal names services under *.localhost on
       # loopback: check that curl, the system resolver and Safari reach this
       # Mac's own loopback for such a name, with no DNS or hosts entry.

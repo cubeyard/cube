@@ -219,7 +219,10 @@ restarts. Not exactly-once: nothing is without provider idempotency.
 Thread agents (`durable-agent.ts`) record their requests the same way: a
 request out at a stop is counted in the thread's `cube.sends` (its usage
 report partial) and its run stopped, never sent again; its next message
-goes on. Tools are not changed: every OptChat tool is read-only or keyed
+goes on. Pi's own context compaction of a thread sends its summary request
+right after entering its `summarize` phase, with no hook to record it in:
+a compaction found there at an open is counted (once per task and attempt)
+and aborted, and Pi asks for no new summary on its own after it. Tools are not changed: every OptChat tool is read-only or keyed
 (`TOOL_REPLAY`), a thread's file and bash tools are keyed workspace
 operations, and Pi reports a call of a tool that is neither as
 `interrupted` rather than running it again.

@@ -84,13 +84,12 @@ On macOS use Homebrew's `qemu-system-aarch64`, `qemu-img` and erofs-utils
 `sfdisk`). The protocol-3 part prints `SKIP: runner acceptance with a real VM
 did NOT run` there by design and the script still exits 0; leave
 `CUBE_TEST_VM` unset, since `CUBE_TEST_VM=required` turns that skip into a
-failure. `scripts/test-local-runner.ts` enrolls its runner when the host has
-an accelerator the runner accepts (a usable `/dev/kvm` on Linux,
-`kern.hv_support` 1 on macOS) and otherwise checks that enrollment is
-deferred. A `berth vm` run passed when the script exits 0 and prints
-`ok: berth vm over protocol 4 (kvm|hvf): …`, `ok: cubed with berth vm: …` and
-`ok: init-local with the real cube-runner (KVM|HVF): …`; a SKIP line for a
-part you meant to run is not a pass.
+failure. `scripts/test-local-berth.ts` runs `cubed runners init-local` with
+the real `berth vm` (the same `CUBE_TEST_BERTH_*` and an accelerator) and
+then again, as after a reinstall. A `berth vm` run passed when the script
+exits 0 and prints `ok: berth vm over protocol 4 (kvm|hvf): …`, `ok: cubed
+with berth vm: …` and `ok: init-local with the real berth vm: …`; a SKIP line
+for a part you meant to run is not a pass.
 
 `keel-layers` (`packages/keel/layers`) tests its conversion and layer disk
 with the real erofs-utils (`mkfs.erofs`, `fsck.erofs`, `dump.erofs`) and
@@ -289,21 +288,27 @@ runbook](docs/cubed-updates.md) for the manifest and supervisor contracts.
 
 The macOS tap is `cubeyard/homebrew-tap`: `Formula/cube.rb` (cubed, from the
 `darwin-arm64` release bundle, run directly without the update supervisor) and
-`Formula/cube-runner.rb` (the runner bundle, depending on Homebrew's `qemu`),
-installed with `brew install cubeyard/tap/cube`. Both are generated, never
-edited by hand:
+`Formula/cube-berth.rb` (berth from the `darwin-arm64` berth bundle, keel's
+arm64 `vmlinuz` and `base.erofs` as resources, depending on Homebrew's `qemu`
+and `erofs-utils`), installed with `brew install cubeyard/tap/cube`. Both are
+generated, never edited by hand:
 
 ```sh
-gh release download vX.Y.Z --pattern 'cubed-darwin-arm64.json*' --pattern 'cube-runner-darwin-arm64.json*' --dir /tmp/assets
+gh release download vX.Y.Z --pattern 'cubed-darwin-arm64.json*' --pattern 'berth-darwin-arm64.json*' \
+  --pattern 'keel-arm64.json*' --dir /tmp/assets
 node scripts/homebrew/formula.ts vX.Y.Z --assets /tmp/assets --out /tmp/formula
 ```
 
-`scripts/homebrew/formula.ts` verifies the two manifests' Ed25519 signatures
-with the committed key (`scripts/cubed/update-public-key.pem`, fingerprint
-checked), requires the stable tag, the `darwin-arm64` platform, the state
-contract (102), protocol 3 and one commit for both, and writes formulas that pin
-each asset's release URL and sha256 (`scripts/homebrew-formula-test.ts`). The
-tap's README comes from `scripts/homebrew/tap-README.md`.
+`scripts/homebrew/formula.ts` verifies the three manifests' Ed25519
+signatures with the committed key (`scripts/cubed/update-public-key.pem`,
+fingerprint checked), requires the stable tag, the `darwin-arm64` platform
+(keel: `arm64`), cubed's state contract (102), berth's protocol 4 and one
+commit for all three, and writes formulas that pin each asset's release URL
+and sha256 (`scripts/homebrew-formula-test.ts`, which also runs both
+launchers). The tap's README comes from `scripts/homebrew/tap-README.md`. The
+tap's `Formula/cube-runner.rb` (protocol 3) is no longer generated or
+changed: it stays at its last release so that an installed `cube-runner` can
+still be stopped with `brew services` and uninstalled.
 
 `.github/workflows/homebrew.yml` runs when a release is published (or by hand
 with a `version` input): it generates the formulas on a macOS runner, installs
@@ -316,46 +321,53 @@ job on Linux so the tap token never reaches the machine that ran the release's
 binaries. The `homebrew` job of `platforms.yml` does the same against the latest
 published release, without the push, on every push to `main` and on pull
 requests that touch the generator, so a formula change is validated on a real
-Mac before it is merged. It checks this checkout's
-generator and tests against the latest release's binaries (which may lack
-`runners init-local`), which is why the formula tests assert only
-what every 0.3.x release has (`runners status`, `--self-check`, `cube-runner
-version`); the generator also requires the release's state schema and protocol
-to match the checkout, so a pull request that changes either fails this job
-until the next release ships. It is not a required check. GitHub's macOS
-runners have no nested virtualization, so neither job starts a thread machine.
-The tap's previous formula was a different product (the v0.1 `cube` launcher);
-the tap README tells those users how to move over.
-The formulas' `test do` blocks run `cubed --version`, `--help`, cubed's
-`--self-check` (which runs `cube-gateway --version`) and `cube-runner version`.
-The cube formula keeps the release bundle as signed except that it removes the
-prebuilt native modules a dependency (pi-tui) ships for other platforms, which
-`brew audit` refuses in an arm64 keg. A backport release published after a
-newer one fails the workflow's latest-release guard; publish it by hand with
-`force` only if the tap should go back.
+Mac before it is merged; it then goes through the lifecycle: both services
+restarted, `brew uninstall` while they are loaded, `brew install` again, the
+same restart (a new cubed process, berth's service again at `not set up
+yet`), and every file under `~/.cube` unchanged throughout. It checks this
+checkout's generator against the latest release's binaries, so its formula
+tests assert only what every such release has (`runners status`,
+`--self-check`, `berth version`, keel's digests); the generator also requires
+the release's state schema and protocols to match the checkout, so a pull
+request that changes either fails this job until the next release ships. It
+is not a required check. GitHub's macOS runners have no nested
+virtualization, so neither job starts a thread machine and berth's service
+is never set up there; `cubed runners init-local` itself is tested offline
+(`runner-enroll-test.ts`) and with the real berth on a host
+(`scripts/test-local-berth.ts`). The tap's previous formula was a different
+product (the v0.1 `cube` launcher); the tap README tells those users how to
+move over. The cube formula keeps the release bundle as signed except that it
+removes the prebuilt native modules a dependency (pi-tui) ships for other
+platforms, which `brew audit` refuses in an arm64 keg. A backport release
+published after a newer one fails the workflow's latest-release guard;
+publish it by hand with `force` only if the tap should go back.
 
 What the Homebrew layout changes against the managed launcher: `bin/cubed` is
-a small wrapper that sources `~/.config/cubed/environment`, sets `CUBE_RUNNER`
-to the formula's runner and runs the bundle's `bin/node` on
-`app/packages/server/src/index.ts` directly, so the **system** page reports an
-externally managed installation and `brew upgrade` is the update path; the
-runner's self-updater is not installed, for the same reason. Services are
-`brew services` user agents (`homebrew.mxcl.cube`, `homebrew.mxcl.cube-runner`)
-running `cubed` and the runner formula's `libexec/service.sh`
-(`cube-runner run --home "${CUBE_RUNNER_HOME:-$HOME/.cube/runner}"`, resolved
-for the user who starts the service); the runner's state and the enrollment
-come from `cubed runners init-local` (see
-[runner operations](docs/runner-operations.md#local-runner)). Homebrew 7 asks
+a small wrapper that sources `~/.config/cubed/environment`, sets
+`CUBE_BERTH`, `CUBE_BERTH_KEEL`, `CUBE_BERTH_QEMU`, `CUBE_BERTH_QEMU_IMG` and
+`CUBE_BERTH_MKFS_EROFS` to the files cube-berth's service uses, and runs the
+bundle's `bin/node` on `app/packages/server/src/index.ts` directly, so the
+**system** page reports an externally managed installation and `brew
+upgrade` is the update path. Services are `brew services` user agents
+(labelled `sh.brew.cube` and `sh.brew.cube-berth` by current Homebrew)
+running `cubed` and
+cube-berth's `libexec/service.sh`, which starts `berth vm --dir ~/.cube/berth`
+with `berth.env`'s image, slots and listen address, or, until `cubed runners init-local` has
+set it up (`berth.json`, `berth.env` and berth's `vm.json` all there), says so and exits after 60 s (see [runner
+operations](docs/runner-operations.md#local-runner)). Homebrew never stops a
+service on `brew uninstall` (formulae have no uninstall hook), so the
+documented step after every install or upgrade is `brew services restart`,
+which starts a stopped service and replaces a stale one. Homebrew 7 asks
 users to trust a third-party tap once (`brew trust cubeyard/tap`) before a
 formula from it, and its dependencies, load; the formulas name the runner
-dependency as `cubeyard/tap/cube-runner`. Both formulas take their version
-from the release tag in their URL, so every release upgrades both even when
-the runner's own version did not change. `brew upgrade` does not restart the
-services and removes the previous keg; the caveats and README say to restart
-them. The cube formula sets `skip_clean "libexec"` so Homebrew's cleaner does
-not walk the bundle's 20,000 files, and prints one `ohai` at the end of
-`install`: Homebrew shows nothing else between `Installing` and the summary
-without `--verbose` ([install progress](docs/macos.md#install-progress)).
+dependency as `cubeyard/tap/cube-berth`. Both formulas take their version
+from the release tag in their URL, so every release upgrades both. `brew
+upgrade` does not restart the services and removes the previous keg; the
+caveats and README say to restart them. The cube formula sets `skip_clean
+"libexec"` so Homebrew's cleaner does not walk the bundle's 20,000 files, and
+prints one `ohai` at the end of `install`: Homebrew shows nothing else between
+`Installing` and the summary without `--verbose` ([install
+progress](docs/macos.md#install-progress)).
 
 ## Fresh start and recovery
 
