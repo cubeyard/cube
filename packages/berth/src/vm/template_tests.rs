@@ -810,13 +810,20 @@ async fn the_default_images_preparation_layer_is_part_of_the_image() {
         .publish(&prepared, |out| Ok(std::fs::write(out, vec![9u8; 4096])?))
         .unwrap();
     let runner = lab.runner(image.clone(), 16 << 30, plenty).await;
-    assert!(
-        runner
-            .describe()
-            .iter()
-            .any(|line| line.contains(&format!("prepared for cube by layer {prepared}"))),
-        "{:?}",
-        runner.describe()
+    // The whole image line, as runner-vm-test.ts reads it
+    // (packages/server/test/berth-banner.ts).
+    let lines = runner.describe();
+    let image_line = lines
+        .iter()
+        .find(|line| line.starts_with("image: "))
+        .unwrap();
+    assert_eq!(
+        image_line,
+        &format!(
+            "image: {image} ({platform}, 2 layers, manifest {}); prepared for cube by layer {prepared} (sudo, git, gh, curl, ca-certificates)",
+            plan.manifest
+        ),
+        "{lines:?}"
     );
     create(&runner, USER, base(), false).await.unwrap();
     {

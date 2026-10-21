@@ -97,7 +97,7 @@ import { LeaseStore } from "../src/workspace-lease.ts";
 import { settleOperation, type Workspace } from "../src/workspace.ts";
 import { workspaceContract, workspaceServicesContract } from "./workspace-contract.ts";
 import { DIAL_APP, dialPortal, portalContract, Raw, request, withListener, type DialPortal } from "./portal-dial.ts";
-import { bannerMachines } from "./berth-banner.ts";
+import { bannerImage, bannerMachines } from "./berth-banner.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
 const repo = path.resolve(import.meta.dirname, "../../..");
@@ -363,7 +363,19 @@ const sessions: RunnerSession[] = [];
 let v9: { target: DialPortal; port: number } | undefined;
 try {
   assert.match(runner.banner, /^qemu: \d+\.\d+\.\d+ .+ \(meets keel's floor; new machines get (pc-q35|virt)-\d+\.\d+\)$/m);
-  assert.match(runner.banner, /^image: .+ \(linux\/(amd64|arm64), \d+ layers, manifest sha256:[0-9a-f]{64}\)$/m);
+  // The image line, exactly as berth writes it: on cube's default image
+  // (the pinned official Debian) with its Debian preparation layer, pinned
+  // per platform; on any other image without one.
+  {
+    const shown = bannerImage(runner.banner);
+    assert.ok(image.endsWith(`@${shown.reference.split("@")[1]}`), `the banner names ${shown.reference}, not ${image}`);
+    const plan = JSON.parse(fs.readFileSync(path.join(repo, "packages/berth/debian/trixie.json"), "utf8")) as
+      { image: string; platforms: Record<string, { manifest: string; diffId: string }> };
+    const onDefault = image.split("@")[1] === plan.image.split("@")[1];
+    assert.equal(shown.prepared, onDefault ? plan.platforms[shown.platform]!.diffId : null,
+      onDefault ? "cube's default image is served with its pinned preparation layer" : "another image gets no preparation layer");
+    if (onDefault) assert.equal(shown.manifest, plan.platforms[shown.platform]!.manifest, "the default image's pinned manifest");
+  }
   assert.match(runner.banner, /^runner CA: certificate sha256 [0-9a-f]{64}$/m);
   assert.doesNotMatch(runner.banner, /UNSANDBOXED/);
   note(runner.banner.split("\n").filter(line => /^(qemu|accelerator|keel|image|runner CA):/.test(line)).join(" | "));
