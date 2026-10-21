@@ -1,27 +1,20 @@
-//! `cube-gateway`: the central network for runner VMs, started and supervised
-//! by cubed.
+//! `cube-gateway`: the credential proxy of runner protocol 4, started and
+//! supervised by cubed.
 //!
-//! Each VM's raw Ethernet frames arrive over Iroh (`cube/l2/1`, the gateway
-//! dials the runner). Per VM the gateway runs a small LAN (DHCP, DNS, TCP
-//! termination). The only egress is HTTP and HTTPS: HTTPS is intercepted with
-//! the installation CA, cubed decides every request over `egress.sock`, and
-//! placeholder secrets are substituted only where cubed says so. cubed reaches
-//! the guest's sshd, and its portal the guest's registered services, through
-//! the control socket's dial route.
+//! A `berth vm` runner sends each guest request a credential rule matches
+//! over a `credential` stream to cubed, which checks the machine and fence
+//! and carries the stream to the gateway's credential socket
+//! (credential.rs). The gateway asks cubed's egress policy over
+//! `egress.sock` (decide.rs), substitutes the real secret only where cubed
+//! says so (secrets.rs), sends the request over TLS from this host and turns
+//! what it substituted back into the placeholder in the answer (B6,
+//! reverse.rs). The token exists only in this process.
 //!
-//! With `--credential SOCK` the same process is also the credential proxy of
-//! runner protocol 4 (credential.rs): cubed carries a `berth vm` runner's
-//! `credential` streams to that socket, and the token is substituted here,
-//! as for p3, and turned back into the placeholder in the answer (B6).
-//!
-//! The per-VM LAN, DNS, address check, CA and the guest-facing half of HTTP
-//! are `cube-netstack`; decisions, secrets and the runner link are here.
-pub mod control;
+//! The guest-facing half of HTTP, the address check and the upstream are
+//! `cube-netstack`'s; berth vm's per-machine LAN is too, inside berth.
 pub mod credential;
 pub mod decide;
-pub mod dial;
 pub mod http;
-pub mod link;
 pub mod reverse;
 pub mod secrets;
 
@@ -29,14 +22,10 @@ pub mod secrets;
 /// here so the gateway's code and tests read as before.
 pub use cube_netstack::{addr, ca, dns, lan};
 
-use anyhow::{Context, Result, bail, ensure};
-use cube_node_transport::NetworkMode;
-use iroh::SecretKey;
+use anyhow::{Result, bail, ensure};
 use std::{
     fs,
-    io::{Read, Write},
-    net::SocketAddr,
-    os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -46,98 +35,50 @@ use tokio::{net::UnixListener, task::JoinHandle};
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct ServeOptions {
-    /// `CUBED_STATE/gateway`: Iroh key and installation CA.
-    pub state: PathBuf,
-    pub control: PathBuf,
+    /// cubed's decision socket.
     pub decide: PathBuf,
-    pub network: NetworkMode,
-    pub listen: Option<SocketAddr>,
+    /// The credential socket this gateway serves (0600).
+    pub credential: PathBuf,
     pub upstream: http::Upstream,
     pub decide_timeout: Duration,
-    pub limits: lan::LanLimits,
 }
 
 pub struct Running {
-    pub gateway: Arc<control::Gateway>,
     /// The ready line printed on stdout.
     pub ready: serde_json::Value,
-    pub control: PathBuf,
+    pub credential: PathBuf,
     pub task: JoinHandle<Result<()>>,
-    /// The credential proxy's socket and task, when it serves one.
-    pub credential: Option<(PathBuf, JoinHandle<Result<()>>)>,
 }
 
 impl Running {
     pub fn stop(self) {
         self.task.abort();
-        let _ = fs::remove_file(&self.control);
-        if let Some((path, task)) = self.credential {
-            task.abort();
-            let _ = fs::remove_file(path);
-        }
+        let _ = fs::remove_file(&self.credential);
     }
 }
 
+/// Binds the credential socket and serves it.
 pub async fn start(options: ServeOptions) -> Result<Running> {
-    start_with_credential(options, None).await
-}
-
-/// [`start`], and the credential proxy on `credential` when given.
-pub async fn start_with_credential(
-    options: ServeOptions,
-    credential: Option<PathBuf>,
-) -> Result<Running> {
-    fs::create_dir_all(&options.state)
-        .with_context(|| format!("create {}", options.state.display()))?;
-    fs::set_permissions(&options.state, fs::Permissions::from_mode(0o700))?;
-    let key = load_or_create_key(&options.state.join("iroh.key"))?;
-    let ca = Arc::new(ca::Ca::load_or_create(&options.state)?);
-    let endpoint = link::bind(key, options.network, options.listen).await?;
-    let upstream = Arc::new(options.upstream);
     let egress = Arc::new(http::Egress {
-        ca: ca.clone(),
         decide: Arc::new(decide::DecideClient::new(
             options.decide.clone(),
             options.decide_timeout,
         )),
-        upstream: upstream.clone(),
+        upstream: Arc::new(options.upstream),
     });
-    let gateway = Arc::new(control::Gateway::new(
-        endpoint.clone(),
-        options.network,
-        egress.clone(),
-        Arc::new(http::HostResolver::new(upstream)),
-        options.limits,
-    ));
-    let credential = match credential {
-        Some(path) => {
-            let listener = bind_control(&path).await?;
-            let task = tokio::spawn(credential::serve(listener, egress.clone()));
-            Some((path, task))
-        }
-        None => None,
-    };
-    let listener = bind_control(&options.control).await?;
-    let task = tokio::spawn(control::serve(listener, gateway.clone()));
-    let ready = serde_json::json!({
-        "ready": true,
-        "version": VERSION,
-        "peer": endpoint.id().to_string(),
-        "caSha256": ca.sha256(),
-    });
+    let listener = bind_socket(&options.credential).await?;
+    let task = tokio::spawn(credential::serve(listener, egress));
+    let ready = serde_json::json!({ "ready": true, "version": VERSION });
     Ok(Running {
-        gateway,
         ready,
-        control: options.control,
+        credential: options.credential,
         task,
-        credential,
     })
 }
 
-/// Binds the control (or credential) socket (0600). A stale socket from a
-/// previous gateway is replaced; a socket another gateway still serves is
-/// not.
-async fn bind_control(path: &Path) -> Result<UnixListener> {
+/// Binds the credential socket (0600). A stale socket from a previous
+/// gateway is replaced; a socket another gateway still serves is not.
+async fn bind_socket(path: &Path) -> Result<UnixListener> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         ensure!(
             metadata.file_type().is_socket(),
@@ -149,49 +90,8 @@ async fn bind_control(path: &Path) -> Result<UnixListener> {
         }
         fs::remove_file(path)?;
     }
-    let listener = UnixListener::bind(path).with_context(|| format!("bind {}", path.display()))?;
+    let listener = UnixListener::bind(path)
+        .map_err(|error| anyhow::anyhow!("bind {}: {error}", path.display()))?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     Ok(listener)
-}
-
-/// The gateway's Iroh identity: 32 raw bytes, owner-only, created once.
-pub fn load_or_create_key(path: &Path) -> Result<SecretKey> {
-    if !path.exists() {
-        let key = SecretKey::generate();
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(&key.to_bytes())?;
-        file.sync_all()?;
-        return Ok(key);
-    }
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    ensure!(
-        metadata.is_file() && metadata.mode() & 0o077 == 0 && metadata.len() == 32,
-        "{} must be a 32-byte owner-only file",
-        path.display()
-    );
-    let mut bytes = [0u8; 32];
-    file.read_exact(&mut bytes)?;
-    Ok(SecretKey::from_bytes(&bytes))
-}
-
-#[cfg(test)]
-mod tests {
-    use cube_node_transport::l2;
-
-    #[test]
-    fn the_lan_leases_the_mtu_the_frame_channel_carries() {
-        // The LAN (cube-netstack) and the runner's frame channel (p3) each
-        // have the constants; a guest leased a larger MTU than the channel
-        // carries would lose its frames.
-        assert_eq!(crate::lan::GUEST_MTU, l2::GUEST_MTU);
-        assert_eq!(crate::lan::MAX_FRAME, l2::MAX_FRAME);
-    }
 }

@@ -1,7 +1,7 @@
 /** The one Workspace contract suite. It runs against VmWorkspace and
  * against HttpWorkspace -> routes -> VmWorkspace, offline over the guest
- * helper under a temporary root (workspace-test.ts) and over a real VM
- * through the runner and the gateway (smoke-node-adapter.ts). */
+ * helper under a temporary root (workspace-test.ts); the same Workspace runs
+ * over a real `berth host` in runner-host-test.ts. */
 import assert from "node:assert/strict";
 import http from "node:http";
 import { randomUUID } from "node:crypto";

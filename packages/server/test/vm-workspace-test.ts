@@ -4,7 +4,7 @@
  * with nothing uncommitted or unpushed is deleted, anything else retained
  * with its reason), a failed
  * provisioning shown on the thread and retried under a new key. Real VMs run
- * in scripts/test-vm-e2e.ts. */
+ * in runner-vm-cubed-test.ts. */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";

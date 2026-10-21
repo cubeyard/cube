@@ -1,5 +1,5 @@
 /** cubed's client for runner protocol 4 (`cubeyard/runner/4`): one Iroh
- * connection per runner, one QUIC stream per call (packages/node-transport/
+ * connection per runner, one QUIC stream per call (packages/runner-protocol/
  * proto/runner.proto). A `RunnerSession` says hello on every new connection,
  * keeps one `watch` stream open (the runner and its machines, as the runner
  * reports them: cubed never polls a guest's hello for readiness), answers

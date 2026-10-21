@@ -61,13 +61,15 @@ const macos = Object.values(platforms.jobs).find((job) => job.name === "node-tra
 assert.equal(macos?.["runs-on"], "macos-latest");
 assert.deepEqual(platforms.on.push.branches, ["main"]);
 assert.ok("workflow_dispatch" in platforms.on);
-for (const own of [".github/workflows/platforms.yml", ".github/actions/**", "Cargo.lock", "packages/node-transport/**", "packages/gateway/**", "packages/netstack/**", "scripts/homebrew/**"]) {
+for (const own of [".github/workflows/platforms.yml", ".github/actions/**", "Cargo.lock", "packages/berth/**", "packages/gateway/**", "packages/netstack/**", "scripts/homebrew/**"]) {
   assert.ok(platforms.on.pull_request.paths.includes(own), `platforms.yml runs on pull requests that touch ${own}`);
 }
 
 // The release builds only after the gate, which names the macOS job platforms.yml has.
 assert.deepEqual([release.jobs.build!.needs].flat(), ["gate"]);
 assert.ok(release.jobs.gate!.steps.some((step) => step.run === "bash scripts/release-gate.sh"));
+// No protocol-3 runner (cube-runner) is built or released any more.
+assert.doesNotMatch(read(".github/workflows/release.yml"), /scripts\/runner\/|cube-runner-/);
 assert.match(read("scripts/release-gate.sh"), /^macos_job='node-transport \(macos\)'$/m);
 
 // keel: each architecture built twice on its own architecture, compared before

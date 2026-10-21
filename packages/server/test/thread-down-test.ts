@@ -5,7 +5,7 @@
  * crash) and on every recovery round: nothing reopens it, so the request
  * out at the failure is not sent again. Its archive still runs the release
  * check, and the release ends the mark. Offline: faux model, local guest,
- * disposable state; real VMs run in scripts/test-vm-e2e.ts. */
+ * disposable state; real VMs run in runner-vm-cubed-test.ts. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
