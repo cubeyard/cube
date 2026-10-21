@@ -88,6 +88,7 @@ try {
   assert.equal(health.protocolVersion, 4);
   assert.equal(health.kind, "host");
   assert.equal(health.maxActiveVms, 8);
+  assert.equal(health.limits, undefined, "a host runner names no machine limits");
   app.registry.recordRunnerProbe(node, { health });
   const overview = describeRunners(observeRunners(app.registry, 60_000));
   assert.match(overview, /HOST runner \(berth host, protocol 4\): UNSANDBOXED/);

@@ -1,7 +1,7 @@
 # Build signed cubed, keel and berth release assets. Publishing the draft
 # remains an explicit maintainer action. No cube-runner (protocol 3) is
-# built: a protocol-3 runner's hourly updater finds none and keeps its
-# version (docs/runner-operations.md).
+# built: a protocol-3 runner's hourly updater left on fails with a 404 every
+# hour and changes nothing (docs/runner-operations.md).
 name: cubed release
 
 on:

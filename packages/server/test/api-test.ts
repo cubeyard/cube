@@ -156,6 +156,13 @@ try {
   assert.equal(await app.conversations.storedHistory(legacyThread.id), null, "and after the archive (protocol3-history-test.ts reads a real one)");
   const legacyObserved = (await (await fetch(`${base}/api/runners/observed`)).json()).runners.find((runner: { id: string }) => runner.id === "legacy-binding");
   assert.deepEqual([legacyObserved.protocol, legacyObserved.slots.allocatable, legacyObserved.byName], [3, false, false]);
+  // Its stored report is old evidence: a reachable one with an active machine
+  // and large limits neither blocks its retirement nor sets the project's
+  // machine-size hint (only runners cubed places on do).
+  app.registry.recordRunnerProbe("legacy-binding", { health: { ...idleHealth, protocolVersion: 3, kind: undefined, activeVms: 1, runningVms: 1,
+    limits: { maxVcpus: 64, maxMemoryMiB: 262144, maxDiskGiB: 512 } } });
+  assert.equal(app.registry.runnerStatuses().find(runner => runner.id === "legacy-binding")!.contactStatus, "reachable");
+  assert.equal((await (await fetch(`${base}/api/projects/${project.id}`)).json()).project.machineLimits, null, "a protocol-3 report's limits are not shown");
   // Its registration can still be retired, without contacting it (phase 8's step, run by the operator).
   const legacyRetired = await write("/api/runners/legacy-binding/retire", { confirm: "node-legacy", reason: "protocol 3 retired" });
   assert.equal(legacyRetired.status, 200, await legacyRetired.clone().text());
