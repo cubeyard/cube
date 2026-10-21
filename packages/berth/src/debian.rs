@@ -3,7 +3,9 @@
 //! more layer above its own, the **Debian preparation layer**, with what a
 //! keel guest needs and the image lacks: sudo, git, gh, curl and
 //! ca-certificates (keel/agent `setup.rs` COMMANDS and CA_BUNDLES; without
-//! them a machine is never `ready`).
+//! them a machine is never `ready`), and openssh-client, which git
+//! recommends (ssh, ssh-keygen and git's ssh signing; outbound ssh is up to
+//! the machine's egress policy, which allows HTTP and HTTPS).
 //!
 //! The layer is built on the runner, not booted: the packages are Debian's
 //! own `.deb` files, pinned by name, version, size and sha256 for each
@@ -14,6 +16,9 @@
 //! maintainer scripts do on a fresh install that a guest needs:
 //!
 //! - `/etc/sudoers` 0440 (sudo);
+//! - the system group `_ssh` (the first free gid from 100, as `addgroup
+//!   --system` picks it) in `/etc/group` and `/etc/gshadow`, and
+//!   `/usr/bin/ssh-agent` setgid `_ssh` 2755 (openssh-client);
 //! - `/etc/ca-certificates.conf` with every certificate enabled,
 //!   `/etc/ssl/certs/<name>.pem` and the bundle
 //!   `/etc/ssl/certs/ca-certificates.crt`, as `update-ca-certificates`
@@ -26,7 +31,12 @@
 //! Not done, and not needed by the tools: OpenSSL's hash links in
 //! `/etc/ssl/certs` (the next `update-ca-certificates` writes them),
 //! `ld.so.cache` (the libraries are in the default directories), debconf's
-//! answers and the sysv links of sudo's init script.
+//! answers, the sysv links of sudo's init script and the systemd user
+//! socket of ssh-agent (keel runs no systemd).
+//!
+//! A machine made on the image before berth prepared it (official Debian
+//! alone, so never ready and nothing ran in it) gets the layer when it next
+//! starts, its disk kept (`vm/mod.rs`, `takes_preparation`).
 //!
 //! The tar is the same bytes on every runner, so its sha256 is pinned too
 //! (`diffId`); a build that hashes otherwise is refused, and the layer goes
@@ -65,6 +75,15 @@ use crate::image::{self, Platform, Progress, Reference};
 const PLAN: &str = include_str!("../debian/trixie.json");
 const STATUS_AMD64: &str = include_str!("../debian/trixie-amd64.status");
 const STATUS_ARM64: &str = include_str!("../debian/trixie-arm64.status");
+const GROUP: &str = include_str!("../debian/trixie.group");
+const GSHADOW: &str = include_str!("../debian/trixie.gshadow");
+
+/// System groups a package's postinst adds (`addgroup --system`), with the
+/// file it then gives that group and the mode: package, group, path, mode.
+const SYSTEM_GROUPS: [(&str, &str, &str, u32); 1] =
+    [("openssh-client", "_ssh", "usr/bin/ssh-agent", 0o2755)];
+/// `addgroup --system`'s range (adduser.conf FIRST_SYSTEM_GID..LAST).
+const SYSTEM_GIDS: std::ops::RangeInclusive<u64> = 100..=999;
 
 /// Where a package is fetched from, in order: the archive's CDN, which has
 /// the current packages, then the snapshot archive, which keeps every one.
@@ -96,8 +115,11 @@ pub struct Plan {
 pub struct PlatformPlan {
     /// The image's manifest for this platform: the plan applies to it only.
     pub manifest: String,
-    /// The image's `/var/lib/dpkg/status`, beside the plan.
+    /// The image's `/var/lib/dpkg/status`, `/etc/group` and `/etc/gshadow`,
+    /// beside the plan.
     pub status: String,
+    pub group: String,
+    pub gshadow: String,
     /// sha256 of the layer's tar.
     pub diff_id: String,
     pub packages: Vec<Package>,
@@ -144,11 +166,20 @@ impl PlatformPlan {
             .with_context(|| format!("debian/trixie.json's diffId {:?}", self.diff_id))
     }
 
-    fn base_status(&self) -> Result<&'static str> {
-        Ok(match self.status.as_str() {
-            "trixie-amd64.status" => STATUS_AMD64,
-            "trixie-arm64.status" => STATUS_ARM64,
-            other => bail!("debian/trixie.json names {other}, which berth does not carry"),
+    fn base(&self) -> Result<Base> {
+        let carried = |name: &str| -> Result<&'static str> {
+            Ok(match name {
+                "trixie-amd64.status" => STATUS_AMD64,
+                "trixie-arm64.status" => STATUS_ARM64,
+                "trixie.group" => GROUP,
+                "trixie.gshadow" => GSHADOW,
+                other => bail!("debian/trixie.json names {other}, which berth does not carry"),
+            })
+        };
+        Ok(Base {
+            status: carried(&self.status)?,
+            group: carried(&self.group)?,
+            gshadow: carried(&self.gshadow)?,
         })
     }
 
@@ -226,10 +257,10 @@ impl Prepare<'_> {
         self.progress
             .line(&format!("fetched and checked {} packages", debs.len()));
         let tar = work.join("layer.tar");
-        let (plan_status, tar_path) = (plan.base_status()?, tar.clone());
+        let (base, tar_path) = (plan.base()?, tar.clone());
         let built = tokio::task::spawn_blocking(move || {
             let file = BufWriterHash::new(File::create(&tar_path)?);
-            let file = build_layer(plan_status, &debs, file)?;
+            let file = build_layer(&base, &debs, file)?;
             file.finish()
         })
         .await??;
@@ -478,13 +509,75 @@ fn clean(path: &Path) -> Result<String> {
     Ok(text.to_owned())
 }
 
-/// What the maintainer scripts set on a fresh install, by path.
-fn installed_mode(path: &str, mode: u32) -> u32 {
-    match path {
-        // sudo's postinst.
-        "etc/sudoers" => 0o440,
-        _ => mode,
+/// The image's own files the layer starts from.
+pub struct Base {
+    pub status: &'static str,
+    pub group: &'static str,
+    pub gshadow: &'static str,
+}
+
+/// What a maintainer script sets on a fresh install for one path: its mode,
+/// and a group (gid, name) instead of the package's.
+struct Installed {
+    mode: u32,
+    group: Option<(u64, String)>,
+}
+
+/// The gid of `name` in a group file.
+fn gid_of(group: &str, name: &str) -> Option<u64> {
+    group
+        .lines()
+        .map(|line| line.split(':').collect::<Vec<_>>())
+        .find(|f| f.len() >= 3 && f[0] == name)
+        .and_then(|f| f[2].parse().ok())
+}
+
+/// The system groups the packages' scripts add: (group, gid), each the first
+/// gid free in `SYSTEM_GIDS` at its turn, as `addgroup --system` picks it.
+fn system_groups(group: &str, packages: &[(Package, PathBuf)]) -> Result<Vec<(String, u64)>> {
+    let mut taken: BTreeSet<u64> = group
+        .lines()
+        .filter_map(|line| line.split(':').nth(2)?.parse().ok())
+        .collect();
+    let mut out = Vec::new();
+    for (package, name, _, _) in SYSTEM_GROUPS {
+        if !packages.iter().any(|(p, _)| p.name == package) {
+            continue;
+        }
+        ensure!(
+            gid_of(group, name).is_none(),
+            "the image has the group {name} already"
+        );
+        let gid = SYSTEM_GIDS
+            .clone()
+            .find(|gid| !taken.contains(gid))
+            .context("no system gid is free")?;
+        taken.insert(gid);
+        out.push((name.to_owned(), gid));
     }
+    Ok(out)
+}
+
+/// What the maintainer scripts set on a fresh install, by path.
+fn installed(path: &str, mode: u32, groups: &[(String, u64)]) -> Installed {
+    if path == "etc/sudoers" {
+        // sudo's postinst.
+        return Installed {
+            mode: 0o440,
+            group: None,
+        };
+    }
+    for (_, name, file, set) in SYSTEM_GROUPS {
+        if path == file
+            && let Some((_, gid)) = groups.iter().find(|(n, _)| n == name)
+        {
+            return Installed {
+                mode: set,
+                group: Some((*gid, name.to_owned())),
+            };
+        }
+    }
+    Installed { mode, group: None }
 }
 
 /// One file of a package's control tar or data tar.
@@ -679,8 +772,9 @@ const CA_CONF_HEADER: &str =
 /// once, a file twice is refused), then what their maintainer scripts and
 /// dpkg would have written (module comment). The same packages give the same
 /// bytes.
-fn build_layer<W: Write>(base_status: &str, debs: &[(Package, PathBuf)], out: W) -> Result<W> {
-    let mut layer = Layer::new(out);
+fn build_layer<W: Write>(base: &Base, debs: &[(Package, PathBuf)], out: W) -> Result<W> {
+    let groups = system_groups(base.group, debs)?;
+    let mut layer = Layer::new(out, groups.clone());
     let mut paragraphs: BTreeMap<String, String> = BTreeMap::new();
     let mut interests: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut info: Vec<(String, u32, Vec<u8>)> = Vec::new();
@@ -820,11 +914,24 @@ fn build_layer<W: Write>(base_status: &str, debs: &[(Package, PathBuf)], out: W)
         layer.file("etc/ssl/certs/ca-certificates.crt", 0o644, &bundle)?;
     }
 
+    // addgroup --system: the image's files with the new groups after them.
+    if !groups.is_empty() {
+        let shadow = gid_of(base.group, "shadow").context("the image has no group shadow")?;
+        let mut group = base.group.to_owned();
+        let mut gshadow = base.gshadow.to_owned();
+        for (name, gid) in &groups {
+            group.push_str(&format!("{name}:x:{gid}:\n"));
+            gshadow.push_str(&format!("{name}:!::\n"));
+        }
+        layer.file("etc/group", 0o644, group.as_bytes())?;
+        layer.file_owned("etc/gshadow", 0o640, (shadow, "shadow"), gshadow.as_bytes())?;
+    }
+
     // dpkg's database.
     layer.file(
         "var/lib/dpkg/status",
         0o644,
-        merge_status(base_status, &paragraphs)?.as_bytes(),
+        merge_status(base.status, &paragraphs)?.as_bytes(),
     )?;
     layer.directory("var/lib/dpkg/info")?;
     info.sort_by(|a, b| a.0.cmp(&b.0));
@@ -884,10 +991,11 @@ struct Layer<W: Write> {
     builder: tar::Builder<W>,
     directories: HashSet<String>,
     files: BTreeSet<String>,
+    groups: Vec<(String, u64)>,
 }
 
 impl<W: Write> Layer<W> {
-    fn new(out: W) -> Self {
+    fn new(out: W, groups: Vec<(String, u64)>) -> Self {
         let mut builder = tar::Builder::new(out);
         builder.mode(tar::HeaderMode::Complete);
         builder.follow_symlinks(false);
@@ -895,6 +1003,7 @@ impl<W: Write> Layer<W> {
             builder,
             directories: HashSet::new(),
             files: BTreeSet::new(),
+            groups,
         }
     }
 
@@ -911,7 +1020,7 @@ impl<W: Write> Layer<W> {
         header
     }
 
-    /// A package's entry, as the package has it (but [`installed_mode`]).
+    /// A package's entry, as the package has it (but [`installed`]).
     fn add(&mut self, member: &Member) -> Result<()> {
         if member.kind == tar::EntryType::Directory {
             if !self.directories.insert(member.path.clone()) {
@@ -924,15 +1033,20 @@ impl<W: Write> Layer<W> {
                 member.path
             );
         }
-        let mut header = Self::header(
-            member.kind,
-            installed_mode(&member.path, member.mode),
-            member.data.len() as u64,
-        );
+        let set = installed(&member.path, member.mode, &self.groups);
+        let mut header = Self::header(member.kind, set.mode, member.data.len() as u64);
         header.set_uid(member.uid);
-        header.set_gid(member.gid);
         header.set_username(&member.user)?;
-        header.set_groupname(&member.group)?;
+        match &set.group {
+            Some((gid, name)) => {
+                header.set_gid(*gid);
+                header.set_groupname(name)?;
+            }
+            None => {
+                header.set_gid(member.gid);
+                header.set_groupname(&member.group)?;
+            }
+        }
         header.set_mtime(member.mtime);
         match &member.link {
             Some(target) => {
@@ -972,9 +1086,16 @@ impl<W: Write> Layer<W> {
     }
 
     fn file(&mut self, path: &str, mode: u32, data: &[u8]) -> Result<()> {
+        self.file_owned(path, mode, (0, "root"), data)
+    }
+
+    /// A file root owns, of group `group` (gid, name).
+    fn file_owned(&mut self, path: &str, mode: u32, group: (u64, &str), data: &[u8]) -> Result<()> {
         self.parent(path)?;
         ensure!(self.files.insert(path.to_owned()), "{path} twice");
         let mut header = Self::header(tar::EntryType::Regular, mode, data.len() as u64);
+        header.set_gid(group.0);
+        header.set_groupname(group.1)?;
         self.builder.append_data(&mut header, path, data)?;
         Ok(())
     }

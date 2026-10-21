@@ -19,7 +19,7 @@
 # REQUESTED below, without Recommends, as cube's guests need them
 # (keel/agent setup.rs COMMANDS and CA_BUNDLES).
 set -eu
-REQUESTED="sudo git gh curl ca-certificates"
+REQUESTED="sudo git gh curl ca-certificates openssh-client"
 snapshot=$1 arch=$2 status=${3:-/var/lib/dpkg/status}
 case "$snapshot" in
 [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
