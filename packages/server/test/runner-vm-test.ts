@@ -97,6 +97,7 @@ import { LeaseStore } from "../src/workspace-lease.ts";
 import { settleOperation, type Workspace } from "../src/workspace.ts";
 import { workspaceContract, workspaceServicesContract } from "./workspace-contract.ts";
 import { DIAL_APP, dialPortal, portalContract, Raw, request, withListener, type DialPortal } from "./portal-dial.ts";
+import { bannerMachines } from "./berth-banner.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
 const repo = path.resolve(import.meta.dirname, "../../..");
@@ -1331,7 +1332,8 @@ sha256sum app/source.rs | cut -d' ' -f1`);
   assert.doesNotMatch(fs.readFileSync(path.join(machineDir, "qemu.log"), "utf8"), /terminating on signal/,
     "the runner told QEMU to quit; the Ctrl-C did not reach it");
   runner = await start(["--listen", "127.0.0.1:0"]);
-  assert.match(runner.banner, /^machines: 1 \(1 interrupted; /m);
+  assert.deepEqual(bannerMachines(runner.banner), { machines: 1, interrupted: 1, suspended: 0, atOnce: 8 },
+    "after the Ctrl-C the one machine is interrupted, none suspended, berth's default bound");
   assert.match(runner.banner, /^image: .+ is in /m, "a restart finds the image in the directory");
   assert.doesNotMatch(runner.banner, /^layer \d+ .*: fetched /m, "and fetches nothing");
   writeConfig(runner.address, runner.peer);
