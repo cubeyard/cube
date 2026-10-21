@@ -11,26 +11,26 @@ DEVELOPING.md before changing behavior.
 - `packages/server/src/optchat*.ts`: OptChat, the user's endless chat; a
   second Pi store whose entries are its log and summary tree. It only starts
   and tells threads (docs/optchat.md).
-- `packages/server/src/vm*.ts`, `guest-ssh.ts`, `egress-policy.ts`, `guest/`:
-  thread machines, tool execution over SSH, the egress policy and the guest
-  helper `cube-guest`.
-- `packages/node-transport`: `cube-runner`, the Linux/macOS VM runner on
-  protocol 3, the `cube/l2/1` frame channel and the Iroh protocol. Kept until
-  protocol 3 is retired; new runner work goes to `berth`.
+- `packages/server/src/runner-machines.ts`, `runner-session.ts`, `vm*.ts`,
+  `guest-transport.ts`, `egress-policy.ts`, `guest/`: thread machines on
+  protocol-4 runners, tool execution over guest streams, the egress policy
+  and the guest helper `cube-guest` (what `berth host` runs).
 - `packages/runner-protocol`: runner protocol 4, `proto/runner.proto` (the
   one schema), its fixtures and the `cube-runner-protocol` crate (generated
   Rust types and stream framing). TypeScript types go to `packages/server/src/gen`.
 - `packages/berth`: `berth`, the protocol-4 runner: `berth host` and the first
   part of `berth vm` (keel machines under QEMU, masterplan B-1).
-- `packages/server/src/runner-select.ts`: the one place cubed picks protocol 3
-  or 4 for a thread, by its runner's enrolled protocol.
-- `packages/gateway`: `cube-gateway`, supervised by cubed; each VM's only
-  network (LAN, HTTP/HTTPS egress, TLS interception, secret substitution).
-- `packages/netstack`: `cube-netstack`, the gateway's network stack without
-  policy or secrets (per-VM LAN, DNS, upstream address check, CA, the
-  guest-facing half of HTTP), taken out for `berth vm` (masterplan B-3),
-  which gives each keel machine its own LAN and decides egress from the
-  machine's policy (B-4, `packages/berth/src/vm/egress.rs`).
+- `packages/server/src/runner-select.ts`: the one place cubed tells runner
+  protocols apart, by a runner's enrolled protocol: protocol 4 runs, and a
+  runner enrolled with protocol 3 (`cube-runner`, retired) is never contacted
+  while its rows and threads stay readable (docs/runner-operations.md).
+- `packages/gateway`: `cube-gateway`, supervised by cubed; protocol 4's
+  credential proxy, the only process that holds a real secret a guest uses.
+- `packages/netstack`: `cube-netstack`, the network stack without policy or
+  secrets (per-machine LAN, DNS, upstream address check, CA, the
+  guest-facing half of HTTP): `berth vm` gives each keel machine its own LAN
+  with it and decides egress from the machine's policy (B-4,
+  `packages/berth/src/vm/egress.rs`); the gateway uses its HTTP half.
 - `packages/git`: host-side repository capabilities; credentials stay here.
 - `packages/web`: Svelte 5/Vite UI, built to `packages/web/dist`.
 - `packages/keel`: keel, what runs inside a thread machine: the guest kernel
@@ -43,8 +43,8 @@ DEVELOPING.md before changing behavior.
   virtio-serial (`packages/keel/agent`: DaemonFrame, `machine_setup`,
   `OPERATIONS` commands so far; `packages/keel/agent-check` boots it under
   QEMU). Booted directly by QEMU,
-  built for fast boot and snapshot/resume, versioned apart from cubed. Not
-  used by the runner yet (docs/plans/2026-10-10-vm-base-and-image-layers.md).
+  built for fast boot and snapshot/resume, versioned apart from cubed; what
+  `berth vm` boots (docs/plans/2026-10-10-vm-base-and-image-layers.md).
 
 A thread's tools run in its own QEMU VM, never as the runner account. The
 guest is a sandbox for the agent's commands, files and network; the runner
@@ -69,12 +69,9 @@ Node ≥26, pnpm pinned in package.json, Rust pinned in rust-toolchain.toml.
 `bash scripts/setup-dev.sh` bootstraps a Linux development account. Run
 `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm build`. New offline Node tests
 belong in `scripts/test-offline.sh`. Runner, gateway and VM changes also need
-`scripts/test-node-transport.sh`'s real-VM runs: on Linux with KVM
-`CUBE_TEST_VM_IMAGE=<debian-13-genericcloud.qcow2> CUBE_TEST_VM=required bash
-scripts/test-node-transport.sh` for protocol 3, and for `berth vm` also
-`CUBE_TEST_BERTH_VM=required` with the `CUBE_TEST_BERTH_*` paths
-(DEVELOPING.md); on macOS with HVF the `berth vm` part only, without
-`CUBE_TEST_VM=required` (protocol 3 is skipped there by design). Mocks are not
+`scripts/test-node-transport.sh`'s real-VM runs: `berth vm` with
+`CUBE_TEST_BERTH_VM=required` and the `CUBE_TEST_BERTH_*` paths
+(DEVELOPING.md), on Linux with KVM and on macOS with HVF. Mocks are not
 runner acceptance.
 keel kernel changes need `packages/keel/kernel/build.sh` for both
 architectures and a boot under KVM and HVF.

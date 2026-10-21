@@ -24,7 +24,7 @@ owns the product. The user-facing unit is a thread.
 - Threads outlive the tab. Reconnect restores the saved transcript and current
   partial response without appending duplicate turns.
 - Each thread's tools run in its own virtual machine on a runner; that machine
-  is the thread's sandbox, reaching only HTTP/HTTPS through cube's gateway.
+  is the thread's sandbox, reaching only HTTP/HTTPS to public hosts.
   The runner host itself is not a sandbox. Operators prepare and enroll runners.
 - The browser host has no built-in user authentication and must remain private.
 
@@ -32,12 +32,13 @@ owns the product. The user-facing unit is a thread.
 
 Projects retain repository configuration and host-side access checks. A new
 thread leases one available runner from the installation-wide pool (its
-`berth vm` runners; a protocol-3 or host runner only when named) and gets
+`berth vm` runners; a host runner only when named) and gets
 its own virtual machine there, with `/workspace` pinned to the commits its
 repositories' branches have when it starts; an idle archived thread returns
 that lease. The thread supports streaming chat, model choice, bounded shell tools, stop, rename and archive.
 Provider and GitHub credentials remain on the host: the machine sees only a
-placeholder, and `gh` and `git push` work through the gateway. Archive
+placeholder, and `gh` and `git push` work because cube's gateway adds the
+token to requests to GitHub. Archive
 deletes the machine's disk unless it holds work that would be lost
 (uncommitted changes, commits not pushed, files outside a checkout in an
 empty project) or could not be checked; then the disk is retained, with the
