@@ -61,9 +61,9 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   --change-image`) moves it on purpose; official Debian alone, which never
   got ready, moves without it. A machine's layers never change under its
   disk; a stopped machine on official Debian alone that provably never got
-  ready (its `readiness.json`, kept from creation on, or for an earlier
-  berth's machine its layers being exactly that image's own) gets a new
-  blank disk on the default image instead, its earlier disk kept untouched
+  ready (its layers are exactly that image's own; `readiness.json`, kept
+  from creation on, can only veto) gets a new blank disk on the default
+  image instead, its earlier disk kept untouched
   under `kept/`; one berth cannot prove so is left as it was, with a `not
   renewed` event. `Platform.image_id` names what machines are
   made from. berth pulls the image when it starts (masterplan B-7), under the

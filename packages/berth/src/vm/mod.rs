@@ -920,10 +920,7 @@ impl VmRunner {
         }
         // The first ready: kept on disk for good (readiness.rs).
         if info.ready && !entry.info.as_ref().is_some_and(|i| i.ready) {
-            let dir = self.machine_dir(id);
-            if let Err(error) = readiness::mark_ready(&dir) {
-                event(&dir, "readiness not recorded", &format!("{error:#}"));
-            }
+            record_ready(&self.machine_dir(id));
         }
         entry.info = Some(info);
         state.version += 1;
@@ -1416,20 +1413,22 @@ impl VmRunner {
                 &runner,
                 self.image.prepared.is_some(),
             ) {
-                // An earlier berth's official-Debian machine whose layers
-                // berth cannot match to that image's record: not provably
-                // never ready, so it stays as it was; the operator decides.
+                // An official-Debian machine on other layers than the
+                // runner's whose layers berth cannot match to that image's
+                // record: not provably never ready, so it stays as it was;
+                // the operator decides.
                 if let Some(image) = &entry.record.image
-                    && ever_ready.is_none()
+                    && ever_ready != Some(true)
                     && entry.record.template.is_none()
                     && crate::served::is_official_debian(&image.reference)
                     && pulled.as_deref() != Some(image.diff_ids.as_slice())
+                    && (image.manifest != runner.manifest || image.diff_ids != runner.diff_ids)
                     && self.image.prepared.is_some()
                 {
                     event(
                         &dir,
                         "not renewed",
-                        "an earlier berth's machine on official Debian whose layers do not match that image's record in images/: \
+                        "a machine on official Debian whose layers are not exactly that image's own (its record in images/): \
                          not provably never ready, so it is left as it was (archive its thread or delete the machine by hand)",
                     );
                 }
@@ -1451,22 +1450,47 @@ impl VmRunner {
         let before = entry.record.image.clone();
         let kept_dir = self.options.directory.join("kept");
         std::fs::create_dir_all(&kept_dir).map_err(internal)?;
+        // Never over an earlier kept disk or note: a name of its own
+        // (a retry in the same second gets `.1`, …), the note created
+        // exclusively, the disk linked (which refuses an existing target)
+        // and only then unlinked from the machine.
         let stamp = Timestamp::now().seconds;
-        let kept = kept_dir.join(format!("{id}.{stamp}.rw.qcow2"));
-        std::fs::write(
-            kept_dir.join(format!("{id}.{stamp}.json")),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "machine": id,
-                "owner": entry.record.owner,
-                "image": before,
-                "why": "never ready on official Debian alone; the machine got a new blank disk on cube's default image",
-            }))
-            .map_err(internal)?,
-        )
+        let note = serde_json::to_vec_pretty(&serde_json::json!({
+            "machine": id,
+            "owner": entry.record.owner,
+            "image": before,
+            "why": "never ready on official Debian alone; the machine got a new blank disk on cube's default image",
+        }))
         .map_err(internal)?;
+        let mut kept = PathBuf::new();
+        for n in 0u32.. {
+            let name = if n == 0 {
+                format!("{id}.{stamp}")
+            } else {
+                format!("{id}.{stamp}.{n}")
+            };
+            let disk = kept_dir.join(format!("{name}.rw.qcow2"));
+            if disk.exists() {
+                continue;
+            }
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(kept_dir.join(format!("{name}.json")))
+            {
+                Ok(mut file) => {
+                    file.write_all(&note).map_err(internal)?;
+                    kept = disk;
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(internal(error)),
+            }
+        }
         // A renewal cut short after the earlier disk was moved: it is kept.
         if dir.join(qemu::RW_DISK).exists() {
-            std::fs::rename(dir.join(qemu::RW_DISK), &kept).map_err(internal)?;
+            std::fs::hard_link(dir.join(qemu::RW_DISK), &kept).map_err(internal)?;
+            std::fs::remove_file(dir.join(qemu::RW_DISK)).map_err(internal)?;
         }
         std::fs::rename(&fresh, dir.join(qemu::RW_DISK)).map_err(internal)?;
         let image = self.write_layers(&id, None).map_err(internal)?;
@@ -2639,6 +2663,20 @@ fn setup_layers(image: &MachineImage, template: Option<&str>) -> Vec<proto::Laye
         .collect()
 }
 
+/// The agent said ready: kept in `readiness.json`. If that cannot be
+/// written the file goes, so the machine reads as unknown rather than a
+/// false "never ready" (unlinking works on a full disk).
+fn record_ready(dir: &Path) {
+    if let Err(error) = readiness::mark_ready(dir) {
+        let _ = std::fs::remove_file(dir.join(readiness::FILE));
+        event(
+            dir,
+            "readiness not recorded",
+            &format!("{error:#}; readiness.json removed"),
+        );
+    }
+}
+
 /// `Platform.image_id`: sha256 of the manifest digest and every layer's
 /// diff_id, bottom first, each followed by a newline.
 fn image_id(image: &MachineImage) -> String {
@@ -2662,15 +2700,15 @@ fn image_id(image: &MachineImage) -> String {
 /// the runner's, which serves cube's default image, and its guest must
 /// provably never have been ready:
 ///
-/// - `readiness.json` says so (kept from creation on by this berth); or
-/// - an earlier berth's machine without that file (the user's ruling P1 on
-///   #231): its layer list is exactly that official Debian image's own, as
-///   the image's record in `images/` says (`image_layers`). keel calls a
-///   machine ready only with sudo, git, gh and curl in its root, official
-///   Debian has none of them, and nothing can add them before it is ready
-///   (the agent refuses every operation until then). Without that record,
-///   or with any other layer in the list, it is not provable and the
-///   machine is left as it was.
+/// its layer list is exactly that official Debian image's own, as the
+/// image's record in `images/` says (`image_layers`): keel calls a machine
+/// ready only with sudo, git, gh and curl in its root, official Debian has
+/// none of them, and nothing can add them before it is ready (the agent
+/// refuses every operation until then). The user's ruling P1 on #231 covers
+/// machines an earlier berth made too. Without that record, or with any
+/// other layer in the list (berth's preparation layer, a template), it is
+/// not provable and the machine is left as it was. `readiness.json` saying
+/// `everReady: true` vetoes; its `false` is never taken as proof.
 ///
 /// A machine once ready is never renewed. No guest operation ran in one
 /// that is, so its disk holds only what keel's setup generates, which the
@@ -2687,10 +2725,13 @@ fn renews_disk(
     let Some(image) = &record.image else {
         return false;
     };
-    let never_ready = match ever_ready {
-        Some(ever) => !ever,
-        None => image_layers.is_some_and(|layers| image.diff_ids == layers),
-    };
+    // Provable only on official Debian's own layers (it lacks keel's tools,
+    // so no machine on them alone was ever ready). readiness.json can only
+    // veto (`everReady: true`); `false` proves nothing on its own: a failed
+    // write or a run of an earlier berth can leave it on a machine that was
+    // ready.
+    let never_ready =
+        ever_ready != Some(true) && image_layers.is_some_and(|layers| image.diff_ids == layers);
     never_ready
         && runner_prepared
         && record.template.is_none()

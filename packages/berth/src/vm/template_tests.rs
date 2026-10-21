@@ -995,6 +995,7 @@ async fn a_never_ready_official_debian_machine_gets_a_new_disk_and_keeps_its_old
         "00000000000000a2",
         "00000000000000a3",
         "00000000000000a5",
+        "00000000000000a6",
     ] {
         create(&runner, id, base(), false).await.unwrap();
         std::fs::write(
@@ -1019,6 +1020,26 @@ async fn a_never_ready_official_debian_machine_gets_a_new_disk_and_keeps_its_old
     readiness::mark_ready(&lab.path().join("00000000000000a2")).unwrap();
     for id in ["00000000000000a3", "00000000000000a5"] {
         std::fs::remove_file(lab.path().join(id).join(readiness::FILE)).unwrap();
+    }
+    // a6: this berth's machine, readiness.json false, with a layer beyond
+    // the image's own (as berth's preparation layer is, for a machine v0.3.32
+    // ran after a rollback): false proves nothing, so it is left (B1).
+    {
+        let path = lab.path().join("00000000000000a6").join(record::RECORD);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record["image"]["diffIds"]
+            .as_array_mut()
+            .unwrap()
+            .push(diff_id(8).to_string().into());
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o644);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(
+            readiness::read(&lab.path().join("00000000000000a6")),
+            Some(false)
+        );
     }
     let path = lab.path().join("00000000000000a5").join(record::RECORD);
     let mut record: serde_json::Value =
@@ -1053,7 +1074,38 @@ async fn a_never_ready_official_debian_machine_gets_a_new_disk_and_keeps_its_old
         assert!(runner.start(request).await.is_err());
     }
     assert!(!lab.path().join("kept").exists(), "nothing moved");
+    // N1: kept names already taken for this and the next seconds are never
+    // written over.
+    let kept_dir = lab.path().join("kept");
+    std::fs::create_dir_all(&kept_dir).unwrap();
+    let now = Timestamp::now().seconds;
+    for second in now..now + 5 {
+        for suffix in ["rw.qcow2", "json"] {
+            std::fs::write(
+                kept_dir.join(format!("00000000000000a1.{second}.{suffix}")),
+                "taken",
+            )
+            .unwrap();
+        }
+    }
     let _ = start_once(&runner, "00000000000000a1").await;
+    for second in now..now + 5 {
+        for suffix in ["rw.qcow2", "json"] {
+            assert_eq!(
+                std::fs::read_to_string(
+                    kept_dir.join(format!("00000000000000a1.{second}.{suffix}"))
+                )
+                .unwrap(),
+                "taken"
+            );
+        }
+    }
+    for second in now..now + 5 {
+        for suffix in ["rw.qcow2", "json"] {
+            std::fs::remove_file(kept_dir.join(format!("00000000000000a1.{second}.{suffix}")))
+                .unwrap();
+        }
+    }
     let dir = runner.machine_dir("00000000000000a1");
     {
         let state = runner.state.lock().unwrap();
@@ -1156,6 +1208,7 @@ async fn a_never_ready_official_debian_machine_gets_a_new_disk_and_keeps_its_old
     for (id, disk) in [
         ("00000000000000a2", Some("disk of 00000000000000a2")),
         ("00000000000000a5", Some("disk of 00000000000000a5")),
+        ("00000000000000a6", Some("disk of 00000000000000a6")),
         ("00000000000000a4", None),
     ] {
         let refused = start_once(&runner, id).await.unwrap_err();
@@ -1178,9 +1231,12 @@ async fn a_never_ready_official_debian_machine_gets_a_new_disk_and_keeps_its_old
     let a5 =
         std::fs::read_to_string(runner.machine_dir("00000000000000a5").join("events.log")).unwrap();
     assert!(
-        a5.contains("not renewed: an earlier berth's machine on official Debian"),
+        a5.contains("not renewed: a machine on official Debian whose layers are not exactly that image's own"),
         "{a5}"
     );
+    let a6 =
+        std::fs::read_to_string(runner.machine_dir("00000000000000a6").join("events.log")).unwrap();
+    assert!(a6.contains("not renewed: "), "{a6}");
     let a2 =
         std::fs::read_to_string(runner.machine_dir("00000000000000a2").join("events.log")).unwrap();
     assert!(
@@ -1280,72 +1336,85 @@ fn only_provably_never_ready_official_debian_machines_are_renewed() {
         dropped: None,
     };
     let debian = "docker.io/library/debian@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    let own = "ghcr.io/example/guest@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     let ok = record(debian, Phase::Stopped, false, false);
-    assert!(renews_disk(&ok, Some(false), None, &runner, true));
-    assert!(!renews_disk(&ok, None, None, &runner, true), "no evidence");
-    // P1: an earlier berth's machine is provable by the image's own layers.
     let own_layers = vec!["o".to_string()];
+    let own = Some(own_layers.as_slice());
+    // B1 (review decc1cfd): only official Debian's own layers prove it;
+    // readiness.json only vetoes.
     assert!(
-        renews_disk(&ok, None, Some(&own_layers), &runner, true),
-        "its layers are the image's own"
+        renews_disk(&ok, None, own, &runner, true),
+        "an earlier berth's machine: its layers are the image's own"
     );
-    let other_layers = vec!["o".to_string(), "x".to_string()];
     assert!(
-        !renews_disk(&ok, None, Some(&other_layers), &runner, true),
+        renews_disk(&ok, Some(false), own, &runner, true),
+        "this berth's machine on the image's own layers"
+    );
+    assert!(
+        !renews_disk(&ok, Some(false), None, &runner, true),
+        "false alone proves nothing (a failed write, a rollback)"
+    );
+    assert!(
+        !renews_disk(&ok, None, None, &runner, true),
+        "no image record: not provable"
+    );
+    let with_more = vec!["o".to_string(), "x".to_string()];
+    assert!(
+        !renews_disk(&ok, Some(false), Some(&with_more), &runner, true),
         "a layer list that does not match"
     );
+    let mut prepared_once = ok.clone();
+    prepared_once.image.as_mut().unwrap().diff_ids = vec!["o".into(), "p0".into()];
     assert!(
-        !renews_disk(&ok, Some(true), Some(&own_layers), &runner, true),
-        "ever ready wins"
+        !renews_disk(&prepared_once, Some(false), own, &runner, true),
+        "berth's preparation layer in its list (made by this berth, run by v0.3.32 after a rollback): not provable"
     );
     assert!(
-        !renews_disk(&ok, Some(true), None, &runner, true),
-        "ever ready"
+        !renews_disk(&ok, Some(true), own, &runner, true),
+        "ever ready vetoes"
     );
     assert!(
-        !renews_disk(&ok, Some(false), None, &runner, false),
+        !renews_disk(&ok, None, own, &runner, false),
         "the runner is not on the default"
     );
-    assert!(!renews_disk(
-        &record(own, Phase::Stopped, false, false),
-        Some(false),
-        None,
-        &runner,
-        true
-    ));
-    assert!(!renews_disk(
-        &record(debian, Phase::Suspended, false, false),
-        Some(false),
-        None,
-        &runner,
-        true
-    ));
-    assert!(!renews_disk(
-        &record(debian, Phase::Running, false, false),
-        Some(false),
-        None,
-        &runner,
-        true
-    ));
-    assert!(!renews_disk(
-        &record(debian, Phase::Stopped, true, false),
-        Some(false),
-        None,
-        &runner,
-        true
-    ));
-    assert!(!renews_disk(
-        &record(debian, Phase::Stopped, false, true),
-        Some(false),
-        None,
-        &runner,
-        true
-    ));
+    let own_image = "ghcr.io/example/guest@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    for (record, why) in [
+        (
+            record(own_image, Phase::Stopped, false, false),
+            "an image of one's own",
+        ),
+        (record(debian, Phase::Suspended, false, false), "suspended"),
+        (record(debian, Phase::Running, false, false), "running"),
+        (
+            record(debian, Phase::Stopped, true, false),
+            "from a template",
+        ),
+        (
+            record(debian, Phase::Stopped, false, true),
+            "a build machine",
+        ),
+    ] {
+        assert!(!renews_disk(&record, None, own, &runner, true), "{why}");
+    }
     let mut same = ok.clone();
     same.image = Some(runner.clone());
     assert!(
-        !renews_disk(&same, Some(false), None, &runner, true),
+        !renews_disk(&same, None, Some(runner.diff_ids.as_slice()), &runner, true),
         "already on the runner's image"
     );
+}
+
+/// B1: a ready that cannot be recorded leaves no false "never ready": the
+/// file goes, so the machine reads as unknown.
+#[test]
+fn a_ready_that_cannot_be_recorded_removes_the_readiness_file() {
+    let dir = tempfile::tempdir().unwrap();
+    readiness::begin(dir.path()).unwrap();
+    // The write of the new file fails (its temporary name is taken by a
+    // directory).
+    std::fs::create_dir(dir.path().join(format!("{}.tmp", readiness::FILE))).unwrap();
+    record_ready(dir.path());
+    assert_eq!(readiness::read(dir.path()), None);
+    assert!(!dir.path().join(readiness::FILE).exists());
+    let events = std::fs::read_to_string(dir.path().join("events.log")).unwrap();
+    assert!(events.contains("readiness not recorded"), "{events}");
 }

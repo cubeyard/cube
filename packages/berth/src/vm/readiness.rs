@@ -8,12 +8,15 @@
 //! (no file)                         made by an earlier berth: unknown
 //! ```
 //!
-//! No guest operation runs before the agent is ready (keel's agent refuses
-//! them), so `everReady: false` means nothing of anyone's ever ran in the
-//! machine and its writable disk holds only what keel's setup generates.
-//! A machine without the file proves nothing either way: berth before this
-//! file kept no trace of readiness (its events say `machine_setup: done`
-//! also when the image lacks keel's tools).
+//! It vetoes, never proves: `everReady: true` keeps a machine from any
+//! renewal, but `false` is not proof that it was never ready (a write that
+//! failed, or a run of an earlier berth after a rollback, which never
+//! writes the file, can leave it on a machine that was ready); renewal
+//! needs the machine's layers to be exactly official Debian's own
+//! (`vm/mod.rs`, `renews_disk`). A ready that cannot be recorded removes
+//! the file, so the machine reads as unknown. berth before this file kept
+//! no trace of readiness (its events say `machine_setup: done` also when
+//! the image lacks keel's tools).
 
 use std::{fs, io::Write as _, path::Path};
 
