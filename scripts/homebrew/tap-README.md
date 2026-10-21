@@ -15,8 +15,8 @@ This installs `cubed` (the control plane, with its own Node runtime and
 kernel and base), QEMU, erofs-utils and `gh`. `cubed runners init-local` sets
 up the runner under `~/.cube` and enrolls it. Thread machines run cube's
 default image, official Debian trixie pinned by berth, which berth prepares
-for cube itself (sudo, git, gh, curl, ca-certificates and openssh-client from
-pinned Debian packages) the first time it starts; `--image` naming your own image is for
+for cube itself (sudo, git, gh, curl and ca-certificates from pinned Debian
+packages) the first time it starts; `--image` naming your own image is for
 those who build one. The same commands work for an upgrade and after `brew uninstall`:
 `init-local` changes nothing that is there and says so, and `brew services
 restart` starts the services or replaces ones left running. Then follow

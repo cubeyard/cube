@@ -20,7 +20,7 @@
 # Without --image (or with default) thread machines run cube's default image:
 # official Debian trixie pinned by this berth, which berth prepares for cube
 # itself (a layer of pinned Debian packages: sudo, git, gh, curl,
-# ca-certificates, openssh-client). An existing --dir keeps the image it served:
+# ca-certificates). An existing --dir keeps the image it served:
 # without --image the installer refuses one that served an image of its own
 # (berth image check) before writing anything.
 # --image <reference> is your own image instead, which must

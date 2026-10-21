@@ -61,6 +61,7 @@ set -eu
 printf '%s\\n' "$*" >> "${log}"
 case "$1" in
   version) printf '%s\\n' '{"softwareVersion":"0.1.0","protocolVersion":4}' ;;
+  image) [ "$2" = check ]; if [ "\${FAKE_CHECK_REFUSE:-}" = 1 ]; then echo "Error: $4 serves ghcr.io/example/guest@sha256:ccc, an image of its operator's own" >&2; exit 1; fi ;;
   keygen) [ "$2" = --key ]; [ ! -e "$3" ]; cp "$FAKE_CONTROL_KEY_FILE" "$3"; chmod 600 "$3"; printf '{"peerId":"%s"}\\n' "$FAKE_CONTROL_PEER" ;;
   vm) shift; dir='' peer='' node='' listen='' image=''
     while [ "$#" -gt 0 ]; do case "$1" in --dir) dir=$2 ;; --allow-peer) peer=$2 ;; --node-id) node=$2 ;; --listen) listen=$2 ;; --image) image=$2 ;; esac; shift 2; done
@@ -422,7 +423,7 @@ try {
   const fresh = await cubed([...plainArgs, "--listen", plainAddress]);
   assert.equal(fresh.status, 0, fresh.stdout + fresh.stderr);
   assert.match(fresh.stdout, /for the first time: it makes its key and pulls cube's default image \(Debian trixie\), then prepares it for cube/);
-  assert.match(fresh.stdout, /image: +default \(official Debian trixie, pinned by berth, which adds sudo, git, gh, curl, ca-certificates and openssh-client/);
+  assert.match(fresh.stdout, /image: +default \(official Debian trixie, pinned by berth, which adds sudo, git, gh, curl and ca-certificates/);
   assert.match(fresh.stdout, new RegExp(`enrolled in ${statePlain}`));
   assert.match(calls().filter(line => line.startsWith("vm --dir ")).at(-1)!, / --image default --max-machines 2 /);
   assert.deepEqual(readBerthSettings(fs.readFileSync(path.join(plain, "berth.env"), "utf8")), { image: "default", maxMachines: 2, listen: plainAddress });
@@ -454,13 +455,21 @@ try {
   const asBefore = fs.readFileSync(settingsPath, "utf8").replace("CUBE_BERTH_IMAGE=default", `CUBE_BERTH_IMAGE=${rawDebian}`);
   fs.writeFileSync(settingsPath, asBefore, { mode: 0o600 });
   const brokenSnapshot = snapshot(plain);
+  // N2: berth refuses the default there (it also served an image of the
+  // operator's own): nothing moves, and the run says why.
+  const checkRefused = await cubed(plainArgs, { ...paths(), FAKE_CHECK_REFUSE: "1" });
+  assert.equal(checkRefused.status, 1, checkRefused.stdout + checkRefused.stderr);
+  assert.match(checkRefused.stderr, /names docker\.io\/library\/debian:trixie@sha256:e+, official Debian alone, but berth would not serve cube's default image in .*: Error: .* serves ghcr\.io\/example\/guest@sha256:ccc.*\. Nothing was changed/);
+  assert.doesNotMatch(checkRefused.stdout, /recovered:/);
+  assert.deepEqual(snapshot(plain), brokenSnapshot, "nothing moved");
   const callsBeforeRecovery = calls().length;
   const recovering = await cubed(plainArgs);
   assert.equal(recovering.status, 0, recovering.stdout + recovering.stderr);
   assert.match(recovering.stdout, /recovered: berth\.env named official Debian alone; it now names cube's default image \(the earlier file is .*berth\.env\.official-debian\./);
   assert.match(recovering.stdout, /next: start or restart its service/);
   assert.doesNotMatch(recovering.stdout, /already set up and enrolled/);
-  assert.equal(calls().length, callsBeforeRecovery, "nothing is started");
+  assert.deepEqual(calls().slice(callsBeforeRecovery), [`image check --dir ${path.join(plain, "berth")} --image default`], "only berth's check runs; nothing is started");
+  assert.match(recovering.stdout, /a machine an earlier berth made has no record of that and is left as it was\. Nothing was deleted\./);
   assert.deepEqual(readBerthSettings(fs.readFileSync(settingsPath, "utf8")), { image: "default", maxMachines: 2, listen: plainAddress });
   const keptFiles = fs.readdirSync(plain).filter(name => name.startsWith("berth.env.official-debian."));
   assert.equal(keptFiles.length, 1);

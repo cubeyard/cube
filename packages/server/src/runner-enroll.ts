@@ -159,7 +159,7 @@ export function isOfficialDebian(image: string): boolean { return OFFICIAL_DEBIA
 /** The image as people read it. */
 export function describeBerthImage(image: string): string {
   return image === DEFAULT_LOCAL_BERTH_IMAGE
-    ? "default (official Debian trixie, pinned by berth, which adds sudo, git, gh, curl, ca-certificates and openssh-client from pinned Debian packages)"
+    ? "default (official Debian trixie, pinned by berth, which adds sudo, git, gh, curl and ca-certificates from pinned Debian packages)"
     : `${image} (your own: it must bring bash, sudo, flock, git, gh, curl and a CA bundle, or no machine becomes ready)`;
 }
 /** berth keeps `<dir>/<16-hex machine id>/qmp.sock` within 100 bytes. */
@@ -285,6 +285,15 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   // preparation layer to such machines when they start).
   let recovered: string | null = null;
   if (recorded && options.image === undefined && isOfficialDebian(recorded.image)) {
+    // berth's word first: it refuses the default where the directory also
+    // served an image of the operator's own (served.rs). Then nothing moves.
+    const berth = program(options.berth, "CUBE_BERTH", "--berth", ["berth"]);
+    try {
+      await run(berth, ["image", "check", "--dir", files.dir, "--image", DEFAULT_LOCAL_BERTH_IMAGE], { encoding: "utf8", timeout: 10000 });
+    } catch (error) {
+      const said = String((error as { stderr?: string }).stderr ?? (error as Error).message).trim();
+      throw new Error(`${files.settings} names ${recorded.image}, official Debian alone, but berth would not serve cube's default image in ${files.dir}: ${said}. Nothing was changed`);
+    }
     const kept = `${files.settings}.official-debian.${new Date().toISOString().replace(/[:.]/g, "-")}`;
     fs.copyFileSync(files.settings, kept, fs.constants.COPYFILE_EXCL);
     fs.chmodSync(kept, 0o600);
