@@ -56,7 +56,7 @@ keel's floor, which `berth vm` checks, and its `qemu-img`),
 `registry/repository@sha256:…`; `berth vm` pulls it itself. cube's default
 image, `docker.io/library/debian@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308`
 as `packages/berth/debian/trixie.json` pins it, is the one to use: berth
-adds its Debian preparation layer with sudo, git, gh, curl, perl and a CA
+adds its Debian preparation layer with sudo, git, gh, curl, perl, ssh and a CA
 bundle. Any other image must bring bash, sudo, flock, git, gh, curl, perl
 and a CA bundle itself. `scripts/test-local-berth.ts` without it runs
 `init-local` with no `--image`, the normal first install) and `CUBE_TEST_BERTH_MKFS` (an

@@ -168,14 +168,34 @@ deleted or rebound. So:
   pinned sha256 and keeps it in the layer cache, above the image's own.
   Machines and templates are made on the image with that layer; a
   template made on another layer list is refused (`template_image_changed`).
+  berth says which image it serves as `Platform.image_id` (sha256 of the
+  manifest and every layer, its own included), and cubed's template key
+  holds it, so after a change cubed builds a new template rather than pick
+  one berth would refuse.
+  The packages: sudo, git, gh, curl, ca-certificates and openssh-client
+  (ssh, ssh-keygen, git's ssh signing; outbound ssh still needs the egress
+  policy to allow it, and cube's allows HTTP and HTTPS).
   See `packages/berth/src/debian.rs` for what is and is not reproduced.
 - **`--image <reference>` is your own image** (advanced). berth does not
   prepare it: it must bring bash, sudo with `/etc/sudoers.d`, util-linux's
   `flock`, git, gh, curl and a CA bundle, or the machine stays not ready
-  ("the image lacks …"). Once recorded, a run without `--image` keeps it;
-  `init-local` never moves a runner to the default by itself. If `berth.env`
-  is lost while the runner is enrolled, `init-local` asks for `--image` as it
-  was instead of guessing.
+  ("the image lacks …"). Once recorded, a run without `--image` keeps it,
+  with one exception below. If `berth.env` is lost while the runner is
+  enrolled, `init-local` asks for `--image` as it was instead of guessing.
+  Official Debian itself (`docker.io/library/debian@…`) is refused as
+  `--image`: it never gets ready, and the default is official Debian
+  trixie prepared.
+- **Recovery of a runner an earlier cube set up with official Debian
+  alone.** Its machines never got ready. A run of `init-local` without
+  `--image` (the same command as an upgrade) moves its `berth.env` to
+  `CUBE_BERTH_IMAGE=default`, keeps the earlier file as
+  `berth.env.official-debian.<time>` and says so; after the service's
+  restart berth prepares the default image. A machine made on the same
+  Debian image (the pinned digest) gets the preparation layer when it next
+  starts, with its disk kept, so its thread gets ready; one made on another
+  Debian image is refused as before (`image_changed`) and is left as it is.
+  Nothing is deleted. An image of one's own that is not official Debian is
+  never moved.
 
 The runner is then started by its service (`brew services restart
 cubeyard/tap/cube-berth` under Homebrew, whose service assumes the default

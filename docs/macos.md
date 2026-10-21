@@ -60,12 +60,16 @@ right one (or without `--image`). berth pulls the image the first time it
 starts, before it listens, so the first `init-local` takes as long as the pull.
 
 **A runner set up with plain `debian:trixie` as its own image** (its machines
-never become ready: "the image lacks sudo, git, gh, curl, a CA bundle") keeps
-it: `init-local` never changes `berth.env`. To move it to the default, stop
-the service, change that line to `CUBE_BERTH_IMAGE=default` by hand and
-restart it; berth then prepares the default image for new machines.
-Machines made before keep the layers they were made with and stay not
-ready: archive those threads and start new ones. Nothing is deleted.
+never got ready: "the image lacks sudo, git, gh, curl, a CA bundle") is
+recovered by the usual upgrade commands: `cubed runners init-local` moves
+its `berth.env` to the default, keeps the earlier file beside it
+(`berth.env.official-debian.<time>`) and says so, and `brew services restart
+cubeyard/tap/cube-berth cubeyard/tap/cube` starts berth on the prepared
+image. A thread whose machine was made on the same Debian image gets ready
+on its next start, with its disk kept. One made on an older Debian image
+stays as it was (berth refuses to start it on another image); archive it
+and start a new thread. Nothing is deleted, and an image of your own that
+is not official Debian is never changed.
 
 `init-local` creates cubed's control key for the runner, starts berth once
 (it binds `~/.cube/berth` to that key, pulls the image and prints its peer),
