@@ -295,6 +295,10 @@ try {
     assert.equal((await ready(own, held, expected.nonce, "thread-b")).status, 404, "another thread's route");
     assert.equal((await ready(own, held, expected.nonce)).status, 404, "a route that names no thread (the HTTP API)");
     assert.equal((await ready(remote, ttl, expected.nonce, "thread-a")).status, 404, "a lease with a TTL is not cubed's own");
+    const pi = new VmWorkspace({ guest, leases: new LeaseStore(path.join(root, "ready-pi")), owner: "pi", binding: guest.binding });
+    const piHeld = (await pi.lease({ owner: "pi" })).token;
+    assert.equal((await ready(pi, piHeld, expected.nonce, "thread-a")).status, 404, "cubed's lease of another owner (a Pi thread's)");
+    await pi.release(piHeld);
     await delay(20);
     assert.equal(settled, false, "none of those counted");
     assert.equal((await ready(own, held, expected.nonce, "thread-a")).status, 200);

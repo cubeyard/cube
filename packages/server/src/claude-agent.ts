@@ -143,7 +143,7 @@ export class ClaudeAgent {
   private readonly submissions: ClaudeSubmission[];
   private readonly messages: ClaudeMessage[];
   private partial: ClaudePartial = [];
-  private child: { process: ChildProcessWithoutNullStreams; exited: Promise<void>; stderr: string[]; ready: Promise<"ready" | "exited" | "late">; attached: boolean } | undefined;
+  private child: { process: ChildProcessWithoutNullStreams; exited: Promise<void>; stderr: string[]; ready: Promise<"ready" | "exited" | "late">; attached: boolean; stopped?: boolean } | undefined;
   private interrupt: { timer: NodeJS.Timeout; kill?: NodeJS.Timeout } | undefined;
   /** Bash calls Claude Code started whose results have not come back, by
    * tool_use_id: the mod runs each as `claude:<id>:bash` in the thread VM. */
@@ -257,7 +257,7 @@ export class ClaudeAgent {
     void child.ready.then(ready => {
       // A child that ended first has said why (its exit is the turn's failure);
       // a turn stopped or closed meanwhile is not sent.
-      if (submission.state !== "running" || this.child !== child || ready === "exited" || this.interrupt || this.closing) return;
+      if (submission.state !== "running" || this.child !== child || ready === "exited" || this.interrupt || this.closing || child.stopped) return;
       if (ready === "ready") { this.write(child.process, { type: "user", session_id: "", parent_tool_use_id: null, message: { role: "user", content: [{ type: "text", text }] } }); return; }
       this.ending = { state: "failed", reason: MOD_MISSING };
       child.process.kill("SIGKILL");
@@ -278,6 +278,7 @@ export class ClaudeAgent {
     // No prompt has reached a child the mod has not said it is in: it is ended at once.
     if (!child.attached) {
       this.ending = { state: "stopped", reason: "stopped in cube" };
+      child.stopped = true;
       child.process.kill("SIGKILL");
       return;
     }
