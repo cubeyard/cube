@@ -76,9 +76,10 @@ image, and new threads get ready. A thread whose machine never got ready
 on official Debian gets a new blank disk on the default image on its next
 start; that is a clean start, not a migration (nothing is copied from the
 earlier disk, which is kept untouched under `~/.cube/berth/kept`). berth
-does this only when it can prove the machine was never ready: by its
-`readiness.json`, or, for one an earlier berth made, because its layers are
-exactly that official Debian image's own. A machine it cannot prove so is
+does this only when it can prove the machine was never ready: its layers
+are exactly that official Debian image's own, which lacks the tools a
+machine needs to get ready (and no machine berth knows was ever ready is
+touched). A machine it cannot prove so is
 left as it was and says why in its `events.log`. Nothing is deleted, and an
 image of your own that is not official Debian is never changed.
 (`init-local` first asks berth, and changes nothing if berth would refuse

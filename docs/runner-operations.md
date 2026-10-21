@@ -147,11 +147,16 @@ deleted or rebound. So:
   and not a build machine, that provably never got ready gets a new blank
   disk on the default image when it next starts; its earlier disk is kept
   untouched as `kept/<id>.<time>.rw.qcow2` with a note, and nothing is
-  copied from it. Provably: its `readiness.json` says never ready, or, for
-  a machine an earlier berth made (no file), its layers are exactly that
-  official Debian image's own as its record in `images/` says: keel calls a
-  machine ready only with sudo, git, gh and curl in its root, which
-  official Debian lacks and nothing can add before it is ready. A machine
+  copied from it. Provably, and only so: its layers are exactly that
+  official Debian image's own as its record in `images/` says; keel calls
+  a machine ready only with sudo, git, gh and curl in its root, which
+  official Debian lacks and nothing can add before it is ready. That holds
+  for machines an earlier berth made too. `readiness.json` only vetoes: a
+  machine it says was ready is never renewed, and its `false` proves
+  nothing (a failed write, or a run of an earlier berth after a rollback,
+  can leave it on a machine that was ready); a ready that cannot be
+  written removes the file. A kept disk or note never replaces another
+  (`.1`, … in the same second). A machine
   berth cannot prove so is left as it was (refused as `image_changed`, or
   started on its own layers) and gets a `not renewed` event saying so; the
   operator decides. Nothing is deleted. An image of one's own that is not
