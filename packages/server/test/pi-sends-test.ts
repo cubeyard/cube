@@ -29,7 +29,7 @@ import { createModels, fauxAssistantMessage, fauxProvider, type Message } from "
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { openAgent, openStorage } from "../src/durable-agent.ts";
 import { OptChat } from "../src/optchat.ts";
-import { SendsDoc, settleSends } from "../src/pi-sends.ts";
+import { SendsDoc, sendsExtension, settleSends } from "../src/pi-sends.ts";
 import { UsageService } from "../src/usage-service.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
@@ -57,7 +57,7 @@ async function until(check: () => boolean | Promise<boolean>, what: string, ms =
 }
 
 /** Runs the child until its request is out, then kills it. */
-async function crash(kind: "chat" | "compactor" | "thread", directory: string): Promise<void> {
+async function crash(kind: "chat" | "compactor" | "thread" | "compaction", directory: string): Promise<void> {
   const signal = path.join(root, `${path.basename(directory)}-${Date.now()}.signal`);
   const child = spawn(process.execPath, [path.join(import.meta.dirname, "pi-sends-child.ts"), kind, directory, signal], { stdio: ["ignore", "ignore", "inherit"] });
   const exited = new Promise(resolve => child.once("exit", resolve));
@@ -147,6 +147,81 @@ const talk = (chat: OptChat) => chat.memory.messages.filter(message => message.k
   assert.equal(read.coverage, "partial");
   assert.match(read.notes.join(" "), /1 model requests were out when cubed stopped/);
   console.log("ok: thread: a request out at a crash is counted once (its usage partial), not sent again; the next message is answered");
+}
+
+// A thread's own context summary (Pi's compaction) out at a kill: counted
+// once and not asked again; Pi asks for no new summary on its own after
+// the reopen, and no run is left waiting for it.
+{
+  const directory = path.join(root, "compaction", "thread");
+  await crash("compaction", directory);
+  const asked: string[] = [];
+  const small = fauxProvider({ tokensPerSecond: 100_000, models: [{ id: "faux-small", contextWindow: 60_000 }] });
+  small.setResponses(Array.from({ length: 50 }, () => async request => {
+    const summary = request.messages.some(message => message.role === "system" && textOf(message).includes("context summarization assistant"));
+    asked.push(summary ? "summary" : textOf(request.messages.filter(message => message.role === "user").at(-1)!).slice(0, 20));
+    return fauxAssistantMessage(summary ? "## Goal\nsummary" : "ok");
+  }));
+  const smallModels = createModels();
+  smallModels.setProvider(small.provider);
+  const files = path.join(root, "compaction", "workspace");
+  const guest = new LocalGuestTransport(path.dirname(files));
+  const open = () => openAgent({ directory, binding: guest.binding, workspace: new VmWorkspace({ guest, leases: new LeaseStore(directory), owner: "pi", binding: guest.binding }), models: smallModels, model: { provider: small.getModel().provider, id: "faux-small" } });
+  let agent = await open();
+  try {
+    await agent.conversation.waitForIdle(context);
+    await delay(500);
+    assert.deepEqual(asked, [], "the summary out at the kill was not asked again, nor anything else");
+    assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted, { [`${small.getModel().provider}/faux-small`]: 1 }, "it is counted as unknown");
+    assert.deepEqual((await agent.harness.inspect(context)).tasks.map(task => task.record.kind), [], "the compaction ended, and nothing waits for it");
+    await agent.close();
+    agent = await open();
+    await agent.conversation.waitForIdle(context);
+    assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted, { [`${small.getModel().provider}/faux-small`]: 1 }, "counted once across opens");
+    assert.deepEqual(asked, []);
+  } finally { await agent.close(); }
+  console.log("ok: a thread's context summary out at a crash is counted once and not asked again, nothing left waiting for it");
+}
+
+// A compactor reply whose commit fails in cube (not a Session failure): the
+// node is not built on it, and the answer stays marked out, so it is
+// counted as unknown when the node is asked again.
+{
+  sent.length = 0;
+  const chat = await chatAt(path.join(root, "reply-commit"));
+  try {
+    const harness = (chat as unknown as { harness: { commit: (change: unknown, commitContext: unknown) => Promise<unknown> } }).harness;
+    const commit = harness.commit.bind(harness);
+    let failed = 0;
+    harness.commit = (change, commitContext) => {
+      if (!failed && new Error().stack?.includes("countCompactor")) { failed++; return Promise.reject(new Error("the reply's commit failed (test)")); }
+      return commit(change, commitContext);
+    };
+    await chat.send(`message 0: ${"word ".repeat(30)}`, "r0");
+    await until(() => talk(chat) >= 1, "the turn is answered");
+    await until(async () => count("compaction") >= 2 && sum((await chat.usage()).cut?.compactor) === 1, "the node asked again, the unstored reply counted as unknown");
+    assert.equal(failed, 1, "one reply's commit failed");
+  } finally { await chat.close(); }
+  console.log("ok: a compactor reply whose commit fails is not used, and counts as unknown when its node is asked again");
+}
+
+// A thread's record that fails before storage: the hook aborts the
+// generation, then throws, so Pi does not send what it built itself.
+{
+  sent.length = 0;
+  const storage = await openStorage(path.join(root, "record-thread.sqlite"));
+  let harness!: Harness;
+  const registry = createRegistry();
+  registry.install(sendsExtension(() => harness, () => { throw new Error("the send record failed (test)"); }));
+  harness = await Harness.open(storage, { models, registry }, context);
+  try {
+    const conversation = await harness.root(context, { agent: { model: { provider: model.provider, modelId: model.id } } });
+    const submission = await conversation.submit({ type: "input", content: "refused", requestId: "refused" }, context);
+    const settled = await submission.wait(context);
+    assert.notEqual(settled.status, "done");
+    assert.equal(count("turn"), 0, "the thread's request was not sent");
+  } finally { await harness.close(context); }
+  console.log("ok: a thread's send record that fails before storage refuses the request: nothing sent");
 }
 
 // Settling twice before a resume, as a crash during the open does, counts once.
