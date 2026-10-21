@@ -1,6 +1,8 @@
 /** Four SIGKILL boundaries of a Pi thread over a local guest (the real
  * guest helper under a temporary root): reopen, exclusive owner, one effect,
- * same identity, SSE. Run by scripts/smoke-local.ts. */
+ * same identity, SSE. At `accepted` and `model-stream` the model request is
+ * out at the kill: the reopen does not send it again (pi-sends.ts), its run
+ * ends, and the next message goes on. Run by scripts/smoke-local.ts. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -77,7 +79,9 @@ export async function smokeDurableAgent(root: string) {
       // A broken stream is reported after the fixture's own failure, if any.
       consume.catch(() => {});
       await fetch(`${reopened.url}/drive`, { method: "POST" });
-      await recovered.wait("done");
+      const done = await recovered.wait("done");
+      const out = boundary === "accepted" || boundary === "model-stream";
+      assert.equal(done.status, out ? "unanswered" : "done", `${boundary}: a request out at the kill is not sent again; any other run goes on`);
       const snapshot = await (await fetch(`${reopened.url}/snapshot`)).json();
       assert.match(JSON.stringify(snapshot), /verified guest result: 74/);
       // Partials are committed at most every 100 ms; only the slow stream has deltas.
@@ -95,7 +99,7 @@ export async function smokeDurableAgent(root: string) {
       const attempts = fs.readFileSync(path.join(directory, "attempts"), "utf8").trim().split("\n");
       assert.equal(attempts.length, boundary === "tool-result-gap" ? 2 : 1);
       assert.equal(new Set(attempts).size, 1);
-      console.log(`ok: durable agent ${boundary}: SIGKILL/reopen, exclusive owner, guest effect once, same identity, SSE and third reopen`);
+      console.log(`ok: durable agent ${boundary}: SIGKILL/reopen${out ? " (the request out not sent again; the next message goes on)" : ""}, exclusive owner, guest effect once, same identity, SSE and third reopen`);
     }
   } finally { await Promise.all([...children].map(stop)); }
 }

@@ -16,7 +16,8 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import type { EntryRecord, SubmissionRecord } from "@earendil-works/pi-durable";
 import { messageEvents, status as claudeStatus, submissionEvent, virtualize } from "./claude-thread-events.ts";
 import { storedBackground, type ClaudeSubmission } from "./claude-agent.ts";
-import { entryEvents, settlement } from "./pi-thread-events.ts";
+import { entryEvents, settlement, withDropped } from "./pi-thread-events.ts";
+import { DROPPED_ENTRY } from "./pi-sends.ts";
 import type { ThreadAgent, ThreadEvent, ThreadStatus, ThreadTranscript } from "./thread-events.ts";
 
 export const HISTORY_PAGE = 12;
@@ -219,7 +220,8 @@ export async function readPiHistory(file: string, owner: ThreadAgent | null, fai
     }
     const status: ThreadStatus = !last ? { state: "idle", run: null, error: null }
       : last.status === "queued" || last.status === "placed" ? { state: "working", run: last.requestId ?? String(last.id), error: failure }
-      : { run: last.requestId ?? String(last.id), ...settlement(last) };
+      : withDropped({ run: last.requestId ?? String(last.id), ...settlement(last) },
+        (db.prepare("SELECT id, json_extract(record, '$.kind') AS kind FROM entries WHERE conversation_id = ? AND json_extract(record, '$.kind') IN ('pi.user', ?) ORDER BY id DESC LIMIT 2").all(ROOT, DROPPED_ENTRY) as Array<{ id: number; kind: string }>));
     const entry = db.prepare("SELECT record FROM entries WHERE id = ?");
     return assemble(growing, { agent: "pi", owner, status }, request,
       row => entryEvents([parse((entry.get(growing.keys[row]!) as { record: string }).record)]).filter(historyShows));

@@ -102,7 +102,17 @@ export async function smokeProduct(root: string) {
       catch (error) { if (!controller.signal.aborted) throw error; }
     })();
     let history;
-    const deadline = Date.now() + 20000;
+    // The model request was out at the SIGKILL: the reopen does not send it
+    // again (pi-sends.ts) and stops that run; the user's next message goes on.
+    let deadline = Date.now() + 20000;
+    do {
+      history = await (await fetch(`${base}/history`)).json();
+      assert(Date.now() < deadline, JSON.stringify(history));
+      await new Promise(resolve => setTimeout(resolve, 25));
+    } while (history.status.state === "working");
+    assert.equal(history.status.state, "stopped", "the request out at the kill is not sent again");
+    assert.equal((await post(`${base}/prompt`, { text: "go on", requestId: "recover-go-on" })).status, 200);
+    deadline = Date.now() + 20000;
     do {
       history = await (await fetch(`${base}/history`)).json();
       assert(Date.now() < deadline, JSON.stringify(history));
@@ -137,7 +147,8 @@ export async function smokeProduct(root: string) {
       assert(Date.now() < stoppedDeadline, JSON.stringify(history));
       await new Promise(resolve => setTimeout(resolve, 20));
     } while (history.status.state === "working");
-    assert.equal(history.events.filter((event: { type: string }) => event.type === "user-message").length, 2);
+    // The first prompt, the user's "go on" after the kill, and this one.
+    assert.equal(history.events.filter((event: { type: string }) => event.type === "user-message").length, 3);
     assert.equal(history.status.state, "stopped");
     assert.equal((await post(`${followup}/prompt`, message)).status, 200);
     assert.deepEqual(await (await fetch(`${followup}/history`)).json(), history, "stopped prompt retry must not launch a new run");
