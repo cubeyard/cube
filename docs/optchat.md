@@ -101,8 +101,12 @@ only. `max_tokens` is not part of the cached prefix.
 The chat's own requests are capped too (O1): `CHAT_OUTPUT_TOKENS` (32,000)
 for an answer, its tool calls and adaptive thinking together, where pi-ai
 would send the model's maximum (128,000 on recent models); on a ChatGPT
-sign-in by the same guard. A turn whose answer reaches it ends there, as
-Pi stores a `length` stop. `optchat.ts` is the service: Pi setup, the tools, the turn
+sign-in by the same guard. No call is capped above its model's own maximum
+(16,384 on `gpt-4o`, say). A turn whose answer reaches it ends there, as
+Pi stores a `length` stop. A call the guard stopped has no usage from its
+provider (Codex reports usage only at the end), so it is counted in
+`cube.optchat.cut`'s `capped` and the usage report shows it as a call
+without a usage report, not as zero. `optchat.ts` is the service: Pi setup, the tools, the turn
 loop (a turn waits until every line of the view is a summary), the compactor
 pump (eight jobs) and the thread watchers. `optchat-threads.ts` connects it
 to cube's registry and threads.

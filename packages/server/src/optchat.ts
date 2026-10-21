@@ -360,7 +360,8 @@ const SpendDoc = defineDoc<{ nodes: Record<string, Spend> }>({ kind: "cube.optch
  * and the reopened chat may send them again. `tools`: tool calls still
  * running at the cut, by name: what they did is unknown (their work may go
  * on, it is not undone), and the reopened run executes them again, keyed. */
-type Cut = { chat: Record<string, number>; compactor: Record<string, number>; tools?: Record<string, number> };
+/** `capped`: model calls cube's output guard stopped (optchat-output.ts); their provider reported no usage. */
+type Cut = { chat: Record<string, number>; compactor: Record<string, number>; tools?: Record<string, number>; capped?: { chat: Record<string, number>; compactor: Record<string, number> } };
 const CutDoc = defineDoc<Cut>({ kind: "cube.optchat.cut", version: 1, scope: "session", initial: () => ({ chat: {}, compactor: {} }) });
 const TURN = "optchat.turn";
 const NODE_ENTRY = "optchat.node";
@@ -642,7 +643,7 @@ export class OptChat {
     this.storage = await openStorage(path.join(directory, "pi.sqlite"));
     const registry = createRegistry();
     registry.install(this.extension());
-    this.harness = await Harness.open(this.storage, { models: cachedModels(boundedOutput(this.options.models, CHAT_OUTPUT_TOKENS), () => this.cacheKey), registry, onReport: piReports(log), settings: {
+    this.harness = await Harness.open(this.storage, { models: cachedModels(boundedOutput(this.options.models, CHAT_OUTPUT_TOKENS, model => this.countCapped("chat", model)), () => this.cacheKey), registry, onReport: piReports(log), settings: {
       // The spec's caching: short entries only, never 1-hour ones. (Every
       // answer is capped, O1: boundedOutput above.)
       stream: { cacheRetention: "short" },
@@ -672,7 +673,7 @@ export class OptChat {
     const settings = await this.harness.snapshot(SettingsDoc, context);
     this.cacheKey = `optchat-${settings!.cache}`;
     // The compactor's task is its own: its request end is not cached.
-    this.compactorModels = cachedModels(boundedOutput(this.options.models), () => `${this.cacheKey}-compact`, { task: false });
+    this.compactorModels = cachedModels(boundedOutput(this.options.models, undefined, model => this.countCapped("compactor", model)), () => `${this.cacheKey}-compact`, { task: false });
     const existing = await this.harness.conversation(ROOT_CONVERSATION_ID, context);
     if (existing) this.conversation = existing;
     else {
@@ -1083,6 +1084,18 @@ export class OptChat {
     if (!cut) this.spend.set(node, next);
   }
 
+  /** A call the output guard stopped: its cost is unknown, counted as such. */
+  private countCapped(kind: "chat" | "compactor", model: string): void {
+    log.warn("a model call was stopped at its output cap by cube: its provider reported no usage, so its cost is unknown", { kind, model });
+    void this.harness.commit(async tx => {
+      const doc = await tx.doc(CutDoc);
+      doc.capped ??= { chat: {}, compactor: {} };
+      // A key holds a slash, so it is never `__proto__`.
+      const counts = doc.capped[kind];
+      counts[model] = (Object.hasOwn(counts, model) ? counts[model]! : 0) + 1;
+    }, context).catch(error => { log.warn("a capped call was not counted", { error: errorText(error) }); });
+  }
+
   /** The chat's own usage (its Pi store and its compactor) and the threads it started. */
   async usage(): Promise<OptChatUsage> {
     const compactor = await this.harness.snapshot(CompactorUsageDoc, context);
@@ -1094,7 +1107,7 @@ export class OptChat {
     for (const [key, n] of Object.entries(interrupted)) chat[key] = (Object.hasOwn(chat, key) ? chat[key]! : 0) + n;
     return { chat: await this.harness.usage(context) as OptChatUsage["chat"],
       compactor: compactor ? JSON.parse(JSON.stringify(compactor)) as OptChatUsage["compactor"] : { models: {}, calls: {}, since: null, earlier: false }, threads,
-      cut: { chat, compactor: { ...cut?.compactor }, tools: { ...cut?.tools } } };
+      cut: { chat, compactor: { ...cut?.compactor }, tools: { ...cut?.tools }, capped: { chat: { ...cut?.capped?.chat }, compactor: { ...cut?.capped?.compactor } } } };
   }
 
   /** Accepts a user message or a thread report and keeps it until it is in
