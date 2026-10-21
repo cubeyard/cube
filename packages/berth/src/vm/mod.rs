@@ -4,7 +4,9 @@
 //!
 //! ```text
 //! machine.json   the journal (record.rs); the pinned machine type
-//! rw.qcow2       the writable disk (vdc), created once, never replaced
+//! readiness.json whether its guest was ever ready, from creation on (readiness.rs)
+//! rw.qcow2       the writable disk (vdc), created once; replaced only by a
+//!                renewal (`renew_never_ready`), the earlier one kept in kept/
 //! layers.vmdk    the layer disk (vdb, read-only) with layers.head/.tail
 //! ctl.sock       cube.0, the guest channel (spoken from masterplan B-2 on)
 //! (no socket)    virtio-net: QEMU inherits one end of a socket pair (B-4)
@@ -81,6 +83,7 @@ mod presence;
 #[cfg(test)]
 mod publish_tests;
 mod qemu;
+mod readiness;
 mod record;
 mod report;
 mod suspend;
@@ -915,6 +918,13 @@ impl VmRunner {
         if !this_boot {
             return;
         }
+        // The first ready: kept on disk for good (readiness.rs).
+        if info.ready && !entry.info.as_ref().is_some_and(|i| i.ready) {
+            let dir = self.machine_dir(id);
+            if let Err(error) = readiness::mark_ready(&dir) {
+                event(&dir, "readiness not recorded", &format!("{error:#}"));
+            }
+        }
         entry.info = Some(info);
         state.version += 1;
         let version = state.version;
@@ -1260,6 +1270,7 @@ impl VmRunner {
             qemu::create_template_disk(&temporary, size.disk_gib).map_err(internal)?;
             std::fs::rename(&temporary, &vdd).map_err(internal)?;
         }
+        readiness::begin(&dir).map_err(internal)?;
         let image = self
             .write_layers(&reference.id, template.as_ref())
             .map_err(internal)?;
@@ -1365,6 +1376,91 @@ impl VmRunner {
             ));
         }
         Ok(record.clone())
+    }
+
+    /// Before a start, under `ops`: a machine [`renews_disk`] says may move
+    /// gets a new blank writable disk on the runner's image; its old disk is
+    /// kept as `DIRECTORY/kept/<id>.<time>.rw.qcow2` beside a note of the
+    /// image it was made on, and nothing is deleted. Anything else is left
+    /// to the start, which refuses a machine on another image as before.
+    async fn renew_never_ready(&self, request: &proto::MachineStart) -> Answer<()> {
+        let runner = self.image.machine_image();
+        let (id, disk_gib) = {
+            // Read only: the start proper fences, and refuses what this
+            // leaves alone (another owner, a stale epoch, a publication).
+            let state = self.state.lock().unwrap();
+            if Self::not_publishing(&state, request.r#ref.as_ref()).is_err() {
+                return Ok(());
+            }
+            let Some(reference) = request.r#ref.as_ref() else {
+                return Ok(());
+            };
+            let Some(entry) = state.machines.get(&reference.id) else {
+                return Ok(());
+            };
+            let epoch = request.fence.as_ref().map_or(0, |fence| fence.epoch);
+            if entry.record.owner != reference.owner || epoch < entry.record.fence_epoch {
+                return Ok(());
+            }
+            let dir = self.machine_dir(&entry.record.id);
+            if !renews_disk(
+                &entry.record,
+                readiness::read(&dir),
+                &runner,
+                self.image.prepared.is_some(),
+            ) {
+                return Ok(());
+            }
+            (entry.record.id.clone(), entry.record.size.disk_gib)
+        };
+        let dir = self.machine_dir(&id);
+        let fresh = dir.join("rw.qcow2.renew");
+        let _ = std::fs::remove_file(&fresh);
+        qemu::create_disk(&self.options.qemu_img, &fresh, disk_gib)
+            .await
+            .map_err(internal)?;
+        let mut state = self.state.lock().unwrap();
+        let Some(entry) = state.machines.get_mut(&id) else {
+            let _ = std::fs::remove_file(&fresh);
+            return Ok(());
+        };
+        let before = entry.record.image.clone();
+        let kept_dir = self.options.directory.join("kept");
+        std::fs::create_dir_all(&kept_dir).map_err(internal)?;
+        let stamp = Timestamp::now().seconds;
+        let kept = kept_dir.join(format!("{id}.{stamp}.rw.qcow2"));
+        std::fs::write(
+            kept_dir.join(format!("{id}.{stamp}.json")),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "machine": id,
+                "owner": entry.record.owner,
+                "image": before,
+                "why": "never ready on official Debian alone; the machine got a new blank disk on cube's default image",
+            }))
+            .map_err(internal)?,
+        )
+        .map_err(internal)?;
+        // A renewal cut short after the earlier disk was moved: it is kept.
+        if dir.join(qemu::RW_DISK).exists() {
+            std::fs::rename(dir.join(qemu::RW_DISK), &kept).map_err(internal)?;
+        }
+        std::fs::rename(&fresh, dir.join(qemu::RW_DISK)).map_err(internal)?;
+        let image = self.write_layers(&id, None).map_err(internal)?;
+        let entry = state.machines.get_mut(&id).unwrap();
+        entry.record.image = Some(image);
+        let record = entry.record.clone();
+        record::write_json(&dir.join(record::RECORD), &record).map_err(internal)?;
+        event(
+            &dir,
+            "renewed",
+            &format!(
+                "never ready on {}: a new blank disk on {}; the earlier disk is kept as {}",
+                before.map(|i| i.reference).unwrap_or_default(),
+                runner.reference,
+                kept.display()
+            ),
+        );
+        Ok(())
     }
 
     /// `template_publish` (masterplan B-8): the build machine's agent writes
@@ -1691,6 +1787,7 @@ impl VmRunner {
     }
 
     async fn start(self: &Arc<Self>, request: proto::MachineStart) -> Answer<proto::Machine> {
+        self.renew_never_ready(&request).await?;
         let documents = boot_documents(request.boot.as_ref())?;
         let policy = policy::Policy::from_proto(request.policy.as_ref())?;
         let (id, record, restore) = {
@@ -1755,25 +1852,6 @@ impl VmRunner {
                             image.reference, image.manifest, runner_image.reference
                         ),
                     ));
-                }
-                // Made on cube's default image before berth prepared it
-                // (official Debian alone): it was never ready, so nothing
-                // ran in it; it takes the preparation layer, its disk kept.
-                Some(image)
-                    if takes_preparation(
-                        image,
-                        &runner_image,
-                        self.image.prepared.is_some(),
-                        entry.record.template.is_some(),
-                        entry.record.phase,
-                    ) =>
-                {
-                    entry.record.image = Some(self.write_layers(&id, None).map_err(internal)?);
-                    event(
-                        &self.machine_dir(&id),
-                        "prepared",
-                        "made on the image before its Debian preparation layer: the layer is added below its disk, which is kept",
-                    );
                 }
                 Some(_) => {}
                 // Created before the runner had an image (B-1): its disk
@@ -2551,27 +2629,33 @@ fn image_id(image: &MachineImage) -> String {
         .collect()
 }
 
-/// Whether a machine made on `image` gets the runner's Debian preparation
-/// layer when it starts: the same manifest, exactly the runner's layers
-/// without that topmost one, not from a template (a template's build
-/// machine was ready, so it had the layer), and not suspended (its memory
-/// holds the old layer list). Such a machine ran official Debian alone,
-/// which keel never calls ready, so no command ran in it.
-fn takes_preparation(
-    image: &MachineImage,
+/// Whether a stopped machine gets a new blank writable disk on the
+/// runner's image when it starts, its disk kept (`renew_never_ready`):
+/// only with durable evidence that its guest was never ready
+/// (`readiness.json` says so since its creation; an earlier berth's machine
+/// has no such evidence and is never renewed), made on official Debian
+/// alone (any digest), not from a template and not a build machine, not
+/// suspended, and on another layer list than the runner's, which serves
+/// cube's default image. No guest operation ran in such a machine, so its
+/// disk holds only what keel's setup generates, which the next boot
+/// generates again on the new disk. Its layers never change under that
+/// disk: overlayfs would refuse an upper over other lowers (`index=on`).
+fn renews_disk(
+    record: &MachineRecord,
+    ever_ready: Option<bool>,
     runner: &MachineImage,
-    prepared: bool,
-    from_template: bool,
-    phase: Phase,
+    runner_prepared: bool,
 ) -> bool {
-    prepared
-        && !from_template
-        && phase != Phase::Suspended
-        && image.manifest == runner.manifest
-        && runner
-            .diff_ids
-            .split_last()
-            .is_some_and(|(_, below)| image.diff_ids == below)
+    let Some(image) = &record.image else {
+        return false;
+    };
+    ever_ready == Some(false)
+        && runner_prepared
+        && record.template.is_none()
+        && !record.build
+        && record.phase == Phase::Stopped
+        && crate::served::is_official_debian(&image.reference)
+        && (image.manifest != runner.manifest || image.diff_ids != runner.diff_ids)
 }
 
 /// How many machines that are not deleted (retained ones too) are made

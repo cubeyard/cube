@@ -35,7 +35,7 @@ const USAGE: &str = "usage:
       each machine is a keel guest under the QEMU given by path, which must meet keel's QEMU floor,
       built on the image, which berth pulls into <directory> before it listens if any of it is missing;
       without --image (or with default) cube's default image, official Debian trixie pinned by digest, which berth
-      prepares for cube with a layer of pinned Debian packages (sudo, git, gh, curl, ca-certificates, openssh-client); any other image
+      prepares for cube with a layer of pinned Debian packages (sudo, git, gh, curl, ca-certificates); any other image
       is the operator's and must bring bash, sudo, flock, git, gh, curl and a CA bundle itself;
       a directory that served an image of the operator's own keeps it: without --image berth refuses to start there
       unless --change-image says to move it to the default (machines keep their layers; nothing is deleted);

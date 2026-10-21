@@ -39,11 +39,19 @@ pub(super) fn pull(dir: &Path, n: u8, layers: &[u8]) -> image::Reference {
 /// The same, with the manifest digest given: cube's default image's, for
 /// the Debian preparation layer (debian.rs).
 fn pull_manifest(dir: &Path, n: u8, layers: &[u8], manifest: &str) -> image::Reference {
-    let reference = image::Reference::parse(&format!(
-        "registry.test/o/image{n}@{}",
-        DiffId::from_bytes([0xa0 + n; 32])
-    ))
-    .unwrap();
+    pull_named(
+        dir,
+        n,
+        layers,
+        manifest,
+        &format!("registry.test/o/image{n}"),
+    )
+}
+
+/// The same, named `name` (`docker.io/library/debian` for official Debian).
+fn pull_named(dir: &Path, n: u8, layers: &[u8], manifest: &str, name: &str) -> image::Reference {
+    let reference =
+        image::Reference::parse(&format!("{name}@{}", DiffId::from_bytes([0xa0 + n; 32]))).unwrap();
     let cache = LayerCache::open(image::layer_dir(dir)).unwrap();
     for layer in layers {
         if cache.get(&diff_id(*layer)).unwrap().is_none() {
@@ -96,6 +104,9 @@ fn pull_manifest(dir: &Path, n: u8, layers: &[u8], manifest: &str) -> image::Ref
 pub(super) struct Lab {
     dir: tempfile::TempDir,
     keel: tempfile::TempDir,
+    /// `--qemu-img` (none by default; a test that needs a disk made sets
+    /// a stand-in).
+    qemu_img: std::sync::Mutex<PathBuf>,
 }
 
 impl Lab {
@@ -108,7 +119,11 @@ impl Lab {
         let keel = tempfile::tempdir().unwrap();
         std::fs::write(keel.path().join("vmlinuz"), b"kernel").unwrap();
         std::fs::write(keel.path().join("base.erofs"), b"base").unwrap();
-        Self { dir, keel }
+        Self {
+            dir,
+            keel,
+            qemu_img: std::sync::Mutex::new("/nonexistent/qemu-img".into()),
+        }
     }
 
     pub(super) fn path(&self) -> &Path {
@@ -141,7 +156,7 @@ impl Lab {
             max_machines,
             labels: BTreeMap::new(),
             qemu: "/nonexistent/qemu".into(),
-            qemu_img: "/nonexistent/qemu-img".into(),
+            qemu_img: self.qemu_img.lock().unwrap().clone(),
             keel: self.keel.path().to_owned(),
             accel: Accel::Tcg,
             image,
@@ -866,138 +881,6 @@ async fn the_default_images_preparation_layer_is_part_of_the_image() {
     );
 }
 
-/// A machine made on cube's default image before berth prepared it
-/// (official Debian alone, never ready): its next start adds the layer and
-/// keeps its disk. Anything else keeps its own layers.
-#[tokio::test]
-async fn a_machine_made_before_the_preparation_takes_it_when_it_starts() {
-    let lab = Lab::new();
-    let platform = image::Platform::native().unwrap();
-    let plan = &crate::debian::plan().platforms[&platform.to_string()];
-    let image = pull_manifest(lab.path(), 1, &[1, 2], &plan.manifest);
-    let prepared = plan.diff_id().unwrap();
-    LayerCache::open(image::layer_dir(lab.path()))
-        .unwrap()
-        .publish(&prepared, |out| Ok(std::fs::write(out, vec![9u8; 4096])?))
-        .unwrap();
-    let runner = lab.runner(image.clone(), 16 << 30, plenty).await;
-    create(&runner, USER, base(), false).await.unwrap();
-    drop(runner);
-    // As the previous berth left it: the image's own layers only.
-    let path = lab.path().join(USER).join(record::RECORD);
-    let mut record: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    record["image"]["diffIds"].as_array_mut().unwrap().pop();
-    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-    permissions.set_mode(0o644);
-    std::fs::set_permissions(&path, permissions).unwrap();
-    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
-    let rw = std::fs::read(lab.path().join(USER).join(qemu::RW_DISK)).unwrap();
-
-    let runner = lab.runner(image, 16 << 30, plenty).await;
-    // No QEMU here: the start fails at launch, after the layers are set.
-    let _ = runner
-        .start(proto::MachineStart {
-            r#ref: Some(reference(USER)),
-            fence: fence(1),
-            ..Default::default()
-        })
-        .await;
-    {
-        let state = runner.state.lock().unwrap();
-        let ids = &state.machines[USER].record.image.as_ref().unwrap().diff_ids;
-        assert_eq!(
-            ids,
-            &[
-                diff_id(1).to_string(),
-                diff_id(2).to_string(),
-                prepared.to_string()
-            ]
-        );
-    }
-    let events = std::fs::read_to_string(lab.path().join(USER).join("events.log")).unwrap();
-    assert!(events.contains("prepared"), "{events}");
-    assert_eq!(
-        std::fs::read(lab.path().join(USER).join(qemu::RW_DISK)).unwrap(),
-        rw,
-        "the disk is kept"
-    );
-    assert_eq!(runner.setup(USER).layers.len(), 3);
-}
-
-#[test]
-fn only_an_unprepared_machine_of_the_same_image_takes_the_preparation() {
-    let runner = MachineImage {
-        reference: "r".into(),
-        manifest: "sha256:m".into(),
-        diff_ids: vec!["a".into(), "b".into(), "p".into()],
-    };
-    let made = |manifest: &str, ids: &[&str]| MachineImage {
-        reference: "r".into(),
-        manifest: manifest.into(),
-        diff_ids: ids.iter().map(|s| s.to_string()).collect(),
-    };
-    let raw = made("sha256:m", &["a", "b"]);
-    assert!(takes_preparation(
-        &raw,
-        &runner,
-        true,
-        false,
-        Phase::Stopped
-    ));
-    // Not when the runner has no preparation, from a template, suspended,
-    // another manifest, another layer list or one prepared already.
-    assert!(!takes_preparation(
-        &raw,
-        &runner,
-        false,
-        false,
-        Phase::Stopped
-    ));
-    assert!(!takes_preparation(
-        &raw,
-        &runner,
-        true,
-        true,
-        Phase::Stopped
-    ));
-    assert!(!takes_preparation(
-        &raw,
-        &runner,
-        true,
-        false,
-        Phase::Suspended
-    ));
-    assert!(!takes_preparation(
-        &made("sha256:o", &["a", "b"]),
-        &runner,
-        true,
-        false,
-        Phase::Stopped
-    ));
-    assert!(!takes_preparation(
-        &made("sha256:m", &["a"]),
-        &runner,
-        true,
-        false,
-        Phase::Stopped
-    ));
-    assert!(!takes_preparation(
-        &made("sha256:m", &["a", "b", "q"]),
-        &runner,
-        true,
-        false,
-        Phase::Stopped
-    ));
-    assert!(!takes_preparation(
-        &runner.clone(),
-        &runner,
-        true,
-        false,
-        Phase::Stopped
-    ));
-}
-
 /// cubed keys templates on `Platform.image_id`: it differs with the
 /// preparation layer, and only with what machines are made from.
 #[tokio::test]
@@ -1046,5 +929,318 @@ async fn the_runner_names_its_image_with_its_preparation() {
     assert_eq!(
         image_id(&made("sha256:m", vec!["a".into()])),
         "7468283ecb5a9346a8ba5254f93172c21159cdf9bcea6b92fd1e8b8ed9c6fdcd"
+    );
+}
+
+/// A stand-in qemu-img: `create -q -f qcow2 FILE SIZE` writes FILE.
+fn stand_in_qemu_img(dir: &Path) -> PathBuf {
+    let path = dir.join("qemu-img");
+    std::fs::write(&path, "#!/bin/sh\nprintf 'blank %s\\n' \"$6\" > \"$5\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// The default image with its preparation layer in the cache.
+fn default_image(lab: &Lab) -> (image::Reference, DiffId) {
+    let platform = image::Platform::native().unwrap();
+    let plan = &crate::debian::plan().platforms[&platform.to_string()];
+    let image = pull_named(
+        lab.path(),
+        1,
+        &[1, 2],
+        &plan.manifest,
+        "docker.io/library/debian",
+    );
+    let prepared = plan.diff_id().unwrap();
+    LayerCache::open(image::layer_dir(lab.path()))
+        .unwrap()
+        .publish(&prepared, |out| Ok(std::fs::write(out, vec![9u8; 4096])?))
+        .unwrap();
+    (image, prepared)
+}
+
+async fn start_once(runner: &Arc<VmRunner>, id: &str) -> Answer<proto::Machine> {
+    // No QEMU here: a start that gets as far as launching fails there.
+    runner
+        .start(proto::MachineStart {
+            r#ref: Some(reference(id)),
+            fence: fence(1),
+            ..Default::default()
+        })
+        .await
+}
+
+/// B2/B3: a machine this berth made on an older official Debian (another
+/// digest), never ready by its own record, gets a new blank disk on the
+/// default image when it next starts; its disk is kept, not mounted over
+/// other layers. Machines without that evidence, ever ready, or on an
+/// image of their own are left as they are.
+#[tokio::test]
+async fn a_never_ready_official_debian_machine_gets_a_new_disk_and_keeps_its_old_one() {
+    let lab = Lab::new();
+    let tools = tempfile::tempdir().unwrap();
+    *lab.qemu_img.lock().unwrap() = stand_in_qemu_img(tools.path());
+    let older = pull_named(
+        lab.path(),
+        3,
+        &[3],
+        "sha256:older",
+        "docker.io/library/debian",
+    );
+    let own = pull_named(lab.path(), 4, &[4], "sha256:own", "ghcr.io/example/guest");
+    // Made on the older Debian, and on an image of one's own.
+    let runner = lab.runner(older.clone(), 16 << 30, plenty).await;
+    for id in ["00000000000000a1", "00000000000000a2", "00000000000000a3"] {
+        create(&runner, id, base(), false).await.unwrap();
+        std::fs::write(
+            runner.machine_dir(id).join(qemu::RW_DISK),
+            format!("disk of {id}"),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        readiness::read(&runner.machine_dir("00000000000000a1")),
+        Some(false),
+        "tracked from creation"
+    );
+    drop(runner);
+    let runner = lab.runner(own, 16 << 30, plenty).await;
+    create(&runner, "00000000000000a4", base(), false)
+        .await
+        .unwrap();
+    drop(runner);
+    // a2 was ready once; a3 is an earlier berth's machine (no evidence).
+    readiness::mark_ready(&lab.path().join("00000000000000a2")).unwrap();
+    std::fs::remove_file(lab.path().join("00000000000000a3").join(readiness::FILE)).unwrap();
+
+    let (default, prepared) = default_image(&lab);
+    let runner = lab.runner(default, 16 << 30, plenty).await;
+    // A stale epoch or another owner: refused by the start, nothing renewed.
+    for request in [
+        proto::MachineStart {
+            r#ref: Some(reference("00000000000000a1")),
+            fence: fence(0),
+            ..Default::default()
+        },
+        proto::MachineStart {
+            r#ref: Some(proto::Ref {
+                owner: "thread-2".into(),
+                id: "00000000000000a1".into(),
+            }),
+            fence: fence(9),
+            ..Default::default()
+        },
+    ] {
+        assert!(runner.start(request).await.is_err());
+    }
+    assert!(!lab.path().join("kept").exists(), "nothing moved");
+    let _ = start_once(&runner, "00000000000000a1").await;
+    let dir = runner.machine_dir("00000000000000a1");
+    {
+        let state = runner.state.lock().unwrap();
+        let ids = &state.machines["00000000000000a1"]
+            .record
+            .image
+            .as_ref()
+            .unwrap()
+            .diff_ids;
+        assert_eq!(
+            ids,
+            &[
+                diff_id(1).to_string(),
+                diff_id(2).to_string(),
+                prepared.to_string()
+            ]
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.join(qemu::RW_DISK)).unwrap(),
+        "blank 1G\n",
+        "a new blank disk"
+    );
+    let kept: Vec<_> = std::fs::read_dir(lab.path().join("kept"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    let disk = kept
+        .iter()
+        .find(|p| p.to_string_lossy().ends_with(".rw.qcow2"))
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(disk).unwrap(),
+        "disk of 00000000000000a1",
+        "the earlier disk is kept"
+    );
+    let note = kept
+        .iter()
+        .find(|p| p.extension().is_some_and(|e| e == "json"))
+        .unwrap();
+    assert!(
+        std::fs::read_to_string(note)
+            .unwrap()
+            .contains("sha256:older")
+    );
+    assert!(
+        std::fs::read_to_string(dir.join("events.log"))
+            .unwrap()
+            .contains("renewed")
+    );
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join(record::RECORD)).unwrap()).unwrap();
+    assert_eq!(
+        on_disk["image"]["diffIds"].as_array().unwrap().len(),
+        3,
+        "the record says so"
+    );
+    assert_eq!(runner.setup("00000000000000a1").layers.len(), 3);
+    // Asked again: nothing more moves.
+    let _ = start_once(&runner, "00000000000000a1").await;
+    assert_eq!(
+        std::fs::read_dir(lab.path().join("kept")).unwrap().count(),
+        2
+    );
+
+    // Ever ready, no evidence, or one's own image: not renewed; the start
+    // refuses them as made on another image, their disks untouched.
+    for (id, disk) in [
+        ("00000000000000a2", Some("disk of 00000000000000a2")),
+        ("00000000000000a3", Some("disk of 00000000000000a3")),
+        ("00000000000000a4", None),
+    ] {
+        let refused = start_once(&runner, id).await.unwrap_err();
+        assert_eq!(
+            reason(refused),
+            (Code::FailedPrecondition, "image_changed".into()),
+            "{id}"
+        );
+        if let Some(disk) = disk {
+            assert_eq!(
+                std::fs::read_to_string(runner.machine_dir(id).join(qemu::RW_DISK)).unwrap(),
+                disk
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_dir(lab.path().join("kept")).unwrap().count(),
+        2
+    );
+}
+
+/// The pinned digest itself, made by an earlier berth (B2's case): no
+/// evidence, so its layers and disk stay as they were; the in-place rebase
+/// that overlayfs refuses is gone.
+#[tokio::test]
+async fn an_earlier_berths_machine_on_the_pinned_debian_is_left_as_it_was() {
+    let lab = Lab::new();
+    let tools = tempfile::tempdir().unwrap();
+    *lab.qemu_img.lock().unwrap() = stand_in_qemu_img(tools.path());
+    let (default, _) = default_image(&lab);
+    let runner = lab.runner(default.clone(), 16 << 30, plenty).await;
+    create(&runner, USER, base(), false).await.unwrap();
+    drop(runner);
+    let path = lab.path().join(USER).join(record::RECORD);
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["image"]["diffIds"].as_array_mut().unwrap().pop();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o644);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    std::fs::remove_file(lab.path().join(USER).join(readiness::FILE)).unwrap();
+    let runner = lab.runner(default, 16 << 30, plenty).await;
+    let _ = start_once(&runner, USER).await;
+    let state = runner.state.lock().unwrap();
+    assert_eq!(
+        state.machines[USER]
+            .record
+            .image
+            .as_ref()
+            .unwrap()
+            .diff_ids
+            .len(),
+        2
+    );
+    assert!(!lab.path().join("kept").exists());
+}
+
+#[test]
+fn only_tracked_never_ready_official_debian_machines_are_renewed() {
+    let runner = MachineImage {
+        reference: "docker.io/library/debian@sha256:new".into(),
+        manifest: "sha256:m".into(),
+        diff_ids: vec!["a".into(), "p".into()],
+    };
+    let record = |reference: &str, phase: Phase, template: bool, build: bool| MachineRecord {
+        version: 1,
+        owner: OWNER.into(),
+        id: USER.into(),
+        fence_epoch: 1,
+        phase,
+        size: DEFAULT_SIZE,
+        machine_type: "pc-q35-11.1".into(),
+        created_with: "11.1.2 /q".into(),
+        created_at: Timestamp {
+            seconds: 1,
+            nanos: 0,
+        },
+        interrupted: None,
+        error: String::new(),
+        boot: None,
+        image: Some(MachineImage {
+            reference: reference.into(),
+            manifest: "sha256:old".into(),
+            diff_ids: vec!["o".into()],
+        }),
+        stopped: None,
+        build,
+        template: template.then(|| "t".into()),
+        snapshot: None,
+        dropped: None,
+    };
+    let debian = "docker.io/library/debian@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let own = "ghcr.io/example/guest@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let ok = record(debian, Phase::Stopped, false, false);
+    assert!(renews_disk(&ok, Some(false), &runner, true));
+    assert!(!renews_disk(&ok, None, &runner, true), "no evidence");
+    assert!(!renews_disk(&ok, Some(true), &runner, true), "ever ready");
+    assert!(
+        !renews_disk(&ok, Some(false), &runner, false),
+        "the runner is not on the default"
+    );
+    assert!(!renews_disk(
+        &record(own, Phase::Stopped, false, false),
+        Some(false),
+        &runner,
+        true
+    ));
+    assert!(!renews_disk(
+        &record(debian, Phase::Suspended, false, false),
+        Some(false),
+        &runner,
+        true
+    ));
+    assert!(!renews_disk(
+        &record(debian, Phase::Running, false, false),
+        Some(false),
+        &runner,
+        true
+    ));
+    assert!(!renews_disk(
+        &record(debian, Phase::Stopped, true, false),
+        Some(false),
+        &runner,
+        true
+    ));
+    assert!(!renews_disk(
+        &record(debian, Phase::Stopped, false, true),
+        Some(false),
+        &runner,
+        true
+    ));
+    let mut same = ok.clone();
+    same.image = Some(runner.clone());
+    assert!(
+        !renews_disk(&same, Some(false), &runner, true),
+        "already on the runner's image"
     );
 }

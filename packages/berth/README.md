@@ -45,7 +45,7 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   official Debian trixie pinned in `debian/trixie.json`, and berth adds the
   **Debian preparation layer** (`src/debian.rs`): the pinned Debian
   packages a guest needs and the image lacks (sudo, git, gh, curl,
-  ca-certificates, openssh-client and their dependencies, resolved by `debian/resolve.sh`
+  ca-certificates and their dependencies, resolved by `debian/resolve.sh`
   at the image's own snapshot time), each checked by size and sha256,
   unpacked on the runner with what their maintainer scripts do on a fresh
   install (`/etc/sudoers` 0440, `update-ca-certificates`' bundle and
@@ -59,7 +59,11 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   `--image` berth refuses to start where that was an image of the
   operator's own, unless `--change-image` (or once `berth image check
   --change-image`) moves it on purpose; official Debian alone, which never
-  got ready, moves without it. `Platform.image_id` names what machines are
+  got ready, moves without it. A machine's layers never change under its
+  disk; a stopped machine on official Debian alone that was never ready by
+  its `readiness.json` (kept from creation on; an earlier berth's machine
+  has none and is left alone) gets a new blank disk on the default image
+  instead, its earlier disk kept under `kept/`. `Platform.image_id` names what machines are
   made from. berth pulls the image when it starts (masterplan B-7), under the
   directory's lock and **before it listens**, unless its record and every
   layer file are in `--dir` already; then nothing goes over the network. A
