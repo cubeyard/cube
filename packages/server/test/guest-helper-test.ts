@@ -28,4 +28,4 @@ if (alreadyRoot) {
 }
 const syntax = spawnSync("python3", ["-c", "import ast,sys; ast.parse(open(sys.argv[1]).read())", path.join(import.meta.dirname, "../guest/cube-guest.py")], { encoding: "utf8" });
 assert.equal(syntax.status, 0, syntax.stderr);
-console.log(`ok: guest helper journal, epochs, launcher, finish and recover mapping, paths, capacity${asRoot}`);
+console.log(`ok: guest helper journal, epochs, launcher, finish mapping, paths, capacity${asRoot}`);

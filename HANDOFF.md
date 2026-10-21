@@ -418,10 +418,11 @@ contacting it and cannot discard their disks; its registration can be
 retired without a check (`protocol3-history-test.ts`, `api-test.ts`,
 `runner-observe-test.ts`, `runners-browser-test.ts`). Nothing in state is
 migrated. What is left on the hosts: docs/runner-operations.md,
-"Protocol-3 runners". The guest helper `cube-guest.py` still has its
-Debian-VM subcommands (`ssh`, `init`, `seal`, `packages`, `recover`, the
-systemd launcher): berth host and the offline local guest use the same file
-in its process mode, so pruning them is its own change.
+"Protocol-3 runners". The follow-up P9-6b removes what was left
+unreachable: `cube-guest.py`'s Debian-VM mode (`ssh`, `init`, `seal`,
+`packages`, `recover`, the systemd launcher and services, `templateSeal`), its
+recover unit, cubed's seal check, and cube-netstack's DHCP addressing. Old
+threads' `sealFailure` records stay readable.
 
 ## Known gaps and next steps
 

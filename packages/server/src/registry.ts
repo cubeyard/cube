@@ -244,7 +244,8 @@ export interface MachinePreparation {
   setupBlob?: string;
   /** Why the machine started fresh (no template, templates off, a failed build). */
   reason?: string;
-  /** The template's seal reported a failure; the template was removed. */
+  /** The template's seal reported a failure; the template was removed
+   * (protocol-3 templates only; kept so their threads read as they were). */
   sealFailure?: string;
 }
 export interface HookOutcome {

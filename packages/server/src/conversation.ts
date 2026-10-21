@@ -271,15 +271,6 @@ export class Conversations {
         this.endPrepare(id, attempt, outcome);
       }
       this.recordHooks(id, outcome.hooks, "prepare", preparing);
-      // A template whose seal could not clean everything: this machine got
-      // its identity from its own seed and a fresh journal, but no further
-      // machine may start from it.
-      const seal = preparation?.source === "template" ? (await workspace.describe()).templateSeal : undefined;
-      if (seal && seal !== "ok" && preparation?.templateId) {
-        log.warn("the template's seal failed; removing it", { thread: id, template: preparation.templateId, seal });
-        this.registry.updateThreadVm(id, { preparation: { ...preparation, sealFailure: seal } });
-        await this.machines.invalidateTemplate?.(thread, preparation.templateId).catch(error => log.warn("invalidating the template failed", { thread: id, error }));
-      }
       if (outcome.stale && preparation?.templateId) {
         log.info("template is stale: the pinned .agents/setup changed", { thread: id, template: preparation.templateId });
         await this.machines.invalidateTemplate?.(thread, preparation.templateId).catch(error => log.warn("invalidating the template failed", { thread: id, error }));
