@@ -60,10 +60,12 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   operator's own, unless `--change-image` (or once `berth image check
   --change-image`) moves it on purpose; official Debian alone, which never
   got ready, moves without it. A machine's layers never change under its
-  disk; a stopped machine on official Debian alone that was never ready by
-  its `readiness.json` (kept from creation on; an earlier berth's machine
-  has none and is left alone) gets a new blank disk on the default image
-  instead, its earlier disk kept under `kept/`. `Platform.image_id` names what machines are
+  disk; a stopped machine on official Debian alone that provably never got
+  ready (its `readiness.json`, kept from creation on, or for an earlier
+  berth's machine its layers being exactly that image's own) gets a new
+  blank disk on the default image instead, its earlier disk kept untouched
+  under `kept/`; one berth cannot prove so is left as it was, with a `not
+  renewed` event. `Platform.image_id` names what machines are
   made from. berth pulls the image when it starts (masterplan B-7), under the
   directory's lock and **before it listens**, unless its record and every
   layer file are in `--dir` already; then nothing goes over the network. A
@@ -331,7 +333,8 @@ layer). `runner-vm-renewal-test.ts` boots real machines to check the renewal: a
 never-ready machine on an older official Debian (`CUBE_TEST_BERTH_OLD_DEBIAN`)
 gets a new disk on the default image and gets ready, its earlier disk kept;
 with `CUBE_TEST_BERTH_LEGACY` (the released v0.3.32 berth) an earlier
-berth's machines are left as they were. It is not part of
+berth's never-ready machines on the pinned and the older digest are renewed
+the same way and get ready. It is not part of
 `test-node-transport.sh`.
 
 ## Updating the default image

@@ -10,11 +10,11 @@
  *    under `kept/`, and it gets ready.
  * B. An earlier berth (CUBE_TEST_BERTH_LEGACY, the released v0.3.32
  *    binary), a machine on the pinned Debian digest and one on the older
- *    digest, neither ready. This berth without `--image`: neither is renewed
- *    (no readiness record); the first starts on its own layers and is not
- *    ready, the second is refused as made on another image; both disks keep
- *    their bytes. That is the behavior until the policy for such machines
- *    is decided (handoff bedffdd2).
+ *    digest, neither ready, neither with a readiness record. This berth
+ *    without `--image`: their layers are exactly their official Debian
+ *    image's own, so they are provably never ready (the user's ruling P1);
+ *    each gets a new blank disk on the default image and gets ready, its
+ *    earlier disk kept with its bytes.
  *
  * Needs CUBE_TEST_BERTH_QEMU, _QEMU_IMG, _KEEL, _MKFS, _OLD_DEBIAN
  * (docker.io/library/debian@sha256:… other than the pinned one) and, for B,
@@ -29,7 +29,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { type Machine } from "../src/gen/runner_pb.js";
-import { RunnerError, RunnerSession, loadSessionConfig } from "../src/runner-session.ts";
+import { RunnerSession, loadSessionConfig } from "../src/runner-session.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
 assert.ok(fs.existsSync(binary), `${binary}: build berth first (cargo build -p berth)`);
@@ -179,25 +179,25 @@ try {
       assert.equal(r.readiness(ref.id), null, "an earlier berth keeps no readiness record");
     }
     const disks = Object.fromEntries([onPinned, onOld].map(ref => [ref.id, sha(path.join(r.directory, ref.id, "rw.qcow2"))]));
-    const layers = Object.fromEntries([onPinned, onOld].map(ref => [ref.id, r.record(ref.id).image.diffIds.length]));
     const run = await r.start(binary, null);
-    const pinnedGuest = await settle(run.session, onPinned);
-    assert.ok(!pinnedGuest!.ready && /the image lacks/.test(pinnedGuest!.reason), `left as it was, not ready: ${pinnedGuest!.reason}`);
-    await stopMachine(run.session, onPinned);
-    await assert.rejects(run.session.call({ case: "machineStart", value: { ref: onOld, fence, boot } }),
-      (error: unknown) => error instanceof RunnerError && error.reason === "image_changed");
     for (const ref of [onPinned, onOld]) {
-      assert.equal(sha(path.join(r.directory, ref.id, "rw.qcow2")), disks[ref.id], `${ref.id}: its disk keeps its bytes`);
-      assert.equal(r.record(ref.id).image.diffIds.length, layers[ref.id], `${ref.id}: its layers unchanged`);
+      const guest = await settle(run.session, ref);
+      assert.match(r.events(ref.id), /renewed: never ready on .*: a new blank disk on .*; the earlier disk is kept as /, `${ref.id}: ${r.events(ref.id)}`);
+      assert.ok(guest!.ready, `${ref.id} renewed, but not ready: ${guest!.reason}`);
+      assert.equal(r.readiness(ref.id), true, "tracked from its new disk on, and ready");
+      const disk = r.kept().find(name => name.startsWith(ref.id) && name.endsWith(".rw.qcow2"));
+      assert.ok(disk, `${ref.id}: kept ${r.kept().join(", ")}`);
+      assert.equal(sha(path.join(r.directory, "kept", disk)), disks[ref.id], `${ref.id}: its earlier disk keeps its bytes`);
+      assert.equal(r.record(ref.id).image.reference, pinned);
+      await stopMachine(run.session, ref);
     }
-    assert.deepEqual(r.kept(), [], "nothing renewed without a readiness record");
     await run.session.close();
     await stop(run.child);
-    note(`B: an earlier berth's machines on ${pinned} and ${old}: not renewed (no readiness record); the first starts on its own layers, not ready; the second is refused (image_changed); both disks unchanged`);
+    note(`B: an earlier berth's never-ready machines on ${pinned} and ${old}: each renewed on the default image and ready; both earlier disks kept unchanged`);
   } else {
     note("B: NOT checked: CUBE_TEST_BERTH_LEGACY (the released v0.3.32 berth) is unset");
   }
-  console.log(`ok: berth renewal on real machines (${accel}): a never-ready official-Debian machine gets a new disk on the default image and gets ready, its earlier disk kept${legacy ? "; an earlier berth's machines are left as they were" : ""}`);
+  console.log(`ok: berth renewal on real machines (${accel}): a never-ready official-Debian machine gets a new disk on the default image and gets ready, its earlier disk kept${legacy ? "; so do an earlier berth's never-ready machines on the pinned and an older digest" : ""}`);
 } finally {
   for (const child of children) await stop(child).catch(() => {});
   if (env.CUBE_TEST_KEEP === "1") console.log(`kept ${root}`);

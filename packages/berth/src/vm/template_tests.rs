@@ -990,7 +990,12 @@ async fn a_never_ready_official_debian_machine_gets_a_new_disk_and_keeps_its_old
     let own = pull_named(lab.path(), 4, &[4], "sha256:own", "ghcr.io/example/guest");
     // Made on the older Debian, and on an image of one's own.
     let runner = lab.runner(older.clone(), 16 << 30, plenty).await;
-    for id in ["00000000000000a1", "00000000000000a2", "00000000000000a3"] {
+    for id in [
+        "00000000000000a1",
+        "00000000000000a2",
+        "00000000000000a3",
+        "00000000000000a5",
+    ] {
         create(&runner, id, base(), false).await.unwrap();
         std::fs::write(
             runner.machine_dir(id).join(qemu::RW_DISK),
@@ -1009,9 +1014,23 @@ async fn a_never_ready_official_debian_machine_gets_a_new_disk_and_keeps_its_old
         .await
         .unwrap();
     drop(runner);
-    // a2 was ready once; a3 is an earlier berth's machine (no evidence).
+    // a2 was ready once; a3 and a5 are an earlier berth's machines (no
+    // readiness.json); a5 also has a layer the image's record does not.
     readiness::mark_ready(&lab.path().join("00000000000000a2")).unwrap();
-    std::fs::remove_file(lab.path().join("00000000000000a3").join(readiness::FILE)).unwrap();
+    for id in ["00000000000000a3", "00000000000000a5"] {
+        std::fs::remove_file(lab.path().join(id).join(readiness::FILE)).unwrap();
+    }
+    let path = lab.path().join("00000000000000a5").join(record::RECORD);
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["image"]["diffIds"]
+        .as_array_mut()
+        .unwrap()
+        .push(diff_id(7).to_string().into());
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o644);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
 
     let (default, prepared) = default_image(&lab);
     let runner = lab.runner(default, 16 << 30, plenty).await;
@@ -1100,11 +1119,43 @@ async fn a_never_ready_official_debian_machine_gets_a_new_disk_and_keeps_its_old
         2
     );
 
-    // Ever ready, no evidence, or one's own image: not renewed; the start
-    // refuses them as made on another image, their disks untouched.
+    // P1: an earlier berth's machine whose layers are exactly that official
+    // Debian image's own (its record in images/): provably never ready,
+    // renewed the same way, its disk kept as it was.
+    let _ = start_once(&runner, "00000000000000a3").await;
+    {
+        let state = runner.state.lock().unwrap();
+        let image = state.machines["00000000000000a3"]
+            .record
+            .image
+            .clone()
+            .unwrap();
+        assert_eq!(image.diff_ids.last().unwrap(), &prepared.to_string());
+    }
+    let kept: Vec<String> = std::fs::read_dir(lab.path().join("kept"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let a3 = kept
+        .iter()
+        .find(|n| n.starts_with("00000000000000a3") && n.ends_with(".rw.qcow2"))
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(lab.path().join("kept").join(a3)).unwrap(),
+        "disk of 00000000000000a3"
+    );
+    assert_eq!(kept.len(), 4);
+    assert_eq!(
+        readiness::read(&runner.machine_dir("00000000000000a3")),
+        Some(false),
+        "tracked from its new disk on"
+    );
+
+    // Ever ready, not provable (a5), or one's own image: not renewed; the
+    // start refuses them as made on another image, their disks untouched.
     for (id, disk) in [
         ("00000000000000a2", Some("disk of 00000000000000a2")),
-        ("00000000000000a3", Some("disk of 00000000000000a3")),
+        ("00000000000000a5", Some("disk of 00000000000000a5")),
         ("00000000000000a4", None),
     ] {
         let refused = start_once(&runner, id).await.unwrap_err();
@@ -1122,15 +1173,27 @@ async fn a_never_ready_official_debian_machine_gets_a_new_disk_and_keeps_its_old
     }
     assert_eq!(
         std::fs::read_dir(lab.path().join("kept")).unwrap().count(),
-        2
+        4
+    );
+    let a5 =
+        std::fs::read_to_string(runner.machine_dir("00000000000000a5").join("events.log")).unwrap();
+    assert!(
+        a5.contains("not renewed: an earlier berth's machine on official Debian"),
+        "{a5}"
+    );
+    let a2 =
+        std::fs::read_to_string(runner.machine_dir("00000000000000a2").join("events.log")).unwrap();
+    assert!(
+        !a2.contains("not renewed") && !a2.contains("renewed"),
+        "an ever-ready machine is not flagged: {a2}"
     );
 }
 
-/// The pinned digest itself, made by an earlier berth (B2's case): no
-/// evidence, so its layers and disk stay as they were; the in-place rebase
-/// that overlayfs refuses is gone.
+/// The pinned digest itself, made by an earlier berth (B2's case): its
+/// layers are that image's own, so it gets a new disk on the prepared image
+/// (P1); its layers never change under its earlier disk, which is kept.
 #[tokio::test]
-async fn an_earlier_berths_machine_on_the_pinned_debian_is_left_as_it_was() {
+async fn an_earlier_berths_machine_on_the_pinned_debian_gets_a_new_disk() {
     let lab = Lab::new();
     let tools = tempfile::tempdir().unwrap();
     *lab.qemu_img.lock().unwrap() = stand_in_qemu_img(tools.path());
@@ -1147,24 +1210,43 @@ async fn an_earlier_berths_machine_on_the_pinned_debian_is_left_as_it_was() {
     std::fs::set_permissions(&path, permissions).unwrap();
     std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
     std::fs::remove_file(lab.path().join(USER).join(readiness::FILE)).unwrap();
+    std::fs::write(
+        lab.path().join(USER).join(qemu::RW_DISK),
+        "the earlier disk",
+    )
+    .unwrap();
     let runner = lab.runner(default, 16 << 30, plenty).await;
     let _ = start_once(&runner, USER).await;
-    let state = runner.state.lock().unwrap();
+    {
+        let state = runner.state.lock().unwrap();
+        assert_eq!(
+            state.machines[USER]
+                .record
+                .image
+                .as_ref()
+                .unwrap()
+                .diff_ids
+                .len(),
+            3
+        );
+    }
     assert_eq!(
-        state.machines[USER]
-            .record
-            .image
-            .as_ref()
-            .unwrap()
-            .diff_ids
-            .len(),
-        2
+        std::fs::read_to_string(lab.path().join(USER).join(qemu::RW_DISK)).unwrap(),
+        "blank 1G\n"
     );
-    assert!(!lab.path().join("kept").exists());
+    let kept: Vec<_> = std::fs::read_dir(lab.path().join("kept"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    let disk = kept
+        .iter()
+        .find(|p| p.to_string_lossy().ends_with(".rw.qcow2"))
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(disk).unwrap(), "the earlier disk");
 }
 
 #[test]
-fn only_tracked_never_ready_official_debian_machines_are_renewed() {
+fn only_provably_never_ready_official_debian_machines_are_renewed() {
     let runner = MachineImage {
         reference: "docker.io/library/debian@sha256:new".into(),
         manifest: "sha256:m".into(),
@@ -1200,47 +1282,70 @@ fn only_tracked_never_ready_official_debian_machines_are_renewed() {
     let debian = "docker.io/library/debian@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     let own = "ghcr.io/example/guest@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     let ok = record(debian, Phase::Stopped, false, false);
-    assert!(renews_disk(&ok, Some(false), &runner, true));
-    assert!(!renews_disk(&ok, None, &runner, true), "no evidence");
-    assert!(!renews_disk(&ok, Some(true), &runner, true), "ever ready");
+    assert!(renews_disk(&ok, Some(false), None, &runner, true));
+    assert!(!renews_disk(&ok, None, None, &runner, true), "no evidence");
+    // P1: an earlier berth's machine is provable by the image's own layers.
+    let own_layers = vec!["o".to_string()];
     assert!(
-        !renews_disk(&ok, Some(false), &runner, false),
+        renews_disk(&ok, None, Some(&own_layers), &runner, true),
+        "its layers are the image's own"
+    );
+    let other_layers = vec!["o".to_string(), "x".to_string()];
+    assert!(
+        !renews_disk(&ok, None, Some(&other_layers), &runner, true),
+        "a layer list that does not match"
+    );
+    assert!(
+        !renews_disk(&ok, Some(true), Some(&own_layers), &runner, true),
+        "ever ready wins"
+    );
+    assert!(
+        !renews_disk(&ok, Some(true), None, &runner, true),
+        "ever ready"
+    );
+    assert!(
+        !renews_disk(&ok, Some(false), None, &runner, false),
         "the runner is not on the default"
     );
     assert!(!renews_disk(
         &record(own, Phase::Stopped, false, false),
         Some(false),
+        None,
         &runner,
         true
     ));
     assert!(!renews_disk(
         &record(debian, Phase::Suspended, false, false),
         Some(false),
+        None,
         &runner,
         true
     ));
     assert!(!renews_disk(
         &record(debian, Phase::Running, false, false),
         Some(false),
+        None,
         &runner,
         true
     ));
     assert!(!renews_disk(
         &record(debian, Phase::Stopped, true, false),
         Some(false),
+        None,
         &runner,
         true
     ));
     assert!(!renews_disk(
         &record(debian, Phase::Stopped, false, true),
         Some(false),
+        None,
         &runner,
         true
     ));
     let mut same = ok.clone();
     same.image = Some(runner.clone());
     assert!(
-        !renews_disk(&same, Some(false), &runner, true),
+        !renews_disk(&same, Some(false), None, &runner, true),
         "already on the runner's image"
     );
 }

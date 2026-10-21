@@ -1403,12 +1403,36 @@ impl VmRunner {
                 return Ok(());
             }
             let dir = self.machine_dir(&entry.record.id);
+            let pulled = entry
+                .record
+                .image
+                .as_ref()
+                .and_then(|image| pulled_layers(&self.options.directory, image));
+            let ever_ready = readiness::read(&dir);
             if !renews_disk(
                 &entry.record,
-                readiness::read(&dir),
+                ever_ready,
+                pulled.as_deref(),
                 &runner,
                 self.image.prepared.is_some(),
             ) {
+                // An earlier berth's official-Debian machine whose layers
+                // berth cannot match to that image's record: not provably
+                // never ready, so it stays as it was; the operator decides.
+                if let Some(image) = &entry.record.image
+                    && ever_ready.is_none()
+                    && entry.record.template.is_none()
+                    && crate::served::is_official_debian(&image.reference)
+                    && pulled.as_deref() != Some(image.diff_ids.as_slice())
+                    && self.image.prepared.is_some()
+                {
+                    event(
+                        &dir,
+                        "not renewed",
+                        "an earlier berth's machine on official Debian whose layers do not match that image's record in images/: \
+                         not provably never ready, so it is left as it was (archive its thread or delete the machine by hand)",
+                    );
+                }
                 return Ok(());
             }
             (entry.record.id.clone(), entry.record.size.disk_gib)
@@ -1446,6 +1470,8 @@ impl VmRunner {
         }
         std::fs::rename(&fresh, dir.join(qemu::RW_DISK)).map_err(internal)?;
         let image = self.write_layers(&id, None).map_err(internal)?;
+        // A blank disk: tracked from here on, as a new machine is.
+        readiness::begin(&dir).map_err(internal)?;
         let entry = state.machines.get_mut(&id).unwrap();
         entry.record.image = Some(image);
         let record = entry.record.clone();
@@ -2630,32 +2656,66 @@ fn image_id(image: &MachineImage) -> String {
 }
 
 /// Whether a stopped machine gets a new blank writable disk on the
-/// runner's image when it starts, its disk kept (`renew_never_ready`):
-/// only with durable evidence that its guest was never ready
-/// (`readiness.json` says so since its creation; an earlier berth's machine
-/// has no such evidence and is never renewed), made on official Debian
-/// alone (any digest), not from a template and not a build machine, not
-/// suspended, and on another layer list than the runner's, which serves
-/// cube's default image. No guest operation ran in such a machine, so its
-/// disk holds only what keel's setup generates, which the next boot
-/// generates again on the new disk. Its layers never change under that
-/// disk: overlayfs would refuse an upper over other lowers (`index=on`).
+/// runner's image when it starts, its disk kept (`renew_never_ready`). It
+/// must be made on official Debian alone (any digest), not from a template,
+/// not a build machine, stopped (not suspended), on another layer list than
+/// the runner's, which serves cube's default image, and its guest must
+/// provably never have been ready:
+///
+/// - `readiness.json` says so (kept from creation on by this berth); or
+/// - an earlier berth's machine without that file (the user's ruling P1 on
+///   #231): its layer list is exactly that official Debian image's own, as
+///   the image's record in `images/` says (`image_layers`). keel calls a
+///   machine ready only with sudo, git, gh and curl in its root, official
+///   Debian has none of them, and nothing can add them before it is ready
+///   (the agent refuses every operation until then). Without that record,
+///   or with any other layer in the list, it is not provable and the
+///   machine is left as it was.
+///
+/// A machine once ready is never renewed. No guest operation ran in one
+/// that is, so its disk holds only what keel's setup generates, which the
+/// next boot generates again on the new disk; the earlier disk is kept,
+/// nothing is copied from it. Layers never change under a disk: overlayfs
+/// refuses an upper over other lowers (`index=on`).
 fn renews_disk(
     record: &MachineRecord,
     ever_ready: Option<bool>,
+    image_layers: Option<&[String]>,
     runner: &MachineImage,
     runner_prepared: bool,
 ) -> bool {
     let Some(image) = &record.image else {
         return false;
     };
-    ever_ready == Some(false)
+    let never_ready = match ever_ready {
+        Some(ever) => !ever,
+        None => image_layers.is_some_and(|layers| image.diff_ids == layers),
+    };
+    never_ready
         && runner_prepared
         && record.template.is_none()
         && !record.build
         && record.phase == Phase::Stopped
         && crate::served::is_official_debian(&image.reference)
         && (image.manifest != runner.manifest || image.diff_ids != runner.diff_ids)
+}
+
+/// The layers of `image` as its record in `directory`'s `images/` has them,
+/// for this platform and that manifest; None when there is no such record.
+fn pulled_layers(directory: &Path, image: &MachineImage) -> Option<Vec<String>> {
+    let reference = image::Reference::parse(&image.reference).ok()?;
+    let store = directory
+        .join("images")
+        .join(format!("{}.json", reference.digest));
+    let record: image::ImageRecord = serde_json::from_slice(&std::fs::read(store).ok()?).ok()?;
+    let platform = image::Platform::native().ok()?.to_string();
+    (record.platform == platform && record.manifest.digest == image.manifest).then(|| {
+        record
+            .layers
+            .into_iter()
+            .map(|layer| layer.diff_id)
+            .collect()
+    })
 }
 
 /// How many machines that are not deleted (retained ones too) are made
