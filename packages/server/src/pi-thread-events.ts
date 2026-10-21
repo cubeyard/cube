@@ -5,6 +5,7 @@ import type { AssistantMessage, ImageContent, Message, TextContent } from "@eare
 import { ROOT_CONVERSATION_ID, type ConversationView, type EntryRecord, type Storage, type SubmissionRecord, type ToolSlot } from "@earendil-works/pi-durable";
 import type { Agent } from "./durable-agent.ts";
 import { mediaId } from "./optchat-media.ts";
+import { droppedReason } from "./pi-sends.ts";
 import { imageNote, shownImage, THREAD_IMAGE_LIMITS } from "./thread-images.ts";
 import type { MessageImage, ThreadAgent, ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
 
@@ -69,7 +70,7 @@ export class PiThreadEvents implements ThreadEvents {
     }
     const status: ThreadStatus = live?.run
       ? { state: "working", run: String(live.run.inputs[0] ?? live.run.taskId), error: this.failure() }
-      : await this.lastRun(`${view.entries.length}:${view.entries.at(-1)?.id}`);
+      : withDropped(await this.lastRun(`${view.entries.length}:${view.entries.at(-1)?.id}`), view.entries);
     return { agent: "pi", owner: this.owner(), status, events };
   }
 
@@ -110,8 +111,13 @@ export async function storedPiTranscript(storage: Pick<Storage, "scanEntries" | 
   } while (cursor);
   const status: ThreadStatus = !last ? { state: "idle", run: null, error: null }
     : last.status === "queued" || last.status === "placed" ? { state: "working", run: last.requestId ?? String(last.id), error: failure }
-    : { run: last.requestId ?? String(last.id), ...settlement(last) };
+    : withDropped({ run: last.requestId ?? String(last.id), ...settlement(last) }, entries);
   return { agent: "pi", owner, status, events: entryEvents(entries.sort((a, b) => a.id - b.id)) };
+}
+
+/** A run stopped because its request was out at a stop says so (pi-sends.ts). */
+export function withDropped(status: ThreadStatus, entries: readonly { id: number; kind: string }[]): ThreadStatus {
+  return status.state === "stopped" && !status.error ? { ...status, error: droppedReason(entries) } : status;
 }
 
 export function settlement(submission: SubmissionRecord): Pick<ThreadStatus, "state" | "error"> {

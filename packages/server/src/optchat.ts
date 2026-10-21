@@ -24,6 +24,8 @@ import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { CAP, capText, Memory, pages, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import { imageNote } from "./thread-images.ts";
+import { countCut, markSent, SendsDoc, settleSends } from "./pi-sends.ts";
+import { boundedOutput, CHAT_OUTPUT_TOKENS } from "./optchat-output.ts";
 import { piReports, reportText as errorText } from "./pi-report.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
 import { PENDING_ID, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
@@ -346,15 +348,20 @@ const CompactorUsageDoc = defineDoc<CompactorUsage>({ kind: "cube.optchat.usage"
  * answers left and the model (`provider/id`) that spent the last. A node
  * with none left is held; a built node's record goes with it. */
 /** `round`: the round a close held before its next answer, which the next
- * build under the same model goes on with (taken once). */
-type Spend = { left: number; model: string; round?: JsonRepresentation<Round> };
+ * build under the same model goes on with (taken once). `out`: an answer
+ * is being asked, already taken from `left`, stored before it is sent and
+ * cleared with its reply; one found at an open was out at the stop. */
+/** `interrupted`: its last answer was out at a stop (counted), so it is held
+ * until a message of the user or another model asks again. */
+type Spend = { left: number; model: string; round?: JsonRepresentation<Round>; out?: { at: number }; interrupted?: true };
 const SpendDoc = defineDoc<{ nodes: Record<string, Spend> }>({ kind: "cube.optchat.spend", version: 1, scope: "session", initial: () => ({ nodes: {} }) });
 /** Model calls a close cut off after its grace, by `provider/model`: what
  * they cost is unknown (their usage, if any came, is counted as it came),
  * and the reopened chat may send them again. `tools`: tool calls still
  * running at the cut, by name: what they did is unknown (their work may go
  * on, it is not undone), and the reopened run executes them again, keyed. */
-type Cut = { chat: Record<string, number>; compactor: Record<string, number>; tools?: Record<string, number> };
+/** `capped`: model calls cube's output guard stopped (optchat-output.ts); their provider reported no usage. */
+type Cut = { chat: Record<string, number>; compactor: Record<string, number>; tools?: Record<string, number>; capped?: { chat: Record<string, number>; compactor: Record<string, number> } };
 const CutDoc = defineDoc<Cut>({ kind: "cube.optchat.cut", version: 1, scope: "session", initial: () => ({ chat: {}, compactor: {} }) });
 const TURN = "optchat.turn";
 const NODE_ENTRY = "optchat.node";
@@ -523,6 +530,8 @@ export class OptChat {
   private readonly building = new Map<string, Promise<void>>();
   /** The compactor calls out now: node → `provider/model`. */
   private readonly calling = new Map<string, string>();
+  /** The nodes whose answer a close cut off and counted. */
+  private readonly cutOff = new Set<string>();
   /** Chat requests and tool calls held back by a close, unstarted, until Pi
    * closes. */
   private readonly gated = { requests: 0, tools: 0 };
@@ -565,6 +574,8 @@ export class OptChat {
   /** The last request the chat refused to send, until the hook next builds
    * one and hands it to Pi to send. */
   private requestError: string | null = null;
+  /** This open's epoch, which each chat request's send record carries (pi-sends.ts). */
+  private epoch = 0;
 
   /** Pi ended the Session by itself: a Storage call failed, so nothing more
    * can be recorded, and every call of the Harness now rejects. The chat
@@ -632,8 +643,9 @@ export class OptChat {
     this.storage = await openStorage(path.join(directory, "pi.sqlite"));
     const registry = createRegistry();
     registry.install(this.extension());
-    this.harness = await Harness.open(this.storage, { models: cachedModels(this.options.models, () => this.cacheKey), registry, onReport: piReports(log), settings: {
-      // The spec's caching: short entries only, never 1-hour ones.
+    this.harness = await Harness.open(this.storage, { models: cachedModels(boundedOutput(this.options.models, CHAT_OUTPUT_TOKENS, model => this.countCapped("chat", model)), () => this.cacheKey), registry, onReport: piReports(log), settings: {
+      // The spec's caching: short entries only, never 1-hour ones. (Every
+      // answer is capped, O1: boundedOutput above.)
       stream: { cacheRetention: "short" },
       toolExecution: "sequential",
       // Every message steered into a tool round is placed at its boundary,
@@ -643,6 +655,15 @@ export class OptChat {
       compaction: { enabled: false },
     } }, context);
     void this.harness.closed.then(end => this.ended(end), () => {});
+    // Before anything is scheduled: a chat request that was out at the last
+    // stop is counted and its turn ends unanswered; it is never sent again
+    // on its own (pi-sends.ts). The next message is the user's to send.
+    const { epoch, dropped } = await settleSends(this.harness, context);
+    this.epoch = epoch;
+    if (dropped.length) {
+      log.warn("a chat request was out when cubed stopped: not sent again, its cost is unknown, its turn ends unanswered", { models: dropped.map(send => send.model) });
+      this.requestError = "the chat's last request was out when cubed stopped, so it was not sent again (what it cost is unknown): send a message to go on";
+    }
     this.tree = await this.harness.commit(async tx => {
       const settings = await tx.doc(SettingsDoc);
       if (!settings.tree) settings.tree = (await tx.createConversation({ ownership: { kind: "ownerless" } })).id;
@@ -652,7 +673,7 @@ export class OptChat {
     const settings = await this.harness.snapshot(SettingsDoc, context);
     this.cacheKey = `optchat-${settings!.cache}`;
     // The compactor's task is its own: its request end is not cached.
-    this.compactorModels = cachedModels(this.options.models, () => `${this.cacheKey}-compact`, { task: false });
+    this.compactorModels = cachedModels(boundedOutput(this.options.models, undefined, model => this.countCapped("compactor", model)), () => `${this.cacheKey}-compact`, { task: false });
     const existing = await this.harness.conversation(ROOT_CONVERSATION_ID, context);
     if (existing) this.conversation = existing;
     else {
@@ -720,7 +741,24 @@ export class OptChat {
     // forgotten once Pi has placed it, which happens after the steer.
     watch.start(async () => { void this.sync(); this.notify(); void this.drain(); });
     this.stopWatch = async () => { await watch.stop(); };
-    // Answers left are kept across restarts: a restart is no new budget.
+    // Answers left are kept across restarts: a restart is no new budget. An
+    // answer that was out at the last stop is counted (its cost unknown) and
+    // not asked again on its own: its node is held, as a node with its
+    // answers spent, until a message of the user or another compactor model.
+    const interrupted = await this.harness.commit(async tx => {
+      const doc = await tx.doc(SpendDoc);
+      const cut = await tx.doc(CutDoc);
+      const out: string[] = [];
+      for (const [key, spend] of Object.entries(doc.nodes)) {
+        if (!spend.out) continue;
+        out.push(key);
+        cut.compactor[spend.model] = (Object.hasOwn(cut.compactor, spend.model) ? cut.compactor[spend.model]! : 0) + 1;
+        doc.nodes[key] = { left: 0, model: spend.model, ...spend.round ? { round: spend.round } : {}, interrupted: true };
+      }
+      return Object.entries(doc.nodes).filter(([, spend]) => spend.interrupted).map(([key]) => key);
+    }, context);
+    for (const key of interrupted) this.why.set(key, "its summary was out when cubed stopped (what it cost is unknown), so it was not asked again");
+    if (interrupted.length) log.warn("compactor answers were out when cubed stopped: not asked again, their cost is unknown; held until a message of the user", { nodes: interrupted });
     for (const [key, spend] of Object.entries((await this.harness.snapshot(SpendDoc, context))?.nodes ?? {})) {
       const [l, i] = key.split(":").map(Number);
       if (!this.memory.built(l!, i!)) this.spend.set(key, { ...spend });
@@ -914,7 +952,7 @@ export class OptChat {
       if (held?.round) { delete held.round; await this.saveSpend([key]); }
       try {
         text = await compactNode({ models: this.compactorModels, model, context: this.memory.context(l, i), source, node: this.memory.nodeLimit, signal: this.abort.signal,
-          answers: this.spend.get(key)?.left ?? ANSWERS, onRequest: () => { this.calling.set(key, name); },
+          answers: this.spend.get(key)?.left ?? ANSWERS, onRequest: () => this.reserve(key, name),
           onReply: reply => { this.calling.delete(key); return this.countCompactor(reply, key, name); }, onCut: why => { cut = why; },
           ...round ? { round } : {}, hold: next => this.holdRound(key, name, next) });
       } finally { this.calling.delete(key); }
@@ -998,27 +1036,64 @@ export class OptChat {
     this.pump();
   }
 
-  /** Adds one compactor reply's usage, and counts it against `node`'s
-   * answers when it spent output. Best effort: a failed commit loses that
-   * reply's usage, never the node; memory still counts the answer. */
+  /** Before a compactor answer is sent: one answer is taken from the
+   * node's, and marked out, in one commit. A failed commit sends nothing (it
+   * throws, ending the round). An answer marked out before whose reply was
+   * never stored is counted now, its cost unknown. */
+  private async reserve(node: string, model: string): Promise<void> {
+    const spend = this.spend.get(node) ?? { left: ANSWERS, model };
+    const next: Spend = { ...spend, model, left: spend.left - 1, out: { at: Date.now() } };
+    delete next.interrupted;
+    await this.harness.commit(async tx => {
+      const doc = await tx.doc(SpendDoc);
+      const prior = doc.nodes[node];
+      if (prior?.out) {
+        const cut = await tx.doc(CutDoc);
+        cut.compactor[prior.model] = (Object.hasOwn(cut.compactor, prior.model) ? cut.compactor[prior.model]! : 0) + 1;
+      }
+      doc.nodes[node] = { ...next };
+    }, context);
+    this.spend.set(node, next);
+    this.calling.set(node, model);
+  }
+
+  /** Adds one compactor reply's usage and clears its node's answer out, in
+   * one commit; a reply that spent no output gives its answer back. A
+   * failed commit throws: the node is not built on a reply whose usage is
+   * not stored, and the answer stays marked out, so it is counted (its cost
+   * unknown) by the next reserve or open. A reply that comes after a close
+   * cut it off adds its usage only (the cut counted it). */
   private async countCompactor(reply: AssistantMessage, node: string, model: string): Promise<void> {
     const key = `${reply.provider}/${reply.model}`;
-    if (spent(reply)) {
-      const spend = this.spend.get(node) ?? { left: ANSWERS, model };
-      spend.left--;
-      spend.model = model;
-      this.spend.set(node, spend);
-    }
+    const cut = this.cutOff.has(node);
+    const spend = this.spend.get(node) ?? { left: ANSWERS, model };
+    const next: Spend = { ...spend, model, left: spend.left + (spent(reply) ? 0 : 1) };
+    delete next.out;
     await this.harness.commit(async tx => {
-      const left = this.spend.get(node);
-      if (left) (await tx.doc(SpendDoc)).nodes[node] = { ...left };
+      if (!cut) (await tx.doc(SpendDoc)).nodes[node] = { ...next };
       const usage = await tx.doc(CompactorUsageDoc);
       const total = Object.hasOwn(usage.models, key) ? usage.models[key] : undefined;
       // A key holds a slash, so it is never `__proto__`.
       if (total) addUsage(total as unknown as Usage, reply.usage);
       else usage.models[key] = JSON.parse(JSON.stringify(reply.usage)) as JsonRepresentation<Usage>;
       usage.calls[key] = (Object.hasOwn(usage.calls, key) ? usage.calls[key]! : 0) + 1;
-    }, context).catch(error => { if (!this.closing) log.warn("compactor usage not counted", { error }); });
+    }, context).catch(error => {
+      log.warn("compactor reply not stored: its node is not built on it, and its cost counts as unknown", { node, error: errorText(error) });
+      throw error;
+    });
+    if (!cut) this.spend.set(node, next);
+  }
+
+  /** A call the output guard stopped: its cost is unknown, counted as such. */
+  private countCapped(kind: "chat" | "compactor", model: string): void {
+    log.warn("a model call was stopped at its output cap by cube: its provider reported no usage, so its cost is unknown", { kind, model });
+    void this.harness.commit(async tx => {
+      const doc = await tx.doc(CutDoc);
+      doc.capped ??= { chat: {}, compactor: {} };
+      // A key holds a slash, so it is never `__proto__`.
+      const counts = doc.capped[kind];
+      counts[model] = (Object.hasOwn(counts, model) ? counts[model]! : 0) + 1;
+    }, context).catch(error => { log.warn("a capped call was not counted", { error: errorText(error) }); });
   }
 
   /** The chat's own usage (its Pi store and its compactor) and the threads it started. */
@@ -1026,9 +1101,13 @@ export class OptChat {
     const compactor = await this.harness.snapshot(CompactorUsageDoc, context);
     const threads = Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {});
     const cut = await this.harness.snapshot(CutDoc, context);
+    // Chat requests out at a stop (pi-sends.ts) count with those a close cut before them.
+    const interrupted = (await this.harness.snapshot(SendsDoc, context))?.interrupted ?? {};
+    const chat: Record<string, number> = { ...cut?.chat };
+    for (const [key, n] of Object.entries(interrupted)) chat[key] = (Object.hasOwn(chat, key) ? chat[key]! : 0) + n;
     return { chat: await this.harness.usage(context) as OptChatUsage["chat"],
       compactor: compactor ? JSON.parse(JSON.stringify(compactor)) as OptChatUsage["compactor"] : { models: {}, calls: {}, since: null, earlier: false }, threads,
-      cut: cut ? { chat: { ...cut.chat }, compactor: { ...cut.compactor }, tools: { ...cut.tools } } : { chat: {}, compactor: {}, tools: {} } };
+      cut: { chat, compactor: { ...cut?.compactor }, tools: { ...cut?.tools }, capped: { chat: { ...cut?.capped?.chat }, compactor: { ...cut?.capped?.compactor } } } };
   }
 
   /** Accepts a user message or a thread report and keeps it until it is in
@@ -1676,8 +1755,12 @@ export class OptChat {
         // closes and aborts it; the reopened run sends it then, once.
         if (this.closing) await this.holdBack(callContext.abortSignal, "requests");
         let messages: Message[];
-        try { messages = await this.request(request.messages, api, callContext); }
-        catch (error) { return this.refuse(api.taskId, callContext.abortSignal, error); }
+        try {
+          messages = await this.request(request.messages, api, callContext);
+          // Last: stored before it leaves, so a stop before its answer is
+          // counted and never sends it again (pi-sends.ts).
+          await markSent(api, this.epoch, callContext);
+        } catch (error) { return this.refuse(api.taskId, callContext.abortSignal, error); }
         this.requestError = null;
         return { messages };
       } })],
@@ -1803,19 +1886,28 @@ export class OptChat {
     if (this.watchTimer) clearInterval(this.watchTimer);
     if (this.harness && this.conversation) {
       const out = await this.quiesce(this.down ? 0 : this.options.limits?.closeMs ?? CLOSE_GRACE_MS);
-      const compactor = [...this.calling.values()];
+      const calling = [...this.calling];
+      const compactor = calling.map(([, model]) => model);
       const chat = out.chat && this.model ? [`${this.model.provider}/${this.model.id}`] : [];
       // Cut off at once, so no node sends another answer after this count.
+      for (const [node] of calling) this.cutOff.add(node);
       this.abort.abort();
       if (compactor.length || chat.length || out.tools.length) {
-        log.warn("calls cut off at close: the model calls' cost is unknown, what the tools did is unknown and not undone, and the reopened chat may send and run them again",
+        log.warn("calls cut off at close: the model calls' cost is unknown and the reopened chat does not send them again (a message of the user does); what the tools did is unknown and not undone, and the reopened chat runs them again, keyed",
           { chat, compactor, nodes: out.nodes, tools: out.tools });
         await this.harness.commit(async tx => {
           const doc = await tx.doc(CutDoc);
-          // A key holds a slash, so it is never `__proto__`; a tool's name is one of TOOL_REPLAY's.
-          for (const key of chat) doc.chat[key] = (Object.hasOwn(doc.chat, key) ? doc.chat[key]! : 0) + 1;
-          for (const key of compactor) doc.compactor[key] = (Object.hasOwn(doc.compactor, key) ? doc.compactor[key]! : 0) + 1;
+          // The chat's request: counted once, and not again by the next open.
+          if (chat.length) countCut(await tx.doc(SendsDoc), chat[0]!);
+          // A node's answer: counted here, not by the next open, which holds the node.
+          const spend = await tx.doc(SpendDoc);
+          for (const [node, model] of calling) {
+            doc.compactor[model] = (Object.hasOwn(doc.compactor, model) ? doc.compactor[model]! : 0) + 1;
+            const left = spend.nodes[node];
+            if (left) { delete left.out; left.left = 0; left.interrupted = true; }
+          }
           if (out.tools.length) doc.tools ??= {};
+          // A key holds a slash, so it is never `__proto__`; a tool's name is one of TOOL_REPLAY's.
           for (const name of out.tools) doc.tools![name] = (Object.hasOwn(doc.tools!, name) ? doc.tools![name]! : 0) + 1;
         }, context).catch(error => { log.warn("calls cut off at close not counted", { error }); });
       }

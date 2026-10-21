@@ -6,11 +6,12 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import type { Models } from "@earendil-works/pi-ai";
 import { GitService, normalizeRepoUrl } from "@cube/git";
 import { NO_HOOKS, projectHooks, projectMachine, Registry, threadAgent, type Project, type ResolvedRepositories, type Runner, type Thread } from "./registry.ts";
 import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
-import { Conversations } from "./conversation.ts";
+import { Conversations, THREADS_CLOSE_MS } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
 import { loadRunnerConfig, type RunnerNetwork, type TrustedRunnerHealth } from "./iroh-node.ts";
 import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
@@ -940,21 +941,28 @@ export async function createCubed(options: {
   probes.unref();
   let closePromise: Promise<void> | undefined;
   return { server, registry, conversations, gateway, usage, portal, machines, close() {
+    // Bounded by one deadline (CLOSE_MS, under the supervisor's SIGKILL 30 s
+    // after its SIGTERM): each step takes at most its cap and what is left,
+    // keeping LAST_MS for the steps after the threads, and the close goes on
+    // past it, so the stores are always closed. OptChat bounds itself (14 s);
+    // the threads get what OptChat leaves.
     closePromise ??= (async () => {
+      const deadline = Date.now() + CLOSE_MS;
+      const left = (cap: number, keep = LAST_MS) => Math.max(0, Math.min(cap, deadline - keep - Date.now()));
       clearInterval(recovery);
       clearInterval(probes);
       server.closeAllConnections();
-      if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
-      await portal.close();
-      await modelAuth.close();
+      if (server.listening) await bounded("http server", new Promise<void>(resolve => server.close(() => resolve())), left(1_000));
+      await bounded("portal", portal.close(), left(1_000));
+      await bounded("model sign-ins", modelAuth.close(), left(1_000));
       artifactService.close();
-      await (await optchat?.catch(() => null))?.chat.close();
-      await conversations.close();
+      await bounded("optchat", (async () => (await optchat?.catch(() => null))?.chat.close())(), left(15_000, LAST_MS + 3_000));
+      await conversations.close(left(THREADS_CLOSE_MS));
       routeCredentials(null);
-      await gateway?.stop();
-      await egress.close();
+      await bounded("gateway", gateway?.stop() ?? Promise.resolve(), left(1_500, 1_000));
+      await bounded("egress", egress.close(), left(500, 500));
       workspaceServer.closeAllConnections();
-      await new Promise<void>(resolve => workspaceServer.close(() => resolve()));
+      await bounded("workspace socket", new Promise<void>(resolve => workspaceServer.close(() => resolve())), left(500, 0));
       fs.rmSync(socketDirectory ?? socket, { recursive: true, force: true });
       usage.close();
       artifactService.store.close();
@@ -962,6 +970,19 @@ export async function createCubed(options: {
     })();
     return closePromise;
   } };
+}
+
+/** cubed's whole close; the supervisor sends SIGKILL 30 s after its SIGTERM. */
+export const CLOSE_MS = 25_000;
+/** Kept from the threads' share for the gateway, egress and the socket. */
+const LAST_MS = 2_500;
+const closeLog = createLogger("cubed");
+/** One step of cubed's close, or past `ms` the close goes on without it. */
+async function bounded(step: string, work: Promise<unknown>, ms: number): Promise<void> {
+  const bound = new AbortController();
+  const late = await Promise.race([work.then(() => false, error => { closeLog.warn("a step of cubed's close failed", { step, error: error instanceof Error ? error.message : String(error) }); return false; }),
+    delay(ms, true, { signal: bound.signal }).catch(() => false)]).finally(() => bound.abort());
+  if (late) closeLog.warn("a step of cubed's close did not end in time; the close goes on", { step, ms });
 }
 
 interface CubedCli {
@@ -1122,23 +1143,33 @@ async function main(argv: string[]): Promise<void> {
   console.log(`threads resumed: ${app.registry.listThreads().filter(thread => !thread.archived).length}`);
   console.log(`runners enrolled: ${app.registry.listRunners().length}`);
   console.log("press Ctrl-C to stop");
+  await serveUntilStopped(app);
+}
+
+/** `serve` from listening to stopped: SIGTERM, SIGINT or the end of the
+ * supervisor's lifeline (fd 3) closes the app once, and nothing else holds
+ * the process after that, so it exits by itself. The lifeline is read as a
+ * socket: a file read of a pipe the supervisor keeps open (as it does while
+ * it waits for this process to exit) would hold a threadpool request that
+ * nothing can cancel, and the supervisor's SIGKILL would end every stop. */
+export async function serveUntilStopped(app: { server: http.Server; close(): Promise<void> }, say: (line: string) => void = line => console.log(line)): Promise<void> {
   let shutdown: Promise<void> | undefined;
   const stop = (signal: NodeJS.Signals | "supervisor-exit") => {
     if (shutdown) {
-      console.log(`stopping: ${signal} received while shutdown is already in progress`);
+      say(`stopping: ${signal} received while shutdown is already in progress`);
       return;
     }
-    console.log(`stopping: ${signal}; waiting for accepted work to reconcile`);
-    shutdown = app.close().then(() => { console.log("stopped"); });
+    say(`stopping: ${signal}; waiting for accepted work to reconcile`);
+    shutdown = app.close().then(() => { say("stopped"); });
     void shutdown.catch(error => { console.error(`cubed: shutdown failed: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; });
   };
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, stop);
-  let lifeline: fs.ReadStream | undefined;
+  let lifeline: net.Socket | undefined;
   if (process.env.CUBED_SUPERVISOR_LIFELINE_FD === "3") {
-    lifeline = fs.createReadStream("/dev/null", { fd: 3, autoClose: false });
-    lifeline.resume();
+    lifeline = new net.Socket({ fd: 3, readable: true, writable: false });
     lifeline.once("end", () => stop("supervisor-exit"));
     lifeline.once("error", () => stop("supervisor-exit"));
+    lifeline.resume();
   }
   await new Promise<void>(resolve => app.server.once("close", resolve));
   await shutdown;

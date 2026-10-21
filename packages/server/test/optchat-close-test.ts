@@ -4,8 +4,9 @@
  * sent, a tool running) and stores their answers, results and usage, so the
  * reopened chat sends and runs none of them again; a summary round held
  * before its next answer goes on after the reopen as it would have. Only
- * what is still out after the close's grace is cut off: counted as unknown,
- * and sent or run again at most once each; the close is bounded whatever a
+ * what is still out after the close's grace is cut off: counted as unknown;
+ * a model call is not sent again until a message of the user (pi-sends.ts),
+ * a tool runs again at most once, keyed; the close is bounded whatever a
  * tool does. */
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
@@ -323,8 +324,9 @@ for (const ms of [0, 200]) {
 }
 
 // 3. Forced: summaries still out after the grace are cut off. The close ends
-// soon after its grace, counts each as unknown, and the reopen asks again
-// for at most those.
+// soon after its grace and counts each as unknown; the reopen asks none of
+// them again (their nodes are held) until a message of the user, which asks
+// again for at most those.
 {
   reset();
   const directory = path.join(root, "forced-summary");
@@ -344,9 +346,13 @@ for (const ms of [0, 200]) {
     assert.ok(took < 150 + 2_000 + 1_000, `the close ends soon after its grace (${took} ms)`);
     hold = { turn: 0, compaction: 0 };
     chat = await chatAt(directory, 5_000);
+    await until(() => /no summary for a message yet \(its summary was out when cubed stopped/.test(chat.failure() ?? ""), "the held nodes say why");
+    await delay(300);
+    assert.equal(twice("compaction"), 0, "the reopen asked none again on its own (another node may be asked)");
+    await chat.send(`message 2: ${"word ".repeat(30)}`, "r2");
     await quiet(chat);
     const again = twice("compaction");
-    assert.ok(again <= cut, `the reopen asked again for at most the ${cut} cut off (${again})`);
+    assert.ok(again <= cut, `the user's message asked again for at most the ${cut} cut off (${again})`);
     assert.ok(sent.slice(0, at).filter(call => call.kind === "compaction").length >= cut);
     const usage = await chat.usage();
     assert.equal(sum(usage.cut?.compactor), cut, "each call cut off is counted as unknown");
@@ -354,8 +360,9 @@ for (const ms of [0, 200]) {
   } finally { await chat.close(); }
 }
 
-// 4. Forced: a chat request still out after the grace is cut off, counted,
-// and sent again once by the reopened run.
+// 4. Forced: a chat request still out after the grace is cut off and
+// counted; the reopened run does not send it again (its turn ends
+// unanswered, and says why) and the next message is answered.
 {
   reset();
   const directory = path.join(root, "forced-turn");
@@ -367,11 +374,21 @@ for (const ms of [0, 200]) {
     await chat.close();
     assert.equal(aborted.turn, 1, "the chat's request was cut off");
     hold = { turn: 0, compaction: 0 };
+    const before = sent.filter(call => call.kind === "turn").length;
     chat = await chatAt(directory, 5_000);
     await quiet(chat);
-    assert.equal(twice("turn"), 1, "the reopened run sent it again, once");
-    const usage = await chat.usage();
-    assert.equal(sum(usage.cut?.chat), 1, "and it is counted as unknown");
+    assert.equal(sent.filter(call => call.kind === "turn").length, before, "the reopened run did not send it again");
+    assert.match(chat.failure() ?? "", /last request was out when cubed stopped, so it was not sent again/);
+    let usage = await chat.usage();
+    assert.equal(sum(usage.cut?.chat), 1, "it is counted as unknown, once");
+    await chat.close();
+    chat = await chatAt(directory, 5_000);
+    await quiet(chat);
+    usage = await chat.usage();
+    assert.equal(sum(usage.cut?.chat), 1, "a second reopen counts it no more");
+    await chat.send(`message 1: ${"word ".repeat(30)}`, "r1");
+    await until(() => chat.memory.messages.filter(message => message.kind === "talk").length >= 1, "the next message is answered");
+    assert.equal(twice("turn"), 0, "no request was sent twice");
   } finally { await chat.close(); }
 }
 
