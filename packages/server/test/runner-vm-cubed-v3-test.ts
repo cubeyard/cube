@@ -47,6 +47,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fakeGithub, git } from "../../../scripts/fake-github.ts";
+import { gatewayCommand, gatewayPids as livePids } from "./gateway-pids.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
 const repo = path.resolve(import.meta.dirname, "../../..");
@@ -127,11 +128,12 @@ const gatewayBin = env.CUBE_TEST_BERTH_GATEWAY || (() => {
 
 type Cubed = { child: ChildProcess; url: string; port: number; provider: string; model: string };
 fs.mkdirSync(path.join(root, "home"), { mode: 0o700 });
+const gatewayTestArgs = ["--test-upstream", `github.com=127.0.0.1:${github.port}`,
+  "--test-upstream", `api.github.com=127.0.0.1:${github.port}`, "--test-upstream-ca", github.ca];
 const fixtureEnv: NodeJS.ProcessEnv = { PATH: env.PATH, HOME: path.join(root, "home"), PI_CODING_AGENT_DIR: path.join(root, "home", "pi"),
   GIT_CONFIG_GLOBAL: gitconfig, CUBED_GATEWAY: gatewayBin, CUBED_GITHUB_TOKEN: token,
   CUBED_VM_VCPUS: "2", CUBED_VM_MEMORY_MIB: "2048", CUBED_VM_DISK_GIB: "16",
-  CUBED_GATEWAY_TEST_ARGS: JSON.stringify(["--test-upstream", `github.com=127.0.0.1:${github.port}`,
-    "--test-upstream", `api.github.com=127.0.0.1:${github.port}`, "--test-upstream-ca", github.ca]) };
+  CUBED_GATEWAY_TEST_ARGS: JSON.stringify(gatewayTestArgs) };
 const cubedLog = path.join(root, "cubed.log");
 async function startCubed(port = 0): Promise<Cubed> {
   const child = fork(path.join(repo, "packages/server/test/e2e-fixture.ts"), [state], {
@@ -162,7 +164,9 @@ async function kill(child: ChildProcess, signal: NodeJS.Signals = "SIGKILL"): Pr
   child.kill(signal);
   await exited;
 }
-const gatewayPids = () => { try { return execFileSync("pgrep", ["-f", `serve --state ${path.join(state, "gateway")}`], { encoding: "utf8" }).trim().split("\n").filter(Boolean); } catch { return []; } };
+/** This state's supervised gateway, by its whole command line (gateway-pids.ts). */
+const gatewayLine = gatewayCommand({ binary: gatewayBin, state, testArgs: gatewayTestArgs });
+const gatewayPids = () => livePids(gatewayLine);
 
 let cubed: Cubed | undefined;
 const api = async (route: string, method = "GET", body?: unknown) => {
@@ -288,6 +292,8 @@ try {
   await delay(3000);
   const tKillA = now();
   const oldCubed = cubed.child.pid;
+  // Found before the kill, so the wait for none below is not met by a lookup that never matches.
+  assert.equal(gatewayPids().length, 1, `one supervised gateway before (a): ${gatewayLine}`);
   await kill(cubed.child);
   await until("the old gateway to exit with cubed's lifeline", 30000, () => gatewayPids().length === 0);
   cubed = await startCubed(cubed.port);
