@@ -327,7 +327,12 @@ start, a lost layer, SIGINT and SIGKILL during a conversion, and the cache
 limit with a retained machine; for host gates, not in CI). With a ready
 image `runner-vm-test.ts` also runs templates (V10; `CUBE_TEST_BERTH_IMAGE_B`
 for `template_image_changed`, `CUBE_TEST_BERTH_FSCK` for fsck.erofs on the
-layer).
+layer). `runner-vm-renewal-test.ts` boots real machines to check the renewal: a
+never-ready machine on an older official Debian (`CUBE_TEST_BERTH_OLD_DEBIAN`)
+gets a new disk on the default image and gets ready, its earlier disk kept;
+with `CUBE_TEST_BERTH_LEGACY` (the released v0.3.32 berth) an earlier
+berth's machines are left as they were. It is not part of
+`test-node-transport.sh`.
 
 ## Updating the default image
 
