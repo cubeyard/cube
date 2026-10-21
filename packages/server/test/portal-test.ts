@@ -5,7 +5,7 @@
  * gateway's dial route itself is tested in packages/gateway/tests/link.rs;
  * a real machine needs scripts/test-node-transport.sh. */
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -16,7 +16,7 @@ import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-work
 import { createCubed } from "../src/index.ts";
 import { Portal, portalSettings, privateIpv4, responseHeaders } from "../src/portal.ts";
 import type { Thread } from "../src/registry.ts";
-import { helperBootstrapScripts, refreshGuest } from "../src/vm.ts";
+import { refreshGuest } from "../src/vm.ts";
 import { GUEST_CLI_SHIM, shippedHelper } from "../src/vm-seed.ts";
 import { keelGuest, VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
@@ -48,32 +48,11 @@ assert.deepEqual(responseHeaders(["Set-Cookie", "a=1; Domain=.sslip.io; Path=/",
   ["Set-Cookie", "a=1; Path=/", "Content-Type", "text/plain", "set-cookie", "b=2"]);
 console.log("ok: portal settings refuse public and wildcard addresses; service cookies become host-only");
 
-// A helper from before `install` gets the shipped one through ordinary
-// commands of cubed's: every one fits the helper's command limit, and the
-// last one hands the new helper's own `install` a valid request.
-{
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-bootstrap-"));
-  try {
-    const { source, sha256 } = shippedHelper();
-    const scripts = helperBootstrapScripts(source);
-    assert.ok(scripts.length >= 2 && scripts.every(script => Buffer.byteLength(script) <= 8192));
-    const launcher = path.join(import.meta.dirname, "local-guest.py");
-    for (const script of scripts) {
-      execFileSync("bash", ["-c", script.replaceAll("/var/tmp/", `${root}/`)
-        .replace('sudo -n /usr/bin/python3 "$d/helper"', `python3 ${launcher} ${root}`)], { stdio: "pipe" });
-    }
-    assert.equal(fs.readFileSync(path.join(root, "cube-guest"), "utf8"), source.toString());
-    assert.equal(fs.readFileSync(path.join(root, "bin", "cube"), "utf8"), GUEST_CLI_SHIM);
-    assert.deepEqual(fs.readdirSync(root).filter(name => name.startsWith("cube-helper-")), [], "the chunks are removed");
-    assert.match(sha256, /^[0-9a-f]{64}$/);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
-  console.log("ok: an old helper is replaced through chunked commands and the new helper's install");
-}
-
 // A keel machine (C-a item 4): its cube-agent comes with the image. refreshGuest
 // tells it by its hello's capabilities, replaces nothing (no install, no
-// bootstrap command, no lease) and still sends the portal's settings; a
-// cube-guest.py with another build is still replaced.
+// lease) and still sends the portal's settings; a cube-guest.py (berth
+// host) with another build is still replaced, and one without `install` is
+// refused rather than bootstrapped.
 {
   const keelSource = fs.readFileSync(path.resolve(import.meta.dirname, "../../keel/agent/src/ops.rs"), "utf8");
   const keelCapabilities = JSON.parse(/pub const CAPABILITIES: \[&str; \d+\] = (\[[^\]]*\]);/.exec(keelSource)![1]!.replace(/,\s*\]/, "]")) as string[];
@@ -81,7 +60,7 @@ console.log("ok: portal settings refuse public and wildcard addresses; service c
   assert.equal(keelGuest({ capabilities: keelCapabilities }), true, "keel's cube-agent, from its source");
   assert.equal(keelGuest({ capabilities: helperCapabilities }), false, "the shipped cube-guest.py");
   assert.equal(keelGuest({ capabilities: helperCapabilities.filter(c => c !== "helper.install" && c !== "portal.configure") }), false,
-    "a cube-guest.py from before `cube service` (it is bootstrapped)");
+    "a cube-guest.py from before `cube service`");
   const limits = { maxFrameBytes: 1 << 20, maxCommandBytes: 8192, maxPathBytes: 4096, maxExecTimeoutMs: 3_600_000, maxOutputBytes: 1 << 20,
     outputPageBytes: 65536, maxReadBytes: 1 << 20, maxWriteBytes: 1 << 20, requestTimeoutMs: 60000 };
   const refresh = async (capabilities: string[]) => {
@@ -95,12 +74,13 @@ console.log("ok: portal settings refuse public and wildcard addresses; service c
     } };
     const leases = new LeaseStore(path.join(fs.mkdtempSync(path.join(os.tmpdir(), "cube-keel-refresh-")), "leases.json"));
     const workspace = new VmWorkspace({ guest: guest as never, leases, owner: "pi", binding: "test" });
-    return { outcome: await refreshGuest(workspace, "pi", { urlTemplate: "http://{name}.example/" }), ops };
+    return { outcome: await refreshGuest(workspace, { urlTemplate: "http://{name}.example/" }), ops };
   };
   assert.deepEqual(await refresh(keelCapabilities), { outcome: "current", ops: ["hello", "portal"] });
   const helper = await refresh(helperCapabilities);
   assert.equal(helper.outcome, "installed");
   assert.deepEqual(helper.ops.filter(op => op !== "hello"), ["install", "portal"]);
+  await assert.rejects(refresh(helperCapabilities.filter(c => c !== "helper.install" && c !== "portal.configure")), /the machine.s guest helper cannot be replaced \(no helper.install\)/);
   console.log("ok: a keel machine's agent is never replaced and still gets the portal's settings; cube-guest.py still is");
 }
 

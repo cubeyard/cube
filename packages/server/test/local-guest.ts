@@ -1,18 +1,63 @@
 /** Test only: the real guest helper (packages/server/guest/cube-guest.py)
  * under a temporary root, with a process launcher instead of systemd
- * (local-guest.py). It stands in for a thread VM reached over SSH; the same
- * contract runs against a real VM in scripts/smoke-node-adapter.ts. Not
- * runner acceptance. */
+ * (local-guest.py). It stands in for a thread machine's guest; the same
+ * helper runs on a real `berth host` in runner-host-test.ts, and keel's
+ * cube-agent keeps its contract (keel-agent-contract-test.ts). Not runner
+ * acceptance. */
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import net from "node:net";
-import { encodeGuestRequest, runGuestProcess, type GuestAnswer, type GuestCallOptions, type GuestOp, type GuestTransport } from "../src/guest-ssh.ts";
+import { decodeGuestAnswer, encodeGuestRequest, GuestTransportError, type GuestAnswer, type GuestCallOptions, type GuestOp,
+  type GuestTransport } from "../src/guest-transport.ts";
+import { clean } from "../src/vm-diagnostics.ts";
 import { readStartupLog, type StartOptions, type StartupLog, type ThreadMachines } from "../src/vm.ts";
 import type { Thread } from "../src/registry.ts";
 import { hookFileContent } from "../src/vm-seed.ts";
 
 const LAUNCHER = path.join(import.meta.dirname, "local-guest.py");
+const MAX_ANSWER_BYTES = 2 * 1024 * 1024;
+
+/** Runs one helper call as a child process: `argv` gets the request on stdin. */
+function runGuestProcess(argv: readonly string[], request: Buffer, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<GuestAnswer> {
+  return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) { reject(new GuestTransportError("guest call aborted")); return; }
+    const child = spawn(argv[0]!, argv.slice(1), { stdio: ["pipe", "pipe", "pipe"] });
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let stderr = "";
+    let settled = false;
+    let exitCode: number | null = null;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abort);
+      if (error) { reject(error); return; }
+      try { resolve(decodeGuestAnswer(Buffer.concat(chunks))); }
+      catch (cause) {
+        const status = exitCode === 255 ? "the guest could not be reached" : `exit status ${exitCode}`;
+        const said = clean(stderr).trim().split("\n").slice(-2).join("; ").slice(0, 512);
+        reject(new GuestTransportError(`${status}${said ? `: ${said}` : ""}`, { cause }));
+      }
+    };
+    const kill = () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); };
+    const abort = () => { kill(); finish(new GuestTransportError("guest call aborted")); };
+    const timer = setTimeout(() => { kill(); finish(new GuestTransportError("the guest did not answer in time")); }, options.timeoutMs ?? 60000);
+    options.signal?.addEventListener("abort", abort, { once: true });
+    child.stdout.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_ANSWER_BYTES) { kill(); finish(new GuestTransportError("the guest answer is too large")); return; }
+      chunks.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-2048); });
+    child.on("error", error => finish(new GuestTransportError(`cannot start ${path.basename(argv[0]!)}: ${error.message}`, { cause: error })));
+    child.on("exit", code => { exitCode = code; });
+    child.on("close", () => finish());
+    child.stdin.on("error", () => {});
+    child.stdin.end(request);
+  });
+}
 
 export class LocalGuestTransport implements GuestTransport {
   readonly root: string;
@@ -107,7 +152,7 @@ export class LocalMachines implements ThreadMachines {
     fs.rmSync(path.join(this.root, thread.id), { recursive: true, force: true });
   }
   async close(): Promise<void> { for (const guest of this.guests.values()) guest.stop(); }
-  /** As ThreadVms reads it; the guest's root stands for its /. */
+  /** As RunnerMachines reads it; the guest's root stands for its /. */
   async startupLog(thread: Thread): Promise<StartupLog | null> {
     return this.guests.has(thread.id) ? readStartupLog(this.guest(thread), "thread", "/home/.cache/cube") : null;
   }

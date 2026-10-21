@@ -3,8 +3,8 @@
  * a race between processes) and the product over local guests: two threads
  * on one runner run commands at the same time, each in its own machine, a
  * third is refused, a failed machine holds its slot until it is archived.
- * Local guests stand in for VMs here; the real runner's bound and isolation
- * are tested in cube-runner's runner_vm.rs. Not runner acceptance. */
+ * Local guests stand in for machines here; berth vm's own bound and
+ * isolation are in runner-vm-v13-test.ts. Not runner acceptance. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -14,14 +14,11 @@ import { Worker } from "node:worker_threads";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
 import { Registry, type Project, type Thread } from "../src/registry.ts";
-import type { GatewaySupervisor } from "../src/gateway.ts";
-import { IrohNodeError, type IrohRunnerClient } from "../src/iroh-node.ts";
-import { ThreadVms } from "../src/vm.ts";
 import { LocalMachines } from "./local-guest.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-runner-slots-"));
 const health = { lifecycle: "ready" as const, draining: false, error: null, activeVms: 0, runningVms: 0, maxActiveVms: 1,
-  retainedVms: 0, retainedBytes: 0, softwareVersion: "test", protocolVersion: 3 as const };
+  retainedVms: 0, retainedBytes: 0, softwareVersion: "test", protocolVersion: 4 as const };
 const project = (id: string): Project => ({ id, name: id, status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
 const model = { provider: "fixture", id: "selected" };
 const runner = (id: string, maxActiveVms?: number) => ({ nodeId: `node-${id}`, environmentId: 1, threadId: id,
@@ -29,13 +26,6 @@ const runner = (id: string, maxActiveVms?: number) => ({ nodeId: `node-${id}`, e
 /** A berth vm: the pool is the berth vm runners (pooledRunner). */
 const pooled = (id: string, maxActiveVms?: number) => ({ ...runner(id, maxActiveVms), protocol: 4 as const, kind: "vm" as const });
 const archive = (registry: Registry, id: string) => { registry.beginRelease(id); registry.finishRelease(id); };
-/** A thread the pool placed on a protocol-3 runner before protocol 3
- * needed a runner's name: unpinned. */
-const legacy = (registry: Registry, thread: Thread): Thread => {
-  const { pinned: _, ...unpinned } = thread;
-  registry.saveThread(unpinned);
-  return unpinned;
-};
 
 try {
   // --- registry ---
@@ -132,64 +122,6 @@ try {
   assert.equal(raced.listThreads().length, 2);
   raced.close();
 
-  // --- a full protocol-3 runner: an unbound legacy thread moves to a protocol-3 runner with room ---
-  {
-    const file = path.join(root, "relocate.sqlite");
-    const moving = new Registry(file);
-    moving.saveProject(project("m"));
-    moving.enrollRunner(runner("full", 2));
-    moving.enrollRunner(runner("roomy", 1));
-    const first = legacy(moving, moving.createThread("m", "first", model, "first", "pi", undefined, { runnerId: "full" }));
-    assert.equal(first.runnerId, "full");
-    const calls: string[] = [];
-    const vmRecord = (ref: { threadId: string; vmId: string }, state: string) => ({ vmId: ref.vmId, threadId: ref.threadId, state, interrupted: false, diskBytes: 0 });
-    const fake = (name: string) => ({
-      target: { peer: "0".repeat(64), network: "loopback" as const, address: "127.0.0.1:1" },
-      nodeId: `node-${name}`,
-      health: async () => ({ ...health, maxActiveVms: name === "full" ? 2 : 1 }),
-      describe: async () => ({ softwareVersion: "0.7.0", capabilities: [], platform: "linux-x86_64", baseImageSha256: "0".repeat(64),
-        limits: { maxFrameBytes: 1048576, requestTimeoutMs: 5000, maxVcpus: 2, maxMemoryMiB: 4096, maxDiskGiB: 32, maxSeedBytes: 65536, maxActiveVms: name === "full" ? 2 : 1 } }),
-      vmInspect: async () => { throw new IrohNodeError("NOT_FOUND"); },
-      vmAllocate: async (ref: { threadId: string; vmId: string }) => {
-        calls.push(`${name}:allocate`);
-        if (name === "full") throw new IrohNodeError("CAPACITY_EXCEEDED", false, "the runner's disk has less than 4 GiB free");
-        return vmRecord(ref, "allocated");
-      },
-      vmStart: async () => { calls.push(`${name}:start`); throw new Error("fixture stops here"); },
-    });
-    const gateway = { binary: "/bin/false", unavailable: null, control: "/nonexistent", onRestart: () => {},
-      ensureNetwork: async () => {}, ready: async () => ({ client: {}, hello: { peer: "0".repeat(64), caPem: "" } }) };
-    const vms = new ThreadVms({ registry: moving, threads: path.join(root, "relocate-threads"), run: path.join(root, "relocate-run"),
-      gateway: gateway as unknown as GatewaySupervisor, runnerClient: admission => fake(admission.configHash) as unknown as IrohRunnerClient });
-    await assert.rejects(vms.start(first), /fixture stops here/);
-    assert.deepEqual(calls, ["full:allocate", "roomy:allocate", "roomy:start"]);
-    assert.equal(moving.getThread(first.id)!.runnerId, "roomy", "the thread moved to the runner with room");
-    assert.equal(moving.runner(first.id)!.threadId, "roomy");
-    assert.deepEqual(moving.runnerStatuses().map(row => [row.id, row.activeThreads]), [["full", 0], ["roomy", 1]]);
-
-    // An opened workspace (its lease store) keys operations by the runner: it stays.
-    const third = legacy(moving, moving.createThread("m", "third", model, "third", "pi", undefined, { runnerId: "full" }));
-    assert.equal(third.runnerId, "full");
-    fs.mkdirSync(path.join(root, "relocate-threads", third.id), { recursive: true });
-    fs.writeFileSync(path.join(root, "relocate-threads", third.id, "lease.sqlite"), "");
-    calls.length = 0;
-    await assert.rejects(vms.start(third), /no room for this thread's machine/);
-    assert.deepEqual(calls, ["full:allocate"]);
-    assert.equal(moving.getThread(third.id)!.runnerId, "full");
-
-    // Bound to its runner (the agent's storage exists): it stays and says why.
-    const second = legacy(moving, moving.createThread("m", "second", model, "second", "pi", undefined, { runnerId: "full" }));
-    assert.equal(second.runnerId, "full");
-    fs.mkdirSync(path.join(root, "relocate-threads", second.id), { recursive: true });
-    fs.writeFileSync(path.join(root, "relocate-threads", second.id, "pi.sqlite"), "");
-    calls.length = 0;
-    await assert.rejects(vms.start(second), /no room for this thread's machine \(the runner's disk has less than 4 GiB free\); cube tries again/);
-    assert.deepEqual(calls, ["full:allocate"]);
-    assert.equal(moving.getThread(second.id)!.runnerId, "full");
-    await vms.close();
-    moving.close();
-  }
-
   // --- product: two threads on one runner at once ---
   const textOf = (message: Message) => typeof message.content === "string" ? message.content
     : message.content.map(part => part.type === "text" ? part.text : "").join("\n");
@@ -272,5 +204,5 @@ try {
     await app.close();
     await machines.close();
   }
-  console.log("ok: runner slots (spread, bound, failed machines, archive, one-machine runners, process race, full-runner relocation) and two concurrent threads on one runner over local guests");
+  console.log("ok: runner slots (spread, bound, failed machines, archive, one-machine runners, process race) and two concurrent threads on one runner over local guests");
 } finally { fs.rmSync(root, { recursive: true, force: true }); }

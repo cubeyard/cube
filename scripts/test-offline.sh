@@ -7,7 +7,6 @@ OFFLINE_TESTS=(
   scripts/ci-test.ts
   scripts/homebrew-formula-test.ts
   scripts/cubed-update-test.ts
-  scripts/runner-production-test.ts
   scripts/keel-boot-check-test.ts
   scripts/keel-release-test.ts
   scripts/berth-release-test.ts
@@ -18,13 +17,13 @@ OFFLINE_TESTS=(
   packages/server/test/runner-suspend-test.ts
   packages/server/test/runner-placement-test.ts
   packages/server/test/runner-host-placement-test.ts
+  packages/server/test/protocol3-history-test.ts
   packages/server/test/runner-probe-test.ts
   packages/server/test/runner-observe-test.ts
   packages/server/test/api-test.ts
   packages/server/test/reattach-step-test.ts
   packages/server/test/models-test.ts
   packages/server/test/model-auth-test.ts
-  packages/server/test/iroh-node-test.ts
   packages/server/test/runner-proto-test.ts
   packages/server/test/runner-enroll-test.ts
   packages/server/test/runner-status-test.ts
@@ -42,8 +41,6 @@ OFFLINE_TESTS=(
   packages/server/test/lifecycle-test.ts
   packages/server/test/thread-down-test.ts
   packages/server/test/vm-template-test.ts
-  packages/server/test/vm-prepare-test.ts
-  packages/server/test/vm-reattach-test.ts
   packages/server/test/vm-diagnostics-test.ts
   packages/server/test/startup-steps-test.ts
   packages/server/test/thread-start-commits-test.ts
@@ -109,7 +106,7 @@ OFFLINE_TESTS=(
   packages/git/test/git-service-test.ts
 )
 # shellcheck disable=SC2034
-RUST_OFFLINE_PACKAGES=(cube-runner cube-gateway cube-netstack cube-runner-protocol berth keel-layers cube-agent keel-agent-check)
+RUST_OFFLINE_PACKAGES=(cube-gateway cube-netstack cube-runner-protocol berth keel-layers cube-agent keel-agent-check)
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -uo pipefail
   cd "$(dirname "$0")/.." || exit 1

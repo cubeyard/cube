@@ -8,7 +8,6 @@
  * translates, checks capabilities and limits, and enforces the lease; it has
  * no file logic. */
 import { setTimeout as delay } from "node:timers/promises";
-import type { NodeErrorCode } from "./execution-node-contract.ts";
 import type { ThreadAgent } from "./thread-events.ts";
 
 /** The lease owner is the thread's agent. */
@@ -16,6 +15,10 @@ export type WorkspaceOwner = ThreadAgent;
 export const WORKSPACE_OWNERS: readonly WorkspaceOwner[] = ["pi", "claude-code"];
 /** Every operation the contract needs. A guest lacking one is incompatible. */
 export const WORKSPACE_CAPABILITIES = ["exec.start", "exec.cancel", "operation.get", "fs.read", "fs.write", "fs.stat"] as const;
+/** The error codes runners and guests share. */
+export type NodeErrorCode = "NODE_UNAVAILABLE" | "ENVIRONMENT_MISSING" | "OPERATION_UNSUPPORTED" | "COMPLETION_UNKNOWN"
+  | "WRONG_NODE" | "INVALID_REQUEST" | "CONFLICT" | "CAPACITY_EXCEEDED" | "DRAINING" | "CANCELLED"
+  | "INCOMPATIBLE_PROTOCOL" | "IO_ERROR" | "LEASE_STALE" | "PRECONDITION_FAILED" | "NOT_FOUND";
 export type WorkspaceErrorCode = NodeErrorCode | "LEASE_HELD";
 /** Advertised by the guest helper's hello; every bound is enforced there. */
 export interface WorkspaceLimits {

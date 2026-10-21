@@ -4,7 +4,7 @@ import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { ModelSelection } from "./models.ts";
-import type { NodeBinding, TrustedRunnerHealth } from "./iroh-node.ts";
+import type { NodeBinding, TrustedRunnerHealth } from "./runner-types.ts";
 import type { ThreadAgent } from "./thread-events.ts";
 import type { ThreadSkills } from "./skills.ts";
 import { newPlaceholder } from "./egress-policy.ts";
@@ -103,12 +103,13 @@ export interface Runner extends NodeBinding {
   /** The project this installation template belonged to before runners became
    * global. It is migration/audit context, never a scheduling constraint. */
   legacyProjectId?: string;
-  /** The runner protocol it was enrolled with; absent: 3 (VM runners). */
+  /** The runner protocol it was enrolled with; absent: 3 (`cube-runner`,
+   * retired: the row stays for its threads' history and is never placed on
+   * or contacted again, runner-select.ts). */
   protocol?: 4;
   /** `host`: `berth host`, machines are directories on that host and
-   * nothing is sandboxed. Only a thread started on it by name runs there,
-   * as on a protocol-3 runner; the pool is the `berth vm` runners
-   * (pooledRunner). */
+   * nothing is sandboxed. Only a thread started on it by name runs there;
+   * the pool is the `berth vm` runners (pooledRunner). */
   kind?: "vm" | "host";
 }
 export interface WorkspaceRepository {
@@ -285,10 +286,8 @@ export function runnerSlots(runner: Pick<Runner, "maxActiveVms">): number {
 }
 
 /** Whether a thread started without naming a runner may get this one:
- * only a `berth vm` (protocol 4, kind vm). A protocol-3 runner
- * (`cube-runner`) and a host runner (`berth host`) take only threads
- * started on them by name (the user's decision of 2026-10-16: p3 only by
- * explicit choice). */
+ * only a `berth vm` (protocol 4, kind vm). A host runner (`berth host`)
+ * takes only threads started on it by name; a protocol-3 runner none. */
 export function pooledRunner(runner: Pick<Runner, "protocol" | "kind">): boolean {
   return runner.protocol === 4 && runner.kind !== "host";
 }
@@ -451,7 +450,7 @@ export class Registry {
         FROM thread WHERE ${OPEN_THREAD} AND ${HOLDS_SLOT} GROUP BY runner_id) t ON t.runner_id=r.id
       WHERE o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired' ORDER BY r.rowid`).all() as Array<Record<string, unknown>>;
     return rows.map(row => ({ row, runner: JSON.parse(String(row.data)) as Runner }))
-      // A protocol-3 or host runner takes only the threads started on it by name.
+      // A host runner takes only the threads started on it by name.
       .filter(({ runner }) => which(runner)).map(({ row, runner }) => {
         const { fitness } = runnerFitness(observation(row), now);
         return { id: String(row.id), runner, slots: runnerSlots(runner), active: Number(row.active), failed: Number(row.failed), fitness };
@@ -466,6 +465,7 @@ export class Registry {
       WHERE r.id=? AND o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired'`).get(id);
     if (!row) throw new Error(`no enrolled runner ${id} that takes threads`);
     const runner = JSON.parse(String(row.data)) as Runner;
+    if (runner.protocol !== 4) throw new Error(`runner ${runner.nodeId} uses protocol 3 (cube-runner), which cube no longer runs; start the thread on a berth runner`);
     if (Number(row.active) >= runnerSlots(runner)) throw new Error(`runner ${runner.nodeId} has no free thread machine (${row.active} of ${runnerSlots(runner)} in use); archive one of its threads first`);
     return { id: String(row.id) };
   }
@@ -476,39 +476,6 @@ export class Registry {
     const observed = observation(row);
     return { ...runnerFitness(observed, now), lastContactAt: observed.lastContactAt, unreachableSince: observed.unreachableSince, error: observed.error, health: observed.health,
       retired: row.retired_at != null };
-  }
-  /** Moves an open thread whose machine was never allocated to another
-   * protocol-3 VM runner with a free slot that is not down and not in
-   * `exclude`. Only an unpinned `provisional` thread on a protocol-3 runner
-   * moves: one the pool placed there before protocol 3 needed a runner's
-   * name (a new protocol-3 thread is pinned); nothing of its own machine
-   * reached its runner (the caller also checks nothing is bound to that
-   * runner). A thread on a protocol-4 runner stays there
-   * (runner-machines.ts). Counting and
-   * moving in one IMMEDIATE transaction is the new slot's reservation and
-   * the old one's release. Returns the new runner's id, or null when none
-   * can take it. */
-  relocateThread(threadId: string, exclude: ReadonlySet<string> = new Set(), now = Date.now()): string | null {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const thread = this.getThread(threadId);
-      if (!thread || thread.archived || thread.pinned || thread.workspaceState === "available" || thread.workspaceState === "releasing" || placement(thread) !== "provisional") {
-        this.db.exec("COMMIT");
-        return null;
-      }
-      // Never between protocols: the caller (vm.ts) boots it on the new
-      // runner with protocol 3.
-      const load = this.getRunner(thread.runnerId)?.protocol === 4 ? undefined
-        : this.runnerLoads(now, runner => runner.protocol !== 4 && runner.kind !== "host").find(candidate => candidate.id !== thread.runnerId && !exclude.has(candidate.id)
-          && candidate.fitness !== "down" && candidate.active < candidate.slots);
-      if (!load) { this.db.exec("COMMIT"); return null; }
-      const moved: Thread = { ...thread, runnerId: load.id, ...(thread.vm ? { vm: { ...thread.vm, placement: "provisional" } } : {}) };
-      this.db.prepare("UPDATE thread SET runner_id=?,data=? WHERE id=?").run(load.id, JSON.stringify(moved), threadId);
-      this.syncRunner(thread.runnerId);
-      this.syncRunner(load.id);
-      this.db.exec("COMMIT");
-      return load.id;
-    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   /** Records the runner's advertised `maxActiveVms` (enrollment, a status
    * check, a machine start). A bound below its open threads only stops new
@@ -638,7 +605,10 @@ export class Registry {
       }
       if (status.lastAttemptAt !== expectedAttemptAt) throw new Error("runner status changed; check it again");
       const idleReachable = status.contactStatus === "reachable" && status.health && status.health.activeVms === 0;
-      if (!idleReachable && status.contactStatus !== "stale") throw new Error("runner must be reachable and idle, or stale, before retirement");
+      // A protocol-3 runner is never contacted again (runner-select.ts): its
+      // registration retires without a check; its threads are archived.
+      const retiredProtocol = this.getRunner(id)?.protocol !== 4;
+      if (!idleReachable && status.contactStatus !== "stale" && !retiredProtocol) throw new Error("runner must be reachable and idle, or stale, before retirement");
       const retired = this.db.prepare(`UPDATE runner SET state='retired',error=NULL
         WHERE id=? AND state='failed' AND thread_id IS NULL
           AND NOT EXISTS (SELECT 1 FROM thread WHERE runner_id=runner.id AND json_extract(data, '$.archived')=0)`).run(id);
@@ -827,7 +797,7 @@ export class Registry {
         : this.runnerLoads().find(candidate => candidate.active < candidate.slots);
       if (!load) throw new Error(this.runnerLoads().length
         ? "no free thread machine in the global runner pool (its berth vm runners) — archive an idle thread, enroll another berth vm, raise a runner's limit, or start the thread on a runner by name"
-        : "no berth vm runner in the global runner pool: start the thread on a runner by name (a protocol-3 runner takes threads only by name), or enroll a berth vm");
+        : "no berth vm runner in the global runner pool: start the thread on a berth host by name, or enroll a berth vm");
       const thread: Thread = { id: randomUUID(), projectId, runnerId: load.id, ...(options.runnerId !== undefined ? { pinned: true as const } : {}),
         title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, agent, archived: false, createdAt: Date.now(),
         allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks },

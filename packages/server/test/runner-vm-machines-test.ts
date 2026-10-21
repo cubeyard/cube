@@ -316,7 +316,6 @@ try {
   assert.ok(evidence.runner.status === "observed" && evidence.runner.method === "machine_diagnose");
   assert.deepEqual(evidence.runner.status === "observed" && evidence.runner.diagnosis, DOCUMENT);
   assert.equal((of("machineDiagnose")[0]!.value as { fence: { epoch: bigint } }).fence.epoch, (of("machineStart").at(-1)!.value as { fence: { epoch: bigint } }).fence.epoch, "a diagnosis does not move the fence");
-  assert.equal(evidence.gateway.status, "none");
   const formatted = formatDiagnostics({ collectedAt: Date.now(), cubed: { version: "test" }, activation: {},
     thread: { id: thread.id, workspaceState: "available", runnerNode: NODE, machine: null }, runnerObservation: {}, machine: evidence });
   assert.match(formatted, /qemu: \{"path":"\/opt\/qemu\/bin\/qemu-system-x86_64","version":"11\.1\.2"\}/, "real paths are shown (B-9 P4)");

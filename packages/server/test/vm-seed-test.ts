@@ -1,93 +1,26 @@
-/** The thread VM's cloud-init seed: what it must hold, and what it never may. */
+/** What cubed hands a thread's machine at boot: a keel machine's boot
+ * documents (what they must hold, and what they never may) and the guest
+ * helper a `berth host` machine runs (berth includes the same file). */
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { gunzipSync } from "node:zlib";
 import { newPlaceholder } from "../src/egress-policy.ts";
-import { bootDocuments, GUEST_CLI_PATH, GUEST_CLI_SHIM, GUEST_HELPER_PATH, GUEST_PACKAGES, MAX_BOOT_BYTES, MAX_SEED_BYTES, guestHelper, vmMac, vmSeed } from "../src/vm-seed.ts";
+import { bootDocuments, GUEST_CLI_SHIM, GUEST_HELPER_PATH, MAX_BOOT_BYTES, shippedHelper } from "../src/vm-seed.ts";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-seed-"));
-try {
-  execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", path.join(root, "host")]);
-  execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", path.join(root, "client")]);
-  const hostKey = { privateKey: fs.readFileSync(path.join(root, "host"), "utf8"), publicKey: fs.readFileSync(path.join(root, "host.pub"), "utf8") };
-  const clientKeyPub = fs.readFileSync(path.join(root, "client.pub"), "utf8");
-  const clientPrivate = fs.readFileSync(path.join(root, "client"), "utf8");
-  const caPem = "-----BEGIN CERTIFICATE-----\nMIIBfakeinstallationca\n-----END CERTIFICATE-----\n";
-  const placeholder = newPlaceholder("github");
-  const realToken = "ghp_the-real-host-token-never-in-a-seed";
-  const vmId = "0123456789abcdef";
-  const seed = vmSeed({ vmId, hostKey, clientKeyPub, caPem, placeholders: { github: placeholder } });
-
-  assert.equal(seed.metaData, `instance-id: ${vmId}\nlocal-hostname: cube-01234567\n`);
-  assert.match(seed.networkConfig, /dhcp4: true/);
-  assert.ok(seed.userData.startsWith("#cloud-config\n"));
-  const size = Buffer.byteLength(seed.metaData) + Buffer.byteLength(seed.userData) + Buffer.byteLength(seed.networkConfig);
-  assert.ok(size < MAX_SEED_BYTES, `seed is ${size} bytes`);
-  const config = JSON.parse(seed.userData.slice("#cloud-config\n".length));
-
-  // What it holds: the pinned host key, the CA, the restricted client key, the placeholder, the helper.
-  assert.equal(config.ssh_keys.ed25519_private.trim(), hostKey.privateKey.trim());
-  assert.deepEqual(config.ssh_genkeytypes, ["ed25519"], "only the provided key type, which exists, so nothing is generated");
-  assert.equal(config.ssh_deletekeys, true);
-  assert.deepEqual(config.ca_certs.trusted, [caPem.trim()]);
-  const file = (name: string) => config.write_files.find((entry: { path: string }) => entry.path === name);
-  assert.equal(file("/etc/cube/authorized_keys").content, `restrict,command="${GUEST_HELPER_PATH} ssh" ${clientKeyPub.trim()}\n`);
-  assert.equal(file("/etc/cube/authorized_keys").permissions, "0600");
-  assert.match(file("/etc/ssh/sshd_config.d/10-cube.conf").content, /Match User root\n\tAuthorizedKeysFile \/etc\/cube\/authorized_keys/);
-  assert.match(file("/etc/ssh/sshd_config.d/10-cube.conf").content, /PasswordAuthentication no/);
-  assert.match(file("/etc/cube/env").content, new RegExp(`^GH_TOKEN=${placeholder}$`, "m"));
-  assert.match(file("/etc/cube/env").content, /^NODE_EXTRA_CA_CERTS=\/etc\/ssl\/certs\/ca-certificates\.crt$/m);
-  assert.match(file("/etc/gitconfig").content, /\[credential "https:\/\/github\.com"\]/);
-  assert.match(file("/etc/gitconfig").content, /username=x-access-token/);
-  const helper = file(GUEST_HELPER_PATH);
-  assert.equal(helper.permissions, "0755");
-  assert.equal(helper.encoding, "gz+b64");
-  assert.equal(gunzipSync(Buffer.from(helper.content, "base64")).toString(), guestHelper().helper, "the shipped helper is the repository's");
-  // The agent's `cube` command, the same shim the helper's `install` writes.
-  assert.deepEqual(file(GUEST_CLI_PATH), { path: GUEST_CLI_PATH, permissions: "0755", owner: "root:root", content: GUEST_CLI_SHIM });
+{
+  const file = path.resolve(import.meta.dirname, "../guest/cube-guest.py");
+  const shipped = shippedHelper();
+  assert.ok(shipped.source.equals(fs.readFileSync(file)), "the shipped helper is the repository's");
+  assert.equal(shipped.sha256, createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
+  const berth = fs.readFileSync(path.resolve(import.meta.dirname, "../../berth/src/host.rs"), "utf8");
+  assert.match(berth, /include_str!\("\.\.\/\.\.\/server\/guest\/cube-guest\.py"\)/, "berth host runs the same helper");
   assert.equal(GUEST_CLI_SHIM, `#!/bin/sh\nexec ${GUEST_HELPER_PATH} cli "$@"\n`);
-  assert.ok(guestHelper().helper.includes('CLI_SHIM = "#!/bin/sh\\nexec %s cli \\"$@\\"\\n" % HELPER\n'), "the helper writes the same shim");
-  assert.equal(file("/etc/systemd/system/cube-guest-recover.service").content, guestHelper().recoverUnit);
-  assert.deepEqual(config.users.map((user: { name: string }) => user.name), ["agent"], "no default user");
-  assert.equal(config.users[0].lock_passwd, true);
-  assert.equal(config.ssh_pwauth, false);
-  assert.ok(config.packages.includes("gh") && config.packages.includes("git"));
-  assert.deepEqual(config.runcmd[0], [GUEST_HELPER_PATH, "init"]);
+  assert.ok(shipped.source.toString().includes('CLI_SHIM = "#!/bin/sh\\nexec %s cli \\"$@\\"\\n" % HELPER\n'), "the helper writes the same shim");
+  console.log("ok: the shipped guest helper is the repository's file, the one berth host includes, with the same cube shim");
+}
 
-  // What it never holds: a real secret, cubed's private key, any address.
-  const everything = `${seed.metaData}${seed.userData}${seed.networkConfig}`;
-  assert.ok(!everything.includes(realToken));
-  // (Line 1 of an OpenSSH key body is a shared header; the later lines are the key.)
-  for (const line of clientPrivate.trim().split("\n").slice(2, -1)) assert.ok(!everything.includes(line), "the client private key stays on cubed");
-  assert.doesNotMatch(everything, /\b(?:127\.0\.0\.1|10\.77\.0\.1|localhost)\b/, "no cubed, gateway or runner address");
-  assert.doesNotMatch(everything, /ghp_|ghs_|github_pat_/, "no GitHub token shape");
-
-  // Valid YAML for cloud-init (PyYAML, as cloud-init parses it), where available.
-  const yaml = spawnSync("python3", ["-c", "import sys, yaml; d = yaml.safe_load(sys.stdin.read()); assert d['users'][0]['name'] == 'agent'; print('ok')"],
-    { input: seed.userData, encoding: "utf8" });
-  if (yaml.status === 0) assert.equal(yaml.stdout.trim(), "ok");
-  else if (!/No module named .?yaml/.test(yaml.stderr)) assert.fail(yaml.stderr);
-
-  // The MAC is locally administered and derived from the vm id.
-  const mac = vmMac(vmId, data => createHash("sha256").update(data).digest());
-  assert.match(mac, /^02(?::[0-9a-f]{2}){5}$/);
-  assert.equal(mac, vmMac(vmId, data => createHash("sha256").update(data).digest()));
-  assert.throws(() => vmSeed({ vmId: "nope", hostKey, clientKeyPub, caPem, placeholders: {} }), /invalid vm id/);
-  assert.throws(() => vmSeed({ vmId, hostKey, clientKeyPub: "ssh-rsa AAAA", caPem, placeholders: {} }), /ssh-ed25519/);
-  assert.throws(() => vmSeed({ vmId, hostKey, clientKeyPub, caPem, placeholders: { github: realToken } }), /invalid placeholder/);
-  console.log("ok: vm seed holds the pinned host key, CA, restricted client key, placeholder and helper; no secret value or address; valid cloud-config");
-} finally { fs.rmSync(root, { recursive: true, force: true }); }
-
-// The helper retries the same packages on every boot that cloud-init installs once.
-const helperPackages = /self\.packages = (\[[^\]]*\])/.exec(guestHelper().helper)?.[1];
-assert.deepEqual(JSON.parse(helperPackages!.replaceAll("'", "\"")), GUEST_PACKAGES);
-console.log("ok: guest helper retries the seed's packages");
-
-// Protocol 4: a keel machine's boot documents (C-4), with berth's names and bound.
+// A keel machine's boot documents (C-4), with berth's names and bound.
 {
   const vmId = "0123456789abcdef";
   const github = newPlaceholder("github");
@@ -96,9 +29,9 @@ console.log("ok: guest helper retries the seed's packages");
   const documents = bootDocuments({ vmId, placeholders: { github, npm: other }, hooks });
   const text = (name: string) => Buffer.from(documents[name]!).toString("utf8");
   assert.deepEqual(Object.keys(documents).sort(), ["env", "hooks/pre-resume", "hooks/pre-setup", "hostname"]);
-  assert.equal(text("hostname"), "cube-01234567\n", "the seed's host name");
+  assert.equal(text("hostname"), "cube-01234567\n", "cube-<first 8 of the machine id>");
   assert.equal(text("env"), `GH_TOKEN=${github}\nCUBE_SECRET_NPM=${other}\n`, "only the placeholders: keel adds the CA and git lines");
-  assert.equal(text("hooks/pre-setup"), "#!/bin/bash\necho pre-setup\n", "a hook as the seed writes it");
+  assert.equal(text("hooks/pre-setup"), "#!/bin/bash\necho pre-setup\n", "a hook as a script, with bash when it names none");
   assert.equal(text("hooks/pre-resume"), "#!/bin/sh\necho pre-resume\n");
   assert.deepEqual(Object.keys(bootDocuments({ vmId, placeholders: {}, hooks: { preSetup: " \n", preResume: "" } })).sort(), ["env", "hostname"], "a blank hook is no document");
   assert.equal(Buffer.from(bootDocuments({ vmId, placeholders: {} }).env!).byteLength, 0);

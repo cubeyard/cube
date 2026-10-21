@@ -20,7 +20,7 @@
  * (conversation.ts): they touch the machine while they last. The runner's
  * own `busy` refusal (open streams) is only a backstop. */
 import type { Duplex } from "node:stream";
-import type { GuestAnswer, GuestCallOptions, GuestOp, GuestTransport } from "./guest-ssh.ts";
+import type { GuestAnswer, GuestCallOptions, GuestOp, GuestTransport } from "./guest-transport.ts";
 
 /** B7-1 (the user's decision): no activity for 5 minutes. */
 export const IDLE_MS = 5 * 60 * 1000;

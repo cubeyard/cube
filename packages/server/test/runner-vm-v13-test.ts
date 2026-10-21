@@ -251,7 +251,6 @@ const capture = (scope: string) => {
 };
 const run = path.join(root, "run");
 fs.mkdirSync(run, { mode: 0o700 });
-const gatewayState = path.join(root, "gateway");
 const github = await fakeGithub({ dir: path.join(root, "github"), token: ghToken });
 const credentialSocket = path.join(run, "credential.sock");
 
@@ -266,8 +265,7 @@ const egress = new EgressPolicy({
   secrets: [{ name: "github", hosts: ["github.com", "api.github.com"], value: async () => ghToken }], log: capture("egress"),
 });
 const decider = await serveEgress(path.join(run, "egress.sock"), egress);
-const gateway = new GatewaySupervisor({ state: gatewayState, control: path.join(run, "gateway.sock"), decide: path.join(run, "egress.sock"),
-  credential: credentialSocket, network: "loopback", binary: gatewayBin, log: capture("gateway"),
+const gateway = new GatewaySupervisor({ decide: path.join(run, "egress.sock"), credential: credentialSocket, binary: gatewayBin, log: capture("gateway"),
   extraArgs: ["--test-upstream", `github.com=127.0.0.1:${github.port}`, "--test-upstream", `api.github.com=127.0.0.1:${github.port}`, "--test-upstream-ca", github.ca] });
 gateway.start();
 const route: CredentialRoute = {
@@ -548,14 +546,14 @@ try {
     assert.equal(now.status?.bootId, side.boot, `${side.name} still on its first boot`);
   }
   // The token: nowhere in the runner's directory (both machines' state,
-  // journals, logs and disks), the gateway's state, berth's output or a log.
-  const scan = scanForSecret([directory, gatewayState], ghToken);
-  assert.deepEqual(scan.matches, [], "the token is in the runner's directory or the gateway's state");
+  // journals, logs and disks), berth's output or a log (the gateway keeps no state).
+  const scan = scanForSecret([directory], ghToken);
+  assert.deepEqual(scan.matches, [], "the token is in the runner's directory");
   assert.ok(scan.files > 0 && scan.skipped.every(s => s.kind === "socket"), `not scanned: ${show(scan.skipped)}`);
   assert.ok(sides.every(side => scan.skipped.some(s => s.path === path.join(directory, side.ref.id, "qmp.sock"))), "both running machines were scanned");
   assert.ok(!berthLog.includes(ghToken) && !logged.some(line => line.includes(ghToken)), "the token is in berth's output or a log");
   assert.ok(logged.some(line => line.startsWith("gateway ")), "the gateway's log was captured");
-  note(`token scan: in no file of berth's --dir (both machines) or the gateway's state (${scan.files} files, ${scan.bytes} bytes read; ${scan.skipped.length} sockets not read), berth's output or the ${logged.length} log lines; A and B still RUNNING on boots ${A.boot} and ${B.boot}`);
+  note(`token scan: in no file of berth's --dir (both machines) (${scan.files} files, ${scan.bytes} bytes read; ${scan.skipped.length} sockets not read), berth's output or the ${logged.length} log lines; A and B still RUNNING on boots ${A.boot} and ${B.boot}`);
 
   // Clean-up: both machines deleted, their QEMUs gone, the runner stopped, nothing left.
   for (const side of sides) {

@@ -344,7 +344,7 @@ export class Conversations {
     // The machine's helper and `cube` command as this cubed ships them, and
     // the portal's settings; a machine without them still serves its agent.
     try {
-      const outcome = await refreshGuest(this.workspace(id), threadAgent(thread), this.portal(thread));
+      const outcome = await refreshGuest(this.workspace(id), this.portal(thread));
       if (outcome !== "current") log.info("guest helper updated", { thread: id, how: outcome });
     } catch (error) {
       log.warn("the machine's cube command could not be brought up to date", { thread: id, error: error instanceof Error ? error.message : String(error) });

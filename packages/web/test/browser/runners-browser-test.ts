@@ -1,25 +1,29 @@
 /** The runners on a project's page in a real browser against the real
  * cubed, at desktop and phone width: each runner's protocol (p4 vm in the
- * pool, p3 and p4 host by name only), p3's free slots and open p3 threads,
- * p4's slots, and which numbers are not current (a stale
- * report, a runner that never reported). Runner reports are faked through
+ * pool, p4 host by name only, p3 no longer supported and never checked),
+ * p4's slots, the p3 runners still enrolled and their unarchived threads,
+ * and which numbers are not current (a stale report, a runner that never
+ * reported). Runner reports are faked through
  * cubed's probe. CUBE_SCREENSHOTS=<dir> keeps a picture of each width.
  * Needs a built UI (pnpm build) and Playwright's Chromium. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { chromium, type Page } from "playwright";
 import { startChatHost } from "../../../server/test/chat-fixture.ts";
-import type { TrustedRunnerHealth } from "../../../server/src/iroh-node.ts";
+import type { TrustedRunnerHealth } from "../../../server/src/runner-types.ts";
 
 const shots = process.env.CUBE_SCREENSHOTS;
 if (shots) fs.mkdirSync(shots, { recursive: true });
 const shoot = async (page: Page, name: string) => { if (shots) await page.screenshot({ path: path.join(shots, `${name}.png`), fullPage: true }); };
 const errors: string[] = [];
 const health: TrustedRunnerHealth = { lifecycle: "ready", draining: false, error: null, activeVms: 1, runningVms: 1, maxActiveVms: 3,
-  retainedVms: 0, retainedBytes: 0, softwareVersion: "0.9.0", protocolVersion: 3, platform: "linux-x86_64", capabilities: [] };
-// Only pool-a answers; the others' probes fail.
+  retainedVms: 0, retainedBytes: 0, softwareVersion: "0.9.0", protocolVersion: 4, kind: "vm", platform: "linux-x86_64", capabilities: [] };
+// Only pool-a answers; the others' probes fail. The p3 runners are never asked.
+const asked: string[] = [];
 const host = await startChatHost({ runnerHealth: async runner => {
+  asked.push(runner.nodeId);
   if (runner.nodeId === "pool-a") return { ...health };
   throw new Error("NODE_UNAVAILABLE");
 } });
@@ -28,16 +32,31 @@ try {
   const { registry } = host;
   registry.saveProject({ id: "p", name: "runners", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
   const binding = (id: string, maxActiveVms: number) => ({ nodeId: id, environmentId: 1, threadId: id, configPath: `/nonexistent/${id}.json`, configHash: id, maxActiveVms });
-  registry.enrollRunner(binding("pool-a", 3));
-  registry.enrollRunner(binding("pool-b", 1));
+  registry.enrollRunner({ ...binding("pool-a", 3), protocol: 4, kind: "vm" });
   registry.enrollRunner({ ...binding("berth-vm", 2), protocol: 4, kind: "vm" });
   registry.enrollRunner({ ...binding("berth-host", 1), protocol: 4, kind: "host" });
+  // Two protocol-3 runners from before, one with a report it sent then.
+  registry.enrollRunner(binding("old-a", 3));
+  registry.enrollRunner(binding("old-b", 1));
+  registry.recordRunnerProbe("old-a", { health: { ...health, protocolVersion: 3, kind: undefined, softwareVersion: "0.8.4" } });
   // berth-vm answered once; the page's own check fails, so that report is stale.
-  registry.recordRunnerProbe("berth-vm", { health: { ...health, protocolVersion: 4, kind: "vm", softwareVersion: "0.1.0", maxActiveVms: 2 } });
+  registry.recordRunnerProbe("berth-vm", { health: { ...health, softwareVersion: "0.1.0", maxActiveVms: 2 } });
   const model = { provider: "fixture", id: "m" };
-  for (const id of ["one", "two", "gone"]) registry.createThread("p", id, model, id, "pi", undefined, { runnerId: "pool-a" });
-  registry.finishRelease(registry.threadByRequest("p", "gone")!.id);
+  for (const id of ["one", "two"]) registry.createThread("p", id, model, id, "pi", undefined, { runnerId: "pool-a" });
   registry.createThread("p", "named", model, "named", "pi", undefined, { runnerId: "berth-vm" });
+  // A thread old-a took before protocol 3 was retired, still open: its row says protocol 4 while it is made.
+  const sqlite = new DatabaseSync(path.join(host.state, "registry.sqlite"));
+  sqlite.prepare("UPDATE runner SET data=json_set(data,'$.protocol',4,'$.kind','vm') WHERE id='old-a'").run();
+  registry.createThread("p", "legacy", model, "legacy", "pi", undefined, { runnerId: "old-a" });
+  sqlite.prepare("UPDATE runner SET data=json_remove(data,'$.protocol','$.kind') WHERE id='old-a'").run();
+  // An archived thread of old-b whose disk was kept: it stays on that host.
+  sqlite.prepare("UPDATE runner SET data=json_set(data,'$.protocol',4,'$.kind','vm') WHERE id='old-b'").run();
+  const kept = registry.createThread("p", "kept", model, "kept", "pi", undefined, { runnerId: "old-b" });
+  sqlite.prepare("UPDATE runner SET data=json_remove(data,'$.protocol','$.kind') WHERE id='old-b'").run();
+  sqlite.close();
+  registry.updateThreadVm(kept.id, { retain: true, retainReason: "dirty: work not pushed" });
+  registry.beginRelease(kept.id);
+  registry.finishRelease(kept.id);
 
   for (const [viewport, name] of [[{ width: 1280, height: 900 }, "desktop"], [{ width: 390, height: 844 }, "phone"]] as const) {
     const page = await browser.newPage({ viewport });
@@ -49,14 +68,24 @@ try {
     await panel.locator(".capacity-late", { hasText: "berth-vm (stale report)" }).waitFor();
     assert.equal(await panel.locator("h2#runner-heading").textContent(), "runners");
     const label = (node: string) => panel.locator(".runner-row", { hasText: node }).locator(".runner-protocol").textContent();
-    assert.equal(await label("pool-a"), "p3 · by name only");
-    assert.equal(await label("pool-b"), "p3 · by name only");
+    assert.equal(await label("pool-a"), "p4 vm · pool");
     assert.equal(await label("berth-vm"), "p4 vm · pool");
     assert.equal(await label("berth-host"), "p4 host · unsandboxed, by name only");
-    // pool-a reported 3 slots and holds 2 open threads (the archived one is not); pool-b's one slot is assumed.
-    assert.equal(await panel.locator(".capacity-p3").textContent(), "p3 by name · 2 free of 4 slots on 2 runners · open p3 threads: 2");
-    assert.equal(await panel.locator(".capacity-p4").textContent(), "p4 · vm pool 1 free of 2 slots · host by name 1 free of 1 slot");
-    assert.equal(await panel.locator(".capacity-late").textContent(), "not current: berth-vm (stale report), pool-b (never reported), berth-host (never reported)");
+    assert.equal(await label("old-a"), "p3 · no longer supported");
+    assert.equal(await label("old-b"), "p3 · no longer supported");
+    assert.match(await panel.locator(".runner-row", { hasText: "old-a" }).textContent() ?? "", /protocol 3: cube no longer contacts this runner/);
+    const oldB = panel.locator(".runner-row", { hasText: "old-b" });
+    assert.equal(await oldB.locator("button", { hasText: "check" }).count(), 0, "a p3 runner has no check");
+    assert.equal(await oldB.locator("button", { hasText: "retire" }).isEnabled(), true, "a p3 runner with no open thread can be retired without a check");
+    assert.match(await panel.locator(".runner-row", { hasText: "old-a" }).locator(".runner-blocked").textContent() ?? "", /retirement waits until its threads are archived/);
+    const keptRow = page.locator(".runner-row", { hasText: "dirty: work not pushed" });
+    await keptRow.waitFor();
+    assert.match(await keptRow.textContent() ?? "", /on a protocol-3 runner: cube no longer reaches it, so the disk stays on that runner's host/);
+    assert.equal(await keptRow.locator("button", { hasText: "discard" }).count(), 0, "no discard for a disk on a p3 runner");
+    // pool-a reported 3 slots and holds 2 open threads; berth-vm 2 with 1 from its stale report.
+    assert.equal(await panel.locator(".capacity-p4").textContent(), "p4 · vm pool 2 free of 5 slots · host by name 1 free of 1 slot");
+    assert.equal(await panel.locator(".capacity-p3").textContent(), "p3 · no longer supported: 2 runners still enrolled, never contacted · unarchived p3 threads: 1");
+    assert.equal(await panel.locator(".capacity-late").textContent(), "not current: berth-vm (stale report), berth-host (never reported)");
     assert.match(await panel.locator(".capacity-note").textContent() ?? "", /a slot is an open thread in cube, not a machine on the runner/);
     assert.ok(await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth), `no sideways scroll (${name})`);
     // The page scrolls in its pane, under a sticky header: the capacity lines go mid-screen.
@@ -70,5 +99,6 @@ try {
   await host.close();
 }
 assert.deepEqual(errors, [], "no script errors");
+assert.ok(asked.length && !asked.some(node => node.startsWith("old-")), `the p3 runners are never checked: ${asked.join(" ")}`);
 console.log("runners browser: ok");
 process.exit(0);
