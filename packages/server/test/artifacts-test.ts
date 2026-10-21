@@ -16,6 +16,8 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
+import http from "node:http";
+import { expectReady } from "../src/claude-ready.ts";
 import { createCubed } from "../src/index.ts";
 import { ArtifactError, ArtifactStore, commentMessage, parseActions } from "../src/artifacts.ts";
 import { GithubPullsError, type GithubPulls, type PullState } from "../src/github-pulls.ts";
@@ -308,6 +310,30 @@ try {
   // The socket's artifact routes need the thread's lease token.
   const unauth = await fetch(`${base}/api/threads/${claudeThread}/workspace/artifacts`);
   assert.equal(unauth.status, 404, "the browser-facing host does not serve them");
+  // The Claude Code mod's ready (claude-ready.ts) counts only on cubed's
+  // private socket: the same thread, its child's own lease token and a nonce
+  // waiting for it are refused over the HTTP API, and taken on the socket.
+  {
+    const claudes = (app.conversations as unknown as { claudes: Map<string, Promise<{ lease: { token: string } }>> }).claudes;
+    const token = (await claudes.get(claudeThread)!).lease.token;
+    const expected = expectReady(claudeThread);
+    let taken = false;
+    void expected.ready.then(() => { taken = true; });
+    const body = JSON.stringify({ nonce: expected.nonce });
+    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const viaApi = await fetch(`${base}/api/threads/${claudeThread}/workspace/claude-ready`, { method: "POST", headers, body });
+    assert.equal(viaApi.status, 404, "the HTTP API names no thread, so the ready is refused there");
+    await delay(20);
+    assert.equal(taken, false, "and it did not count");
+    const viaSocket = await new Promise<number>((resolve, reject) => {
+      const request = http.request({ socketPath: path.join(state, "run", "workspace.sock"), path: `/api/threads/${claudeThread}/workspace/claude-ready`, method: "POST", headers },
+        response => { response.resume(); resolve(response.statusCode ?? 0); });
+      request.on("error", reject);
+      request.end(body);
+    });
+    assert.equal(viaSocket, 200, "cubed's socket takes the same token and nonce");
+    await expected.ready;
+  }
 
   // Comments: drafts, validation, delete, send. A busy thread keeps them queued.
   assert.equal((await call(`/api/artifacts/${threadArtifact.id}/comments`, { revision: 1, anchor: { quote: "x", start: 0, end: 5 }, body: "no", requestId: "bad" })).status, 400);

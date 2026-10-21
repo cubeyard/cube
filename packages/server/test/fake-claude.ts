@@ -17,10 +17,17 @@
  * backgrounded task of another kind that never notifies).
  * FAKE_CLAUDE_LOG names a file that receives one JSON line per start.
  *
+ * At start it says the mod is in, as the mod's last `session.start` hook
+ * does (CUBE_MOD_NONCE to `…/claude-ready`). FAKE_CLAUDE_MOD=missing is
+ * Claude Code without the mod: it says nothing, and a `run` step it is
+ * sent runs on the host, as Claude Code's own Bash would; `forged` sends
+ * another nonce first.
+ *
  * Every result carries `modelUsage` as Claude Code's does: running totals
  * per model for the process, each turn adding TURN_USAGE under
  * `claude-<model>`; a process started with --resume continues the totals
  * the session saved (in its working directory). */
+import { execSync } from "node:child_process";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
@@ -40,6 +47,10 @@ const model = flag("--model") ?? fail("expected --model");
 if (flag("--setting-sources") !== "" || !args.includes("--strict-mcp-config") || flag("--mcp-config") !== JSON.stringify({ mcpServers: {} })) fail("expected no setting sources and an empty strict MCP config");
 const tools = (flag("--tools") ?? "").split(",");
 if (!["Bash", "Read", "Write", "Edit"].every(name => tools.includes(name)) || tools.some(name => name.startsWith("mcp__") || name === "WebFetch")) fail("expected --tools with the mod's allow-list");
+// Nothing Claude Code runs itself on the host: refused in dontAsk and by the PreToolUse hook.
+const settings = JSON.parse(flag("--settings") ?? "{}") as { hooks?: { PreToolUse?: Array<{ matcher: string; hooks: Array<{ command: string }> }> } };
+const guard = settings.hooks?.PreToolUse?.[0];
+if (flag("--permission-mode") !== "dontAsk" || !guard || guard.hooks[0]?.command !== "exit 2" || ["Bash", "Read", "Write", "Edit"].some(name => !new RegExp(guard.matcher).test(name))) fail("expected dontAsk and a PreToolUse hook that refuses host tools");
 const session = flag("--resume") ?? randomUUID();
 if (process.env.FAKE_CLAUDE_LOG) {
   fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, `${JSON.stringify({ args, cwd: process.cwd(), session,
@@ -48,6 +59,11 @@ if (process.env.FAKE_CLAUDE_LOG) {
 const env = process.env;
 if (!env.CUBE_WORKSPACE_SOCKET || !env.CUBE_WORKSPACE_PATH || !env.CUBE_WORKSPACE_TOKEN || !env.CUBE_WORKSPACE_ROOT) fail("expected the cube workspace environment");
 const client = new WorkspaceClient({ base: env.CUBE_WORKSPACE_PATH!, transport: unixTransport(env.CUBE_WORKSPACE_SOCKET!) });
+// `forged`: a ready with another nonce, which cubed refuses; Claude Code goes on without the mod.
+// `early`: no ready, and a turn printed at once (which no prompt asked for).
+const missing = env.FAKE_CLAUDE_MOD === "missing" || env.FAKE_CLAUDE_MOD === "forged" || env.FAKE_CLAUDE_MOD === "early";
+if (env.FAKE_CLAUDE_MOD === "forged") await client.ready(env.CUBE_WORKSPACE_TOKEN!, "0".repeat(64)).then(() => fail("a forged nonce was taken"), () => {});
+else if (!missing) await client.ready(env.CUBE_WORKSPACE_TOKEN!, env.CUBE_MOD_NONCE ?? fail("expected CUBE_MOD_NONCE"));
 
 const TURN_USAGE = { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 50, cacheCreationInputTokens: 10, costUSD: 0.01 };
 type Totals = Record<string, typeof TURN_USAGE & { webSearchRequests: number; contextWindow: number; maxOutputTokens: number; costBasis: string }>;
@@ -72,6 +88,7 @@ const usage = () => {
 const emit = (message: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ ...message, session_id: session })}\n`);
 emit({ type: "system", subtype: "init", model, cwd: process.cwd(), tools: ["Bash", "Read", "Write", "Edit"], plugins: [{ name: "cube", path: mod }] });
 
+if (env.FAKE_CLAUDE_MOD === "early") emit({ type: "assistant", parent_tool_use_id: null, message: { id: "msg_early", role: "assistant", model, content: [{ type: "text", text: "a turn of its own" }] } });
 let calls = 0;
 let current: AbortController | undefined;
 let ignoreInterrupt = false;
@@ -159,6 +176,7 @@ async function turn(text: string, prompted = true): Promise<void> {
       if (verb === "ignore-interrupt") { ignoreInterrupt = true; continue; }
       if (verb === "ignore-term") { process.on("SIGTERM", () => {}); continue; }
       if (verb === "say") await say(rest.join(" "));
+      else if (missing && verb === "run") { execSync(rest.join(" ")); await say("ran on the host"); }
       else if (verb === "run" || verb === "slow") await tool(id, "Bash", { command: rest.join(" "), description: "run it" }, controller.signal);
       else if (verb === "write") await tool(id, "Write", { file_path: `${env.CUBE_WORKSPACE_ROOT}/${rest[0]}`, content: rest.slice(1).join(" ") }, controller.signal);
       else if (verb === "edit") await tool(id, "Edit", { file_path: `${env.CUBE_WORKSPACE_ROOT}/${rest[0]}`, old_string: rest[1], new_string: rest[2] }, controller.signal);

@@ -12,6 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Models } from "@earendil-works/pi-ai";
 import { ClaudeAgent, ClaudeBusy, claudeEnvironment, type ClaudeRuntime } from "../src/claude-agent.ts";
+import { expectReady, markReady } from "../src/claude-ready.ts";
 import { ClaudeThreadEvents } from "../src/claude-thread-events.ts";
 import { ModelAuth } from "../src/model-auth.ts";
 import type { ThreadTranscript } from "../src/thread-events.ts";
@@ -37,7 +38,7 @@ const server = http.createServer(async (request, response) => {
   let raw = "";
   for await (const chunk of request) raw += chunk;
   if (parts.slice(0, 4).join("/") !== "api/threads/t1/workspace") { response.writeHead(404); response.end("{}"); return; }
-  const result = await workspaceRoute(workspace, { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body: raw ? JSON.parse(raw) : {} });
+  const result = await workspaceRoute(workspace, { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body: raw ? JSON.parse(raw) : {}, thread: "t1" });
   response.writeHead(result.status, { "content-type": "application/json" });
   response.end(JSON.stringify(result.body));
 });
@@ -110,7 +111,7 @@ try {
   assert.ok(first!.env.includes("CLAUDE_CODE_OAUTH_TOKEN") && first!.env.includes("HOME") && first!.env.includes("CUBE_WORKSPACE_TOKEN"));
   assert.ok(first!.env.includes("CUBE_WORKSPACE_REAL_ROOT"), "the mod also knows the root with its symlinks resolved");
   assert.ok(first!.env.includes("CUBE_SKILLS_PROMPT"), "the mod gets the thread's skills to list");
-  assert.ok(first!.env.every(name => /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_\w+|TERM|TZ|TMPDIR|XDG_\w+|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|CUBE_WORKSPACE_\w+|CUBE_SKILLS_PROMPT|FAKE_CLAUDE_LOG)$/.test(name)), `only allow-listed variables: ${first!.env.join(" ")}`);
+  assert.ok(first!.env.every(name => /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_\w+|TERM|TZ|TMPDIR|XDG_\w+|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|CUBE_WORKSPACE_\w+|CUBE_MOD_NONCE|CUBE_SKILLS_PROMPT|FAKE_CLAUDE_LOG)$/.test(name)), `only allow-listed variables: ${first!.env.join(" ")}`);
   assert.deepEqual(Object.keys(claudeEnvironment({ PATH: "/bin", AWS_SECRET_ACCESS_KEY: "x" }, { ANTHROPIC_BASE_URL: "x", CLAUDE_CODE_USE_VERTEX: "1", EXTRA: "y" }, { CUBE_WORKSPACE_TOKEN: "t" })).sort(), ["CUBE_WORKSPACE_TOKEN", "EXTRA", "PATH"]);
   assert.equal(first!.args[first!.args.indexOf("--setting-sources") + 1], "");
   assert.ok(first!.args.includes("--strict-mcp-config"));
@@ -233,6 +234,101 @@ try {
     } finally { await reopened.close(); }
   }
   console.log("ok: a reopen after cubed died mid-turn cancels the interrupted turn's guest commands");
+
+  // Claude Code without the mod (it could not load it, or the mod's word is
+  // forged): no prompt reaches it, so nothing runs on the host.
+  // One hooks module: the mod's ready (its last hook) then says all of it is in.
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(mod, "hooks", "hooks.json"), "utf8")), { modules: ["./register.ts"] });
+  for (const kind of ["missing", "forged", "early"]) {
+    const marker = path.join(root, `host-ran-${kind}`);
+    const modless = await ClaudeAgent.open({ directory: path.join(root, `modless-${kind}`), threadId: "t1", workspace, model: "sonnet",
+      runtime: { ...runtime, modReadyMs: kind === "early" ? 10_000 : 1000, env: { ...runtime.env, FAKE_CLAUDE_MOD: kind } } });
+    try {
+      const started = Date.now();
+      await modless.submit("m1", `run touch ${marker}`);
+      const shown = await until(() => modless.state().submissions[0]!.state !== "running" && modless.state().submissions[0]!, "the modless turn");
+      assert.equal(shown.state, "failed");
+      assert.match(shown.error ?? "", /started without cube's mod, so nothing was sent to it/);
+      assert.ok(Date.now() - started < (kind === "early" ? 5000 : 10000), "it fails within the bound (a turn before the mod's word: at once)");
+      await delay(300);
+      assert.ok(!fs.existsSync(marker), `${kind}: nothing ran on the host`);
+      assert.deepEqual(modless.state().messages.filter(message => message.data.type === "assistant"), [], `${kind}: the child answered nothing`);
+    } finally { await modless.close(); }
+  }
+  // The same fake with the mod in runs the same step in the machine (the control).
+  {
+    const control = await ClaudeAgent.open({ directory: path.join(root, "modless-control"), threadId: "t1", workspace, runtime, model: "sonnet" });
+    try {
+      await control.submit("m1", "run touch control-ran");
+      const shown = await until(() => control.state().submissions[0]!.state !== "running" && control.state().submissions[0]!, "the control turn");
+      assert.equal(shown.state, "completed", shown.error ?? "");
+      assert.ok(fs.existsSync(path.join(files, "control-ran")), "the mod ran it in the workspace");
+    } finally { await control.close(); }
+  }
+  // A stop before the mod's word ends that child at once (no prompt reached it).
+  {
+    const waiting = await ClaudeAgent.open({ directory: path.join(root, "modless-stop"), threadId: "t1", workspace, model: "sonnet",
+      runtime: { ...runtime, modReadyMs: 10_000, stopGraceMs: 10_000, env: { ...runtime.env, FAKE_CLAUDE_MOD: "missing" } } });
+    try {
+      await waiting.submit("m1", `run touch ${path.join(root, "host-ran-stop")}`);
+      await delay(300);
+      const stopping = Date.now();
+      await waiting.stop();
+      const shown = await until(() => waiting.state().submissions[0]!.state !== "running" && waiting.state().submissions[0]!, "the stopped turn");
+      assert.equal(shown.state, "stopped");
+      assert.ok(Date.now() - stopping < 3000, "at once, not after the stop's grace");
+      assert.ok(!fs.existsSync(path.join(root, "host-ran-stop")));
+    } finally { await waiting.close(); }
+  }
+  // A stop, then at once that child's own ready: the ready comes before the
+  // kill lands, and still no prompt is written (child.stopped).
+  if (fs.existsSync("/proc/self/environ")) {
+    const racing = await ClaudeAgent.open({ directory: path.join(root, "modless-race"), threadId: "t1", workspace, model: "sonnet",
+      runtime: { ...runtime, modReadyMs: 10_000, stopGraceMs: 10_000, env: { ...runtime.env, FAKE_CLAUDE_MOD: "missing" } } });
+    try {
+      const writes: string[] = [];
+      const internals = racing as unknown as { write: (child: unknown, message: { type: string }) => void; child?: { process: { pid: number } } };
+      const write = internals.write.bind(racing);
+      internals.write = (child, message) => { writes.push(message.type); write(child, message); };
+      await racing.submit("m1", `run touch ${path.join(root, "host-ran-race")}`);
+      const pid = await until(() => internals.child?.process.pid, "the child");
+      const nonce = await until(() => /(?:^|\0)CUBE_MOD_NONCE=([0-9a-f]{64})/.exec(fs.readFileSync(`/proc/${pid}/environ`, "utf8"))?.[1], "the child's nonce");
+      void racing.stop();
+      assert.equal(markReady("t1", nonce), true, "the child's ready arrives after the stop");
+      const shown = await until(() => racing.state().submissions[0]!.state !== "running" && racing.state().submissions[0]!, "the stopped turn");
+      assert.equal(shown.state, "stopped");
+      await delay(200);
+      assert.deepEqual(writes.filter(type => type === "user"), [], "no prompt was written to the stopped child");
+    } finally { await racing.close(); }
+  }
+  // The ready route: only cubed's own lease (no TTL), only the thread's own
+  // nonce, and only where the route names its thread (cubed's socket).
+  {
+    const ready = (target: VmWorkspace, token: string, nonce: string, thread?: string) => workspaceRoute(target, { method: "POST", parts: ["claude-ready"], query: new URLSearchParams(),
+      headers: { authorization: `Bearer ${token}` }, body: { nonce }, ...thread === undefined ? {} : { thread } });
+    const own = new VmWorkspace({ guest, leases: new LeaseStore(path.join(root, "ready-own")), owner: "claude-code", binding: guest.binding });
+    const held = (await own.lease({ owner: "claude-code" })).token;
+    const remote = new VmWorkspace({ guest, leases: new LeaseStore(path.join(root, "ready-ttl")), owner: "claude-code", binding: guest.binding });
+    const ttl = (await remote.lease({ owner: "claude-code", ttlMs: 60_000 })).token;
+    const expected = expectReady("thread-a");
+    let settled = false;
+    void expected.ready.then(() => { settled = true; });
+    assert.equal((await ready(own, held, expected.nonce, "thread-b")).status, 404, "another thread's route");
+    assert.equal((await ready(own, held, expected.nonce)).status, 404, "a route that names no thread (the HTTP API)");
+    assert.equal((await ready(remote, ttl, expected.nonce, "thread-a")).status, 404, "a lease with a TTL is not cubed's own");
+    const pi = new VmWorkspace({ guest, leases: new LeaseStore(path.join(root, "ready-pi")), owner: "pi", binding: guest.binding });
+    const piHeld = (await pi.lease({ owner: "pi" })).token;
+    assert.equal((await ready(pi, piHeld, expected.nonce, "thread-a")).status, 404, "cubed's lease of another owner (a Pi thread's)");
+    await pi.release(piHeld);
+    await delay(20);
+    assert.equal(settled, false, "none of those counted");
+    assert.equal((await ready(own, held, expected.nonce, "thread-a")).status, 200);
+    await expected.ready;
+    assert.equal((await ready(own, held, expected.nonce, "thread-a")).status, 404, "single use");
+    await own.release(held);
+  }
+  console.log("ok: a child whose mod is missing, forges its ready or prints a turn first gets no prompt: killed, the turn fails, nothing runs on the host; "
+    + "a stop before the ready ends it at once; the ready route takes only cubed's lease, the thread's own nonce, once, on the socket");
 
   // Background agents. A turn that ends with one running leaves the thread
   // waiting: the child stays open past the idle close, and the turn Claude

@@ -902,7 +902,8 @@ export async function createCubed(options: {
         }
         return json({ error: "not found", code: "NOT_FOUND", completionUnknown: false }, 404);
       }
-      const result = await workspaceRoute(conversations.workspace(thread.id), { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body });
+      // The thread names the Claude Code mod's ready here, on this socket only.
+      const result = await workspaceRoute(conversations.workspace(thread.id), { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body, thread: thread.id });
       return json(result.body, result.status);
     } catch (error) {
       if (response.headersSent) response.destroy();

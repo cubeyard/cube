@@ -12,11 +12,13 @@
  *   GET    …/workspace/file                  ?path=&offset=&limit=
  *   PUT    …/workspace/file                  {key, path, content (base64), expectedSha?, createParents?}
  *   GET    …/workspace/stat                  ?path=
+ *   POST   …/workspace/claude-ready          {nonce}: the Claude Code mod's hooks are in (claude-ready.ts)
  *
  * Bytes travel as base64. Errors are `{error, code, completionUnknown}`. */
 import type { IncomingHttpHeaders } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { MAX_OPERATION_WAIT_MS, WorkspaceClient, WorkspaceClientError } from "../../claude-mod/hooks/workspace.ts";
+import { markReady } from "./claude-ready.ts";
 import { DEFAULT_LEASE_TTL_MS } from "./workspace-lease.ts";
 import {
   WorkspaceError, type Workspace, type WorkspaceErrorCode, type WorkspaceExecSpec, type WorkspaceFile, type WorkspaceLease,
@@ -34,8 +36,9 @@ const STATUS: Partial<Record<WorkspaceErrorCode, number>> = {
 const WAIT_POLL_MS = 100;
 
 /** `parts` are the path segments after `…/workspace`. */
+/** `thread`: whose workspace this is (the Claude Code mod's ready names it). */
 export async function workspaceRoute(workspace: Workspace, request: {
-  method: string; parts: string[]; query: URLSearchParams; headers: IncomingHttpHeaders; body: Record<string, unknown>;
+  method: string; parts: string[]; query: URLSearchParams; headers: IncomingHttpHeaders; body: Record<string, unknown>; thread?: string;
 }): Promise<WorkspaceResponse> {
   const { method, parts, query, body } = request;
   try {
@@ -101,6 +104,12 @@ export async function workspaceRoute(workspace: Workspace, request: {
       return ok(await workspace.writeFile(token(), body.key as string, body.path as string, content, options));
     }
     if (route === "stat" && method === "GET") return ok(await workspace.stat(token(), required(query, "path")));
+    // Only the child of cubed's own Claude Code lease, and only with its nonce.
+    if (route === "claude-ready" && method === "POST") {
+      const lease = await workspace.lease({ token: token() });
+      if (lease.owner !== "claude-code" || lease.expiresAt !== null || request.thread === undefined || !markReady(request.thread, body.nonce)) throw new WorkspaceError("NOT_FOUND", "no claude code child is waiting on this nonce");
+      return ok({ ok: true });
+    }
     return { status: 404, body: { error: "not found", code: "NOT_FOUND", completionUnknown: false } };
   } catch (error) {
     if (!(error instanceof WorkspaceError)) throw error;

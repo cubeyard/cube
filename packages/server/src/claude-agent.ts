@@ -10,7 +10,16 @@
  * Git or cloud credentials. Claude Code's own login is read from its config
  * directory (or CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`). The user's
  * settings files and MCP servers are not loaded, and only the mod's allowed
- * tools are offered. Durability is weaker than Pi's: Claude Code keeps
+ * tools are offered.
+ *
+ * The mod must be in before Claude Code gets a prompt: without it Claude
+ * Code runs Bash, Read, Write and Edit itself, on the cubed host. A child
+ * gets no prompt until the mod's last hook sends its nonce back
+ * (claude-ready.ts) within MOD_READY_MS; otherwise it is killed and the turn
+ * fails, nothing sent, and so is a child that prints a turn before it (no
+ * prompt reached it, so that cannot be cube's). Nothing respawns it. Its `--settings` hook refuses every tool that would
+ * act on the host and reaches Claude Code itself, which a tool the mod
+ * answered never does, and `dontAsk` refuses what would ask. Durability is weaker than Pi's: Claude Code keeps
  * its own session (resumed with --resume) but has no task checkpoints, so a
  * turn cut off by a cubed restart is not continued. Workspace keys still
  * keep the thread machine from executing any tool call twice.
@@ -34,6 +43,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { ALLOWED_TOOLS } from "../../claude-mod/hooks/tools.ts";
+import { expectReady } from "./claude-ready.ts";
 import type { ModelSelection } from "./models.ts";
 import type { Workspace, WorkspaceLease } from "./workspace.ts";
 
@@ -54,6 +64,17 @@ const INTERRUPTED = "cubed stopped during this turn; claude code does not contin
 export const BACKGROUND_MS = 4 * 60 * 60_000;
 /** How long a finished background agent's follow-up turn may take to start. */
 const CONTINUE_GRACE_MS = 2 * 60_000;
+/** How long a new child may take to say the mod is in. */
+export const MOD_READY_MS = 15_000;
+const MOD_MISSING = "claude code started without cube's mod, so nothing was sent to it: its tools would have run on the cubed host, not in the thread's machine";
+/** The tools of --tools that act on nothing but Claude Code's own state
+ * (its task list, plan mode) or Anthropic's (WebSearch). */
+const IN_PROCESS_TOOLS = ALLOWED_TOOLS.filter(name => !["Bash", "Read", "Write", "Edit"].includes(name));
+/** Claude Code's own PreToolUse hook (flag settings, which --setting-sources
+ * leaves in): every other tool that reaches Claude Code itself is refused.
+ * The mod answers its tools above it, so this runs only for a tool no hook
+ * of the mod answered, a mod that did not load included. */
+export const CLAUDE_SETTINGS = JSON.stringify({ hooks: { PreToolUse: [{ matcher: `^(?!(${IN_PROCESS_TOOLS.join("|")})$).*`, hooks: [{ type: "command", command: "exit 2" }] }] } });
 /** Why background agents are lost when cubed closes the agent. */
 const CLOSED = "cubed closed claude code while it ran (cubed stopped or restarted, or the thread was archived)";
 
@@ -74,6 +95,8 @@ export interface ClaudeRuntime {
   backgroundMs?: number;
   /** How long a finished background agent's follow-up turn may take to start. */
   continueGraceMs?: number;
+  /** How long a new child may take to say the mod is in (MOD_READY_MS). */
+  modReadyMs?: number;
 }
 
 /** The child's environment: the allow-list, the runtime's extras and the
@@ -88,11 +111,12 @@ export function claudeEnvironment(source: NodeJS.ProcessEnv, extra: Readonly<Rec
 
 /** The `claude` arguments for a thread, the same on a first start and a
  * resumed one: only cube's mod, no user or project settings (their hooks),
- * no MCP servers, and only the tools the mod allows. */
+ * no MCP servers, only the tools the mod allows, and nothing of those run
+ * by Claude Code itself on the host. */
 export function claudeArguments(mod: string, model: string, session: string | null): string[] {
   return ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
     "--setting-sources", "", "--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: {} }), "--tools", ALLOWED_TOOLS.join(","),
-    "--plugin-dir", mod, "--model", model, ...(session ? ["--resume", session] : [])];
+    "--permission-mode", "dontAsk", "--settings", CLAUDE_SETTINGS, "--plugin-dir", mod, "--model", model, ...(session ? ["--resume", session] : [])];
 }
 
 export interface ClaudeSubmission {
@@ -119,7 +143,7 @@ export class ClaudeAgent {
   private readonly submissions: ClaudeSubmission[];
   private readonly messages: ClaudeMessage[];
   private partial: ClaudePartial = [];
-  private child: { process: ChildProcessWithoutNullStreams; exited: Promise<void>; stderr: string[] } | undefined;
+  private child: { process: ChildProcessWithoutNullStreams; exited: Promise<void>; stderr: string[]; ready: Promise<"ready" | "exited" | "late">; attached: boolean; stopped?: boolean } | undefined;
   private interrupt: { timer: NodeJS.Timeout; kill?: NodeJS.Timeout } | undefined;
   /** Bash calls Claude Code started whose results have not come back, by
    * tool_use_id: the mod runs each as `claude:<id>:bash` in the thread VM. */
@@ -226,10 +250,18 @@ export class ClaudeAgent {
     if (this.running) throw new ClaudeBusy("thread is already working");
     const child = this.spawn();
     const seq = Number(this.db.prepare("INSERT INTO submission(request_id, text, state, created_at) VALUES (?, ?, 'running', ?)").run(requestId, text, Date.now()).lastInsertRowid);
-    this.submissions.push({ seq, requestId, text, state: "running", error: null });
+    const submission: ClaudeSubmission = { seq, requestId, text, state: "running", error: null };
+    this.submissions.push(submission);
     clearTimeout(this.idle);
-    this.write(child.process, { type: "user", session_id: "", parent_tool_use_id: null, message: { role: "user", content: [{ type: "text", text }] } });
     this.changed();
+    void child.ready.then(ready => {
+      // A child that ended first has said why (its exit is the turn's failure);
+      // a turn stopped or closed meanwhile is not sent.
+      if (submission.state !== "running" || this.child !== child || ready === "exited" || this.interrupt || this.closing || child.stopped) return;
+      if (ready === "ready") { this.write(child.process, { type: "user", session_id: "", parent_tool_use_id: null, message: { role: "user", content: [{ type: "text", text }] } }); return; }
+      this.ending = { state: "failed", reason: MOD_MISSING };
+      child.process.kill("SIGKILL");
+    });
   }
 
   /** Stop is an interrupt; a child that does not end the turn in time is killed. */
@@ -243,6 +275,13 @@ export class ClaudeAgent {
       return;
     }
     if (!this.running || !child || this.interrupt) return;
+    // No prompt has reached a child the mod has not said it is in: it is ended at once.
+    if (!child.attached) {
+      this.ending = { state: "stopped", reason: "stopped in cube" };
+      child.stopped = true;
+      child.process.kill("SIGKILL");
+      return;
+    }
     this.write(child.process, { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } });
     // Claude Code answers an interrupt by rejecting the running tool use
     // without aborting the mod's hook, so the guest command would run on.
@@ -296,7 +335,9 @@ export class ClaudeAgent {
     if (this.child) return this.child;
     const session = this.sessionId;
     const [command, ...prefix] = this.runtime.command;
+    const expected = expectReady(this.threadId);
     const env = claudeEnvironment(process.env, this.runtime.env ?? {}, {
+      CUBE_MOD_NONCE: expected.nonce,
       CUBE_WORKSPACE_SOCKET: this.runtime.socket,
       CUBE_WORKSPACE_PATH: `/api/threads/${encodeURIComponent(this.threadId)}/workspace`,
       CUBE_WORKSPACE_TOKEN: this.lease.token,
@@ -309,7 +350,13 @@ export class ClaudeAgent {
     const stderr: string[] = [];
     child.once("error", error => stderr.push(error.message));
     const exited = new Promise<void>(resolve => { child.once("close", () => resolve()); child.once("error", () => resolve()); });
-    const current = { process: child, exited, stderr };
+    // Whether the mod said it is in before the child ended or the time ran out.
+    let timer: NodeJS.Timeout | undefined;
+    const ready = Promise.race([expected.ready.then(() => "ready" as const), exited.then(() => "exited" as const),
+      new Promise<"late">(resolve => { timer = setTimeout(() => resolve("late"), this.runtime.modReadyMs ?? MOD_READY_MS); timer.unref(); })])
+      .finally(() => { clearTimeout(timer); expected.cancel(); });
+    const current = { process: child, exited, stderr, ready, attached: false };
+    void ready.then(state => { current.attached = state === "ready"; });
     this.child = current;
     child.stdin.on("error", () => {});
     child.stderr.setEncoding("utf8");
@@ -339,6 +386,12 @@ export class ClaudeAgent {
     if (this.closing || !line.trim()) return;
     let data: Record<string, unknown>;
     try { data = JSON.parse(line) as Record<string, unknown>; } catch { return; }
+    // A turn from a child the mod never said it is in: not cube's. Killed.
+    if (this.child && !this.child.attached && (data.type === "assistant" || data.type === "stream_event" || data.type === "result")) {
+      this.ending = { state: "failed", reason: MOD_MISSING };
+      this.child.process.kill("SIGKILL");
+      return;
+    }
     if (data.type === "control_response" || data.type === "keep_alive") return;
     // A turn nobody sent (Claude Code going on after a background agent's
     // notification) is a run of its own.

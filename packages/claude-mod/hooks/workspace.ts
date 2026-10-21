@@ -64,6 +64,8 @@ export class WorkspaceClient {
     return this.call("POST", "/lease", { body: request.ttlMs === undefined ? { owner: request.owner } : { owner: request.owner, ttlMs: request.ttlMs } });
   }
   async release(token: string): Promise<void> { await this.call("DELETE", "/lease", { token }); }
+  /** The mod's hooks are in: cubed sends the child no prompt before this. */
+  async ready(token: string, nonce: string): Promise<void> { await this.call("POST", "/claude-ready", { token, body: { nonce } }); }
   async capabilities(): Promise<string[]> { return (await this.call<{ capabilities: string[] }>("GET", "")).capabilities; }
   async limits(): Promise<WorkspaceLimits> { return (await this.call<{ limits: WorkspaceLimits }>("GET", "")).limits; }
   async exec(token: string, key: string, spec: WorkspaceExecSpec): Promise<WorkspaceOperation> {

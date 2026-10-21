@@ -294,8 +294,31 @@ reaches Anthropic models with an API key.
 lifetime and starts `claude -p --input-format stream-json --output-format
 stream-json --verbose --include-partial-messages --setting-sources ""
 --strict-mcp-config --mcp-config '{"mcpServers":{}}' --tools <allow-list>
---plugin-dir packages/claude-mod --model <model>` on the first prompt, in a stable per-thread
+--permission-mode dontAsk --settings <PreToolUse guard> --plugin-dir packages/claude-mod
+--model <model>` on the first prompt, in a stable per-thread
 directory, with `--resume <session-id>` once Claude Code has reported a session.
+
+The mod must answer the tools: Claude Code runs without a mod it cannot load
+(its static check refuses the module, the folder is missing, the module
+throws at load) and skips a hook that throws, and its `init` line names the
+plugin either way. Then its own Bash, Read, Write and Edit run on the cubed
+host; a read-only command such as `pwd` needs no approval even in `dontAsk`.
+So it fails closed three ways:
+
+| layer | what it stops |
+| --- | --- |
+| ready gate: each child gets a nonce (`CUBE_MOD_NONCE`); the mod's last hook, at `session.start` (before any prompt, on a start and a resume), posts it to `…/workspace/claude-ready` under the child's lease token (`claude-ready.ts`). cubed writes no prompt before it; after 15 s (`MOD_READY_MS`), an exit, or a turn line the child prints first, it is killed and the turn fails (`claude code started without cube's mod, so nothing was sent to it`); nothing respawns it. The nonce is single use, the child's own and its thread's (it counts only on that thread's route of cubed's private socket, never on the HTTP API); the lease must be cubed's `claude-code` lease (no TTL). A stop before the ready ends the child at once | a mod that did not load: no prompt, so no model request and no tool |
+| `--settings` PreToolUse hook (`exit 2`) on every tool but the in-process ones of `--tools` (task list, plan mode, WebSearch), and `dontAsk` | a host tool that reaches Claude Code itself: the mod answers its tools above that hook, so it runs only when no mod hook did |
+| `.catch` on every guard of the mod | a mod hook that throws, misanswers or overruns: refused, not handed to Claude Code |
+
+None of these changes the model's request (checked byte for byte with the
+real CLI). The module must keep exactly one `on('session.start')` and one
+hooks module: Claude Code's check refuses a second unmatched
+`session.start` and then runs without the mod (the gate refuses that
+child), so tools registered at `session.start` (#221's `cubeHooks`) go in
+the same hook as the ready, before it. `scripts/check-claude-fail-closed.ts` runs all three against a
+real `claude` and a scripted Messages API, with a control that shows a
+modless `claude` with cubed's earlier arguments running `pwd` on the host.
 Prompts go to stdin under their request ID (a repeated ID is accepted once), stop
 is a stream-json `interrupt` control request; a child that ignores it is sent
 SIGTERM, then SIGKILL. cubed follows the Bash calls in Claude Code's messages
