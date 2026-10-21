@@ -1,26 +1,27 @@
 #!/usr/bin/python3
-"""cube-guest: a thread's workspace inside its VM.
+"""cube-guest: a thread's workspace on a `berth host` machine.
 
-cubed reaches this helper over SSH (the key in /etc/cube/authorized_keys may
-only run `cube-guest ssh`, which dispatches on SSH_ORIGINAL_COMMAND). One
-request is one JSON header line on stdin, optionally followed by a raw body;
-the answer is one JSON header line on stdout, optionally followed by a raw
-body. Errors are answered as {"error": {"code", "message"}} with exit status 0,
-so a nonzero status always means the transport or the helper itself failed.
+berth host runs this helper as `cube-guest host MACHINE call OP` for each
+guest request cubed sends over a runner protocol 4 guest stream (the same
+file is compiled into berth). One request is one JSON header line on stdin,
+optionally followed by a raw body; the answer is one JSON header line on
+stdout, optionally followed by a raw body. Errors are answered as
+{"error": {"code", "message"}} with exit status 0, so a nonzero status
+always means the transport or the helper itself failed. Offline tests run
+it the same way under a temporary root (packages/server/test/local-guest.py).
 
 Operations keep protocol 2's semantics: commands and writes carry a key that
-is journaled under /var/lib/cube/ops/<id> before anything happens (the same
+is journaled under the machine's state/ops/<id> before anything happens (the same
 key and request returns the recorded state, a different request is CONFLICT,
 records are never deleted), mutations carry a lease epoch that never goes
-back (an older one is LEASE_STALE), and a command runs in a transient
-systemd unit, so it survives cubed or gateway restarts and is found again by
-its key. A reboot marks unfinished records interrupted; nothing is ever run
-twice.
+back (an older one is LEASE_STALE), and a command runs under a detached
+supervisor of its own, so it survives cubed or runner restarts and is found
+again by its key. Nothing is ever run twice.
 
-The same file is the `cube` command inside the guest (/usr/local/bin/cube
-is a shim that runs `cube-guest cli`): `cube service` runs the agent's web
-servers as supervised systemd services, outside the transient unit of the
-command that started them, and registers their port for cubed's portal.
+The same file is the `cube` command in the machine (its `bin/cube` is a
+shim that runs `cube-guest host MACHINE cli`): `cube service` runs the
+agent's web servers as supervised processes, outside the command that
+started them, and registers their port for cubed's portal.
 cubed reads the registrations with the `services` operation; nothing in the
 guest calls cubed. `cube hooks` shows the hooks this machine runs and their
 last outcomes and logs, read only, from files in this machine.
@@ -31,7 +32,8 @@ create to the agent; anywhere else they act with the agent account's own
 permissions, as its commands do without sudo. /proc, /sys and /dev are not
 files to them.
 
-The VM is the isolation boundary: path checks are contract, not security.
+A host machine has no isolation (berth host is unsandboxed): path checks
+are contract, not security.
 Python 3 standard library only.
 """
 
@@ -87,64 +89,6 @@ class Fail(Exception):
         self.message = message or code
 
 
-class SystemdLauncher:
-    """Runs a command's wrapper in a transient unit. The unit's ExecStopPost
-    records the result, whatever stopped it (exit, timeout, cancel)."""
-
-    def argv(self, op_id, timeout_ms):
-        unit = unit_name(op_id)
-        return [
-            "systemd-run", "--quiet", "--collect", "--unit", unit,
-            "--property", "Type=simple",
-            "--property", "KillMode=control-group",
-            "--property", "RuntimeMaxSec=%dms" % timeout_ms,
-            "--property", "TimeoutStopSec=5s",
-            "--property", "ExecStopPost=+%s finish %s" % (HELPER, op_id),
-            "--property", "StandardInput=null",
-            "--property", "StandardOutput=null",
-            "--property", "StandardError=journal",
-            HELPER, "wrap", op_id,
-        ]
-
-    def start(self, op_id, timeout_ms):
-        result = subprocess.run(self.argv(op_id, timeout_ms), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
-        if result.returncode != 0:
-            raise Fail("IO_ERROR", "systemd-run failed: %s" % result.stderr.decode(errors="replace").strip()[:200])
-
-    def active(self, op_id):
-        result = subprocess.run(["systemctl", "show", "--property=ActiveState", "--value", unit_name(op_id)],
-                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
-        state = result.stdout.decode().strip()
-        return state not in ("", "inactive", "failed")
-
-    def kill(self, op_id):
-        subprocess.run(["systemctl", "kill", "--signal=SIGKILL", unit_name(op_id)], stdin=subprocess.DEVNULL,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-
-    def memory(self, op_id):
-        """The unit's peak memory and OOM kills, read from its cgroup while
-        its ExecStopPost runs (the cgroup still exists), with the machine's
-        memory; None when the kernel or systemd does not say."""
-        try:
-            result = subprocess.run(["systemctl", "show", "--property=ControlGroup", "--value", unit_name(op_id)],
-                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
-            group = result.stdout.decode().strip()
-            if not group.startswith("/") or ".." in group.split("/"):
-                return None
-            return cgroup_memory(os.path.join("/sys/fs/cgroup", group.lstrip("/")), "/proc/meminfo")
-        except (OSError, subprocess.SubprocessError):
-            return None
-
-    def shutting_down(self):
-        try:
-            result = subprocess.run(["systemctl", "is-system-running"], stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            return False
-        return result.stdout.decode().strip() == "stopping"
-
-
 def cgroup_memory(group, meminfo):
     """`{peakBytes, totalBytes, oomKills}` of a cgroup (v2: memory.peak and
     memory.events) on a machine with `meminfo`'s MemTotal, or None."""
@@ -167,90 +111,6 @@ def cgroup_memory(group, meminfo):
         return {"peakBytes": peak, "totalBytes": total, "oomKills": kills}
     except (OSError, ValueError):
         return None
-
-
-class SystemdServices:
-    """`cube service`'s services as persistent systemd units: enabled, so a
-    machine that boots again starts them again, restarted when they fail,
-    with their output in the journal. Each unit runs `cube-guest service-run
-    NAME`, which reads the registration; nothing the agent typed goes into
-    a unit file."""
-
-    UNIT_DIRECTORY = "/etc/systemd/system"
-
-    def unit(self, name):
-        return "cube-service-%s.service" % name
-
-    def text(self, name):
-        return "\n".join([
-            "[Unit]",
-            "Description=cube service %s" % name,
-            "After=network-online.target",
-            "Wants=network-online.target",
-            # A service that keeps failing stops being restarted; `cube service
-            # status` shows it failed and `restart` starts it again.
-            "StartLimitIntervalSec=60",
-            "StartLimitBurst=5",
-            "",
-            "[Service]",
-            "Type=simple",
-            "ExecStart=%s service-run %s" % (HELPER, name),
-            "Restart=on-failure",
-            "RestartSec=2",
-            "KillMode=control-group",
-            "TimeoutStopSec=10",
-            "StandardInput=null",
-            "StandardOutput=journal",
-            "StandardError=journal",
-            "SyslogIdentifier=cube-service-%s" % name,
-            "",
-            "[Install]",
-            "WantedBy=multi-user.target",
-            "",
-        ])
-
-    def _systemctl(self, *args):
-        result = subprocess.run(["systemctl"] + list(args), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, timeout=60)
-        return result.returncode, result.stdout.decode(errors="replace").strip()
-
-    def start(self, name):
-        """Writes the unit and (re)starts it."""
-        write_atomic(os.path.join(self.UNIT_DIRECTORY, self.unit(name)), self.text(name).encode(), 0o644)
-        for args in (["daemon-reload"], ["reset-failed", self.unit(name)], ["enable", self.unit(name)], ["restart", self.unit(name)]):
-            code, output = self._systemctl(*args)
-            if code != 0 and args[0] != "reset-failed":
-                raise Fail("IO_ERROR", "systemctl %s failed: %s" % (args[0], output[-300:]))
-
-    def restart(self, name):
-        self._systemctl("reset-failed", self.unit(name))
-        code, output = self._systemctl("restart", self.unit(name))
-        if code != 0:
-            raise Fail("IO_ERROR", "systemctl restart failed: %s" % output[-300:])
-
-    def remove(self, name):
-        """Stops the unit and removes it; absent is fine."""
-        self._systemctl("disable", "--now", self.unit(name))
-        remove(os.path.join(self.UNIT_DIRECTORY, self.unit(name)))
-        self._systemctl("daemon-reload")
-        self._systemctl("reset-failed", self.unit(name))
-
-    def state(self, name):
-        """{active: ActiveState, sub: SubState, restarts: NRestarts}."""
-        code, output = self._systemctl("show", self.unit(name), "--property=ActiveState,SubState,NRestarts,LoadState")
-        values = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
-        if values.get("LoadState") == "not-found":
-            return {"active": "missing", "sub": "", "restarts": 0}
-        restarts = values.get("NRestarts", "0")
-        return {"active": values.get("ActiveState", "unknown"), "sub": values.get("SubState", ""),
-                "restarts": int(restarts) if restarts.isdigit() else 0}
-
-    def logs(self, name, lines, follow):
-        argv = ["journalctl", "--no-pager", "--output=cat", "--unit", self.unit(name), "--lines", str(lines)]
-        if follow:
-            os.execvp(argv[0], argv + ["--follow"])
-        result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
-        return result.stdout.decode(errors="replace")
 
 
 class ProcessLauncher:
@@ -408,21 +268,19 @@ class Config:
         self.env_file = "/etc/cube/env"
         # Commands and files belong to this account; None keeps the caller's.
         self.user = "agent"
-        self.ready_files = ["/var/lib/cloud/instance/boot-finished", "/var/lib/cube/initialized"]
-        # Same list as GUEST_PACKAGES in vm-seed.ts. boot-finished survives a
-        # reboot, so readiness also needs the commands themselves: a first boot
-        # whose package install failed must not count as ready forever.
-        self.packages = ["git", "gh", "curl", "ca-certificates"]
-        self.commands = ["git", "gh", "curl"]
-        self.launcher = SystemdLauncher()
-        # Everything `seal_final` touches lives under this root (tests: a temporary one).
+        # Files and commands that must exist before the machine says ready.
+        self.ready_files = []
+        self.commands = []
+        # How commands and services run: host mode (configure_host) or a
+        # test sets them; without one, nothing runs.
+        self.launcher = None
         self.root = "/"
         # This file and its `cube` shim (`install` replaces both).
         self.helper = HELPER
         self.cli = CLI_PATH
         # Where cubed's portal settings are (`portal` writes them).
         self.portal_file = "/etc/cube/portal.json"
-        self.services = SystemdServices()
+        self.services = None
         # The address cubed's portal reaches services on; None: this machine's
         # address on the gateway's LAN.
         self.service_host = None
@@ -452,10 +310,6 @@ def configure(**options):
         if not hasattr(CONFIG, key):
             raise KeyError(key)
         setattr(CONFIG, key, value)
-
-
-def unit_name(op_id):
-    return "cube-op-%s.service" % op_id
 
 
 def ops_dir():
@@ -727,17 +581,6 @@ def ready():
         and all(shutil.which(command) for command in CONFIG.commands)
 
 
-def template_seal():
-    """How the template this machine was made from was sealed: `ok`, the
-    seal's failure, or None for a machine from the base image."""
-    try:
-        with open(os.path.join(CONFIG.state, "template-seal"), "rb") as handle:
-            outcome = handle.read(1000).decode(errors="replace").strip()
-    except FileNotFoundError:
-        return None
-    return outcome if outcome.startswith("failed") else "ok"
-
-
 def boot_id():
     if not CONFIG.boot_id or not CONFIG.boot_id.startswith("/"):
         return CONFIG.boot_id or None
@@ -767,9 +610,6 @@ def op_hello(header, body):
     boot = boot_id()
     if boot:
         answer["bootId"] = boot
-    seal = template_seal()
-    if seal is not None:
-        answer["templateSeal"] = seal
     return answer, b""
 
 
@@ -1716,89 +1556,6 @@ def exec_result(op):
             "memory": memory}
 
 
-def recover():
-    """At boot, before sshd: transient units do not survive a reboot, so every
-    record without a result was cut off. Mark it interrupted; never rerun."""
-    with Lock():
-        try:
-            names = os.listdir(ops_dir())
-        except FileNotFoundError:
-            return 0
-        for name in names:
-            if ID.match(name) and os.path.exists(op_path(name, "request.json")) \
-                    and not os.path.exists(op_path(name, "result.json")):
-                write_json(op_path(name, "result.json"), {"state": "Interrupted", "completionUnknown": True})
-    return 0
-
-
-def packages(attempts=5):
-    """Every boot (cloud-init per-boot script): install the guest packages a
-    failed first boot left out. cloud-init's own package step runs once."""
-    if all(shutil.which(command) for command in CONFIG.commands):
-        return 0
-    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
-    for attempt in range(attempts):
-        if subprocess.run(["apt-get", "update", "-q"], env=env).returncode == 0 \
-                and subprocess.run(["apt-get", "install", "-y", "-q"] + CONFIG.packages, env=env).returncode == 0 \
-                and all(shutil.which(command) for command in CONFIG.commands):
-            return 0
-        time.sleep(min(60, 10 * (attempt + 1)))
-    return 1
-
-
-SEAL_UNIT = "cube-seal.service"
-SEAL_MARKER = "var/lib/cube-seal/sealed"
-SEAL_VERSION = "1"
-
-
-def rooted(path):
-    return os.path.join(CONFIG.root, path.lstrip("/"))
-
-
-def seal():
-    """Turns this build machine into a template at its next power-off (as
-    root, run by cubed after a successful preparation). The cleaning itself
-    happens at shutdown, when nothing uses the identity it removes; cubed
-    then powers the machine off and the runner publishes the disk."""
-    unit = "\n".join([
-        "[Unit]",
-        "Description=cube: clean this disk for a template at power-off",
-        "DefaultDependencies=no",
-        "Requires=local-fs.target",
-        "After=local-fs.target",
-        "Conflicts=shutdown.target",
-        "Before=shutdown.target",
-        "",
-        "[Service]",
-        "Type=oneshot",
-        "RemainAfterExit=yes",
-        "ExecStart=/bin/true",
-        "ExecStop=%s seal-final" % HELPER,
-        "TimeoutStopSec=180",
-        "",
-    ])
-    write_atomic(rooted("/etc/systemd/system/" + SEAL_UNIT), unit.encode(), 0o644)
-    # Failed until seal_final says otherwise: a power-off that never ran it
-    # still leaves machines made from this disk to clean up and report.
-    os.makedirs(os.path.dirname(rooted(SEAL_MARKER)), mode=0o700, exist_ok=True)
-    write_atomic(rooted(SEAL_MARKER), b"failed: the seal did not run at power-off", 0o600)
-    subprocess.run(["apt-get", "clean"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    # The bulk of the discard now, while the machine is up: the runner gives
-    # a powering-off guest 30 s before it counts the stop as interrupted.
-    try:
-        subprocess.run(["fstrim", "--all"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
-    except subprocess.TimeoutExpired:
-        sys.stdout.write("seal failed: fstrim timed out\n")
-        return 1
-    for command in (["systemctl", "daemon-reload"], ["systemctl", "start", SEAL_UNIT]):
-        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
-        if result.returncode != 0:
-            sys.stdout.write("seal failed: %s\n" % result.stdout.decode(errors="replace").strip()[:500])
-            return 1
-    sys.stdout.write("sealed at power-off\n")
-    return 0
-
-
 def remove(path):
     """Removes a file, a symlink or a whole directory; absent is fine."""
     try:
@@ -1808,115 +1565,6 @@ def remove(path):
             os.unlink(path)
     except FileNotFoundError:
         pass
-
-
-def empty(directory):
-    try:
-        names = os.listdir(directory)
-    except FileNotFoundError:
-        return
-    for name in names:
-        remove(os.path.join(directory, name))
-
-
-def remove_service_units(directory):
-    """`cube service` units and their enablement links under `directory`."""
-    for sub in ("", "multi-user.target.wants"):
-        folder = os.path.join(directory, sub)
-        for name in (os.listdir(folder) if os.path.isdir(folder) else []):
-            if name.startswith("cube-service-") and name.endswith(".service"):
-                remove(os.path.join(folder, name))
-
-
-def seal_final():
-    """ExecStop of the seal unit, at power-off: removes what makes this
-    machine one machine (host keys, machine id, cloud-init instance, the
-    helper's journal and epoch, cubed's per-machine files and the build's
-    placeholders), then discards the freed blocks so the deleted bytes do
-    not stay in the template file. Every later machine gets all of these
-    new from its own seed. Package caches, toolchains and the prepared
-    checkout stay: they are the point of the template."""
-    failures = []
-    marker = rooted(SEAL_MARKER)
-    steps = [
-        ("/var/lib/cube", remove), ("/etc/cube", remove),
-        ("/var/lib/cloud", empty), ("/var/log/journal", empty), ("/tmp", empty),
-        ("/var/lib/dhcp", empty), ("/var/lib/systemd/random-seed", remove),
-        ("/var/lib/dbus/machine-id", remove), ("/root/.bash_history", remove),
-        ("/home/agent/.bash_history", remove), ("/etc/systemd/system/" + SEAL_UNIT, remove),
-        # Services a setup started: their registrations go with /var/lib/cube.
-        ("/etc/systemd/system", remove_service_units),
-        # The build's hook logs: they may echo its (dead) placeholder.
-        ("/home/agent/.cache/cube", remove),
-    ]
-    for path, action in steps:
-        try:
-            action(rooted(path))
-        except OSError as error:
-            failures.append("%s: %s" % (path, error.strerror or error))
-    def ssh_keys():
-        ssh = rooted("/etc/ssh")
-        for name in (os.listdir(ssh) if os.path.isdir(ssh) else []):
-            if name.startswith("ssh_host_"):
-                remove(os.path.join(ssh, name))
-
-    def machine_id():
-        # Empty, not absent: systemd makes a new id at the next boot.
-        with open(rooted("/etc/machine-id"), "w"):
-            pass
-    for name, action in (("logs", lambda: [remove(rooted(log)) for log in ("/var/log/cloud-init.log", "/var/log/cloud-init-output.log")]),
-                         ("/etc/ssh host keys", ssh_keys), ("/etc/machine-id", machine_id)):
-        try:
-            action()
-        except OSError as error:
-            failures.append("%s: %s" % (name, error.strerror or error))
-    os.makedirs(os.path.dirname(marker), mode=0o700, exist_ok=True)
-    if failures:
-        # The machines made from this disk report it, and cubed drops the template.
-        message = "failed: %s" % "; ".join(failures)
-        write_atomic(marker, message.encode()[:1000], 0o600)
-        sys.stderr.write("cube-guest seal: %s\n" % message)
-        return 1
-    write_atomic(marker, SEAL_VERSION.encode(), 0o600)
-    if CONFIG.root == "/":
-        # Only what was deleted since seal(): bounded, the runner's grace is 30 s.
-        try:
-            subprocess.run(["fstrim", "--all"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-        except subprocess.TimeoutExpired:
-            pass
-        subprocess.run(["sync"])
-    return 0
-
-
-def init():
-    """First boot of an instance (cloud-init runcmd): the journal and the
-    agent's directories. On a machine made from a template the seal marker
-    exists: whatever is left of the build machine's journal goes (nothing,
-    if the seal succeeded), and the seal's outcome is kept for `hello`."""
-    marker = rooted(SEAL_MARKER)
-    if os.path.exists(marker):
-        with open(marker, "rb") as handle:
-            outcome = handle.read(1000)
-        try:
-            remove(CONFIG.state)
-        except OSError as error:
-            # Never boot on the build machine's journal: move it aside.
-            os.rename(CONFIG.state, "%s.stale-%d" % (CONFIG.state, os.getpid()))
-            if not outcome.startswith(b"failed"):
-                outcome = ("failed: %s" % (error.strerror or error)).encode()
-        os.makedirs(CONFIG.state, mode=0o700, exist_ok=True)
-        write_atomic(os.path.join(CONFIG.state, "template-seal"), outcome)
-        remove(os.path.dirname(marker))
-        # A seal that failed may have left the build's services behind.
-        remove_service_units(rooted("/etc/systemd/system"))
-    os.makedirs(ops_dir(), mode=0o700, exist_ok=True)
-    for directory in (CONFIG.workspace, rooted("/repos")):
-        os.makedirs(directory, mode=0o755, exist_ok=True)
-        give(directory)
-    if CONFIG.root == "/":
-        install_cli()
-    write_atomic(os.path.join(CONFIG.state, "initialized"), b"")
-    return 0
 
 
 # --- host mode -----------------------------------------------------------
@@ -1961,9 +1609,6 @@ def host_main(argv):
     command = argv[1:]
     if command[0] == "supervise" and len(command) == 3 and ID.match(command[1]) and command[2].isdigit():
         return CONFIG.launcher.supervise(command[1], int(command[2]))
-    if command[0] in ("ssh", "recover", "init", "seal", "seal-final", "packages"):
-        sys.stderr.write("cube-guest: %s is not for a host machine\n" % command[0])
-        return 2
     return main(command)
 
 
@@ -2006,24 +1651,12 @@ def call(name, stdin, stdout):
 
 def main(argv):
     command = argv[0] if argv else ""
-    if command == "ssh":
-        return call(os.environ.get("SSH_ORIGINAL_COMMAND", "").strip(), sys.stdin.buffer, sys.stdout.buffer)
     if command == "call" and len(argv) == 2:
         return call(argv[1], sys.stdin.buffer, sys.stdout.buffer)
     if command == "wrap" and len(argv) == 2 and ID.match(argv[1]):
         return wrap(argv[1])
     if command == "finish" and len(argv) == 2 and ID.match(argv[1]):
         return finish(argv[1])
-    if command == "recover":
-        return recover()
-    if command == "init":
-        return init()
-    if command == "seal":
-        return seal()
-    if command == "seal-final":
-        return seal_final()
-    if command == "packages":
-        return packages()
     if command == "cli":
         return cli(argv[1:])
     if command == "service-run" and len(argv) == 2:
@@ -2033,7 +1666,7 @@ def main(argv):
     if command == "--version":
         print("cube-guest %s" % VERSION)
         return 0
-    sys.stderr.write("usage: cube-guest ssh | call OP | host MACHINE ... | wrap ID | finish ID | recover | init | seal | seal-final | packages | cli ... | service-run NAME | --version\n")
+    sys.stderr.write("usage: cube-guest host MACHINE call OP | host MACHINE cli ... | --version\n")
     return 2
 
 

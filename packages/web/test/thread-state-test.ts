@@ -1,7 +1,7 @@
 /** The thread's state words and lamp while its machine is suspended or
  * woken (P7-5, B7-2), and the B7-5 notice. */
 import assert from "node:assert/strict";
-import { composerWaiting, lampClass, machineNotice, STARTING_TEXT, stateLabel } from "../src/lib/thread-state.ts";
+import { composerWaiting, lampClass, machineLabel, machineNotice, STARTING_TEXT, stateLabel } from "../src/lib/thread-state.ts";
 import type { ThreadSummary } from "../src/lib/types.ts";
 
 const thread = (state: ThreadSummary["state"], vm: ThreadSummary["vm"] = { vmId: "0123456789abcdef" }): ThreadSummary =>
@@ -29,4 +29,8 @@ assert.equal(composerWaiting({ ...waiting, state: "starting" }), "waiting for a 
 assert.equal(composerWaiting(thread("ready")), null);
 assert.equal(machineNotice(thread("ready", { vmId: "0123456789abcdef", notice })), notice.text);
 assert.equal(machineNotice(thread("ready", { vmId: "0123456789abcdef", notice, suspension: { state: "suspended", at: 3 } })), null, "not while suspended");
-console.log("ok: suspended, waking and waiting for a free slot in the thread's state (a wake's own starts do not flicker it) and the composer; the restart notice once it runs");
+// A protocol-3 thread's record from before: a template whose seal failed still reads as it was.
+const sealed = machineLabel(thread("ready", { vmId: "0123456789abcdef",
+  preparation: { source: "template", templateId: "a000000000000001", sealFailure: "failed: /etc/machine-id" } } as ThreadSummary["vm"]));
+assert.match(sealed!.title, /the template's seal failed \(failed: \/etc\/machine-id\); it was removed/);
+console.log("ok: suspended, waking and waiting for a free slot in the thread's state (a wake's own starts do not flicker it) and the composer; the restart notice once it runs; an old seal failure still reads");

@@ -83,7 +83,6 @@ pub const KEEL: Addressing = Addressing {
     gateway: Ipv4Addr::new(192, 168, 127, 1),
     guest: Ipv4Addr::new(192, 168, 127, 2),
     prefix: 24,
-    dhcp: false,
 };
 /// The guest's MAC; the runner's side keeps netstack's 02:00:00:00:00:01.
 pub const GUEST_MAC: &str = "02:00:00:00:00:02";

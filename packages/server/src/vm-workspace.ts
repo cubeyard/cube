@@ -28,8 +28,6 @@ const SHA = /^[0-9a-f]{64}$/;
 const STATES = new Set(["Accepted", "Running", "Unknown", "Succeeded", "Written", "Failed", "Interrupted"]);
 
 export interface GuestDescription { version: string; ready: boolean; capabilities: string[]; limits: WorkspaceLimits; epoch: number;
-  /** A machine made from a template: how that template was sealed (`ok` or the failure). */
-  templateSeal?: string;
   /** The sha256 of the helper as installed (helpers before `cube service` do not say). */
   build?: string }
 
@@ -81,7 +79,6 @@ export function guestDescription(header: Record<string, unknown>): GuestDescript
   }
   return { version: header.version, ready: header.ready, capabilities: [...header.capabilities as string[]],
     limits: Object.fromEntries(WORKSPACE_LIMIT_KEYS.map(key => [key, limits[key]])) as unknown as WorkspaceLimits, epoch: header.epoch as number,
-    ...(typeof header.templateSeal === "string" ? { templateSeal: header.templateSeal.slice(0, 1000) } : {}),
     ...(typeof header.build === "string" && SHA.test(header.build) ? { build: header.build } : {}) };
 }
 
