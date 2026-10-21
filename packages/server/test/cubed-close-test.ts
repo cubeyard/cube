@@ -19,6 +19,7 @@ import { OptChat } from "../src/optchat.ts";
 assert.equal(CLOSE_MS, 25_000);
 assert.equal(THREADS_CLOSE_MS, 9_000);
 const never = new Promise<void>(() => {});
+let drainMs = -1;
 const calls: string[] = [];
 // The chat's close never ends (it bounds itself at 14 s; here it does not).
 OptChat.prototype.close = async function () { calls.push("optchat"); return never; };
@@ -32,7 +33,7 @@ const conversations = app.conversations as unknown as { agents: Map<string, Prom
 await new Promise(resolve => setTimeout(resolve, 1000));
 conversations.machines.close = async () => { calls.push("machines"); return never; };
 conversations.agents.set("stuck", Promise.resolve({
-  async drain() { calls.push("drain"); return never; },
+  async drain(ms: number) { calls.push("drain"); drainMs = ms; return never; },
   async close() { calls.push("close"); return never; },
   harness: { snapshot: async () => undefined, usage: async () => ({ models: {}, tools: {} }) },
 }));
@@ -48,6 +49,7 @@ assert.ok(took < 30_000, "under the supervisor's SIGKILL");
 assert.ok(calls.includes("optchat"), `the chat's close was the stuck one: ${calls.join(", ")}`);
 assert.deepEqual(calls.filter(call => call !== "optchat"), ["machines", "drain", "close"], "the machines, then the agent's drain and close, each bounded");
 assert.ok(threadsMs >= 0 && threadsMs <= THREADS_CLOSE_MS, `the threads got at most their share (${threadsMs} ms)`);
+assert.ok(drainMs >= 4_000, `the stuck machines' close left the drain its time (${drainMs} ms)`);
 assert.throws(() => app.registry.listProjects(), "the registry is closed");
 assert.ok(!fs.existsSync(path.join(state, "run", "workspace.sock")), "the workspace socket is gone");
 fs.rmSync(state, { recursive: true, force: true });

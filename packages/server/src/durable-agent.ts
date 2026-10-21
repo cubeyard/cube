@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { cleanupSessionResources, Type, type Models, type Static } from "@earendil-works/pi-ai";
-import { createRegistry, defineDoc, defineExtension, defineTool, Harness, LiveDoc, ROOT_CONVERSATION_ID, section, type Extension, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
+import { CompactionTask, createRegistry, defineDoc, defineExtension, defineTool, Harness, LiveDoc, ROOT_CONVERSATION_ID, section, type Extension, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import { NodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CURRENT_SQLITE_SCHEMA_VERSION, SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { createEditTool, createWriteTool } from "@earendil-works/pi-durable/tools";
@@ -269,19 +269,25 @@ export async function openAgent(options: {
       /** Why the agent is down, once Pi's Session failed; null while it works. */
       failure: () => down,
       /** Before a close: no new request is sent (held back, sent once after
-       * the reopen), and a request already out gets up to `ms` to come back
-       * and be stored. Pi's own close aborts what is still out, so without
-       * this every graceful stop would end a run with a request out (the
-       * next open counts it and does not send it again). Answers whether
-       * none is out now. */
+       * the reopen), and a request already out, or a context summary Pi's
+       * compaction has out, gets up to `ms` to come back and be stored.
+       * Pi's own close aborts what is still out, so without this every
+       * graceful stop would end a run with one out (the next open counts it
+       * and does not send it again). Answers whether none is out now. */
       async drain(ms: number): Promise<boolean> {
         gate.closing = true;
         const deadline = Date.now() + ms;
         for (;;) {
           const generation = (await opened.snapshot(LiveDoc, conversation.id, context).catch(() => undefined))?.generation;
           // Pi keeps `generation` from a request's start until its answer is
-          // stored; a retry's wait and a deferred poll are not out.
-          if (!generation || generation.retry || generation.deferred || gate.held > 0) return true;
+          // stored; a retry's wait, a deferred poll and a request held back
+          // here are not out.
+          const request = !!generation && !generation.retry && !generation.deferred && gate.held === 0;
+          // A summary is out from its `summarize` commit until its answer is placed.
+          const summary = !request && (await opened.inspect(context).catch(() => ({ tasks: [] }))).tasks.some(({ record }) =>
+            record.kind === CompactionTask.definition.name && record.state.status !== "terminal" && record.state.status !== "completing"
+            && (record.state.checkpoint as { phase?: string } | undefined)?.phase === "summarize");
+          if (!request && !summary) return true;
           if (Date.now() >= deadline) return false;
           await delay(Math.min(20, deadline - Date.now()));
         }
