@@ -101,8 +101,13 @@ pub struct LanLimits {
     pub idle: Duration,
     pub handshake: Duration,
     pub dial: Duration,
-    /// Unacknowledged data older than this closes the flow.
+    /// A flow whose guest sends nothing for this long is aborted. smoltcp
+    /// counts from the guest's last packet even when nothing is waiting to
+    /// be acknowledged, so `tcp_keep_alive` must stay well below it.
     pub tcp_timeout: Duration,
+    /// Keep-alive probe after this much quiet: a live guest answers it, so a
+    /// quiet but healthy flow outlives `tcp_timeout`; a dead one does not.
+    pub tcp_keep_alive: Duration,
 }
 
 impl Default for LanLimits {
@@ -118,6 +123,7 @@ impl Default for LanLimits {
             handshake: Duration::from_secs(30),
             dial: Duration::from_secs(10),
             tcp_timeout: Duration::from_secs(120),
+            tcp_keep_alive: Duration::from_secs(30),
         }
     }
 }
@@ -593,6 +599,7 @@ impl Stack {
         // across a slower Iroh path that overflows the datagram queue.
         s.set_congestion_control(tcp::CongestionControl::Cubic);
         s.set_timeout(Some(limits.tcp_timeout.into()));
+        s.set_keep_alive(Some(limits.tcp_keep_alive.into()));
         s
     }
 

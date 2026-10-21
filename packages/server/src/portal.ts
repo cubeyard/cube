@@ -30,6 +30,8 @@ import { createLogger, type Logger } from "./log.ts";
 
 export const DEFAULT_PORTAL_PORT = 7780;
 /** Wildcard DNS services that answer `<anything>.<a-b-c-d>.<domain>` with a.b.c.d. */
+/** How long a portal request waits for a suspended machine to wake (B7-3). */
+const WAKE_WAIT_MS = 60000;
 const IP_DOMAINS = new Set(["sslip.io", "nip.io"]);
 const DOMAIN = /^(?=.{3,150}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
 /** How long the guest's registrations are trusted before asking again. */
@@ -199,6 +201,16 @@ export class Portal {
       || !SERVICE_NAME.test(match[1]!)) throw unknown;
     const thread = this.thread(match[2]!);
     if (!thread) throw unknown;
+    // B7-3: a connection to a suspended machine wakes it.
+    if (thread.workspaceState === "available" && !this.options.archiving(thread.id) && this.options.machines.suspended?.(thread)) {
+      // A request waits for it a while; a machine that waits for a free slot keeps waking.
+      const woken = this.options.machines.wake?.(thread).then(() => true, () => false) ?? Promise.resolve(false);
+      const waited = await Promise.race([woken, new Promise<false>(resolve => setTimeout(() => resolve(false), WAKE_WAIT_MS).unref())]);
+      if (!waited) {
+        const waiting = this.options.registry.getThread(thread.id)?.vm?.suspension?.waiting;
+        throw new Refusal(503, `this thread's machine was suspended and is waking${waiting ? `: ${waiting}` : ""}; try again shortly`);
+      }
+    }
     if (thread.workspaceState !== "available" || this.options.archiving(thread.id) || !this.options.machines.running?.(thread)) {
       this.cache.delete(thread.id);
       throw new Refusal(503, "this thread's machine is not running; open the thread in cube to start it");

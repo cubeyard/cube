@@ -1,6 +1,6 @@
 # Publish the Homebrew tap formulas (cubeyard/homebrew-tap) for one published
-# stable release: generate them from the release's signed darwin-arm64
-# manifests, install and test them on macOS, then commit them to the tap from
+# stable release: generate them from the release's signed manifests (cubed and
+# berth darwin-arm64, keel arm64), install and test them on macOS, then commit them to the tap from
 # a separate job, so the tap token never reaches the machine that ran the
 # release's binaries. Runs when a release is published, or by hand for a
 # given version; only the latest release may be published unless forced.
@@ -60,7 +60,8 @@ jobs:
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/assets" "$RUNNER_TEMP/formula"
-          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --pattern 'cubed-darwin-arm64.json*' --pattern 'cube-runner-darwin-arm64.json*' --dir "$RUNNER_TEMP/assets"
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --pattern 'cubed-darwin-arm64.json*' --pattern 'berth-darwin-arm64.json*' \
+            --pattern 'keel-arm64.json*' --dir "$RUNNER_TEMP/assets"
           node scripts/homebrew/formula.ts "$VERSION" --assets "$RUNNER_TEMP/assets" --out "$RUNNER_TEMP/formula" | tee "$RUNNER_TEMP/formula/formula.json"
           cp scripts/homebrew/tap-README.md "$RUNNER_TEMP/formula/README.md"
       - name: install, audit and test the formulas
@@ -72,10 +73,10 @@ jobs:
           cp "$RUNNER_TEMP"/formula/*.rb "$(brew --repository cubeyard/tap)/Formula/"
           brew trust cubeyard/tap
           brew install cubeyard/tap/cube
-          brew audit --strict cubeyard/tap/cube cubeyard/tap/cube-runner
-          brew test cubeyard/tap/cube cubeyard/tap/cube-runner
+          brew audit --strict cubeyard/tap/cube cubeyard/tap/cube-berth
+          brew test cubeyard/tap/cube cubeyard/tap/cube-berth
           cubed --version
-          cube-runner version
+          "$(brew --prefix)/opt/cube-berth/bin/berth" version
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: homebrew-formula
@@ -97,17 +98,19 @@ jobs:
           repository: cubeyard/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
+      # Formula/cube-runner.rb (protocol 3) is left as it is: an installed
+      # cube-runner can still be stopped with brew services and uninstalled.
       - name: update the tap
         working-directory: homebrew-tap
         run: |
           set -euo pipefail
           mkdir -p Formula
-          cp ../formula/cube.rb ../formula/cube-runner.rb Formula/
+          cp ../formula/cube.rb ../formula/cube-berth.rb Formula/
           cp ../formula/README.md README.md
-          runner="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runner)' ../formula/formula.json)"
+          berth="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).berth)' ../formula/formula.json)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add Formula README.md
           git diff --cached --quiet && { echo 'tap already up to date'; exit 0; }
-          git commit -m "cube ${VERSION} (cube-runner ${runner})"
+          git commit -m "cube ${VERSION} (berth ${berth})"
           git push

@@ -59,6 +59,14 @@ export interface ThreadMachines {
    * portal (p3's gateway allows 22 and 1024-65535, a protocol-4 runner
    * 1024-65535). */
   dial?(thread: Thread, port: number): Promise<Duplex>;
+  /** Suspend (S-7a, P7-5; runner-machines.ts): whether the thread's machine
+   * is suspended; suspend it when idle and `busy` finds nothing running;
+   * wake it; something happened for it now (its idle time starts again).
+   * Only protocol-4 VM runners suspend. */
+  suspended?(thread: Thread): boolean;
+  suspendIfIdle?(thread: Thread, busy: () => Promise<string | null>): Promise<boolean>;
+  wake?(thread: Thread): Promise<void>;
+  touch?(thread: Thread): void;
   /** Read-only evidence about the thread's machine (vm-diagnostics.ts);
    * never starts, stops or attaches it. */
   diagnose?(thread: Thread): Promise<MachineEvidence>;

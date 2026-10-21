@@ -27,6 +27,8 @@ const context = BACKGROUND_CONTEXT;
 const log = createLogger("threads");
 /** The registry's first message is submitted once under this request id. */
 const INITIAL_REQUEST = "cube:initial";
+/** How long an idle round waits for the recovery loop's check of a machine. */
+const CHECK_WAIT_MS = 60_000;
 /** Why a disk the release check let go is kept all the same. */
 const RUNNER_KEPT = "the release check was clean, but the runner kept the disk (a machine that did not stop in time or failed, or a host runner's directory)";
 /** Archive refused: the thread's agent is running. Nothing is interrupted. */
@@ -78,6 +80,11 @@ export class Conversations {
    * so none overlaps the release check or the release. */
   private readonly archiveHolds = new Set<string>();
   private readonly commands = new Map<string, Promise<unknown>>();
+  /** Threads whose machine an idle round is suspending: the recovery loop
+   * leaves them alone meanwhile (it would wake what is being saved). */
+  private readonly suspends = new Set<string>();
+  /** The idle round under way: rounds do not overlap. */
+  private suspendRound: Promise<void> | null = null;
   private readonly feeds = new WeakMap<Agent, PiThreadEvents>();
   private readonly claudes = new Map<string, Promise<ClaudeAgent>>();
   private readonly claudeFeeds = new WeakMap<ClaudeAgent, ClaudeThreadEvents>();
@@ -110,10 +117,17 @@ export class Conversations {
       if (releaseUnfinished(thread)) {
         work.push(this.command(thread.id, () => this.release(thread.id)).catch(() => {}));
       }
+      // A suspended machine stays so until something needs it (P7-5); one
+      // being woken (a wake a restart cut short) goes on.
+      else if (thread.vm?.suspension?.state === "suspended" || this.suspends.has(thread.id)) continue;
       else work.push(this.activate(thread.id));
     }
     await Promise.all(work);
   }
+  /** One round of cubed's recovery loop (index.ts, every 30 s): every open
+   * thread's activation (for a running machine under an open agent only a
+   * check) beside the idle round, which waits for those checks. */
+  async recover(): Promise<void> { await Promise.all([this.boot(), this.suspendIdle()]); }
   error(id: string): string | null { return this.failures.get(id) ?? null; }
   /** Why the thread's Pi agent is down (its Session failed), if it is. */
   down(id: string): string | null { return this.downs.get(id) ?? null; }
@@ -453,7 +467,61 @@ export class Conversations {
     finally { if (this.commands.get(id) === promise) this.commands.delete(id); }
   }
   submit(id: string, text: string, requestId: string): Promise<{ runId: string }> {
-    return this.command(id, async () => { await this.settled(id); return this.accept(id, text, requestId); });
+    return this.command(id, async () => { await this.settled(id); await this.wakeFor(id); return this.accept(id, text, requestId); });
+  }
+  /** A message to a thread whose machine is suspended wakes it first, so
+   * the agent's run never meets a machine that starts again from its disk
+   * (B7-5). With a full runner the activation records that it waits, and
+   * the run's first guest call waits on (runner-machines.ts `wake`). */
+  private async wakeFor(id: string): Promise<void> {
+    if (this.registry.getThread(id)?.vm?.suspension) await this.activate(id);
+  }
+  /** Suspends the machines that have been idle for 5 minutes (B7-1; the
+   * runner side decides idleness from guest calls, commands and portal
+   * connections, machine-idle.ts) and run nothing cubed knows of. Run by
+   * the recovery loop. Each thread's attempt is queued with its commands,
+   * so a message waits for it and then wakes the machine. */
+  suspendIdle(): Promise<void> {
+    if (this.closing || !this.machines.suspendIfIdle) return Promise.resolve();
+    this.suspendRound ??= Promise.all(this.registry.listThreads().map(thread => this.suspendOne(thread)))
+      .then(() => {}).finally(() => { this.suspendRound = null; });
+    return this.suspendRound;
+  }
+  private async suspendOne(thread: Thread): Promise<void> {
+    const machines = this.machines;
+    const id = thread.id;
+    const skip = (current: Thread | null) => !current || current.archived || current.workspaceState !== "available" || !!current.vm?.suspension || releaseUnfinished(current);
+    if (skip(thread)) return;
+    // The recovery loop's check of a machine that runs is not activity:
+    // its end is waited for (B-207-1). A start is.
+    // A check that became a start (the machine was down) is not waited for
+    // past CHECK_WAIT_MS: the round goes on, and the start counts as activity.
+    const check = this.checks.has(id) ? this.activations.get(id) : undefined;
+    if (check) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([check, new Promise(resolve => { timer = setTimeout(resolve, CHECK_WAIT_MS); })]);
+      clearTimeout(timer);
+    }
+    const current = this.registry.getThread(id);
+    if (skip(current)) return;
+    if (this.commands.has(id) || this.activations.has(id) || this.archiveHolds.has(id)) { machines.touch?.(current!); return; }
+    this.suspends.add(id);
+    try { await this.command(id, () => machines.suspendIfIdle!(this.registry.getThread(id) ?? current!, () => this.busy(id))); }
+    catch (error) { log.warn("suspending an idle machine failed", { thread: id, error: error instanceof Error ? error.message : String(error) }); }
+    finally { this.suspends.delete(id); }
+  }
+  /** What cubed runs for the thread now, or null (B7-1, B7-3): a start, an
+   * archive, the agent's run or its background agents. */
+  private async busy(id: string): Promise<string | null> {
+    if (this.closing) return "cubed is stopping";
+    if (this.activations.has(id)) return "the machine is starting";
+    if (this.archiveHolds.has(id)) return "the thread is being archived";
+    const claude = await this.claudes.get(id)?.catch(() => null);
+    if (claude?.running) return "the agent is working";
+    if (claude?.waiting.length) return "the agent's background agents run";
+    const pi = await this.agents.get(id)?.catch(() => null);
+    if (pi && (await pi.harness.snapshot(LiveDoc, pi.conversation.id, context))?.run) return "the agent is working";
+    return null;
   }
   private async accept(id: string, text: string, requestId: string): Promise<{ runId: string }> {
     if (this.isClaude(id)) {

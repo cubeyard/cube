@@ -44,8 +44,16 @@ node packages/server/test/runner-vm-v13-test.ts "${CARGO_TARGET_DIR:-target}/deb
 # S-7a (G-F): a machine suspended while a command runs and resumed, then a
 # snapshot of another berth booted cold (else skipped).
 node packages/server/test/runner-vm-suspend-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
-# cubed's local runner setup with the real cube-runner and the fake QEMU.
-node scripts/test-local-runner.ts "${CARGO_TARGET_DIR:-target}/debug/cube-runner"
+# #208: machine_suspend waits at most 5 s for another operation on the
+# runner, then is refused busy and never runs later (else skipped).
+node packages/server/test/runner-vm-suspend-ops-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
+# P7-5 (N1–N7): cubed's real 30 s loop suspends an idle machine on `berth vm`,
+# never during a command, a dial or a registered service, and wakes it by a
+# message, a guest call or the portal; one slot, a cold start (else skipped).
+node packages/server/test/runner-vm-cubed-suspend-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
+# cubed's local runner setup (runners init-local) with the real berth vm, and
+# a second run that changes nothing (else skipped).
+node scripts/test-local-berth.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
 for script in scripts/runner/*.sh; do bash -n "$script"; done
 
 target="${CARGO_TARGET_DIR:-target}/debug"
