@@ -6,26 +6,14 @@
   "git",
   "gh",
   "curl",
-  "ca-certificates",
-  "openssh-client"
+  "ca-certificates"
  ],
  "platforms": {
   "linux/amd64": {
    "manifest": "sha256:15a71cc87173e191d5046f9c4288db4e8954b67f92e48d9587087826b0afe562",
    "status": "trixie-amd64.status",
-   "group": "trixie.group",
-   "gshadow": "trixie.gshadow",
-   "diffId": "sha256:7439261954158685e45255928760cdea76bbef2ae4b1dee46632e03c905a1780",
+   "diffId": "sha256:808b31baad57c7c4b3dd3e6a9ff0560fe5e77b49fecdc92a73c56cecf82b0a9c",
    "packages": [
-    {
-     "name": "adduser",
-     "version": "3.152",
-     "architecture": "all",
-     "archive": "debian",
-     "filename": "pool/main/a/adduser/adduser_3.152_all.deb",
-     "size": 190932,
-     "sha256": "e50984d2e1ef6300e3fd51303839842189a077b10cb5cadff1923df10c61c493"
-    },
     {
      "name": "ca-certificates",
      "version": "20250419+deb13u1",
@@ -90,15 +78,6 @@
      "sha256": "0fb79f88db210afbd69282ab9649e525f393ec6950ca34da1a6b359250b8d7db"
     },
     {
-     "name": "libcbor0.10",
-     "version": "0.10.2-2",
-     "architecture": "amd64",
-     "archive": "debian",
-     "filename": "pool/main/libc/libcbor/libcbor0.10_0.10.2-2_amd64.deb",
-     "size": 28296,
-     "sha256": "2457686e375dcb7567ba01da6638a0711e2a55725d084d65de44dd11bb1f52e2"
-    },
-    {
      "name": "libcom-err2",
      "version": "1.47.2-3+b12",
      "architecture": "amd64",
@@ -126,15 +105,6 @@
      "sha256": "4f89bd3e7a33bbd8f7422817a8a8e2233c9e194fda9c331e33bf98705f525bfc"
     },
     {
-     "name": "libedit2",
-     "version": "3.1-20250104-1",
-     "architecture": "amd64",
-     "archive": "debian",
-     "filename": "pool/main/libe/libedit/libedit2_3.1-20250104-1_amd64.deb",
-     "size": 93832,
-     "sha256": "b002ea172b9c1e34a67bc497c523c67bb74c3f0a4e98113cb083990a1f1d3bfe"
-    },
-    {
      "name": "liberror-perl",
      "version": "0.17030-1",
      "architecture": "all",
@@ -160,15 +130,6 @@
      "filename": "pool/main/libf/libffi/libffi8_3.4.8-2_amd64.deb",
      "size": 24144,
      "sha256": "0ebdc340de33333639c3c63874cd4b15ac2e83dfa1ef3053b7eefaf4919f4f68"
-    },
-    {
-     "name": "libfido2-1",
-     "version": "1.15.0-1+b1",
-     "architecture": "amd64",
-     "archive": "debian",
-     "filename": "pool/main/libf/libfido2/libfido2-1_1.15.0-1+b1_amd64.deb",
-     "size": 78728,
-     "sha256": "094fc0fe20c652be848ab2a8b3793eb03bc4327140ebd232145356352004e6c0"
     },
     {
      "name": "libgdbm-compat4t64",
@@ -378,15 +339,6 @@
      "sha256": "6dd3490bef06ea1096f32d10766b7e016cf579bfae8451d1b7df15ce05b8aa46"
     },
     {
-     "name": "openssh-client",
-     "version": "1:10.0p1-7+deb13u4",
-     "architecture": "amd64",
-     "archive": "debian",
-     "filename": "pool/main/o/openssh/openssh-client_10.0p1-7+deb13u4_amd64.deb",
-     "size": 989904,
-     "sha256": "8fff343654f86c3b3266f94cd338c7b4da2e386da029327815118ea00bce03b9"
-    },
-    {
      "name": "openssl",
      "version": "3.5.7-1~deb13u3",
      "architecture": "amd64",
@@ -427,19 +379,8 @@
   "linux/arm64": {
    "manifest": "sha256:0daf3052d9359adaa0de63035b87949cc6c7966bfd6d60746d318ee1999f5edb",
    "status": "trixie-arm64.status",
-   "group": "trixie.group",
-   "gshadow": "trixie.gshadow",
-   "diffId": "sha256:5818231a4e468bd6c6f52314fe652907fdbdb2aa0665093d32a454cec394bfdf",
+   "diffId": "sha256:6a744b34bf7b3c7474f9ffc2ffe6940c8a9f0faa8f0eadd14234e5875d8f53b4",
    "packages": [
-    {
-     "name": "adduser",
-     "version": "3.152",
-     "architecture": "all",
-     "archive": "debian",
-     "filename": "pool/main/a/adduser/adduser_3.152_all.deb",
-     "size": 190932,
-     "sha256": "e50984d2e1ef6300e3fd51303839842189a077b10cb5cadff1923df10c61c493"
-    },
     {
      "name": "ca-certificates",
      "version": "20250419+deb13u1",
@@ -504,15 +445,6 @@
      "sha256": "10270398c4842e71c72b4081fa1761728b3225d6c8dce7c58d5baafe58a5e18f"
     },
     {
-     "name": "libcbor0.10",
-     "version": "0.10.2-2",
-     "architecture": "arm64",
-     "archive": "debian",
-     "filename": "pool/main/libc/libcbor/libcbor0.10_0.10.2-2_arm64.deb",
-     "size": 27372,
-     "sha256": "5e129095192ff766884e5ed13260644e510d20ed6b4facc47809bf2cb630117d"
-    },
-    {
      "name": "libcom-err2",
      "version": "1.47.2-3+b12",
      "architecture": "arm64",
@@ -540,15 +472,6 @@
      "sha256": "264718feb6d2466fff82da4dd783a1f221ae73031fbda7a9e398cc5861fd2303"
     },
     {
-     "name": "libedit2",
-     "version": "3.1-20250104-1",
-     "architecture": "arm64",
-     "archive": "debian",
-     "filename": "pool/main/libe/libedit/libedit2_3.1-20250104-1_arm64.deb",
-     "size": 89296,
-     "sha256": "496c31df89fac9cb7e98102fcc21daf887376dcd9914f6322c86dd5bd4360ff1"
-    },
-    {
      "name": "liberror-perl",
      "version": "0.17030-1",
      "architecture": "all",
@@ -574,15 +497,6 @@
      "filename": "pool/main/libf/libffi/libffi8_3.4.8-2_arm64.deb",
      "size": 21260,
      "sha256": "d84a783b818f2386627604e64b793eb4ac5bb9ea1ba321a194a1c9c82fe09a01"
-    },
-    {
-     "name": "libfido2-1",
-     "version": "1.15.0-1+b1",
-     "architecture": "arm64",
-     "archive": "debian",
-     "filename": "pool/main/libf/libfido2/libfido2-1_1.15.0-1+b1_arm64.deb",
-     "size": 74348,
-     "sha256": "510f81957f2905c57d3d8681c3ed9bf68a17bfb254d721a578c88edd8158477c"
     },
     {
      "name": "libgdbm-compat4t64",
@@ -790,15 +704,6 @@
      "filename": "pool/main/libu/libunistring/libunistring5_1.3-2_arm64.deb",
      "size": 452856,
      "sha256": "4847467a0e47039837895e88f5a99a4a86a3d8266be40c3c896fc7c10d552dc7"
-    },
-    {
-     "name": "openssh-client",
-     "version": "1:10.0p1-7+deb13u4",
-     "architecture": "arm64",
-     "archive": "debian",
-     "filename": "pool/main/o/openssh/openssh-client_10.0p1-7+deb13u4_arm64.deb",
-     "size": 926832,
-     "sha256": "e900c13c9a5267714fc2c2c1f369fe4a667c7dd4031266b1480250320f0bfcfb"
     },
     {
      "name": "openssl",

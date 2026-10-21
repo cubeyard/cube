@@ -106,18 +106,6 @@ fn entries(tar_bytes: &[u8]) -> BTreeMap<String, (tar::EntryType, u32, String)> 
     out
 }
 
-const BASE_GROUP: &str = "root:x:0:\nshadow:x:42:\nusers:x:100:\n";
-const BASE_GSHADOW: &str = "root:*::\nshadow:*::\nusers:*::\n";
-
-/// The image's files, with `status` leaked for the test (it is small).
-fn base(status: &str) -> Base {
-    Base {
-        status: Box::leak(status.to_owned().into_boxed_str()),
-        group: BASE_GROUP,
-        gshadow: BASE_GSHADOW,
-    }
-}
-
 const BASE_STATUS: &str = "Package: apt\nStatus: install ok installed\nVersion: 3.0\nDescription: a\n more\n\nPackage: zlib1g\nStatus: install ok installed\nMulti-Arch: same\nArchitecture: amd64\nVersion: 1\n\n";
 
 fn two_packages(dir: &Path) -> Vec<(Package, PathBuf)> {
@@ -189,7 +177,7 @@ fn two_packages(dir: &Path) -> Vec<(Package, PathBuf)> {
 fn the_layer_has_the_packages_and_what_their_scripts_would_write() {
     let dir = tempfile::tempdir().unwrap();
     let debs = two_packages(dir.path());
-    let tar_bytes = build_layer(&base(BASE_STATUS), &debs, Vec::new()).unwrap();
+    let tar_bytes = build_layer(BASE_STATUS, &debs, Vec::new()).unwrap();
     let all = entries(&tar_bytes);
 
     // Files as packaged; sudo setuid; /etc/sudoers 0440 as sudo's postinst.
@@ -264,7 +252,7 @@ fn the_layer_has_the_packages_and_what_their_scripts_would_write() {
 
     // The same packages give the same bytes.
     assert_eq!(
-        build_layer(&base(BASE_STATUS), &debs, Vec::new()).unwrap(),
+        build_layer(BASE_STATUS, &debs, Vec::new()).unwrap(),
         tar_bytes
     );
 }
@@ -274,14 +262,14 @@ fn a_package_the_image_has_or_a_file_in_two_packages_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let debs = two_packages(dir.path());
     let with_sudo = format!("{BASE_STATUS}Package: sudo\nVersion: 0\n\n");
-    let error = build_layer(&base(&with_sudo), &debs, Vec::new()).unwrap_err();
+    let error = build_layer(&with_sudo, &debs, Vec::new()).unwrap_err();
     assert!(
         format!("{error:#}").contains("sudo is in the image already"),
         "{error:#}"
     );
 
     let twice = vec![debs[1].clone(), (package("sudo", "1.9"), debs[1].1.clone())];
-    let error = build_layer(&base(BASE_STATUS), &twice, Vec::new()).unwrap_err();
+    let error = build_layer(BASE_STATUS, &twice, Vec::new()).unwrap_err();
     assert!(
         format!("{error:#}").contains("is in two packages"),
         "{error:#}"
@@ -293,7 +281,7 @@ fn a_package_whose_control_file_differs_from_the_plan_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let mut debs = two_packages(dir.path());
     debs[1].0.version = "1.8".into();
-    let error = build_layer(&base(BASE_STATUS), &debs, Vec::new()).unwrap_err();
+    let error = build_layer(BASE_STATUS, &debs, Vec::new()).unwrap_err();
     assert!(
         format!("{error:#}").contains("another package or version"),
         "{error:#}"
@@ -322,14 +310,7 @@ fn the_pinned_plan_is_whole() {
     assert!(plan.image.starts_with("docker.io/library/debian:trixie-"));
     assert_eq!(
         plan.requested,
-        [
-            "sudo",
-            "git",
-            "gh",
-            "curl",
-            "ca-certificates",
-            "openssh-client"
-        ]
+        ["sudo", "git", "gh", "curl", "ca-certificates"]
     );
     assert_eq!(
         plan.platforms.keys().collect::<Vec<_>>(),
@@ -338,7 +319,7 @@ fn the_pinned_plan_is_whole() {
     for (platform, p) in &plan.platforms {
         p.diff_id().unwrap_or_else(|e| panic!("{platform}: {e:#}"));
         assert!(p.manifest.starts_with("sha256:") && p.manifest.len() == 71);
-        assert!(p.base().unwrap().status.starts_with("Package: "));
+        assert!(p.base_status().unwrap().starts_with("Package: "));
         let names: Vec<&str> = p.packages.iter().map(|p| p.name.as_str()).collect();
         let mut sorted = names.clone();
         sorted.sort();
@@ -361,9 +342,8 @@ fn the_pinned_plan_is_whole() {
         // No package of the plan is in the image already.
         for package in &p.packages {
             assert!(
-                !p.base()
+                !p.base_status()
                     .unwrap()
-                    .status
                     .contains(&format!("\nPackage: {}\n", package.name)),
                 "{platform}: {} is in the image",
                 package.name
@@ -490,7 +470,7 @@ async fn build_the_pinned_layers() {
                 .unwrap();
             debs.push((package.clone(), path));
         }
-        let tar = build_layer(&p.base().unwrap(), &debs, Vec::new()).unwrap();
+        let tar = build_layer(p.base_status().unwrap(), &debs, Vec::new()).unwrap();
         let diff_id = DiffId::from_bytes(Sha256::digest(&tar).into());
         println!(
             "{platform}: {diff_id} ({} tar bytes); pinned {}",
@@ -502,65 +482,4 @@ async fn build_the_pinned_layers() {
             fs::write(Path::new(&out).join(format!("{arch}.tar")), &tar).unwrap();
         }
     }
-}
-
-/// openssh-client's postinst: `addgroup --system _ssh` (the first free gid
-/// from 100) and ssh-agent setgid `_ssh` 2755; nothing of it without the
-/// package.
-#[test]
-fn openssh_clients_group_is_added_as_addgroup_would() {
-    let dir = tempfile::tempdir().unwrap();
-    let ssh = deb(
-        &[(
-            "./control",
-            0o644,
-            "Package: openssh-client\nVersion: 1:10.0p1\nArchitecture: amd64\nMulti-Arch: foreign\nDescription: o\n",
-        )],
-        &[
-            ("./", 0o755, ""),
-            ("./usr/", 0o755, ""),
-            ("./usr/bin/", 0o755, ""),
-            ("./usr/bin/ssh", 0o755, "ELF"),
-            ("./usr/bin/ssh-agent", 0o755, "ELF"),
-        ],
-    );
-    let path = dir.path().join("openssh-client.deb");
-    fs::write(&path, ssh).unwrap();
-    let debs = vec![(package("openssh-client", "1:10.0p1"), path)];
-    let tar_bytes = build_layer(&base(BASE_STATUS), &debs, Vec::new()).unwrap();
-    let all = entries(&tar_bytes);
-    assert_eq!(all["etc/group"].2, format!("{BASE_GROUP}_ssh:x:101:\n"));
-    assert_eq!(all["etc/gshadow"].2, format!("{BASE_GSHADOW}_ssh:!::\n"));
-    assert_eq!(all["etc/gshadow"].1, 0o640);
-    assert_eq!(all["usr/bin/ssh-agent"].1, 0o2755);
-    assert_eq!(all["usr/bin/ssh"].1, 0o755);
-    let mut archive = tar::Archive::new(tar_bytes.as_slice());
-    let owners: BTreeMap<String, (u64, String)> = archive
-        .entries()
-        .unwrap()
-        .map(|e| {
-            let e = e.unwrap();
-            let h = e.header();
-            (
-                e.path().unwrap().to_str().unwrap().to_owned(),
-                (h.gid().unwrap(), h.groupname().unwrap().unwrap().to_owned()),
-            )
-        })
-        .collect();
-    assert_eq!(owners["usr/bin/ssh-agent"], (101, "_ssh".to_owned()));
-    assert_eq!(owners["etc/gshadow"], (42, "shadow".to_owned()));
-
-    // An image with the group already is refused, not given a second one.
-    let mut taken = base(BASE_STATUS);
-    taken.group = "shadow:x:42:\n_ssh:x:120:\n";
-    let error = build_layer(&taken, &debs, Vec::new()).unwrap_err();
-    assert!(
-        format!("{error:#}").contains("has the group _ssh already"),
-        "{error:#}"
-    );
-
-    // Without openssh-client, /etc/group is the image's.
-    let other = two_packages(dir.path());
-    let all = entries(&build_layer(&base(BASE_STATUS), &other, Vec::new()).unwrap());
-    assert!(!all.contains_key("etc/group") && !all.contains_key("etc/gshadow"));
 }
