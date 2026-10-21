@@ -54,7 +54,7 @@ const api = http.createServer((request, response) => {
     // One call for each prompt: while the prompts outnumber the results.
     const text = JSON.stringify(sent.messages);
     const call = sent.tools?.length && text.split('"text":"check"').length > text.split('"type":"tool_result"').length
-      ? tool === "Bash" ? { name: "Bash", input: { command: `touch ${MARK}; pwd`, description: "where am I" } } : { name: "Read", input: { file_path: "/etc/hostname" } }
+      ? tool === "Bash" ? { name: "Bash", input: { command: `touch ${MARK}; pwd`, description: "where am I" } } : { name: "Read", input: { file_path: `/workspace/${MARK}` } }
       : undefined;
     const events: Array<[string, Record<string, unknown>]> = [["message_start", { message: { id: `msg_${requests}`, type: "message", role: "assistant", model: "claude-sonnet-4-5", content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 1 } } }]];
     if (call) {
@@ -86,7 +86,7 @@ const server = http.createServer(async (request, response) => {
   if (!url.pathname.startsWith(BASE)) return response.writeHead(404).end("{}");
   const parts = url.pathname.slice(BASE.length).split("/").filter(Boolean).map(decodeURIComponent);
   if (parts[0] === "claude-ready" && raw) nonces.push((JSON.parse(raw) as { nonce: string }).nonce);
-  const result = await workspaceRoute(workspace, { method: request.method!, parts, query: url.searchParams, headers: request.headers, body: raw ? JSON.parse(raw) as Record<string, unknown> : {} });
+  const result = await workspaceRoute(workspace, { method: request.method!, parts, query: url.searchParams, headers: request.headers, body: raw ? JSON.parse(raw) as Record<string, unknown> : {}, thread: "t1" });
   response.writeHead(result.status, { "content-type": "application/json" }).end(JSON.stringify(result.body));
 });
 await new Promise<void>(resolve => server.listen(socket, resolve));
@@ -155,12 +155,19 @@ try {
       assert.equal(result.state, "completed", result.error ?? "");
       assert.deepEqual(result.results, [guest.workspace], "Bash ran in the workspace (pwd is the guest's)");
       assert.ok(fs.existsSync(path.join(guest.workspace, MARK)) && !hostRan(agent.root), "the file is in the workspace, not on the host");
-      // A new child resumes the session; its mod says it is in again.
+      // A new child resumes the session; its mod says it is in again, and
+      // its Bash runs in the workspace again (a refusal would not print it).
       await agent.setModel("opus");
-      tool = "Read";
+      fs.rmSync(path.join(guest.workspace, MARK));
       result = await turn(agent, "c2");
       assert.equal(result.state, "completed", result.error ?? "");
-      assert.ok(result.results.length === 1 && !result.results[0]!.includes(os.hostname()), `Read is the machine's /etc/hostname, not the host's: ${result.results[0]}`);
+      assert.deepEqual(result.results, [guest.workspace], "on the resume, Bash ran in the workspace (pwd is the guest's)");
+      assert.ok(fs.existsSync(path.join(guest.workspace, MARK)) && !hostRan(agent.root), "the resumed command's file is in the workspace");
+      // And Read reads the workspace: the file Bash wrote there, empty (a refusal is text).
+      tool = "Read";
+      result = await turn(agent, "c3");
+      assert.equal(result.state, "completed", result.error ?? "");
+      assert.ok(result.results.length === 1 && !/refused|not available|denied|PreToolUse/i.test(result.results[0]!), `Read was answered by the mod: ${result.results[0]}`);
       assert.ok(requests - before >= 4, "the model was asked");
     } finally { await agent.close(); }
     console.log("ok: cube's mod as cubed loads it: Bash and Read reach the workspace, on a start and a resume");

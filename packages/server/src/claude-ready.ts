@@ -7,20 +7,23 @@
  * prompt is written to a child before it. */
 import { randomBytes } from "node:crypto";
 
+/** By thread, then nonce: a nonce counts only on its own thread's route. */
 const waiting = new Map<string, () => void>();
+const slot = (thread: string, nonce: string) => `${thread}\u0000${nonce}`;
 
-/** A new nonce and a promise that settles when the mod sends it. */
-export function expectReady(): { nonce: string; ready: Promise<void>; cancel: () => void } {
+/** A new nonce for `thread`'s child and a promise that settles when its mod sends it. */
+export function expectReady(thread: string): { nonce: string; ready: Promise<void>; cancel: () => void } {
   const nonce = randomBytes(32).toString("hex");
+  const key = slot(thread, nonce);
   let resolve!: () => void;
   const ready = new Promise<void>(settle => { resolve = settle; });
-  waiting.set(nonce, () => { waiting.delete(nonce); resolve(); });
-  return { nonce, ready, cancel: () => { waiting.delete(nonce); } };
+  waiting.set(key, () => { waiting.delete(key); resolve(); });
+  return { nonce, ready, cancel: () => { waiting.delete(key); } };
 }
 
-/** True when a child was waiting on this nonce (it is ready now). */
-export function markReady(nonce: unknown): boolean {
-  const resolve = typeof nonce === "string" ? waiting.get(nonce) : undefined;
+/** True when `thread`'s child was waiting on this nonce (it is ready now). */
+export function markReady(thread: string, nonce: unknown): boolean {
+  const resolve = typeof nonce === "string" ? waiting.get(slot(thread, nonce)) : undefined;
   resolve?.();
   return resolve !== undefined;
 }

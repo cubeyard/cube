@@ -12,6 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Models } from "@earendil-works/pi-ai";
 import { ClaudeAgent, ClaudeBusy, claudeEnvironment, type ClaudeRuntime } from "../src/claude-agent.ts";
+import { expectReady } from "../src/claude-ready.ts";
 import { ClaudeThreadEvents } from "../src/claude-thread-events.ts";
 import { ModelAuth } from "../src/model-auth.ts";
 import type { ThreadTranscript } from "../src/thread-events.ts";
@@ -37,7 +38,7 @@ const server = http.createServer(async (request, response) => {
   let raw = "";
   for await (const chunk of request) raw += chunk;
   if (parts.slice(0, 4).join("/") !== "api/threads/t1/workspace") { response.writeHead(404); response.end("{}"); return; }
-  const result = await workspaceRoute(workspace, { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body: raw ? JSON.parse(raw) : {} });
+  const result = await workspaceRoute(workspace, { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body: raw ? JSON.parse(raw) : {}, thread: "t1" });
   response.writeHead(result.status, { "content-type": "application/json" });
   response.end(JSON.stringify(result.body));
 });
@@ -264,7 +265,45 @@ try {
       assert.ok(fs.existsSync(path.join(files, "control-ran")), "the mod ran it in the workspace");
     } finally { await control.close(); }
   }
-  console.log("ok: a child whose mod is missing, forges its ready or prints a turn first gets no prompt: killed, the turn fails, nothing runs on the host");
+  // A stop before the mod's word ends that child at once (no prompt reached it).
+  {
+    const waiting = await ClaudeAgent.open({ directory: path.join(root, "modless-stop"), threadId: "t1", workspace, model: "sonnet",
+      runtime: { ...runtime, modReadyMs: 10_000, stopGraceMs: 10_000, env: { ...runtime.env, FAKE_CLAUDE_MOD: "missing" } } });
+    try {
+      await waiting.submit("m1", `run touch ${path.join(root, "host-ran-stop")}`);
+      await delay(300);
+      const stopping = Date.now();
+      await waiting.stop();
+      const shown = await until(() => waiting.state().submissions[0]!.state !== "running" && waiting.state().submissions[0]!, "the stopped turn");
+      assert.equal(shown.state, "stopped");
+      assert.ok(Date.now() - stopping < 3000, "at once, not after the stop's grace");
+      assert.ok(!fs.existsSync(path.join(root, "host-ran-stop")));
+    } finally { await waiting.close(); }
+  }
+  // The ready route: only cubed's own lease (no TTL), only the thread's own
+  // nonce, and only where the route names its thread (cubed's socket).
+  {
+    const ready = (target: VmWorkspace, token: string, nonce: string, thread?: string) => workspaceRoute(target, { method: "POST", parts: ["claude-ready"], query: new URLSearchParams(),
+      headers: { authorization: `Bearer ${token}` }, body: { nonce }, ...thread === undefined ? {} : { thread } });
+    const own = new VmWorkspace({ guest, leases: new LeaseStore(path.join(root, "ready-own")), owner: "claude-code", binding: guest.binding });
+    const held = (await own.lease({ owner: "claude-code" })).token;
+    const remote = new VmWorkspace({ guest, leases: new LeaseStore(path.join(root, "ready-ttl")), owner: "claude-code", binding: guest.binding });
+    const ttl = (await remote.lease({ owner: "claude-code", ttlMs: 60_000 })).token;
+    const expected = expectReady("thread-a");
+    let settled = false;
+    void expected.ready.then(() => { settled = true; });
+    assert.equal((await ready(own, held, expected.nonce, "thread-b")).status, 404, "another thread's route");
+    assert.equal((await ready(own, held, expected.nonce)).status, 404, "a route that names no thread (the HTTP API)");
+    assert.equal((await ready(remote, ttl, expected.nonce, "thread-a")).status, 404, "a lease with a TTL is not cubed's own");
+    await delay(20);
+    assert.equal(settled, false, "none of those counted");
+    assert.equal((await ready(own, held, expected.nonce, "thread-a")).status, 200);
+    await expected.ready;
+    assert.equal((await ready(own, held, expected.nonce, "thread-a")).status, 404, "single use");
+    await own.release(held);
+  }
+  console.log("ok: a child whose mod is missing, forges its ready or prints a turn first gets no prompt: killed, the turn fails, nothing runs on the host; "
+    + "a stop before the ready ends it at once; the ready route takes only cubed's lease, the thread's own nonce, once, on the socket");
 
   // Background agents. A turn that ends with one running leaves the thread
   // waiting: the child stays open past the idle close, and the turn Claude

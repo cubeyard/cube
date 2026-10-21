@@ -275,6 +275,12 @@ export class ClaudeAgent {
       return;
     }
     if (!this.running || !child || this.interrupt) return;
+    // No prompt has reached a child the mod has not said it is in: it is ended at once.
+    if (!child.attached) {
+      this.ending = { state: "stopped", reason: "stopped in cube" };
+      child.process.kill("SIGKILL");
+      return;
+    }
     this.write(child.process, { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } });
     // Claude Code answers an interrupt by rejecting the running tool use
     // without aborting the mod's hook, so the guest command would run on.
@@ -328,7 +334,7 @@ export class ClaudeAgent {
     if (this.child) return this.child;
     const session = this.sessionId;
     const [command, ...prefix] = this.runtime.command;
-    const expected = expectReady();
+    const expected = expectReady(this.threadId);
     const env = claudeEnvironment(process.env, this.runtime.env ?? {}, {
       CUBE_MOD_NONCE: expected.nonce,
       CUBE_WORKSPACE_SOCKET: this.runtime.socket,

@@ -36,8 +36,9 @@ const STATUS: Partial<Record<WorkspaceErrorCode, number>> = {
 const WAIT_POLL_MS = 100;
 
 /** `parts` are the path segments after `…/workspace`. */
+/** `thread`: whose workspace this is (the Claude Code mod's ready names it). */
 export async function workspaceRoute(workspace: Workspace, request: {
-  method: string; parts: string[]; query: URLSearchParams; headers: IncomingHttpHeaders; body: Record<string, unknown>;
+  method: string; parts: string[]; query: URLSearchParams; headers: IncomingHttpHeaders; body: Record<string, unknown>; thread?: string;
 }): Promise<WorkspaceResponse> {
   const { method, parts, query, body } = request;
   try {
@@ -106,7 +107,7 @@ export async function workspaceRoute(workspace: Workspace, request: {
     // Only the child of cubed's own Claude Code lease, and only with its nonce.
     if (route === "claude-ready" && method === "POST") {
       const lease = await workspace.lease({ token: token() });
-      if (lease.owner !== "claude-code" || lease.expiresAt !== null || !markReady(body.nonce)) throw new WorkspaceError("NOT_FOUND", "no claude code child is waiting on this nonce");
+      if (lease.owner !== "claude-code" || lease.expiresAt !== null || request.thread === undefined || !markReady(request.thread, body.nonce)) throw new WorkspaceError("NOT_FOUND", "no claude code child is waiting on this nonce");
       return ok({ ok: true });
     }
     return { status: 404, body: { error: "not found", code: "NOT_FOUND", completionUnknown: false } };
