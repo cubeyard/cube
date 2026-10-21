@@ -465,7 +465,9 @@ export async function createCubed(options: {
   // most the enrolled runners last said they allow.
   const machineView = () => {
     const sizes = vmSizes();
-    const limits = registry.runnerStatuses().filter(runner => !runner.retiredAt).map(runner => runner.health?.limits).filter(limit => !!limit);
+    // Only runners cubed places on: a protocol-3 runner's old report is not a limit now.
+    const limits = registry.runnerStatuses().filter(runner => !runner.retiredAt && registry.getRunner(runner.id)?.protocol === 4)
+      .map(runner => runner.health?.limits).filter(limit => !!limit);
     return { machineDefaults: { vcpus: sizes.vcpus, memoryMiB: sizes.memoryMiB },
       machineLimits: limits.length ? { maxVcpus: Math.max(...limits.map(limit => limit.maxVcpus)), maxMemoryMiB: Math.max(...limits.map(limit => limit.maxMemoryMiB)) } : null };
   };
@@ -609,7 +611,9 @@ export async function createCubed(options: {
           registry.beginRunnerRetirement(id);
           try {
             const status = await probeRunner(id);
-            if (status.contactStatus === "reachable" && status.health?.activeVms) {
+            // A protocol-3 runner is never contacted: its stored report is
+            // old evidence, not its state now (its threads are archived).
+            if (runnerProtocol(runner) === 4 && status.contactStatus === "reachable" && status.health?.activeVms) {
               throw new Error("runner reports an active thread machine and cannot be retired");
             }
             registry.finishRunnerRetirement(id, reason, status.lastAttemptAt!);

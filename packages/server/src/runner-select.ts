@@ -37,6 +37,9 @@ export async function runnerHealth(runner: Runner): Promise<TrustedRunnerHealth>
   const described = hello.runner!;
   const capacity = described.capacity;
   const lifecycle = LIFECYCLES[described.lifecycle] ?? "faulted";
+  const bounds = described.limits;
+  const limits = bounds && bounds.maxVcpus > 0 && bounds.maxMemoryMib > 0
+    ? { limits: { maxVcpus: bounds.maxVcpus, maxMemoryMiB: bounds.maxMemoryMib, maxDiskGiB: bounds.maxDiskGib } } : {};
   return {
     lifecycle, draining: lifecycle === "draining", error: null,
     activeVms: capacity?.machinesActive ?? 0, runningVms: capacity?.machinesRunning ?? 0,
@@ -46,6 +49,7 @@ export async function runnerHealth(runner: Runner): Promise<TrustedRunnerHealth>
     kind: described.kind === Runner_Kind.HOST ? "host" : "vm",
     platform: [described.platform?.os, described.platform?.arch].filter(Boolean).join("-"),
     capabilities: hello.capabilities,
+    ...limits,
   };
 }
 
