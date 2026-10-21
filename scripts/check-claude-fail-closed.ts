@@ -22,6 +22,7 @@
  *
  *   node scripts/check-claude-fail-closed.ts   (CLAUDE=<path> names the binary) */
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
@@ -38,6 +39,8 @@ import { LocalGuestTransport } from "../packages/server/test/local-guest.ts";
 const claude = process.env.CLAUDE ?? "claude";
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "cube-claude-closed-"));
 const MARK = "HOST-RAN";
+/** What the guest's Bash writes into MARK, and Read must give back. */
+const TOKEN = `cube-check-${randomBytes(8).toString("hex")}`;
 
 let requests = 0;
 let tool: "Bash" | "Read" = "Bash";
@@ -54,7 +57,7 @@ const api = http.createServer((request, response) => {
     // One call for each prompt: while the prompts outnumber the results.
     const text = JSON.stringify(sent.messages);
     const call = sent.tools?.length && text.split('"text":"check"').length > text.split('"type":"tool_result"').length
-      ? tool === "Bash" ? { name: "Bash", input: { command: `touch ${MARK}; pwd`, description: "where am I" } } : { name: "Read", input: { file_path: `/workspace/${MARK}` } }
+      ? tool === "Bash" ? { name: "Bash", input: { command: `printf ${TOKEN} > ${MARK}; pwd`, description: "where am I" } } : { name: "Read", input: { file_path: `/workspace/${MARK}` } }
       : undefined;
     const events: Array<[string, Record<string, unknown>]> = [["message_start", { message: { id: `msg_${requests}`, type: "message", role: "assistant", model: "claude-sonnet-4-5", content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 1 } } }]];
     if (call) {
@@ -167,7 +170,7 @@ try {
       tool = "Read";
       result = await turn(agent, "c3");
       assert.equal(result.state, "completed", result.error ?? "");
-      assert.ok(result.results.length === 1 && !/refused|not available|denied|PreToolUse/i.test(result.results[0]!), `Read was answered by the mod: ${result.results[0]}`);
+      assert.ok(result.results.length === 1 && result.results[0]!.includes(TOKEN) && !result.results[0]!.includes("<tool_use_error>"), `Read gave back what the guest's Bash wrote: ${result.results[0]}`);
       assert.ok(requests - before >= 4, "the model was asked");
     } finally { await agent.close(); }
     console.log("ok: cube's mod as cubed loads it: Bash and Read reach the workspace, on a start and a resume");
