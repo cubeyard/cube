@@ -196,13 +196,18 @@ pub struct VmOptions {
     pub suspend_disk_margin_gib: Option<u64>,
 }
 
-/// The runner's image, as `berth image pull` recorded it.
+/// The runner's image, as `berth image pull` recorded it, and above its
+/// layers the Debian preparation layer when it is cube's default image
+/// (debian.rs).
 struct Image {
     reference: String,
     record: image::ImageRecord,
+    prepared: Option<String>,
 }
 
 impl Image {
+    /// What machines are made from: the image's layers, bottom first, then
+    /// the preparation layer. A changed preparation is a changed image.
     fn machine_image(&self) -> MachineImage {
         MachineImage {
             reference: self.reference.clone(),
@@ -212,6 +217,7 @@ impl Image {
                 .layers
                 .iter()
                 .map(|l| l.diff_id.clone())
+                .chain(self.prepared.clone())
                 .collect(),
         }
     }
@@ -584,7 +590,7 @@ impl VmRunner {
     /// removed when a machine's layers cannot be read.
     fn evict(&self, state: &State) {
         let limit = self.options.layer_cache_bytes;
-        match trim_cache(&self.cache, limit, &self.image.record, state) {
+        match trim_cache(&self.cache, limit, &self.image.machine_image(), state) {
             Ok((eviction, _))
                 if eviction.removed.is_empty() && eviction.remaining_bytes <= limit => {}
             Ok((eviction, in_use)) => {
@@ -640,11 +646,18 @@ impl VmRunner {
                 self.keel.base_sha256
             ),
             format!(
-                "image: {} ({}, {} layers, manifest {})",
+                "image: {} ({}, {} layers, manifest {}){}",
                 self.image.reference,
                 self.image.record.platform,
                 self.image.record.layers.len(),
-                self.image.record.manifest.digest
+                self.image.record.manifest.digest,
+                match &self.image.prepared {
+                    Some(diff_id) => format!(
+                        "; prepared for cube by layer {diff_id} ({})",
+                        crate::debian::plan().requested.join(", ")
+                    ),
+                    None => String::new(),
+                }
             ),
             format!(
                 "layer cache: {} ({} bytes in {} layers; limit {} GiB besides the layers machines use), mkfs.erofs {} ({})",
@@ -953,21 +966,21 @@ impl VmRunner {
         id: &str,
         template: Option<&template::TemplateRecord>,
     ) -> Result<MachineImage> {
-        let mut layers: Vec<keel_layers::disk::Layer> = self
-            .image
-            .record
-            .layers
+        let image = self.image.machine_image();
+        let mut layers: Vec<keel_layers::disk::Layer> = image
+            .diff_ids
             .iter()
-            .map(|layer| keel_layers::disk::Layer {
-                path: self.options.directory.join(&layer.file),
-                name: layer
-                    .diff_id
-                    .trim_start_matches("sha256:")
-                    .chars()
-                    .take(29)
-                    .collect(),
+            .map(|diff_id| {
+                Ok(keel_layers::disk::Layer {
+                    path: self.cache.path(&diff_id.parse()?),
+                    name: diff_id
+                        .trim_start_matches("sha256:")
+                        .chars()
+                        .take(29)
+                        .collect(),
+                })
             })
-            .collect();
+            .collect::<Result<_>>()?;
         if let Some(template) = template {
             // The topmost partition, as `setup_layers` names it.
             layers.push(keel_layers::disk::Layer {
@@ -976,7 +989,7 @@ impl VmRunner {
             });
         }
         keel_layers::disk::write(&self.machine_dir(id), &layers)?;
-        Ok(self.image.machine_image())
+        Ok(image)
     }
 
     /// Tells every watch about a template (and the runner, whose summaries
@@ -1332,14 +1345,21 @@ impl VmRunner {
                 "the template is deleted; it goes when the last machine made from it does",
             ));
         }
-        let runner = &self.image.record.manifest.digest;
-        if &record.image.manifest != runner {
+        // The whole layer list, not only the manifest: a template built on
+        // another preparation of the same image lies on other files.
+        let runner = self.image.machine_image();
+        if record.image.manifest != runner.manifest || record.image.diff_ids != runner.diff_ids {
             return Err(refuse(
                 Code::FailedPrecondition,
                 "template_image_changed",
                 &format!(
-                    "the template was built on {} ({}); this runner serves {} ({runner})",
-                    record.image.reference, record.image.manifest, self.image.reference
+                    "the template was built on {} ({}, {} layers); this runner serves {} ({}, {} layers)",
+                    record.image.reference,
+                    record.image.manifest,
+                    record.image.diff_ids.len(),
+                    self.image.reference,
+                    runner.manifest,
+                    runner.diff_ids.len()
                 ),
             ));
         }
@@ -2527,10 +2547,7 @@ fn template_proto(record: &template::TemplateRecord, state: &State) -> Option<pr
 /// The layers the cache must keep: the runner's image's, those of every
 /// machine that is not deleted, retained ones too, and those of the image
 /// every template lies on (B-8 D2: a template keeps them while it exists).
-fn layers_in_use(
-    image: &image::ImageRecord,
-    state: &State,
-) -> Result<HashSet<keel_layers::DiffId>> {
+fn layers_in_use(image: &MachineImage, state: &State) -> Result<HashSet<keel_layers::DiffId>> {
     let machines = state
         .machines
         .values()
@@ -2540,7 +2557,7 @@ fn layers_in_use(
         .templates
         .values()
         .flat_map(|template| template.image.diff_ids.iter());
-    let runner = image.layers.iter().map(|layer| &layer.diff_id);
+    let runner = image.diff_ids.iter();
     runner
         .chain(machines)
         .chain(templates)
@@ -2558,7 +2575,7 @@ fn layers_in_use(
 fn trim_cache(
     cache: &keel_layers::cache::LayerCache,
     limit: u64,
-    image: &image::ImageRecord,
+    image: &MachineImage,
     state: &State,
 ) -> Result<(keel_layers::cache::Eviction, usize)> {
     let in_use = layers_in_use(image, state)?;
@@ -2753,9 +2770,27 @@ fn load_image(directory: &Path, reference: &image::Reference) -> Result<Image> {
             file.display()
         );
     }
+    // cube's default image: its preparation layer, which `berth vm` builds
+    // before it gets here (debian.rs).
+    let prepared = match crate::debian::for_manifest(
+        image::Platform::native()?,
+        &record.manifest.digest,
+    ) {
+        Some(plan) => {
+            let diff_id = plan.diff_id()?;
+            let cache = keel_layers::cache::LayerCache::open(image::layer_dir(directory))?;
+            ensure!(
+                cache.get(&diff_id)?.is_some(),
+                "{reference}: its Debian preparation layer {diff_id} is not in the cache; {pull}"
+            );
+            Some(diff_id.to_string())
+        }
+        None => None,
+    };
     Ok(Image {
         reference: reference.to_string(),
         record,
+        prepared,
     })
 }
 
@@ -3224,36 +3259,11 @@ mod cache_tests {
         left
     }
 
-    fn runner_image(layers: &[u8]) -> image::ImageRecord {
-        let descriptor = image::Descriptor {
-            media_type: "m".into(),
-            digest: "sha256:00".into(),
-            size: 1,
-        };
-        image::ImageRecord {
-            version: 1,
+    fn runner_image(layers: &[u8]) -> MachineImage {
+        MachineImage {
             reference: "registry.test/o/n@sha256:00".into(),
-            registry: "registry.test".into(),
-            repository: "o/n".into(),
-            digest: "sha256:00".into(),
-            platform: "linux/amd64".into(),
-            manifest: descriptor.clone(),
-            config: descriptor.clone(),
-            env: Vec::new(),
-            layers: layers
-                .iter()
-                .map(|n| image::LayerRecord {
-                    diff_id: id(*n).to_string(),
-                    blob: descriptor.clone(),
-                    file: format!("layers/1/{}.erofs", id(*n)),
-                    erofs_bytes: 100,
-                    tar_bytes: None,
-                })
-                .collect(),
-            layer_format: 1,
-            mkfs: "/m".into(),
-            mkfs_version: "mkfs.erofs 1".into(),
-            resolved_at: 0,
+            manifest: "sha256:00".into(),
+            diff_ids: layers.iter().map(|n| id(*n).to_string()).collect(),
         }
     }
 

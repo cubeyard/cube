@@ -952,6 +952,7 @@ impl VmRunner {
                 "platform": self.image.record.platform,
                 "manifest": self.image.record.manifest.digest,
                 "layers": self.image.record.layers.len(),
+                "prepared": self.image.prepared,
             },
             "layerCache": cache,
             "templates": { "count": snapshot.templates.0, "bytes": snapshot.templates.1 },

@@ -33,6 +33,12 @@ fn diff_id(n: u8) -> DiffId {
 /// An image (manifest `sha256:m<n>`) whose layers are `layers`, pulled into
 /// `dir` as `berth image pull` leaves it: its record and layer files.
 pub(super) fn pull(dir: &Path, n: u8, layers: &[u8]) -> image::Reference {
+    pull_manifest(dir, n, layers, &format!("sha256:m{n}"))
+}
+
+/// The same, with the manifest digest given: cube's default image's, for
+/// the Debian preparation layer (debian.rs).
+fn pull_manifest(dir: &Path, n: u8, layers: &[u8], manifest: &str) -> image::Reference {
     let reference = image::Reference::parse(&format!(
         "registry.test/o/image{n}@{}",
         DiffId::from_bytes([0xa0 + n; 32])
@@ -60,7 +66,7 @@ pub(super) fn pull(dir: &Path, n: u8, layers: &[u8]) -> image::Reference {
         repository: reference.repository.clone(),
         digest: reference.digest.to_string(),
         platform: image::Platform::native().unwrap().to_string(),
-        manifest: descriptor(format!("sha256:m{n}")),
+        manifest: descriptor(manifest.to_owned()),
         config: descriptor("sha256:c".into()),
         env: vec![],
         layers: layers
@@ -764,5 +770,98 @@ fn only_the_agents_done_goes_on_to_keep_the_disk() {
         !publish_outcome(Some(Ok(Ok(AnswerKind::Guest(vec![])))))
             .unwrap_err()
             .completion_unknown
+    );
+}
+
+/// cube's default image: the runner refuses to start without its Debian
+/// preparation layer in the cache; with it, machines get it as the image's
+/// topmost layer, and a template whose layer list lacks it (built on the
+/// image before, or on another preparation) is refused as made on another
+/// image.
+#[tokio::test]
+async fn the_default_images_preparation_layer_is_part_of_the_image() {
+    let lab = Lab::new();
+    let platform = image::Platform::native().unwrap();
+    let plan = &crate::debian::plan().platforms[&platform.to_string()];
+    let image = pull_manifest(lab.path(), 1, &[1, 2], &plan.manifest);
+    let missing = load_image(lab.path(), &image).err().unwrap();
+    assert!(
+        format!("{missing:#}").contains("its Debian preparation layer"),
+        "{missing:#}"
+    );
+    let prepared = plan.diff_id().unwrap();
+    LayerCache::open(image::layer_dir(lab.path()))
+        .unwrap()
+        .publish(&prepared, |out| Ok(std::fs::write(out, vec![9u8; 4096])?))
+        .unwrap();
+    let runner = lab.runner(image.clone(), 16 << 30, plenty).await;
+    assert!(
+        runner
+            .describe()
+            .iter()
+            .any(|line| line.contains(&format!("prepared for cube by layer {prepared}"))),
+        "{:?}",
+        runner.describe()
+    );
+    create(&runner, USER, base(), false).await.unwrap();
+    {
+        let state = runner.state.lock().unwrap();
+        let ids = &state.machines[USER].record.image.as_ref().unwrap().diff_ids;
+        assert_eq!(
+            ids,
+            &[
+                diff_id(1).to_string(),
+                diff_id(2).to_string(),
+                prepared.to_string()
+            ]
+        );
+    }
+    // Topmost first, the preparation above the image's own.
+    let layers = runner.setup(USER).layers;
+    assert_eq!(
+        layers.iter().map(|l| l.partition).collect::<Vec<_>>(),
+        [3, 2, 1]
+    );
+    assert_eq!(
+        layers[0].source,
+        Some(proto::layer::Source::DiffId(prepared.to_string()))
+    );
+    // The cache keeps it whatever its limit.
+    drop(runner);
+    let runner = lab.runner(image.clone(), 0, plenty).await;
+    assert!(
+        LayerCache::open(image::layer_dir(lab.path()))
+            .unwrap()
+            .get(&prepared)
+            .unwrap()
+            .is_some()
+    );
+    published(&runner).await;
+    create(&runner, "00000000000000c2", from(BUILD), false)
+        .await
+        .unwrap();
+    drop(runner);
+    // The template's record as one built before the preparation existed:
+    // the image's own layers only.
+    let path = template::dir(lab.path()).join(format!("{BUILD}.json"));
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["image"]["diffIds"].as_array_mut().unwrap().pop();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o644);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let runner = lab.runner(image, 16 << 30, plenty).await;
+    let refused = create(&runner, "00000000000000c3", from(BUILD), false)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reason(refused.clone()),
+        (Code::FailedPrecondition, "template_image_changed".into())
+    );
+    assert!(
+        refused.message.contains("2 layers") && refused.message.contains("3 layers"),
+        "{}",
+        refused.message
     );
 }
