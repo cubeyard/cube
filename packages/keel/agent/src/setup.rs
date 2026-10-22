@@ -43,6 +43,13 @@ pub const STATE: &str = "/run/keel/rw/state";
 pub const NAMESPACE: &str = "/run/keel/workload.mnt";
 pub const SETUP: &str = "/run/keel/setup.json";
 const UNBOUND: &str = "/run/keel/unbound.json";
+/// The runner's CA as this boot's setup brought it, kept only when the
+/// runner binds its templates to that CA (`TEMPLATE_RUNNER_CA`): a template
+/// published in this boot may then keep it (template.rs).
+pub const BOUND_CA: &str = "/run/keel/template-ca.pem";
+/// `MachineSetup.capabilities`: the runner records its CA's fingerprint
+/// with every template it keeps and refuses the template under another CA.
+pub const TEMPLATE_RUNNER_CA: &str = "template.runner_ca";
 const LAYER_DISK: &str = "/dev/vdb";
 const RW_DISK: &str = "/dev/vdc";
 const MAX_LAYERS: u32 = 128;
@@ -825,6 +832,17 @@ pub fn apply(setup: &proto::MachineSetup) -> Result<Applied, Refusal> {
             ca: ca.as_deref(),
         },
     )?;
+    let bound = ca
+        .as_deref()
+        .filter(|_| setup.capabilities.iter().any(|c| c == TEMPLATE_RUNNER_CA));
+    match bound {
+        Some(ca) => crate::files::write_atomic(Path::new(BOUND_CA), ca.as_bytes(), 0o600),
+        None => match fs::remove_file(BOUND_CA) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        },
+    }
+    .map_err(|error| internal("setup", format!("{BOUND_CA}: {error}")))?;
     Ok(Applied {
         launch: Launch {
             workspace: PathBuf::from("/workspace"),
