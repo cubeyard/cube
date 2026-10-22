@@ -54,8 +54,8 @@ every boot:   pre-resume ─▶ .agents/resume ─▶ the agent opens
   with it; services it starts through systemd keep running.
 - Trust in the runner's CA beyond the system bundle (a Java keystore, a
   bundled JDK's own store) belongs in `.agents/resume`, read from
-  `/etc/cube/ca.pem`, never in setup, where it would reach the template and
-  fail its seal: see the skill
+  `/etc/cube/ca.pem`, never in setup, where it can reach the template (the
+  seal catches only plain copies): see the skill
   [`runner-ca-in-resume`](../.agents/skills/runner-ca-in-resume/SKILL.md).
 
 ## Watching a machine start
