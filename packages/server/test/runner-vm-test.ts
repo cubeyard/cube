@@ -42,7 +42,9 @@
  * template_delete (REMOVING, gone with its last machine).
  * CUBE_TEST_BERTH_JAVA=1 adds a real JDK: installed by a build machine's
  * setup (apt, then update-ca-certificates), published, and Java's own
- * HTTPS from a machine made from the template. CUBE_TEST_BERTH_FSCK names an
+ * HTTPS from a machine made from the template, both machines started with
+ * cubed's own public policy (`EgressPolicy.policyFor`). CUBE_TEST_KEEP=1
+ * keeps a failed run's directory. CUBE_TEST_BERTH_FSCK names an
  * fsck.erofs to check the layer with. And (B-9) `machine_diagnose`: one
  * bounded, redacted JSON document about a running, a paused and a stopped
  * machine (QEMU's path, version and argv as the process has them,
@@ -366,6 +368,7 @@ let runner = await start(firstArgs);
 const sessions: RunnerSession[] = [];
 /** V9's portal and the app's port, kept until the machine stops. */
 let v9: { target: DialPortal; port: number } | undefined;
+let passed = false;
 try {
   assert.match(runner.banner, /^qemu: \d+\.\d+\.\d+ .+ \(meets keel's floor; new machines get (pc-q35|virt)-\d+\.\d+\)$/m);
   // The image line, exactly as berth writes it: on cube's default image
@@ -1363,12 +1366,25 @@ sha256sum app/source.rs /etc/ssl/certs/java/cacerts | cut -d' ' -f1`);
       // so Java's keystore holds the runner's CA; the template is bound to
       // it and published, and Java's own HTTPS works in a machine made from it.
       if (env.CUBE_TEST_BERTH_JAVA === "1") {
+        // cubed's own policy for a thread without secrets (EgressPolicy.policyFor):
+        // public HTTP and HTTPS, the 15-minute lease; a start without one has no egress.
+        const javaPolicy = new EgressPolicy({ vms: { vm: () => null }, secrets: [] }).policyFor({});
+        assert.equal(javaPolicy.default, EgressPolicy_Default.ALLOW_PUBLIC_HTTP);
+        assert.deepEqual([javaPolicy.denyHosts, javaPolicy.rules], [[], []], "no credential rule, nothing widened");
+        const startJava = (ref: { owner: string; id: string }) =>
+          session.machine({ case: "machineStart", value: { ref, fence: fence10, boot: { documents, mac: "" }, policy: javaPolicy as never } });
+        // Both machines get it: apt and Java's HTTPS are refused by policy without it.
+        const publicEgress = async (ref: { owner: string; id: string }, key: string) => {
+          const reached = await sh10(workspace10(ref), key, "curl -s -o /dev/null -m 30 -w '%{http_code}' http://deb.debian.org/debian/dists/trixie/Release; echo; curl -s -o /dev/null -m 30 -w '%{http_code}' https://example.com/");
+          assert.equal(reached, "200\n200", `${key}: the Java leg's machine runs with cubed's public policy (deb.debian.org over HTTP, example.com over HTTPS)`);
+        };
         const javaRef = { owner: "thread-1", id: randomBytes(8).toString("hex") };
         const javaSize = { vcpus: 2, memoryMib: 2048, diskGib: 6 };
         await session.machine({ case: "machineCreate", value: { ref: javaRef, fence: fence10,
           spec: { source: { case: "base", value: true }, size: javaSize, build: true } } });
-        await session.machine({ case: "machineStart", value: { ref: javaRef, fence: fence10, boot: { documents, mac: "" } } });
+        await startJava(javaRef);
         await session.until(javaRef, machine => !!machine.status?.guest?.ready, 180000);
+        await publicEgress(javaRef, "v10-java-egress");
         const fingerprint = createHash("sha256").update(caDer).digest("hex").toUpperCase().match(/../g)!.join(":");
         const fetchJava = "public class Fetch { public static void main(String[] a) throws Exception { var c = java.net.http.HttpClient.newHttpClient(); "
           + "System.out.println(c.send(java.net.http.HttpRequest.newBuilder(java.net.URI.create(a[0])).build(), java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode()); } }";
@@ -1386,8 +1402,9 @@ ${javaCheck}`, 1500000);
         const javaUserRef = { owner: "thread-1", id: randomBytes(8).toString("hex") };
         await session.machine({ case: "machineCreate", value: { ref: javaUserRef, fence: fence10,
           spec: { source: { case: "templateId", value: javaRef.id }, size: javaSize } } });
-        await session.machine({ case: "machineStart", value: { ref: javaUserRef, fence: fence10, boot: { documents, mac: "" } } });
+        await startJava(javaUserRef);
         await session.until(javaUserRef, machine => !!machine.status?.guest?.ready, 180000);
+        await publicEgress(javaUserRef, "v10-java-user-egress");
         const javaSeen = await sh10(workspace10(javaUserRef), "v10-java-seen", javaCheck, 300000);
         assert.equal(javaSeen, "1\n200\n", "a machine from the template: Java's keystore has the runner's CA and its HTTPS works");
         await stopVia(session, javaUserRef, epoch);
@@ -1531,6 +1548,7 @@ ${javaCheck}`, 1500000);
   } else if (guest.ready) {
     note("V10 cache: NOT checked natively: CUBE_TEST_BERTH_IMAGE_B (another image pinned by digest) is unset");
   }
+  passed = true;
   console.log(`ok: berth vm over protocol 4 (${accel}): floor, image, CA, hello, create, start, guest channel (session, setup, ${guest.ready ? "ready, Workspace contract, agent restart, network V5, credentials V6-V8, portal V9, templates V10" : "not ready: image lacks tools"}), guest streams, fencing, diagnosis (B-9), stop, restart and crash interrupt, pinned machine type and image, retained disk, discard, delete`);
 } finally {
   await v9?.target.portal.close();
@@ -1538,5 +1556,7 @@ ${javaCheck}`, 1500000);
   await stop(runner.child);
   // Any QEMU this test's machines left.
   try { execFileSync("pkill", ["-KILL", "-f", directory], { stdio: "ignore" }); } catch { /* none left */ }
-  fs.rmSync(root, { recursive: true, force: true });
+  // CUBE_TEST_KEEP=1 keeps a failed run's root (berth's directory, logs, disks) for reading.
+  if (!passed && env.CUBE_TEST_KEEP === "1") console.error(`kept for reading: ${root}`);
+  else fs.rmSync(root, { recursive: true, force: true });
 }
