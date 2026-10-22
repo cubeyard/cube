@@ -95,6 +95,17 @@ try {
 # A stand-in for berth: \`version\`, and \`vm\` up to its banner (until SIGTERM).
 case "$1" in
 version) echo '{"protocolVersion":4,"softwareVersion":"0.1.0"}'; exit 0 ;;
+image)
+  # As berth's (served.rs): the default over a directory whose record names
+  # an image of its own is refused unless --change-image.
+  echo "image $*" >>"$STUB_LOG"
+  shift 2; d='' i='' c=''
+  while [ $# -gt 0 ]; do case "$1" in --dir) d=$2; shift 2 ;; --image) i=$2; shift 2 ;; --change-image) c=1; shift ;; *) shift ;; esac; done
+  own=$(sed -n 's/.*"reference":"\\([^"]*\\)".*/\\1/p' "$d/.berth/served.json" 2>/dev/null)
+  if [ "$i" = default ] && [ -z "$c" ] && [ -n "$own" ] && [ "$own" != default ]; then
+    echo "Error: $d serves $own, an image of its operator's own; without --image (or with --image default) berth would serve cube's default image instead" >&2; exit 1
+  fi
+  exit 0 ;;
 vm) shift ;;
 *) exit 2 ;;
 esac
@@ -204,6 +215,31 @@ exec ${berth} vm --dir ${dir}/state \\
   assert.equal(again.status, 2);
   assert.match(again.stderr, /refusing to overwrite .*start-b2-fix-berth\.sh/);
   assert.deepEqual(fs.readFileSync(start), before);
+
+  // Without --image: cube's default image, which berth prepares itself.
+  const withoutImage = (name: string) => args(name, "systemd").filter((a, i, all) => a !== "--image" && all[i - 1] !== "--image");
+  const plain = install(withoutImage("b2-default"));
+  assert.equal(plain.status, 0, plain.stdout + plain.stderr);
+  assert.match(plain.stdout, /the check pulls cube's default image \(Debian trixie\) and prepares it for cube/);
+  assert.match(lastCheck(), / --image default --accel /);
+  assert.match(fs.readFileSync(path.join(prefix, "bin/start-b2-default.sh"), "utf8"), /^ {2}--image default \\$/m);
+  // B1: over a runner directory that served an image of its own, leaving
+  // out --image is refused before anything is written; --image keeps it.
+  const ownDir = path.join(dir, "own-state");
+  write(path.join(ownDir, ".berth", "served.json"), `{"version":1,"reference":"${image}"}`);
+  const withOwnDir = (name: string) => withoutImage(name).map((a, i, all) => all[i - 1] === "--dir" ? ownDir : a);
+  const moved = install(withOwnDir("b2-moved"));
+  assert.equal(moved.status, 1, moved.stdout + moved.stderr);
+  assert.match(moved.stderr, new RegExp(`serves ${image.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, an image of its operator's own`));
+  assert.match(moved.stderr, /keeps its image: give --image <the reference it serves>, or move it to cube's default on purpose first .*image check --dir .* --change-image \(nothing was written\)/);
+  assert.ok(!fs.existsSync(path.join(prefix, "bin/start-b2-moved.sh")) && !fs.existsSync(path.join(units, "b2-moved.service")), "nothing written");
+  const kept = install([...withOwnDir("b2-kept"), "--image", image]);
+  assert.equal(kept.status, 0, kept.stdout + kept.stderr);
+  assert.match(fs.readFileSync(path.join(prefix, "bin/start-b2-kept.sh"), "utf8"), new RegExp(`--image ${image.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} `));
+
+  const unpinned = install([...withoutImage("b2-unpinned"), "--image", "debian:trixie"]);
+  assert.equal(unpinned.status, 1);
+  assert.match(unpinned.stderr, /--image must be default .* or pinned/);
 
   // launchd, with the image seeded from a berth directory that has it.
   const seed = path.join(dir, "seed");

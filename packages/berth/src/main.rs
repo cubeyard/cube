@@ -3,9 +3,11 @@
 //! host`, whose machines are directories on the host it runs on, unsandboxed,
 //! for developing and debugging runners. Key files hold secrets; stdout and
 //! stderr show only public identities and addresses.
+mod debian;
 mod host;
 mod image;
 mod serve;
+mod served;
 mod vm;
 
 use std::{
@@ -29,17 +31,26 @@ const DEFAULT_LAYER_CACHE_GIB: u64 = 16;
 const MAX_LAYER_CACHE_GIB: u64 = 1 << 20;
 
 const USAGE: &str = "usage:
-  berth vm --dir <directory> --qemu <qemu-system binary> --qemu-img <qemu-img binary> --keel <directory with vmlinuz and base.erofs> --mkfs-erofs <mkfs.erofs binary> --image <registry/repository@sha256:digest> [--layer-cache-gib 16] [--accel kvm|hvf|tcg] [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay [--relay-only]] [--listen <ip:port>] [--max-machines 8] [--labels k=v,...] [--suspend-disk-margin-gib <GiB>]
+  berth vm --dir <directory> --qemu <qemu-system binary> --qemu-img <qemu-img binary> --keel <directory with vmlinuz and base.erofs> --mkfs-erofs <mkfs.erofs binary> [--image default|<registry/repository@sha256:digest>] [--change-image] [--layer-cache-gib 16] [--accel kvm|hvf|tcg] [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay [--relay-only]] [--listen <ip:port>] [--max-machines 8] [--labels k=v,...] [--suspend-disk-margin-gib <GiB>]
       each machine is a keel guest under the QEMU given by path, which must meet keel's QEMU floor,
       built on the image, which berth pulls into <directory> before it listens if any of it is missing;
+      without --image (or with default) cube's default image, official Debian trixie pinned by digest, which berth
+      prepares for cube with a layer of pinned Debian packages (sudo, git, gh, curl, ca-certificates); any other image
+      is the operator's and must bring bash, sudo, flock, git, gh, curl and a CA bundle itself;
+      a directory that served an image of the operator's own keeps it: without --image berth refuses to start there
+      unless --change-image says to move it to the default (machines keep their layers; nothing is deleted);
       the layer cache keeps at most --layer-cache-gib (kept in .berth/vm.json) besides the layers machines use;
       machine_suspend is on only with --suspend-disk-margin-gib (no default): a machine is saved only while the disk
       keeps its memory and that many GiB besides
   berth host --dir <directory> [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay [--relay-only]] [--listen <ip:port>] [--python python3] [--max-machines 8] [--labels k=v,...]
       UNSANDBOXED: each machine is a subdirectory of <directory>; commands run as you, with your logins
-  berth image pull --dir <directory> --mkfs-erofs <mkfs.erofs binary> --image <registry/repository@sha256:digest>
+  berth image pull --dir <directory> --mkfs-erofs <mkfs.erofs binary> [--image default|<registry/repository@sha256:digest>]
       fetches a public image for this runner's platform, checks every blob, converts its layers into <directory>'s layer cache
+      (and for cube's default image builds its preparation layer there)
       (berth vm does this itself; by hand only while berth is stopped)
+  berth image check --dir <directory> [--image default|<registry/repository@sha256:digest>] [--change-image]
+      whether berth vm would start there with that image (an operator's own image is not left without --image);
+      with --change-image, records the move, so later starts need no flag (while berth is stopped)
   berth keygen --key <new-private-file>     a control key for cubed (prints its public key)
   berth version";
 
@@ -552,9 +563,19 @@ impl Stops {
     }
 }
 
-/// Pulls `reference` into `store` until it is done or SIGINT or SIGTERM
-/// stops it: then the pull is awaited until mkfs.erofs is reaped and its
-/// temporary files are gone, and it fails "cancelled".
+/// The image `--image` names, and the word for it as given: cube's default
+/// (`default`) without it or with `default`.
+fn image_option(options: &mut BTreeMap<String, String>) -> Result<(image::Reference, String)> {
+    match options.remove("--image").as_deref() {
+        None | Some("default") => Ok((debian::default_image(), "default".into())),
+        Some(text) => Ok((image::Reference::parse(text)?, text.to_owned())),
+    }
+}
+
+/// Pulls `reference` into `store`, and for cube's default image builds its
+/// Debian preparation layer (debian.rs), until it is done or SIGINT or
+/// SIGTERM stops it: then the pull is awaited until mkfs.erofs is reaped
+/// and its temporary files are gone, and it fails "cancelled".
 async fn pull_until_signal(
     store: &image::Store,
     mkfs: &Path,
@@ -573,12 +594,26 @@ async fn pull_until_signal(
         cancel.clone(),
     );
     pull.time_limits = time_limits;
+    let platform = pull.platform;
     let pull = async {
-        if only_what_is_missing {
+        let record = if only_what_is_missing {
             pull.ensure(reference).await
         } else {
             pull.run(reference).await
+        }?;
+        if let Some(plan) = debian::for_manifest(platform, &record.manifest.digest) {
+            debian::Prepare {
+                directory: store.directory(),
+                mkfs,
+                progress: &Stderr,
+                cancel: cancel.clone(),
+                time_limits,
+                free_space: &image::free_bytes,
+            }
+            .ensure(plan)
+            .await?;
         }
+        Ok(record)
     };
     tokio::pin!(pull);
     tokio::select! {
@@ -599,7 +634,15 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
     let mkfs = given_file(&mut options, "--mkfs-erofs")?;
     let keel = PathBuf::from(take(&mut options, "--keel")?);
     ensure!(keel.is_absolute(), "--keel must be an absolute path");
-    let image = image::Reference::parse(&take(&mut options, "--image")?)?;
+    let (image, given) = image_option(&mut options)?;
+    let change_image = options.remove("--change-image").is_some();
+    // Before anything is written or pulled: the image this directory
+    // served is not left without the operator's word (served.rs).
+    if let Some(dir) = options.get("--dir").map(PathBuf::from)
+        && dir.is_absolute()
+    {
+        served::check(&dir, &given, change_image, image::Platform::native()?)?;
+    }
     let accel = match options.remove("--accel") {
         Some(accel) => vm::Accel::parse(&accel)?,
         None => vm::Accel::native(),
@@ -663,6 +706,7 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
         floor,
     )
     .await?;
+    served::record(&directory, &given)?;
     let endpoint = bind_home(key, &home).await?;
     eprintln!(
         "berth {SOFTWARE_VERSION} vm (runner protocol {})",
@@ -690,7 +734,7 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
 async fn image_pull(mut options: BTreeMap<String, String>) -> Result<()> {
     use std::os::unix::{fs::DirBuilderExt, io::AsRawFd};
     let mkfs = given_file(&mut options, "--mkfs-erofs")?;
-    let reference = image::Reference::parse(&take(&mut options, "--image")?)?;
+    let (reference, _) = image_option(&mut options)?;
     let directory = PathBuf::from(take(&mut options, "--dir")?);
     ensure!(options.is_empty(), "unknown options\n{USAGE}");
     ensure!(directory.is_absolute(), "--dir must be an absolute path");
@@ -727,6 +771,38 @@ async fn image_pull(mut options: BTreeMap<String, String>) -> Result<()> {
     Ok(())
 }
 
+/// `berth image check`: whether `berth vm` would start in `--dir` with that
+/// `--image` (served.rs); with `--change-image`, the move recorded, under the
+/// directory's lock, so the next starts need no flag.
+fn image_check(mut options: BTreeMap<String, String>) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let (_, given) = image_option(&mut options)?;
+    let change = options.remove("--change-image").is_some();
+    let directory = PathBuf::from(take(&mut options, "--dir")?);
+    ensure!(options.is_empty(), "unknown options\n{USAGE}");
+    ensure!(directory.is_absolute(), "--dir must be an absolute path");
+    let platform = image::Platform::native()?;
+    served::check(&directory, &given, change, platform)?;
+    let control = directory.join(".berth");
+    if change && control.is_dir() {
+        let lock = File::create(control.join("lock"))?;
+        // SAFETY: flock on a descriptor this function owns.
+        ensure!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+            "berth runs in {}; record the move while it is stopped",
+            directory.display()
+        );
+        served::record(&directory, &given)?;
+        println!(
+            "{} serves {given} from its next start (recorded)",
+            directory.display()
+        );
+    } else {
+        println!("{} may serve {given}", directory.display());
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -738,8 +814,8 @@ async fn main() -> Result<()> {
     let mut options = BTreeMap::new();
     while let Some(key) = args.next() {
         ensure!(key.starts_with("--"), "{USAGE}");
-        // The one option without a value.
-        let value = if key == "--relay-only" {
+        // The options without a value.
+        let value = if key == "--relay-only" || key == "--change-image" {
             String::new()
         } else {
             args.next().context(USAGE)?
@@ -750,6 +826,7 @@ async fn main() -> Result<()> {
         "host" => host(options).await,
         "vm" => vm(options).await,
         "image pull" => image_pull(options).await,
+        "image check" => image_check(options),
         "keygen" => {
             let path = PathBuf::from(take(&mut options, "--key")?);
             ensure!(options.is_empty(), "unknown options\n{USAGE}");

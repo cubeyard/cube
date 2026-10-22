@@ -46,7 +46,7 @@ A `berth vm` on the cubed host itself, reached over loopback, is set up and
 enrolled by one cubed command, which can be run again at any time:
 
 ```sh
-cubed runners init-local --image <registry/repository@sha256:…> \
+cubed runners init-local [--image default|<registry/repository@sha256:…>] \
   [--home ~/.cube] [--listen 127.0.0.1:7779] [--node-id node-berth-<host>] [--max-machines 2] \
   [--berth PATH] [--keel DIR] [--qemu PATH] [--qemu-img PATH] [--mkfs-erofs PATH] [--state ~/.cube-host]
 ```
@@ -94,8 +94,73 @@ deleted or rebound. So:
 - **With a moved or new `--state`:** it enrolls the same runner there (the
   same key and peer).
 - **A retired runner** is not admitted again.
-- **`--image` is needed only the first time.** The image is the operator's
-  choice; cube publishes no default image yet.
+- **No `--image`: cube's default image.** That is official Debian trixie,
+  pinned by digest in berth (`packages/berth/debian/trixie.json`), and
+  `berth.env` says `CUBE_BERTH_IMAGE=default`. Official Debian lacks sudo,
+  git, gh, curl and a CA bundle, which a machine needs to become ready, so
+  berth prepares it before it first listens: it fetches the pinned Debian
+  packages (each checked by size and sha256; deb.debian.org first, then
+  snapshot.debian.org), unpacks them with what their maintainer scripts do
+  on a fresh install into one more layer, checks that layer against its
+  pinned sha256 and keeps it in the layer cache, above the image's own.
+  Machines and templates are made on the image with that layer; a
+  template made on another layer list is refused (`template_image_changed`).
+  berth says which image it serves as `Platform.image_id` (sha256 of the
+  manifest and every layer, its own included), and cubed's template key
+  holds it, so after a change cubed builds a new template rather than pick
+  one berth would refuse.
+  The packages: sudo, git, gh, curl and ca-certificates, without
+  Recommends. git over SSH is not available in a guest, whose egress is
+  HTTP and HTTPS only: use HTTPS remotes (cube's credential helper serves
+  them with `GH_TOKEN`).
+  See `packages/berth/src/debian.rs` for what is and is not reproduced.
+- **`--image <reference>` is your own image** (advanced). berth does not
+  prepare it: it must bring bash, sudo with `/etc/sudoers.d`, util-linux's
+  `flock`, git, gh, curl and a CA bundle, or the machine stays not ready
+  ("the image lacks …"). Once recorded, a run without `--image` keeps it,
+  with one exception below. If `berth.env` is lost while the runner is
+  enrolled, `init-local` asks for `--image` as it was instead of guessing.
+  Official Debian itself (`docker.io/library/debian@…`) is refused as
+  `--image`: it never gets ready, and the default is official Debian
+  trixie prepared.
+- **A runner directory keeps its image.** berth records what a directory
+  serves (`.berth/served.json`; for one an earlier berth served, the images
+  pulled into it). Without `--image` (or with `--image default`) it refuses
+  to start where that was an image of the operator's own, saying how to
+  keep it (`--image <that reference>`) or move it on purpose
+  (`--change-image` on `berth vm`, or once `berth image check --dir <dir>
+  --change-image` while it is stopped). Machines keep their layers; nothing
+  is deleted. Official Debian alone, which never got ready, is the one image
+  that moves to the default without the flag. `install-berth.sh` runs the
+  same check before it writes anything.
+- **Recovery of a runner an earlier cube set up with official Debian
+  alone.** Its machines never got ready. A run of `init-local` without
+  `--image` (the same command as an upgrade) moves its `berth.env` to
+  `CUBE_BERTH_IMAGE=default`, keeps the earlier file as
+  `berth.env.official-debian.<time>` and says so; after the service's
+  restart berth prepares the default image. It asks berth first (`berth
+  image check`) and changes nothing if berth would refuse the default there.
+  A machine's layers never change under its disk (overlayfs refuses an
+  upper over other lowers). Instead berth keeps, from a machine's creation
+  on, whether its guest was ever ready (`<id>/readiness.json`). A stopped
+  machine made on official Debian alone (any digest), not from a template
+  and not a build machine, that provably never got ready gets a new blank
+  disk on the default image when it next starts; its earlier disk is kept
+  untouched as `kept/<id>.<time>.rw.qcow2` with a note, and nothing is
+  copied from it. Provably, and only so: its layers are exactly that
+  official Debian image's own as its record in `images/` says; keel calls
+  a machine ready only with sudo, git, gh and curl in its root, which
+  official Debian lacks and nothing can add before it is ready. That holds
+  for machines an earlier berth made too. `readiness.json` only vetoes: a
+  machine it says was ready is never renewed, and its `false` proves
+  nothing (a failed write, or a run of an earlier berth after a rollback,
+  can leave it on a machine that was ready); a ready that cannot be
+  written removes the file. A kept disk or note never replaces another
+  (`.1`, … in the same second). A machine
+  berth cannot prove so is left as it was (refused as `image_changed`, or
+  started on its own layers) and gets a `not renewed` event saying so; the
+  operator decides. Nothing is deleted. An image of one's own that is not
+  official Debian is never moved.
 
 The runner is then started by its service (`brew services restart
 cubeyard/tap/cube-berth` under Homebrew, whose service assumes the default

@@ -141,7 +141,7 @@ class CubeBerth < Formula
       set -eu
       home="$HOME/.cube"
       if [ ! -f "$home/berth.json" ] || [ ! -f "$home/berth.env" ] || [ ! -f "$home/berth/.berth/vm.json" ]; then
-        echo "cube-berth: not set up yet: run cubed runners init-local --image <registry/repository@sha256:...>" >&2
+        echo "cube-berth: not set up yet: run cubed runners init-local" >&2
         sleep 60
         exit 78
       fi
@@ -176,8 +176,11 @@ class CubeBerth < Formula
   def caveats
     <<~EOS
       Set it up from the cube formula, once (later runs change nothing):
-        cubed runners init-local --image <registry/repository@sha256:...>
+        cubed runners init-local
         brew services restart cubeyard/tap/cube-berth
+      Thread machines run cube's default image, official Debian trixie pinned
+      by berth, which berth prepares for cube with pinned Debian packages
+      (sudo, git, gh, curl, ca-certificates) before it first listens.
       Its state (key, disks, layer cache) is ~/.cube/berth, with berth.json,
       berth.control.key and berth.env beside it in ~/.cube; uninstalling keeps
       them, and installing again uses them as they are.
@@ -285,9 +288,11 @@ class Cube < Formula
     <<~EOS
       Set up on this Mac (Apple Silicon), the same commands for a first
       install, an upgrade and an install after brew uninstall; init-local
-      changes nothing that is there, and only the first time needs --image
-      (the image every thread machine is built on, pinned by digest):
-        cubed runners init-local --image <registry/repository@sha256:...>
+      changes nothing that is there. Thread machines run cube's default
+      image, official Debian trixie, which berth prepares for cube itself
+      (--image <registry/repository@sha256:...> names your own instead, for
+      those who build one with sudo, git, gh, curl and a CA bundle):
+        cubed runners init-local
         brew services restart cubeyard/tap/cube-berth cubeyard/tap/cube
       ("restart" also starts them, and replaces a process brew uninstall left
       running.) Then open http://127.0.0.1:7777, connect a model under

@@ -98,8 +98,11 @@ export interface LocalBerthOptions {
   state: string;
   /** The local runner's directory (default `~/.cube`). */
   home: string;
-  /** The image every machine is built on, pinned by digest; needed the
-   * first time, then read from `berth.env`. */
+  /** The image every machine is built on: `default` (cube's default,
+   * official Debian trixie pinned by berth, which berth prepares for cube),
+   * else the operator's own, pinned by digest, which must bring cube's
+   * tools itself. Read from `berth.env` once it is recorded; `default` when
+   * nothing says otherwise. */
   image?: string;
   /** The loopback address berth listens on (default 127.0.0.1:7779). */
   listen?: string;
@@ -124,11 +127,30 @@ export interface LocalBerth {
   /** The admission, or null when berth could not be started or asked here (`runnerError`). */
   enrollment: Enrollment | null;
   runnerError: string | null;
+  /** berth.env named official Debian alone and now says `default`: the
+   * earlier file, kept beside it. */
+  recovered: string | null;
 }
 
 export const DEFAULT_LOCAL_BERTH_LISTEN = "127.0.0.1:7779";
 export const DEFAULT_LOCAL_BERTH_MACHINES = 2;
 const PINNED_IMAGE = /^[A-Za-z0-9._/:-]+@sha256:[0-9a-f]{64}$/;
+/** berth's own default image (berth `--image default`, packages/berth/debian/trixie.json). */
+export const DEFAULT_LOCAL_BERTH_IMAGE = "default";
+const imageAccepted = (image: string) => image === DEFAULT_LOCAL_BERTH_IMAGE || PINNED_IMAGE.test(image);
+/** Official Debian (any tag), pinned. It has no sudo, git, gh, curl or CA
+ * bundle, so keel never calls a machine on it ready: as an image of one's
+ * own it cannot work, and berth's default is official Debian trixie with
+ * what cube needs added. */
+const OFFICIAL_DEBIAN = /^(?:docker\.io\/)?(?:library\/)?debian(?::[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$/;
+export function isOfficialDebian(image: string): boolean { return OFFICIAL_DEBIAN.test(image); }
+
+/** The image as people read it. */
+export function describeBerthImage(image: string): string {
+  return image === DEFAULT_LOCAL_BERTH_IMAGE
+    ? "default (official Debian trixie, pinned by berth, which adds sudo, git, gh, curl and ca-certificates from pinned Debian packages)"
+    : `${image} (your own: it must bring bash, sudo, flock, git, gh, curl and a CA bundle, or no machine becomes ready)`;
+}
 /** berth keeps `<dir>/<16-hex machine id>/qmp.sock` within 100 bytes. */
 const MAX_DIR_BYTES = 100 - 26;
 
@@ -152,8 +174,8 @@ export function readBerthSettings(text: string): { image: string; maxMachines: n
   const raw = value("CUBE_BERTH_MAX_MACHINES") ?? "";
   const listen = value("CUBE_BERTH_LISTEN") ?? "";
   const maxMachines = Number(raw);
-  if (!PINNED_IMAGE.test(image) || !/^[1-9]\d?$/.test(raw) || maxMachines > 64 || !loopbackListen(listen)) {
-    throw new Error("is not a berth.env of cubed's (CUBE_BERTH_IMAGE=<registry/repository@sha256:…>, CUBE_BERTH_MAX_MACHINES=1…64, CUBE_BERTH_LISTEN=127.x.x.x:<port>)");
+  if (!imageAccepted(image) || !/^[1-9]\d?$/.test(raw) || maxMachines > 64 || !loopbackListen(listen)) {
+    throw new Error("is not a berth.env of cubed's (CUBE_BERTH_IMAGE=default or <registry/repository@sha256:…>, CUBE_BERTH_MAX_MACHINES=1…64, CUBE_BERTH_LISTEN=127.x.x.x:<port>)");
   }
   return { image, maxMachines, listen };
 }
@@ -240,10 +262,22 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   const berthHome = exists(vmHome) ? JSON.parse(fs.readFileSync(vmHome, "utf8")) as { nodeId?: string; allowedPeer?: string; listen?: string | null } : null;
   const peer = exists(files.controlKey) ? controlPeer(files.controlKey) : null;
 
-  if (options.image !== undefined && !PINNED_IMAGE.test(options.image)) throw new Error("--image must be pinned: <registry/repository>@sha256:<64 hex>");
-  if (recorded && options.image !== undefined && options.image !== recorded.image) throw conflict(`${files.settings} names the image ${recorded.image}`);
-  const image = options.image ?? recorded?.image;
-  if (!image) throw new Error("--image <registry/repository@sha256:…> is needed the first time (until a run gets berth started): the image every thread machine is built on");
+  if (options.image !== undefined && !imageAccepted(options.image)) {
+    throw new Error("--image must be default (cube's default image; the same as leaving it out) or your own image pinned: <registry/repository>@sha256:<64 hex>");
+  }
+  if (options.image !== undefined && isOfficialDebian(options.image)) {
+    throw new Error(`--image ${options.image} is official Debian alone, which lacks sudo, git, gh, curl and a CA bundle, so no thread machine would get ready: leave out --image (cube's default is official Debian trixie, which berth prepares for cube)`);
+  }
+  // Recovery: a berth.env an earlier cube wrote for official Debian alone
+  // (its machines never got ready) moves to the default, without --image or
+  // with --image default alike. Decided here, done only after every other
+  // check below has passed (and berth agreed), so a refused run changes
+  // nothing.
+  const recovering = recorded !== null && (options.image === undefined || options.image === DEFAULT_LOCAL_BERTH_IMAGE)
+    && isOfficialDebian(recorded.image);
+  const recordedImage = recovering ? DEFAULT_LOCAL_BERTH_IMAGE : recorded?.image;
+  if (recorded && options.image !== undefined && options.image !== recordedImage) throw conflict(`${files.settings} names the image ${recorded.image}`);
+  const image = options.image ?? recordedImage ?? DEFAULT_LOCAL_BERTH_IMAGE;
   if (options.maxMachines !== undefined && (!Number.isInteger(options.maxMachines) || options.maxMachines < 1 || options.maxMachines > 64)) {
     throw new Error("--max-machines must be 1 through 64");
   }
@@ -282,7 +316,29 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   const dir = physical(files.dir);
   if (Buffer.byteLength(dir) > MAX_DIR_BYTES) throw new Error(`${dir} is too long: berth needs <dir>/<machine id>/qmp.sock within 100 bytes (choose a shorter --home)`);
 
-  const result: LocalBerth = { home, files, nodeId, address: listen, image, maxMachines, already: false, enrollment: null, runnerError: null };
+  let recovered: string | null = null;
+  if (recovering && recorded) {
+    // berth's word first: it refuses the default where the directory also
+    // served an image of the operator's own (served.rs). Then nothing moves.
+    const berth = program(options.berth, "CUBE_BERTH", "--berth", ["berth"]);
+    try {
+      await run(berth, ["image", "check", "--dir", files.dir, "--image", DEFAULT_LOCAL_BERTH_IMAGE], { encoding: "utf8", timeout: 10000 });
+    } catch (error) {
+      const said = String((error as { stderr?: string }).stderr ?? (error as Error).message).trim();
+      throw new Error(`${files.settings} names ${recorded.image}, official Debian alone, but berth would not serve cube's default image in ${files.dir}: ${said}. Nothing was changed`);
+    }
+    const kept = `${files.settings}.official-debian.${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    fs.copyFileSync(files.settings, kept, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(kept, 0o600);
+    const temporary = `${files.settings}.tmp-${process.pid}`;
+    fs.writeFileSync(temporary, berthSettingsText(DEFAULT_LOCAL_BERTH_IMAGE, recorded.maxMachines, recorded.listen), { mode: 0o600, flag: "wx" });
+    fs.renameSync(temporary, files.settings);
+    log(`${files.settings} named ${recorded.image}, official Debian alone, on which no thread machine gets ready: it now names cube's default image (official Debian trixie, prepared by berth); the earlier file is ${kept}`);
+    recorded = { ...recorded, image: DEFAULT_LOCAL_BERTH_IMAGE };
+    recovered = kept;
+  }
+
+  const result: LocalBerth = { home, files, nodeId, address: listen, image, maxMachines, already: false, enrollment: null, runnerError: null, recovered };
 
   // Enrolled in this state already: nothing is left to do.
   const registry = new Registry(path.join(state, "registry.sqlite"));
@@ -297,11 +353,16 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
       }
       if (!berthHome) throw conflict(`runner ${nodeId} is enrolled in ${state}, but its directory ${files.dir} is gone`);
       if (!recorded) {
-        // Only the service's settings are missing: written again, nothing else.
+        // Only the service's settings are missing: written again, nothing
+        // else. The image they named is not known here, so it is never
+        // guessed: a runner on its own image must not move to the default.
+        if (options.image === undefined) {
+          throw new Error(`${files.settings} is gone, and runner ${nodeId} is enrolled: give --image as it was (default, or your own image's pinned reference) to write it again`);
+        }
         fs.writeFileSync(files.settings, berthSettingsText(image, maxMachines, listen), { mode: 0o600, flag: "wx" });
         log(`wrote ${files.settings}`);
       }
-      result.already = recorded !== null;
+      result.already = recorded !== null && recovered === null;
       return result;
     }
   } finally { registry.close(); }
@@ -334,7 +395,7 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   // listens: until then a run may give another --image, --max-machines or
   // --listen, and the service does not start.
 
-  log(berthHome ? `starting berth vm in ${files.dir} to enroll it` : `starting berth vm in ${files.dir} for the first time: it makes its key and pulls ${image}`);
+  log(berthHome ? `starting berth vm in ${files.dir} to enroll it` : `starting berth vm in ${files.dir} for the first time: it makes its key and pulls ${image === DEFAULT_LOCAL_BERTH_IMAGE ? "cube's default image (Debian trixie), then prepares it for cube" : image}`);
   const child = spawn(berth, ["vm", "--dir", files.dir, "--qemu", qemu, "--qemu-img", qemuImg, "--keel", keel, "--mkfs-erofs", mkfs,
     "--image", image, "--max-machines", String(maxMachines), "--allow-peer", allowPeer, "--node-id", nodeId, "--network", "loopback", "--listen", listen],
   { stdio: ["ignore", "ignore", "pipe"] });

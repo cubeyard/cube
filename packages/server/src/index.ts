@@ -44,7 +44,7 @@ import { Artifacts } from "./artifact-service.ts";
 import { ARTIFACT_GUIDE, artifactTools } from "./artifact-tools.ts";
 import { githubPulls, type GithubPulls } from "./github-pulls.ts";
 import { Portal, portalSettings, type PortalSettings } from "./portal.ts";
-import { DEFAULT_LOCAL_BERTH_LISTEN, DEFAULT_LOCAL_BERTH_MACHINES, enrollRunner, initLocalBerth } from "./runner-enroll.ts";
+import { DEFAULT_LOCAL_BERTH_LISTEN, DEFAULT_LOCAL_BERTH_MACHINES, describeBerthImage, enrollRunner, initLocalBerth } from "./runner-enroll.ts";
 
 const CUBED_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 /** The release's version (its launcher exports CUBED_VERSION=vX.Y.Z); null
@@ -56,7 +56,7 @@ function releaseVersion(): string | null {
 const HELP = `usage: cubed [options]
        cubed runners status [--state <directory>]
        cubed runners enroll --config <runner.json> [--state <directory>]
-       cubed runners init-local [--image <registry/repository@sha256:digest>] [--home <directory>]
+       cubed runners init-local [--home <directory>] [--image default|<registry/repository@sha256:digest>]
              [--listen <127.0.0.1:port>] [--node-id <node-id>] [--max-machines N] [--berth <path>]
              [--keel <directory>] [--qemu <path>] [--qemu-img <path>] [--mkfs-erofs <path>] [--state <directory>]
 
@@ -80,7 +80,10 @@ runners init-local sets up a berth vm on this host and enrolls it: cubed's
 control key, berth's directory, berth.env (the image and the machines at once
 its service starts it with) and berth.json under <home> (default ~/.cube),
 loopback at --listen (default ${DEFAULT_LOCAL_BERTH_LISTEN}), ${DEFAULT_LOCAL_BERTH_MACHINES} machines at once unless
---max-machines says. --image is needed the first time. berth, QEMU, qemu-img,
+--max-machines says. Thread machines run cube's default image, official Debian
+trixie pinned by berth, which berth prepares for cube itself (sudo, git, gh,
+curl, ca-certificates from pinned Debian packages); --image names your own
+instead, pinned by digest, which must bring those tools. berth, QEMU, qemu-img,
 mkfs.erofs and keel come from the options, else CUBE_BERTH, CUBE_BERTH_QEMU,
 CUBE_BERTH_QEMU_IMG, CUBE_BERTH_MKFS_EROFS and CUBE_BERTH_KEEL (Homebrew sets
 them). Run it again at any time (after a reinstall too): it creates only what
@@ -1065,7 +1068,13 @@ async function runnersInitLocal(state: string, options: NonNullable<CubedCli["lo
   console.log(`local berth vm ${local.nodeId}`);
   console.log(`  home:    ${local.home} (berth/, berth.json, berth.control.key, berth.env)`);
   console.log(`  listens: ${local.address} (loopback)`);
-  console.log(`  image:   ${local.image}, ${local.maxMachines} machine${local.maxMachines === 1 ? "" : "s"} at once`);
+  console.log(`  image:   ${describeBerthImage(local.image)}`);
+  console.log(`  slots:   ${local.maxMachines} machine${local.maxMachines === 1 ? "" : "s"} at once`);
+  if (local.recovered) {
+    console.log(`recovered: berth.env named official Debian alone; it now names cube's default image (the earlier file is ${local.recovered}).`
+      + " New threads get ready. A machine on official Debian that provably never got ready gets a new blank disk on its next start (the earlier one is kept under berth/kept);"
+      + " one berth cannot prove never ready is left as it was and says so in its events.log. Nothing was deleted.");
+  }
   if (local.already) {
     console.log(`already set up and enrolled in ${state}; nothing changed`);
     console.log(`next: ${service}`);

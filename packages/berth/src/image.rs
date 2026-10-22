@@ -376,13 +376,22 @@ impl Store {
         for item in fs::read_dir(&images)? {
             let item = item?;
             if item.file_name().to_string_lossy().starts_with(".tmp-") {
-                fs::remove_file(item.path())?;
+                // A directory is a Debian preparation's (debian.rs).
+                if item.file_type()?.is_dir() {
+                    fs::remove_dir_all(item.path())?;
+                } else {
+                    fs::remove_file(item.path())?;
+                }
             }
         }
         Ok(Self {
             directory: directory.to_owned(),
             cache,
         })
+    }
+
+    pub fn directory(&self) -> &Path {
+        &self.directory
     }
 
     fn images(&self) -> PathBuf {
@@ -525,7 +534,7 @@ struct Registry {
     cancel: Arc<AtomicBool>,
 }
 
-fn client(https_only: bool) -> Result<reqwest::Client> {
+pub(crate) fn client(https_only: bool) -> Result<reqwest::Client> {
     // berth links ring for Iroh; reqwest is built without a provider of its
     // own. Installing it twice is harmless.
     let _ = rustls::crypto::ring::default_provider().install_default();

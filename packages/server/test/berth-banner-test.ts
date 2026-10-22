@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { bannerMachines } from "./berth-banner.ts";
+import { PREPARED_PACKAGES, bannerImage, bannerMachines } from "./berth-banner.ts";
 
 // berth's format string, from its source.
 const source = fs.readFileSync(path.resolve(import.meta.dirname, "../../berth/src/vm/mod.rs"), "utf8");
@@ -39,4 +39,29 @@ assert.throws(() => bannerMachines("machines: 1 (1 interrupted, 0 suspended; at 
 assert.throws(() => bannerMachines("machines: one (1 interrupted, 0 suspended; at most 8 at once, a suspended one holding none)\n"), /not berth's/);
 assert.throws(() => bannerMachines("waiting for cubed\n"), /0 machines: lines/);
 assert.throws(() => bannerMachines(`${render(1, 1, 0, 8)}\n${render(1, 1, 0, 8)}\n`), /2 machines: lines/);
-console.log("ok: berth's machines: banner line read exactly (berth's own format string; the counts after a restart; the pre-P7-4 line refused)");
+// The image: line (#231): berth's format strings and package list, then
+// the plain line, the prepared one, and what is refused.
+const imageFormats = [...source.matchAll(/"(image: \{\} \([^"]*)"/g)].map(match => match[1]);
+assert.deepEqual(imageFormats, ["image: {} ({}, {} layers, manifest {}){}"], "berth writes one image summary line, in this format");
+assert.ok(source.includes('"; prepared for cube by layer {diff_id} ({})"'), "berth's preparation suffix, in this format");
+const plan = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, "../../berth/debian/trixie.json"), "utf8")) as { requested: string[] };
+assert.equal(plan.requested.join(", "), PREPARED_PACKAGES, "the suffix names the plan's packages as berth joins them");
+const manifest = `sha256:${"a".repeat(64)}`;
+const layer = `sha256:${"b".repeat(64)}`;
+const plain = `image: ghcr.io/example/guest@sha256:${"c".repeat(64)} (linux/amd64, 3 layers, manifest ${manifest})`;
+const prepared = `image: docker.io/library/debian@sha256:${"d".repeat(64)} (linux/arm64, 1 layers, manifest ${manifest}); prepared for cube by layer ${layer} (${PREPARED_PACKAGES})`;
+const around = (line: string) => `berth 0.1.0 vm\nimage: x is in /d\n${line}\nwaiting for cubed`;
+assert.deepEqual(bannerImage(around(plain)), { reference: `ghcr.io/example/guest@sha256:${"c".repeat(64)}`, platform: "linux/amd64", layers: 3, manifest, prepared: null });
+assert.deepEqual(bannerImage(around(prepared)), { reference: `docker.io/library/debian@sha256:${"d".repeat(64)}`, platform: "linux/arm64", layers: 1, manifest, prepared: layer });
+for (const [why, line] of [
+  ["a manifest that is not a sha256", plain.replace(manifest, "sha256:abc")],
+  ["another suffix", `${plain}; something else`],
+  ["the suffix with other packages", prepared.replace(PREPARED_PACKAGES, "sudo, git")],
+  ["the suffix with a layer that is not a sha256", prepared.replace(layer, "sha256:xyz")],
+  ["text after the suffix", `${prepared} more`],
+  ["another platform", plain.replace("linux/amd64", "linux/riscv64")],
+] as const) assert.throws(() => bannerImage(around(line)), /not berth's/, why);
+assert.throws(() => bannerImage("waiting for cubed\n"), /0 image summary lines/);
+assert.throws(() => bannerImage(`${plain}\n${prepared}\n`), /2 image summary lines/);
+
+console.log("ok: berth's machines: and image: banner lines read exactly (berth's own format strings; the counts after a restart; the pre-P7-4 line refused; the image line plain and with the preparation suffix, any other suffix refused)");

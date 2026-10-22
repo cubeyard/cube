@@ -4,7 +4,9 @@
 //!
 //! ```text
 //! machine.json   the journal (record.rs); the pinned machine type
-//! rw.qcow2       the writable disk (vdc), created once, never replaced
+//! readiness.json whether its guest was ever ready, from creation on (readiness.rs)
+//! rw.qcow2       the writable disk (vdc), created once; replaced only by a
+//!                renewal (`renew_never_ready`), the earlier one kept in kept/
 //! layers.vmdk    the layer disk (vdb, read-only) with layers.head/.tail
 //! ctl.sock       cube.0, the guest channel (spoken from masterplan B-2 on)
 //! (no socket)    virtio-net: QEMU inherits one end of a socket pair (B-4)
@@ -81,6 +83,7 @@ mod presence;
 #[cfg(test)]
 mod publish_tests;
 mod qemu;
+mod readiness;
 mod record;
 mod report;
 mod suspend;
@@ -196,13 +199,18 @@ pub struct VmOptions {
     pub suspend_disk_margin_gib: Option<u64>,
 }
 
-/// The runner's image, as `berth image pull` recorded it.
+/// The runner's image, as `berth image pull` recorded it, and above its
+/// layers the Debian preparation layer when it is cube's default image
+/// (debian.rs).
 struct Image {
     reference: String,
     record: image::ImageRecord,
+    prepared: Option<String>,
 }
 
 impl Image {
+    /// What machines are made from: the image's layers, bottom first, then
+    /// the preparation layer. A changed preparation is a changed image.
     fn machine_image(&self) -> MachineImage {
         MachineImage {
             reference: self.reference.clone(),
@@ -212,6 +220,7 @@ impl Image {
                 .layers
                 .iter()
                 .map(|l| l.diff_id.clone())
+                .chain(self.prepared.clone())
                 .collect(),
         }
     }
@@ -584,7 +593,7 @@ impl VmRunner {
     /// removed when a machine's layers cannot be read.
     fn evict(&self, state: &State) {
         let limit = self.options.layer_cache_bytes;
-        match trim_cache(&self.cache, limit, &self.image.record, state) {
+        match trim_cache(&self.cache, limit, &self.image.machine_image(), state) {
             Ok((eviction, _))
                 if eviction.removed.is_empty() && eviction.remaining_bytes <= limit => {}
             Ok((eviction, in_use)) => {
@@ -640,11 +649,18 @@ impl VmRunner {
                 self.keel.base_sha256
             ),
             format!(
-                "image: {} ({}, {} layers, manifest {})",
+                "image: {} ({}, {} layers, manifest {}){}",
                 self.image.reference,
                 self.image.record.platform,
                 self.image.record.layers.len(),
-                self.image.record.manifest.digest
+                self.image.record.manifest.digest,
+                match &self.image.prepared {
+                    Some(diff_id) => format!(
+                        "; prepared for cube by layer {diff_id} ({})",
+                        crate::debian::plan().requested.join(", ")
+                    ),
+                    None => String::new(),
+                }
             ),
             format!(
                 "layer cache: {} ({} bytes in {} layers; limit {} GiB besides the layers machines use), mkfs.erofs {} ({})",
@@ -726,6 +742,7 @@ impl VmRunner {
                 base_image_sha256: self.keel.base_sha256.clone(),
                 base_image_name: "keel".into(),
                 host_name: host_name(),
+                image_id: image_id(&self.image.machine_image()),
             }),
             limits: Some(proto::Limits {
                 max_vcpus: MAX_VCPUS.min(host_cpus.max(1)),
@@ -901,6 +918,10 @@ impl VmRunner {
         if !this_boot {
             return;
         }
+        // The first ready: kept on disk for good (readiness.rs).
+        if info.ready && !entry.info.as_ref().is_some_and(|i| i.ready) {
+            record_ready(&self.machine_dir(id));
+        }
         entry.info = Some(info);
         state.version += 1;
         let version = state.version;
@@ -953,21 +974,21 @@ impl VmRunner {
         id: &str,
         template: Option<&template::TemplateRecord>,
     ) -> Result<MachineImage> {
-        let mut layers: Vec<keel_layers::disk::Layer> = self
-            .image
-            .record
-            .layers
+        let image = self.image.machine_image();
+        let mut layers: Vec<keel_layers::disk::Layer> = image
+            .diff_ids
             .iter()
-            .map(|layer| keel_layers::disk::Layer {
-                path: self.options.directory.join(&layer.file),
-                name: layer
-                    .diff_id
-                    .trim_start_matches("sha256:")
-                    .chars()
-                    .take(29)
-                    .collect(),
+            .map(|diff_id| {
+                Ok(keel_layers::disk::Layer {
+                    path: self.cache.path(&diff_id.parse()?),
+                    name: diff_id
+                        .trim_start_matches("sha256:")
+                        .chars()
+                        .take(29)
+                        .collect(),
+                })
             })
-            .collect();
+            .collect::<Result<_>>()?;
         if let Some(template) = template {
             // The topmost partition, as `setup_layers` names it.
             layers.push(keel_layers::disk::Layer {
@@ -976,7 +997,7 @@ impl VmRunner {
             });
         }
         keel_layers::disk::write(&self.machine_dir(id), &layers)?;
-        Ok(self.image.machine_image())
+        Ok(image)
     }
 
     /// Tells every watch about a template (and the runner, whose summaries
@@ -1246,6 +1267,7 @@ impl VmRunner {
             qemu::create_template_disk(&temporary, size.disk_gib).map_err(internal)?;
             std::fs::rename(&temporary, &vdd).map_err(internal)?;
         }
+        readiness::begin(&dir).map_err(internal)?;
         let image = self
             .write_layers(&reference.id, template.as_ref())
             .map_err(internal)?;
@@ -1332,18 +1354,163 @@ impl VmRunner {
                 "the template is deleted; it goes when the last machine made from it does",
             ));
         }
-        let runner = &self.image.record.manifest.digest;
-        if &record.image.manifest != runner {
+        // The whole layer list, not only the manifest: a template built on
+        // another preparation of the same image lies on other files.
+        let runner = self.image.machine_image();
+        if record.image.manifest != runner.manifest || record.image.diff_ids != runner.diff_ids {
             return Err(refuse(
                 Code::FailedPrecondition,
                 "template_image_changed",
                 &format!(
-                    "the template was built on {} ({}); this runner serves {} ({runner})",
-                    record.image.reference, record.image.manifest, self.image.reference
+                    "the template was built on {} ({}, {} layers); this runner serves {} ({}, {} layers)",
+                    record.image.reference,
+                    record.image.manifest,
+                    record.image.diff_ids.len(),
+                    self.image.reference,
+                    runner.manifest,
+                    runner.diff_ids.len()
                 ),
             ));
         }
         Ok(record.clone())
+    }
+
+    /// Before a start, under `ops`: a machine [`renews_disk`] says may move
+    /// gets a new blank writable disk on the runner's image; its old disk is
+    /// kept as `DIRECTORY/kept/<id>.<time>.rw.qcow2` beside a note of the
+    /// image it was made on, and nothing is deleted. Anything else is left
+    /// to the start, which refuses a machine on another image as before.
+    async fn renew_never_ready(&self, request: &proto::MachineStart) -> Answer<()> {
+        let runner = self.image.machine_image();
+        let (id, disk_gib) = {
+            // Read only: the start proper fences, and refuses what this
+            // leaves alone (another owner, a stale epoch, a publication).
+            let state = self.state.lock().unwrap();
+            if Self::not_publishing(&state, request.r#ref.as_ref()).is_err() {
+                return Ok(());
+            }
+            let Some(reference) = request.r#ref.as_ref() else {
+                return Ok(());
+            };
+            let Some(entry) = state.machines.get(&reference.id) else {
+                return Ok(());
+            };
+            let epoch = request.fence.as_ref().map_or(0, |fence| fence.epoch);
+            if entry.record.owner != reference.owner || epoch < entry.record.fence_epoch {
+                return Ok(());
+            }
+            let dir = self.machine_dir(&entry.record.id);
+            let pulled = entry
+                .record
+                .image
+                .as_ref()
+                .and_then(|image| pulled_layers(&self.options.directory, image));
+            let ever_ready = readiness::read(&dir);
+            if !renews_disk(
+                &entry.record,
+                ever_ready,
+                pulled.as_deref(),
+                &runner,
+                self.image.prepared.is_some(),
+            ) {
+                // An official-Debian machine on other layers than the
+                // runner's whose layers berth cannot match to that image's
+                // record: not provably never ready, so it stays as it was;
+                // the operator decides.
+                if let Some(image) = &entry.record.image
+                    && ever_ready != Some(true)
+                    && entry.record.template.is_none()
+                    && crate::served::is_official_debian(&image.reference)
+                    && pulled.as_deref() != Some(image.diff_ids.as_slice())
+                    && (image.manifest != runner.manifest || image.diff_ids != runner.diff_ids)
+                    && self.image.prepared.is_some()
+                {
+                    event(
+                        &dir,
+                        "not renewed",
+                        "a machine on official Debian whose layers are not exactly that image's own (its record in images/): \
+                         not provably never ready, so it is left as it was (archive its thread or delete the machine by hand)",
+                    );
+                }
+                return Ok(());
+            }
+            (entry.record.id.clone(), entry.record.size.disk_gib)
+        };
+        let dir = self.machine_dir(&id);
+        let fresh = dir.join("rw.qcow2.renew");
+        let _ = std::fs::remove_file(&fresh);
+        qemu::create_disk(&self.options.qemu_img, &fresh, disk_gib)
+            .await
+            .map_err(internal)?;
+        let mut state = self.state.lock().unwrap();
+        let Some(entry) = state.machines.get_mut(&id) else {
+            let _ = std::fs::remove_file(&fresh);
+            return Ok(());
+        };
+        let before = entry.record.image.clone();
+        let kept_dir = self.options.directory.join("kept");
+        std::fs::create_dir_all(&kept_dir).map_err(internal)?;
+        // Never over an earlier kept disk or note: a name of its own
+        // (a retry in the same second gets `.1`, …), the note created
+        // exclusively, the disk linked (which refuses an existing target)
+        // and only then unlinked from the machine.
+        let stamp = Timestamp::now().seconds;
+        let note = serde_json::to_vec_pretty(&serde_json::json!({
+            "machine": id,
+            "owner": entry.record.owner,
+            "image": before,
+            "why": "never ready on official Debian alone; the machine got a new blank disk on cube's default image",
+        }))
+        .map_err(internal)?;
+        let mut kept = PathBuf::new();
+        for n in 0u32.. {
+            let name = if n == 0 {
+                format!("{id}.{stamp}")
+            } else {
+                format!("{id}.{stamp}.{n}")
+            };
+            let disk = kept_dir.join(format!("{name}.rw.qcow2"));
+            if disk.exists() {
+                continue;
+            }
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(kept_dir.join(format!("{name}.json")))
+            {
+                Ok(mut file) => {
+                    file.write_all(&note).map_err(internal)?;
+                    kept = disk;
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(internal(error)),
+            }
+        }
+        // A renewal cut short after the earlier disk was moved: it is kept.
+        if dir.join(qemu::RW_DISK).exists() {
+            std::fs::hard_link(dir.join(qemu::RW_DISK), &kept).map_err(internal)?;
+            std::fs::remove_file(dir.join(qemu::RW_DISK)).map_err(internal)?;
+        }
+        std::fs::rename(&fresh, dir.join(qemu::RW_DISK)).map_err(internal)?;
+        let image = self.write_layers(&id, None).map_err(internal)?;
+        // A blank disk: tracked from here on, as a new machine is.
+        readiness::begin(&dir).map_err(internal)?;
+        let entry = state.machines.get_mut(&id).unwrap();
+        entry.record.image = Some(image);
+        let record = entry.record.clone();
+        record::write_json(&dir.join(record::RECORD), &record).map_err(internal)?;
+        event(
+            &dir,
+            "renewed",
+            &format!(
+                "never ready on {}: a new blank disk on {}; the earlier disk is kept as {}",
+                before.map(|i| i.reference).unwrap_or_default(),
+                runner.reference,
+                kept.display()
+            ),
+        );
+        Ok(())
     }
 
     /// `template_publish` (masterplan B-8): the build machine's agent writes
@@ -1670,6 +1837,7 @@ impl VmRunner {
     }
 
     async fn start(self: &Arc<Self>, request: proto::MachineStart) -> Answer<proto::Machine> {
+        self.renew_never_ready(&request).await?;
         let documents = boot_documents(request.boot.as_ref())?;
         let policy = policy::Policy::from_proto(request.policy.as_ref())?;
         let (id, record, restore) = {
@@ -2495,6 +2663,102 @@ fn setup_layers(image: &MachineImage, template: Option<&str>) -> Vec<proto::Laye
         .collect()
 }
 
+/// The agent said ready: kept in `readiness.json`. If that cannot be
+/// written the file goes, so the machine reads as unknown rather than a
+/// false "never ready" (unlinking works on a full disk).
+fn record_ready(dir: &Path) {
+    if let Err(error) = readiness::mark_ready(dir) {
+        let _ = std::fs::remove_file(dir.join(readiness::FILE));
+        event(
+            dir,
+            "readiness not recorded",
+            &format!("{error:#}; readiness.json removed"),
+        );
+    }
+}
+
+/// `Platform.image_id`: sha256 of the manifest digest and every layer's
+/// diff_id, bottom first, each followed by a newline.
+fn image_id(image: &MachineImage) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut hasher = Sha256::new();
+    for part in std::iter::once(&image.manifest).chain(&image.diff_ids) {
+        hasher.update(part.as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Whether a stopped machine gets a new blank writable disk on the
+/// runner's image when it starts, its disk kept (`renew_never_ready`). It
+/// must be made on official Debian alone (any digest), not from a template,
+/// not a build machine, stopped (not suspended), on another layer list than
+/// the runner's, which serves cube's default image, and its guest must
+/// provably never have been ready:
+///
+/// its layer list is exactly that official Debian image's own, as the
+/// image's record in `images/` says (`image_layers`): keel calls a machine
+/// ready only with sudo, git, gh and curl in its root, official Debian has
+/// none of them, and nothing can add them before it is ready (the agent
+/// refuses every operation until then). The user's ruling P1 on #231 covers
+/// machines an earlier berth made too. Without that record, or with any
+/// other layer in the list (berth's preparation layer, a template), it is
+/// not provable and the machine is left as it was. `readiness.json` saying
+/// `everReady: true` vetoes; its `false` is never taken as proof.
+///
+/// A machine once ready is never renewed. No guest operation ran in one
+/// that is, so its disk holds only what keel's setup generates, which the
+/// next boot generates again on the new disk; the earlier disk is kept,
+/// nothing is copied from it. Layers never change under a disk: overlayfs
+/// refuses an upper over other lowers (`index=on`).
+fn renews_disk(
+    record: &MachineRecord,
+    ever_ready: Option<bool>,
+    image_layers: Option<&[String]>,
+    runner: &MachineImage,
+    runner_prepared: bool,
+) -> bool {
+    let Some(image) = &record.image else {
+        return false;
+    };
+    // Provable only on official Debian's own layers (it lacks keel's tools,
+    // so no machine on them alone was ever ready). readiness.json can only
+    // veto (`everReady: true`); `false` proves nothing on its own: a failed
+    // write or a run of an earlier berth can leave it on a machine that was
+    // ready.
+    let never_ready =
+        ever_ready != Some(true) && image_layers.is_some_and(|layers| image.diff_ids == layers);
+    never_ready
+        && runner_prepared
+        && record.template.is_none()
+        && !record.build
+        && record.phase == Phase::Stopped
+        && crate::served::is_official_debian(&image.reference)
+        && (image.manifest != runner.manifest || image.diff_ids != runner.diff_ids)
+}
+
+/// The layers of `image` as its record in `directory`'s `images/` has them,
+/// for this platform and that manifest; None when there is no such record.
+fn pulled_layers(directory: &Path, image: &MachineImage) -> Option<Vec<String>> {
+    let reference = image::Reference::parse(&image.reference).ok()?;
+    let store = directory
+        .join("images")
+        .join(format!("{}.json", reference.digest));
+    let record: image::ImageRecord = serde_json::from_slice(&std::fs::read(store).ok()?).ok()?;
+    let platform = image::Platform::native().ok()?.to_string();
+    (record.platform == platform && record.manifest.digest == image.manifest).then(|| {
+        record
+            .layers
+            .into_iter()
+            .map(|layer| layer.diff_id)
+            .collect()
+    })
+}
+
 /// How many machines that are not deleted (retained ones too) are made
 /// from template `id`.
 fn users(state: &State, id: &str) -> u32 {
@@ -2527,10 +2791,7 @@ fn template_proto(record: &template::TemplateRecord, state: &State) -> Option<pr
 /// The layers the cache must keep: the runner's image's, those of every
 /// machine that is not deleted, retained ones too, and those of the image
 /// every template lies on (B-8 D2: a template keeps them while it exists).
-fn layers_in_use(
-    image: &image::ImageRecord,
-    state: &State,
-) -> Result<HashSet<keel_layers::DiffId>> {
+fn layers_in_use(image: &MachineImage, state: &State) -> Result<HashSet<keel_layers::DiffId>> {
     let machines = state
         .machines
         .values()
@@ -2540,7 +2801,7 @@ fn layers_in_use(
         .templates
         .values()
         .flat_map(|template| template.image.diff_ids.iter());
-    let runner = image.layers.iter().map(|layer| &layer.diff_id);
+    let runner = image.diff_ids.iter();
     runner
         .chain(machines)
         .chain(templates)
@@ -2558,7 +2819,7 @@ fn layers_in_use(
 fn trim_cache(
     cache: &keel_layers::cache::LayerCache,
     limit: u64,
-    image: &image::ImageRecord,
+    image: &MachineImage,
     state: &State,
 ) -> Result<(keel_layers::cache::Eviction, usize)> {
     let in_use = layers_in_use(image, state)?;
@@ -2753,9 +3014,27 @@ fn load_image(directory: &Path, reference: &image::Reference) -> Result<Image> {
             file.display()
         );
     }
+    // cube's default image: its preparation layer, which `berth vm` builds
+    // before it gets here (debian.rs).
+    let prepared = match crate::debian::for_manifest(
+        image::Platform::native()?,
+        &record.manifest.digest,
+    ) {
+        Some(plan) => {
+            let diff_id = plan.diff_id()?;
+            let cache = keel_layers::cache::LayerCache::open(image::layer_dir(directory))?;
+            ensure!(
+                cache.get(&diff_id)?.is_some(),
+                "{reference}: its Debian preparation layer {diff_id} is not in the cache; {pull}"
+            );
+            Some(diff_id.to_string())
+        }
+        None => None,
+    };
     Ok(Image {
         reference: reference.to_string(),
         record,
+        prepared,
     })
 }
 
@@ -3224,36 +3503,11 @@ mod cache_tests {
         left
     }
 
-    fn runner_image(layers: &[u8]) -> image::ImageRecord {
-        let descriptor = image::Descriptor {
-            media_type: "m".into(),
-            digest: "sha256:00".into(),
-            size: 1,
-        };
-        image::ImageRecord {
-            version: 1,
+    fn runner_image(layers: &[u8]) -> MachineImage {
+        MachineImage {
             reference: "registry.test/o/n@sha256:00".into(),
-            registry: "registry.test".into(),
-            repository: "o/n".into(),
-            digest: "sha256:00".into(),
-            platform: "linux/amd64".into(),
-            manifest: descriptor.clone(),
-            config: descriptor.clone(),
-            env: Vec::new(),
-            layers: layers
-                .iter()
-                .map(|n| image::LayerRecord {
-                    diff_id: id(*n).to_string(),
-                    blob: descriptor.clone(),
-                    file: format!("layers/1/{}.erofs", id(*n)),
-                    erofs_bytes: 100,
-                    tar_bytes: None,
-                })
-                .collect(),
-            layer_format: 1,
-            mkfs: "/m".into(),
-            mkfs_version: "mkfs.erofs 1".into(),
-            resolved_at: 0,
+            manifest: "sha256:00".into(),
+            diff_ids: layers.iter().map(|n| id(*n).to_string()).collect(),
         }
     }
 
