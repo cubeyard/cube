@@ -15,7 +15,7 @@
  * checkout, so its blob id travels in the template's metadata and a machine
  * whose pinned setup differs runs setup itself and invalidates the template.
  * Templates are per runner and per project, never shared across projects. */
-import { createHash } from "node:crypto";
+import { createHash, X509Certificate } from "node:crypto";
 import type { RunnerTemplate } from "./runner-types.ts";
 import type { ProjectHooks, WorkspaceAllocation } from "./registry.ts";
 
@@ -51,14 +51,26 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
  * machine boots. Not in it: the pre-resume hook (resume hooks run on every
  * machine and are never cached) and `.agents/setup` (see `setupBlob`). */
 export type TemplateKeyInput = { allocation: WorkspaceAllocation; hooks: ProjectHooks;
-  /** `imageId`: a VM runner's `Platform.image_id`, what its machines are made from (berth vm); absent or empty without one. */
-  runner: { baseImageSha256: string; platform: string; imageId?: string }; diskGiB: number };
+  /** `imageId`: a VM runner's `Platform.image_id`, what its machines are made from (berth vm); absent or empty without one.
+   * `caSha256`: its egress CA's fingerprint (`runnerCaSha256`); absent or empty without one. */
+  runner: { baseImageSha256: string; platform: string; imageId?: string; caSha256?: string }; diskGiB: number };
+
+/** sha256 of the DER of the runner's CA (`Runner.ca_pem`), as berth names
+ * it; "" for a runner without one. A template may hold that CA, and berth
+ * makes machines from it only under the same CA (`template_runner_ca_changed`). */
+export function runnerCaSha256(pem: string): string {
+  if (!pem.trim()) return "";
+  try { return createHash("sha256").update(new X509Certificate(pem).raw).digest("hex"); }
+  catch { return sha256(pem.trim()); }
+}
 /** A keel template's key (`berth vm`): `kind: "keel"` keeps it apart from
  * the keys protocol-3 runners used (retired). The runner's keel base
  * (`Platform.base_image_sha256`), platform and image (`Platform.image_id`:
  * the OCI image and berth's own layers, such as its Debian preparation) are
  * in it, so a lookup never picks a template the runner would refuse as made
- * on another image (`template_image_changed`). */
+ * on another image (`template_image_changed`). So is the runner's CA, which a
+ * template may hold: a runner with a new CA gets a new template instead of
+ * refusing the old one (`template_runner_ca_changed`). */
 export function keelTemplateKey(input: TemplateKeyInput): string {
   return sha256(JSON.stringify({
     kind: "keel",
@@ -69,6 +81,8 @@ export function keelTemplateKey(input: TemplateKeyInput): string {
     image: input.runner.baseImageSha256,
     // Only when the runner says it: a runner that does not keeps its keys.
     ...(input.runner.imageId ? { workloadImage: input.runner.imageId } : {}),
+    // A template is bound to the runner's CA: another CA, another key.
+    ...(input.runner.caSha256 ? { runnerCa: input.runner.caSha256 } : {}),
     platform: input.runner.platform,
     diskGiB: input.diskGiB,
   }));
@@ -77,11 +91,13 @@ export function keelTemplateKey(input: TemplateKeyInput): string {
 /** What each part of the key was, hashed, so a thread that finds no
  * template can say what changed since the project's last one. `guest` was
  * only in protocol-3 templates' parts. */
-export type TemplateParts = Record<"repositories" | "preSetup" | "image" | "disk", string> & { guest?: string };
+export type TemplateParts = Record<"repositories" | "preSetup" | "image" | "disk", string> & { guest?: string; runnerCa?: string };
 const PART_WORDS: Record<keyof TemplateParts & string, string> = {
   repositories: "the project's repositories", preSetup: "the pre-setup hook", guest: "cube's guest helper or packages",
-  image: "the runner's base image or platform", disk: "the disk size",
+  image: "the runner's base image or platform", disk: "the disk size", runnerCa: "the runner's CA",
 };
+/** Parts a template's metadata may lack (made before they were parts). */
+const OPTIONAL_PARTS = ["guest", "runnerCa"];
 export function keelTemplateParts(input: TemplateKeyInput): TemplateParts {
   const short = (value: unknown) => sha256(JSON.stringify(value)).slice(0, 16);
   // The runner's image is part of "image" only when it has one, so a
@@ -93,6 +109,7 @@ export function keelTemplateParts(input: TemplateKeyInput): TemplateParts {
     preSetup: short(input.hooks.preSetup),
     image: short(image),
     disk: short(input.diskGiB),
+    ...(input.runner.caSha256 ? { runnerCa: short(input.runner.caSha256) } : {}),
   };
 }
 
@@ -132,7 +149,7 @@ export function templateMeta(raw: string): TemplateMeta | null {
     if (value.format !== TEMPLATE_FORMAT || typeof value.projectId !== "string" || typeof value.setupBlob !== "string" || !BLOB.test(value.setupBlob)
       || !(value.commit === null || (typeof value.commit === "string" && /^[0-9a-f]{40,64}$/.test(value.commit)))) return null;
     const parts = value.parts as Record<string, unknown> | undefined;
-    const partsValid = !!parts && typeof parts === "object" && Object.keys(PART_WORDS).every(name => typeof parts[name] === "string" || (name === "guest" && parts[name] === undefined));
+    const partsValid = !!parts && typeof parts === "object" && Object.keys(PART_WORDS).every(name => typeof parts[name] === "string" || (OPTIONAL_PARTS.includes(name) && parts[name] === undefined));
     return { format: value.format, projectId: value.projectId, setupBlob: value.setupBlob, commit: value.commit,
       ...(partsValid ? { parts: parts as TemplateParts } : {}) };
   } catch { return null; }

@@ -51,7 +51,7 @@ import { currentMachineEpoch, gib, nextMachineEpoch, preparationOutcome, prepara
   type MachineStart, type StartOptions, type StartupLog, type ThreadMachines, type VmSizes } from "./vm.ts";
 import { MachineEvents, safeText, type GuestAgent, type MachineEvidence } from "./vm-diagnostics.ts";
 import { bootDocuments, MAX_BOOT_BYTES } from "./vm-seed.ts";
-import { FAILED_BUILD_BACKOFF_MS, KEEL_TEMPLATE_CAPABILITIES, TEMPLATE_FORMAT, keelTemplateKey, keelTemplateParts, missingTemplate, obsoleteTemplates, pickTemplate,
+import { FAILED_BUILD_BACKOFF_MS, KEEL_TEMPLATE_CAPABILITIES, TEMPLATE_FORMAT, keelTemplateKey, keelTemplateParts, missingTemplate, obsoleteTemplates, pickTemplate, runnerCaSha256,
   templateMeta, templateSettings, type TemplateMeta, type TemplateParts, type TemplateSettings } from "./vm-template.ts";
 import { guestServices, VmWorkspace } from "./vm-workspace.ts";
 import { IDLE_MS, MachineActivity } from "./machine-idle.ts";
@@ -100,6 +100,7 @@ function templateRefused(error: unknown, id: string): string | null {
   if (error.code === "NOT_FOUND") return `template ${id} was removed before the machine was created`;
   if (error.code === "FAILED_PRECONDITION" && error.reason === "template_removing") return `template ${id} was being removed when the machine was created`;
   if (error.code === "FAILED_PRECONDITION" && error.reason === "template_image_changed") return `the runner's image changed since template ${id} was prepared`;
+  if (error.code === "FAILED_PRECONDITION" && error.reason === "template_runner_ca_changed") return `the runner's CA changed since template ${id} was prepared`;
   return null;
 }
 
@@ -505,8 +506,9 @@ export class RunnerMachines implements ThreadMachines {
   }
 
   /** Creates the thread's machine as its preparation says. A template the
-   * runner no longer has, is removing, or made on another image (B-8 D3)
-   * makes it start from the base, with that reason (as vm.ts `allocate`). */
+   * runner no longer has, is removing, or made on another image (B-8 D3) or
+   * under another runner CA makes it start from the base, with that reason
+   * (as vm.ts `allocate`). */
   private async create(thread: Thread, session: RunnerSession, ref: MachineRef, size: MessageInitShape<typeof SizeSchema> | undefined): Promise<Machine> {
     const send = (templateId?: string) => session.machine({ case: "machineCreate", value: { ref, fence: this.fence(thread),
       spec: { source: templateId ? { case: "templateId", value: templateId } : { case: "base", value: true }, ...(size ? { size } : {}) } } });
@@ -545,7 +547,7 @@ export class RunnerMachines implements ThreadMachines {
     }
     const keyInput = { allocation: thread.allocation, hooks: thread.allocation.hooks ?? NO_HOOKS, diskGiB: size.diskGib ?? 0,
       runner: { baseImageSha256: runner.platform?.baseImageSha256 ?? "", platform: [runner.platform?.os, runner.platform?.arch].filter(Boolean).join("-"),
-        imageId: runner.platform?.imageId ?? "" } };
+        imageId: runner.platform?.imageId ?? "", caSha256: runnerCaSha256(runner.caPem) } };
     const key = keelTemplateKey(keyInput);
     let templates: RunnerTemplate[];
     try { templates = await this.listTemplates(session); }
