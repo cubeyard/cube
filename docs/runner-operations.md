@@ -238,12 +238,26 @@ runner.
   replaces, and restart. A berth from before suspend cannot read a machine
   record that holds a snapshot or a dropped-snapshot note, and then does not
   start at all: roll back only with no machine suspended (stop or archive
-  those threads first). Likewise a berth from before templates were bound
-  to the runner's CA cannot read a template record of version 2 and does
-  not start: roll back only when `templates/` holds no such record
-  (`template_delete` removes one once no machine is made from it).
-  A cubed from before suspend counts suspended
+  those threads first). Rolling back past the berth that binds templates
+  to the runner's CA (template records of version 2) is **unsupported**
+  once that berth has published a template: an earlier berth cannot read
+  such a record and does not start at all. Roll forward instead. Never
+  delete a template record or layer, or a machine's retained disk, to make
+  an earlier berth start. A cubed from before suspend counts suspended
   threads as holding slots and starts them again through its recovery loop.
+- **Rotate the runner's CA** (stop the runner, remove both
+  `DIRECTORY/.berth/ca/ca.key` and `ca.pem`, start it: a new CA is made)
+  only once cubed is at the version that keys templates on the runner's CA
+  or later. A template is bound to the CA it was built under, and the
+  runner refuses it under a new one (`template_runner_ca_changed`); a
+  current cubed then starts the thread from the base and builds a new
+  template, but an earlier cubed keeps choosing the refused template, so
+  thread starts on that runner fail until the template expires
+  (`CUBED_TEMPLATE_TTL_HOURS`, 24 h by default). With such a cubed, run it
+  with `CUBED_TEMPLATES=off` for that window. Machines already made from a
+  template keep the old CA in their layer: a tool whose own store holds it
+  (a Java keystore) stops trusting the runner's HTTPS until its store is
+  repaired (a resume hook) or the thread is new.
 - **Suspend** (phase 7) is off unless `berth vm` starts with
   `--suspend-disk-margin-gib <GiB>`, which has no default: it is the free
   disk a runner keeps besides a machine's memory file (at least 1 GiB; the

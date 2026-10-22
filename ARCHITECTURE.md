@@ -757,9 +757,12 @@ builds a new one. Without a template the thread's slot is first used by a
 placeholder (registered so the credential path serves it), the thread's
 pinned checkouts, pre-setup and `.agents/setup`. Only if all of that
 succeeds does cubed call `template_publish`: keel's agent cleans the
-writable layer of cube's things (the runner's CA, mount points, the agent
-account, identity) and writes it as one EROFS layer, which berth checks and
-keeps, read-only, while it deletes the build machine. Anything else deletes
+writable layer of cube's things (marker blocks, the runner's CA where it can
+be cut out, mount points, the agent account, identity) and writes it as one
+EROFS layer, which berth checks and keeps, read-only, while it deletes the
+build machine. The layer may keep the runner's public CA where the build put
+it beyond that (a Java keystore): berth binds the template to that CA's
+sha256 and refuses it under another CA (`template_runner_ca_changed`). Anything else deletes
 the build machine and the thread starts fresh (a build that failed is not
 retried for the same key, machine size and primary commit on that runner for
 an hour; another size or a new commit builds at once; the backoff is in

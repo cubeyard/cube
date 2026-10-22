@@ -226,8 +226,9 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   the template only under the same CA (`FAILED_PRECONDITION
   template_runner_ca_changed` after the CA's files were made again; a
   version 1 template, sealed against every runner CA, under any). A berth
-  from before version 2 does not start with such a record: roll back only
-  after deleting the templates it published. The build
+  from before version 2 does not start with such a record: rolling back
+  past it is unsupported once it has published a template; roll forward
+  (docs/runner-operations.md, which also says when to rotate the CA). The build
   machine is deleted. Asked again with the
   same key and meta, the same template (another: `ALREADY_EXISTS
   template`). The agent has 10 min (`completion_unknown` after). The call
