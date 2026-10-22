@@ -18,6 +18,15 @@
 //! makes it `removing`; it is deleted when no machine that is not deleted
 //! (retained ones too) is made from it. Templates are outside the layer
 //! cache (B-8 D2): never trimmed, removed only by `template_delete`.
+//!
+//! A template is bound to the runner's CA (record version 2): its build
+//! machine's agent may leave that CA's public certificate in the layer (a
+//! Java keystore, say; keel's `template.rs`), so the record keeps the CA's
+//! fingerprint and a machine is made from the template only while the
+//! runner has that CA (`template_runner_ca_changed` after a new CA). A
+//! version 1 record was sealed against every runner CA and holds none; it
+//! is usable under any. A berth from before version 2 does not start with
+//! a version 2 record: roll back only after deleting those templates.
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -73,6 +82,22 @@ pub struct TemplateRecord {
     /// The build machine's fence epoch at the publication.
     pub fence_epoch: i64,
     pub created_at: Timestamp,
+    /// Version 2: sha256 of the DER of the runner's CA the template was
+    /// built under, the only CA it may hold; empty in version 1.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runner_ca_sha256: String,
+}
+
+/// The record version of a template bound to the runner's CA.
+pub const VERSION: u32 = 2;
+
+impl TemplateRecord {
+    /// Whether a machine may be made from the template under the runner's
+    /// CA `ca_sha256`: a version 2 template only under the CA it was built
+    /// under; a version 1 template, which holds no runner CA, under any.
+    pub fn usable_under(&self, ca_sha256: &str) -> bool {
+        self.version < VERSION || self.runner_ca_sha256 == ca_sha256
+    }
 }
 
 pub fn dir(directory: &Path) -> PathBuf {
@@ -114,8 +139,19 @@ pub fn load(directory: &Path) -> Result<BTreeMap<String, TemplateRecord>> {
         };
         let record: TemplateRecord = serde_json::from_slice(&std::fs::read(&path)?)
             .with_context(|| format!("read {}", path.display()))?;
+        let valid = match record.version {
+            1 => record.runner_ca_sha256.is_empty(),
+            VERSION => {
+                record.runner_ca_sha256.len() == 64
+                    && record
+                        .runner_ca_sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }
+            _ => false,
+        };
         ensure!(
-            record.version == 1 && record.id == id && crate::host::valid_id(id),
+            valid && record.id == id && crate::host::valid_id(id),
             "{} is not a template record of this runner",
             path.display()
         );
@@ -246,7 +282,7 @@ mod tests {
 
     fn record(id: &str) -> TemplateRecord {
         TemplateRecord {
-            version: 1,
+            version: VERSION,
             id: id.into(),
             owner: "thread-1".into(),
             key: "k".into(),
@@ -267,6 +303,7 @@ mod tests {
                 seconds: 1,
                 nanos: 0,
             },
+            runner_ca_sha256: "ab".repeat(32),
         }
     }
 
@@ -355,6 +392,42 @@ mod tests {
         // A record that is not this runner's stops the start.
         std::fs::write(record_path(dir.path(), "00000000000000dd"), b"{}").unwrap();
         assert!(load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn a_record_is_bound_to_a_ca_from_version_2_on() {
+        let dir = tempfile::tempdir().unwrap();
+        load(dir.path()).unwrap();
+        let id = "00000000000000ee";
+        let check = |version: u32, ca: &str| {
+            let record = TemplateRecord {
+                version,
+                runner_ca_sha256: ca.into(),
+                ..record(id)
+            };
+            write(dir.path(), &record).unwrap();
+            load(dir.path()).map(|_| ())
+        };
+        let ca = "ab".repeat(32);
+        assert!(check(2, &ca).is_ok());
+        assert!(check(1, "").is_ok(), "before the binding: no CA");
+        for (version, bad) in [(2, String::new()), (2, "AB".repeat(32)), (2, "ab".into())] {
+            assert!(check(version, &bad).is_err(), "{version} {bad:?}");
+        }
+        assert!(check(1, &ca).is_err(), "version 1 names no CA");
+        assert!(check(3, &ca).is_err(), "a later version");
+        let bound = TemplateRecord {
+            runner_ca_sha256: ca.clone(),
+            ..record(id)
+        };
+        assert!(bound.usable_under(&ca));
+        assert!(!bound.usable_under(&"cd".repeat(32)));
+        let earlier = TemplateRecord {
+            version: 1,
+            runner_ca_sha256: String::new(),
+            ..record(id)
+        };
+        assert!(earlier.usable_under(&"cd".repeat(32)));
     }
 
     #[test]

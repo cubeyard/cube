@@ -219,7 +219,15 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   `FAILED_PRECONDITION template_disk`, the machine kept), and the disk
   becomes `DIRECTORY/templates/<id>.erofs` (the build machine's id): its
   record written as `publishing`, the disk renamed, cut to the layer's
-  size, made read-only (0444) and hashed, the record `ready`. The build
+  size, made read-only (0444) and hashed, the record `ready`. The record
+  (version 2) keeps the sha256 of the runner's CA: the setup's
+  `template.runner_ca` lets the agent leave that CA's certificate in the
+  layer (a Java keystore built during setup), and a machine is made from
+  the template only under the same CA (`FAILED_PRECONDITION
+  template_runner_ca_changed` after the CA's files were made again; a
+  version 1 template, sealed against every runner CA, under any). A berth
+  from before version 2 does not start with such a record: roll back only
+  after deleting the templates it published. The build
   machine is deleted. Asked again with the
   same key and meta, the same template (another: `ALREADY_EXISTS
   template`). The agent has 10 min (`completion_unknown` after). The call

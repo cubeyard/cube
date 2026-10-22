@@ -677,6 +677,88 @@ async fn a_templates_image_layers_stay_in_the_cache_and_templates_are_not_trimme
     assert_eq!(cached, vec![diff_id(3)]);
 }
 
+/// The runner's CA files are removed, so the next start makes a new CA.
+fn new_runner_ca(lab: &Lab) {
+    for name in ["ca.key", "ca.pem"] {
+        std::fs::remove_file(lab.path().join(".berth/ca").join(name)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_template_is_bound_to_the_runner_ca_it_was_built_under() {
+    let lab = Lab::new();
+    let image = pull(lab.path(), 1, &[1]);
+    let runner = lab.runner(image.clone(), 16 << 30, plenty).await;
+    published(&runner).await;
+    let built_under = runner.ca.sha256.clone();
+    {
+        let state = runner.state.lock().unwrap();
+        let kept = &state.templates[BUILD];
+        assert_eq!(
+            (kept.version, kept.runner_ca_sha256.as_str()),
+            (template::VERSION, built_under.as_str())
+        );
+    }
+    create(&runner, USER, from(BUILD), false).await.unwrap();
+    drop(runner);
+    // The CA is kept aside and replaced: the template may hold the old
+    // one, so no machine is made from it; one made before stays.
+    let kept = lab.path().join("kept-ca");
+    std::fs::create_dir(&kept).unwrap();
+    for name in ["ca.key", "ca.pem"] {
+        std::fs::copy(lab.path().join(".berth/ca").join(name), kept.join(name)).unwrap();
+    }
+    new_runner_ca(&lab);
+    let runner = lab.runner(image.clone(), 16 << 30, plenty).await;
+    assert_ne!(runner.ca.sha256, built_under);
+    let refused = create(&runner, "00000000000000c2", from(BUILD), false)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reason(refused.clone()),
+        (
+            Code::FailedPrecondition,
+            "template_runner_ca_changed".into()
+        )
+    );
+    assert!(
+        refused.message.contains(&built_under),
+        "{}",
+        refused.message
+    );
+    assert_eq!(runner.list_templates().items[0].users, 1);
+    drop(runner);
+    // The same CA again (its files restored): the template is usable.
+    for name in ["ca.key", "ca.pem"] {
+        std::fs::copy(kept.join(name), lab.path().join(".berth/ca").join(name)).unwrap();
+    }
+    let runner = lab.runner(image, 16 << 30, plenty).await;
+    assert_eq!(runner.ca.sha256, built_under);
+    create(&runner, "00000000000000c2", from(BUILD), false)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_template_from_before_the_binding_holds_no_ca_and_is_usable_under_any() {
+    let lab = Lab::new();
+    let image = pull(lab.path(), 1, &[1]);
+    let runner = lab.runner(image.clone(), 16 << 30, plenty).await;
+    published(&runner).await;
+    drop(runner);
+    // As an earlier berth wrote it: version 1, no CA (its agent's seal
+    // refused every runner CA in the layer).
+    let path = template::dir(lab.path()).join(format!("{BUILD}.json"));
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["version"] = 1.into();
+    record.as_object_mut().unwrap().remove("runnerCaSha256");
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    new_runner_ca(&lab);
+    let runner = lab.runner(image, 16 << 30, plenty).await;
+    create(&runner, USER, from(BUILD), false).await.unwrap();
+}
+
 #[tokio::test]
 async fn a_publication_cut_short_is_finished_when_the_runner_starts_again() {
     let lab = Lab::new();
@@ -703,6 +785,7 @@ async fn a_publication_cut_short_is_finished_when_the_runner_starts_again() {
             base_sha256: "b".into(),
             fence_epoch: 1,
             created_at: Timestamp::now(),
+            runner_ca_sha256: String::new(),
         }
     };
     template::adopt(
