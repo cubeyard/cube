@@ -52,6 +52,11 @@ every boot:   pre-resume ─▶ .agents/resume ─▶ the agent opens
   log (below). Processes a hook leaves running in its own command (a build
   tool's daemon, say) keep their memory until the hook ends and are stopped
   with it; services it starts through systemd keep running.
+- Trust in the runner's CA beyond the system bundle (a Java keystore, a
+  bundled JDK's own store) belongs in `.agents/resume`, read from
+  `/etc/cube/ca.pem`, never in setup, where it would reach the template and
+  fail its seal: see the skill
+  [`runner-ca-in-resume`](../.agents/skills/runner-ca-in-resume/SKILL.md).
 
 ## Watching a machine start
 
