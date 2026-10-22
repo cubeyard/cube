@@ -26,7 +26,9 @@
 //! runner has that CA (`template_runner_ca_changed` after a new CA). A
 //! version 1 record was sealed against every runner CA and holds none; it
 //! is usable under any. A berth from before version 2 does not start with
-//! a version 2 record: roll back only after deleting those templates.
+//! a version 2 record: once one exists, rolling back is unsupported; roll
+//! forward, and never delete a template, its layer or a machine's retained
+//! disk to make an earlier berth start (docs/runner-operations.md).
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
