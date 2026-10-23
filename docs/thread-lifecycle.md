@@ -74,7 +74,8 @@ phase, `suspended` or running. It is not continued.
   this process owns it; otherwise woken only when the agent has a stored
   run that did not finish (a Pi submission still queued or placed with no
   agent open: its run went out while the machine slept, then cubed
-  stopped); otherwise a `waking` is read back, a `suspended` stays;
+  stopped) and its pause is over and its starts did not stop; otherwise a
+  `waking` is read back (also one a failed wake left), a `suspended` stays;
 - a ready thread: its machine is checked (and started again when its
   runner restarted);
 - a thread not ready yet: its machine is started or prepared.
