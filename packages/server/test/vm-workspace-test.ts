@@ -238,6 +238,34 @@ try {
   assert.equal(app.conversations.error(withHooks), null);
   await (await fetch(`${base}/api/threads/${withHooks}/history`)).json();
 
+  // keel's check of Java's keystore at a boot's setup (keel/agent
+  // keystore.rs, one line on the boot's tmpfs) is the outcome runner-ca: a
+  // failure fails the resume step with its line, and the hooks still run.
+  const caNote = (line: string) => {
+    const run = path.join(machines.guests.get(withHooks)!.root, "run");
+    fs.mkdirSync(run, { recursive: true });
+    fs.writeFileSync(path.join(run, "runner-ca"), line);
+  };
+  const caFailure = "failed /etc/ssl/certs/java/cacerts lacks the runner's CA and was left as it was: keytool -importcert exited 1: boom";
+  machines.reboot(app.registry.getThread(withHooks)!);
+  caNote(`${caFailure}\n`);
+  await app.conversations.activate(withHooks);
+  assert.deepEqual(order(), ["pre-setup", "pre-resume", "pre-resume", "pre-resume"], "the hooks run after a failed check");
+  const caFailed = app.registry.getThread(withHooks)!.vm!;
+  assert.deepEqual([caFailed.hooks!["runner-ca"]?.status, caFailed.hooks!["runner-ca"]?.exitCode], ["failed", 1]);
+  const caStep = caFailed.steps!.filter(step => step.name === "resume").at(-1)!;
+  assert.equal(caStep.state, "failed");
+  assert.equal(caStep.detail, "runner-ca failed (exit 1)");
+  assert.match(caStep.log ?? "", /keytool -importcert exited 1: boom/);
+  assert.equal(fs.readFileSync(path.join(machines.guests.get(withHooks)!.root, "home", ".cache", "cube", "runner-ca.log"), "utf8"), `${caFailure}\n`);
+  machines.reboot(app.registry.getThread(withHooks)!);
+  caNote("repaired added the runner's CA to /etc/ssl/certs/java/cacerts; its 150 other certificates kept\n");
+  await app.conversations.activate(withHooks);
+  const caRepaired = app.registry.getThread(withHooks)!.vm!;
+  assert.equal(caRepaired.hooks!["runner-ca"]?.status, "ok");
+  assert.equal(caRepaired.steps!.filter(step => step.name === "resume").at(-1)!.state, "ok");
+  assert.match(fs.readFileSync(path.join(machines.guests.get(withHooks)!.root, "home", ".cache", "cube", "runner-ca.log"), "utf8"), /^repaired added the runner's CA/);
+
   // The scripts quote what they are given.
   assert.match(provisionScript({ projectId: "p", projectRevision: 1, repositories: [{ url: "https://example.com/a'b.git", base: "main", baseOid: "a".repeat(40), checkoutName: "workspace" }] }),
     /checkout '\.' 'https:\/\/example\.com\/a'\\''b\.git' 'refs\/heads\/main'/);

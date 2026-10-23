@@ -136,7 +136,8 @@ function notReady(guest: GuestInfo | undefined): string | null {
  * `machine_setup`): a hook that ran since shows at the next one. */
 function guestAgent(guest: GuestInfo): GuestAgent | null {
   if (!guest.connected || (!guest.version && !guest.bootId)) return null;
-  const hooks = Object.fromEntries(HOOK_NAMES.filter(name => guest.hooks[name] !== undefined).map(name => [name, safeText(guest.hooks[name]!, 32)]));
+  // runner-ca: keel's check of Java's keystore at this boot's setup (ok, repaired, skipped, failed).
+  const hooks = Object.fromEntries([...HOOK_NAMES, "runner-ca"].filter(name => guest.hooks[name] !== undefined).map(name => [name, safeText(guest.hooks[name]!, 32)]));
   return { version: safeText(guest.version, 64), build: /^[0-9a-f]{64}$/.test(guest.build) ? guest.build : "", kernel: safeText(guest.kernel, 128),
     bootId: safeText(guest.bootId, 64), hooks };
 }

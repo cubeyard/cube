@@ -177,6 +177,53 @@ the project, so a thread (whose agent reads untrusted repository content)
 changing them would reach beyond its own machine. Its agent says so and
 points the user to the project page or OptChat.
 
+## HTTPS trust: what cube does, what a hook may still need
+
+A thread machine's HTTPS goes through its runner, which signs it with the
+runner's CA. cube makes the machine trust that CA on every boot; no hook is
+needed for:
+
+- the system bundle and the tools that read it or cube's variables
+  (`SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`,
+  `NODE_EXTRA_CA_CERTS`): curl, git, gh, apt, Python, Node;
+- Java from the distribution (Debian's or Ubuntu's `default-jdk`,
+  `openjdk-*`, with `ca-certificates-java`), whether pre-setup or setup
+  installs it, the image has it or a template brought it. keel links
+  `/etc/ssl/certs/cube-runner.pem` to the CA, so the keystore apt builds
+  (`/etc/ssl/certs/java/cacerts`) holds it, and at boot it adds the CA to
+  that keystore when it lacks it or holds a stale one under its alias,
+  keeping every other certificate. Its check is the outcome `runner-ca`
+  (`ok`, `skipped` or `failed`, the reason in
+  `~/.cache/cube/runner-ca.log`; a failure fails the resume step and
+  never the thread). Do not run `update-ca-certificates` or import the CA
+  into that keystore for cube.
+
+A JDK that keeps its own store is the project's: SDKMAN, a Temurin or
+other tarball, a Gradle or Maven toolchain download, an IDE's runtime
+(`$JAVA_HOME/lib/security/cacerts` is a file, not a link to
+`/etc/ssl/certs/java/cacerts`). Either point it at the system keystore,
+which has every public root and the CA (`-Djavax.net.ssl.trustStore=/etc/ssl/certs/java/cacerts`
+through the tool's JVM options, such as `org.gradle.jvmargs` in
+`gradle.properties` or `.mvn/jvm.config`; with a distribution JDK
+installed), or import the CA in `.agents/resume`, which runs on every
+boot, after setup and in template machines too:
+
+```sh
+ca=/etc/cube/ca.pem store="$JAVA_HOME/lib/security/cacerts"
+if [ -r "$ca" ] && [ -s "$store" ]; then
+  want=$(openssl x509 -in "$ca" -noout -fingerprint -sha256 | cut -d= -f2)
+  keytool -list -keystore "$store" -storepass changeit | grep -q "$want" || {
+    keytool -delete -alias cube-runner -keystore "$store" -storepass changeit >/dev/null 2>&1 || true
+    keytool -importcert -noprompt -alias cube-runner -file "$ca" -keystore "$store" -storepass changeit
+  }
+fi
+```
+
+Read the CA from `/etc/cube/ca.pem` each time (it is the runner's, and
+absent on a `berth host` runner); never create a store, which would hold
+only the CA; never turn certificate checks off (`-k`, `verify=False`,
+`NODE_TLS_REJECT_UNAUTHORIZED=0`, a trust-all `TrustManager`).
+
 ## Limitations
 
 - Two hooks only, with fixed order, triggers, user and directory. A

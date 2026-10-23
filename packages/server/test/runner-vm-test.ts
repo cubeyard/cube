@@ -41,9 +41,10 @@
  * image (CUBE_TEST_BERTH_IMAGE_B, template_image_changed), and
  * template_delete (REMOVING, gone with its last machine).
  * CUBE_TEST_BERTH_JAVA=1 adds a real JDK: installed by a build machine's
- * setup (apt, then update-ca-certificates), published, and Java's own
- * HTTPS from a machine made from the template, both machines started with
- * cubed's own public policy (`EgressPolicy.policyFor`). CUBE_TEST_KEEP=1
+ * setup with apt alone, published, and Java's own HTTPS (example.com,
+ * services.gradle.org) from a machine made from the template, whose
+ * keystore keel repairs at boot without the CA and with a stale one, both
+ * machines started with cubed's own public policy (`EgressPolicy.policyFor`). CUBE_TEST_KEEP=1
  * keeps a failed run's directory. CUBE_TEST_BERTH_FSCK names an
  * fsck.erofs to check the layer with. And (B-9) `machine_diagnose`: one
  * bounded, redacted JSON document about a running, a paused and a stopped
@@ -1273,7 +1274,9 @@ sudo mkdir -p /opt/v10 /etc/ssl/certs/java; echo setup-done | sudo tee /opt/v10/
       assert.equal(userExtents.length, machineImage.diffIds.length + 1);
       assert.ok(userExtents.at(-1)!.includes(layer), "the template is the topmost partition, read where it is");
       await session.machine({ case: "machineStart", value: { ref: userRef, fence: fence10, boot: { documents, mac: "" } } });
-      await session.until(userRef, machine => !!machine.status?.guest?.ready, 180000);
+      const userReady = await session.until(userRef, machine => !!machine.status?.guest?.ready, 180000);
+      // The stand-in is no keystore keel can read: reported, left as it is (its sha256 below).
+      assert.equal(userReady.status?.guest?.hooks["runner-ca"], "skipped", show(userReady.status?.guest?.hooks));
       const user = workspace10(userRef);
       const seen10 = await sh10(user, "v10-seen", `cat app/built.txt; echo; cat /opt/v10/setup.txt
 grep -c 'cube: begin' app/bundle-copy.pem || true; grep -cF '${caLine}' app/bundle-copy.pem || true
@@ -1362,9 +1365,15 @@ sha256sum app/source.rs /etc/ssl/certs/java/cacerts | cut -d' ' -f1`);
       note("V10: template_delete: REMOVING with 1 user (a new machine from it refused: template_removing), gone (file and record) once that machine was deleted; again: NOT_FOUND");
 
       // A real JDK (CUBE_TEST_BERTH_JAVA=1, the image's apt over the
-      // runner's egress): setup installs it and rebuilds the trust stores,
-      // so Java's keystore holds the runner's CA; the template is bound to
-      // it and published, and Java's own HTTPS works in a machine made from it.
+      // runner's egress), installed by a build machine's setup with apt and
+      // nothing else: keel's link (/etc/ssl/certs/cube-runner.pem) makes
+      // ca-certificates-java put the runner's CA in Java's keystore. The
+      // template is bound to the CA and published; in a machine made from it
+      // Java's HTTPS works (example.com, and services.gradle.org, which the
+      // Gradle wrapper reaches). Its keystore without the CA (a template
+      // built before the link) and with a stale CA under cube's alias (a CA
+      // rotation) is repaired by keel at the next boot, every other
+      // certificate kept; the boot after that changes nothing.
       if (env.CUBE_TEST_BERTH_JAVA === "1") {
         // cubed's own policy for a thread without secrets (EgressPolicy.policyFor):
         // public HTTP and HTTPS, the 15-minute lease; a start without one has no egress.
@@ -1373,6 +1382,12 @@ sha256sum app/source.rs /etc/ssl/certs/java/cacerts | cut -d' ' -f1`);
         assert.deepEqual([javaPolicy.denyHosts, javaPolicy.rules], [[], []], "no credential rule, nothing widened");
         const startJava = (ref: { owner: string; id: string }) =>
           session.machine({ case: "machineStart", value: { ref, fence: fence10, boot: { documents, mac: "" }, policy: javaPolicy as never } });
+        // keel's check of Java's keystore at this boot's setup (status.guest.hooks["runner-ca"]).
+        const bootJava = async (ref: { owner: string; id: string }, expected: string | undefined) => {
+          await startJava(ref);
+          const booted = await session.until(ref, machine => !!machine.status?.guest?.ready, 180000);
+          assert.equal(booted.status?.guest?.hooks["runner-ca"], expected, `${ref.id}: keel's keystore check at boot: ${show(booted.status?.guest?.hooks)}`);
+        };
         // Both machines get it: apt and Java's HTTPS are refused by policy without it.
         const publicEgress = async (ref: { owner: string; id: string }, key: string) => {
           const reached = await sh10(workspace10(ref), key, "curl -s -o /dev/null -m 30 -w '%{http_code}' http://deb.debian.org/debian/dists/trixie/Release; echo; curl -s -o /dev/null -m 30 -w '%{http_code}' https://example.com/");
@@ -1382,35 +1397,71 @@ sha256sum app/source.rs /etc/ssl/certs/java/cacerts | cut -d' ' -f1`);
         const javaSize = { vcpus: 2, memoryMib: 2048, diskGib: 6 };
         await session.machine({ case: "machineCreate", value: { ref: javaRef, fence: fence10,
           spec: { source: { case: "base", value: true }, size: javaSize, build: true } } });
-        await startJava(javaRef);
-        await session.until(javaRef, machine => !!machine.status?.guest?.ready, 180000);
+        await bootJava(javaRef, undefined); // no keystore yet: nothing checked
         await publicEgress(javaRef, "v10-java-egress");
         const fingerprint = createHash("sha256").update(caDer).digest("hex").toUpperCase().match(/../g)!.join(":");
         const fetchJava = "public class Fetch { public static void main(String[] a) throws Exception { var c = java.net.http.HttpClient.newHttpClient(); "
           + "System.out.println(c.send(java.net.http.HttpRequest.newBuilder(java.net.URI.create(a[0])).build(), java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode()); } }";
-        const javaCheck = `keytool -list -cacerts -storepass changeit 2>/dev/null | grep -c '${fingerprint}'; java app/Fetch.java https://example.com/`;
+        const listing = "sudo keytool -list -cacerts -storepass changeit 2>/dev/null";
+        // The runner's CA in the keystore (1), and Java's HTTPS.
+        const javaCheck = `${listing} | grep -c '${fingerprint}'; java app/Fetch.java https://example.com/; java app/Fetch.java https://services.gradle.org/versions/current`;
         const javaSetup = await sh10(workspace10(javaRef), "v10-java-setup", `set -e
 sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null
 sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends default-jdk-headless >/dev/null
-sudo update-ca-certificates >/dev/null 2>&1
 sudo apt-get clean
+readlink /etc/ssl/certs/cube-runner.pem
 mkdir -p app; printf '%s\\n' '${fetchJava}' > app/Fetch.java
 ${javaCheck}`, 1500000);
-        assert.equal(javaSetup, "1\n200\n", "the build machine's Java trusts the runner's CA");
+        assert.equal(javaSetup, "/usr/local/share/ca-certificates/cube-runner.crt\n1\n200\n200\n",
+          "apt alone: the build machine's Java trusts the runner's CA (no update-ca-certificates, no hook)");
         const javaTemplate = await session.call({ case: "templatePublish", value: { from: javaRef, fence: fence10, key: "v10-java", meta: "" } }, 600000);
         assert.ok(javaTemplate.case === "template" && javaTemplate.value.state === Template_State.READY, show(javaTemplate));
         const javaUserRef = { owner: "thread-1", id: randomBytes(8).toString("hex") };
+        const javaUser = workspace10(javaUserRef);
         await session.machine({ case: "machineCreate", value: { ref: javaUserRef, fence: fence10,
           spec: { source: { case: "templateId", value: javaRef.id }, size: javaSize } } });
-        await startJava(javaUserRef);
-        await session.until(javaUserRef, machine => !!machine.status?.guest?.ready, 180000);
+        await bootJava(javaUserRef, "ok");
         await publicEgress(javaUserRef, "v10-java-user-egress");
-        const javaSeen = await sh10(workspace10(javaUserRef), "v10-java-seen", javaCheck, 300000);
-        assert.equal(javaSeen, "1\n200\n", "a machine from the template: Java's keystore has the runner's CA and its HTTPS works");
+        assert.equal(await sh10(javaUser, "v10-java-seen", javaCheck, 300000), "1\n200\n200\n",
+          "a machine from the template: Java's keystore has the runner's CA and its HTTPS works");
+        const entries = Number(await sh10(javaUser, "v10-java-entries", `${listing} | grep -c trustedCertEntry`));
+        assert.ok(entries > 100, `Debian's public roots and the runner's CA: ${entries}`);
+        const state = `${listing} | grep -c trustedCertEntry; ${listing} | grep -c '${fingerprint}' || true; sudo sha256sum /etc/ssl/certs/java/cacerts | cut -d' ' -f1`;
+        const pkix = "java app/Fetch.java https://services.gradle.org/versions/current 2>&1 | grep -q 'PKIX path building failed' && echo pkix";
+
+        // A keystore without the CA (as a template built before the link has it).
+        const dropped = await sh10(javaUser, "v10-java-drop", `sudo keytool -delete -alias debian:cube-runner.pem -cacerts -storepass changeit >/dev/null; ${state}; ${pkix}`, 300000);
+        assert.match(dropped, new RegExp(`^${entries - 1}\n0\n[0-9a-f]{64}\npkix\n$`), "without the CA Java's HTTPS fails");
+        await stopVia(session, javaUserRef, epoch);
+        await bootJava(javaUserRef, "repaired");
+        const repaired = await sh10(javaUser, "v10-java-repaired", `cat /run/cube/runner-ca; ${state}; ${javaCheck}`, 300000);
+        const [repairNote, repairedEntries, repairedCa, repairedSha, ...repairedRest] = repaired.trim().split("\n");
+        assert.equal(repairNote, `repaired added the runner's CA to /etc/ssl/certs/java/cacerts; its ${entries - 1} other certificates kept`);
+        assert.deepEqual([Number(repairedEntries), repairedCa, repairedRest], [entries, "1", ["1", "200", "200"]], "repaired at boot: the CA back, every root kept, Java's HTTPS works");
+        await stopVia(session, javaUserRef, epoch);
+        await bootJava(javaUserRef, "ok");
+        assert.equal((await sh10(javaUser, "v10-java-again", state)).trim().split("\n")[2], repairedSha, "the next boot writes nothing");
+
+        // A stale CA under cube's alias (as after a CA rotation).
+        const stale = await sh10(javaUser, "v10-java-stale", `set -e
+sudo rm -f /tmp/old.p12
+sudo keytool -genkeypair -alias old -keyalg EC -dname CN=old-runner-ca -validity 2 -keystore /tmp/old.p12 -storetype PKCS12 -storepass changeit >/dev/null 2>&1
+sudo keytool -exportcert -rfc -alias old -keystore /tmp/old.p12 -storepass changeit > /tmp/old.pem
+sudo keytool -delete -alias debian:cube-runner.pem -cacerts -storepass changeit >/dev/null
+sudo keytool -importcert -noprompt -alias debian:cube-runner.pem -file /tmp/old.pem -cacerts -storepass changeit >/dev/null 2>&1
+${state}; ${pkix}`, 300000);
+        assert.match(stale, new RegExp(`^${entries}\n0\n[0-9a-f]{64}\npkix\n$`), "a stale CA under cube's alias: Java's HTTPS fails");
+        await stopVia(session, javaUserRef, epoch);
+        await bootJava(javaUserRef, "repaired");
+        const refreshed = await sh10(javaUser, "v10-java-refreshed", `cat /run/cube/runner-ca; ${state}; ${javaCheck}`, 300000);
+        const [refreshNote, refreshedEntries, refreshedCa, , ...refreshedRest] = refreshed.trim().split("\n");
+        assert.equal(refreshNote, `repaired added the runner's CA to /etc/ssl/certs/java/cacerts, in place of a stale one under its alias; its ${entries - 1} other certificates kept`);
+        assert.deepEqual([Number(refreshedEntries), refreshedCa, refreshedRest], [entries, "1", ["1", "200", "200"]], "the stale CA replaced, every root kept");
+
         await stopVia(session, javaUserRef, epoch);
         await session.machine({ case: "machineDelete", value: { ref: javaUserRef, fence: fence10, retain: false } });
         await session.call({ case: "templateDelete", value: { id: javaRef.id } });
-        note(`V10 Java: setup installed default-jdk-headless and ran update-ca-certificates (the keystore holds runner CA ${fingerprint.slice(0, 23)}...); template_publish READY; a machine from it: the keystore has the CA, java HttpClient https://example.com/ 200`);
+        note(`V10 Java: setup installed default-jdk-headless with apt only (keel's link /etc/ssl/certs/cube-runner.pem; the keystore holds runner CA ${fingerprint.slice(0, 23)}...); template_publish READY; a machine from it: runner-ca ok, java HttpClient https://example.com/ and https://services.gradle.org/versions/current 200; the CA taken out of the keystore: PKIX, repaired at the next boot (${entries} entries kept), the boot after unchanged; a stale CA under cube's alias: replaced at the next boot`);
       } else {
         note("V10 Java: NOT checked here: CUBE_TEST_BERTH_JAVA=1 (a real JDK from the image's apt) is unset");
       }

@@ -161,7 +161,11 @@ cube-init (PID 1)
   `INVALID_ARGUMENT/bad_ca`) goes into the image's bundle as a block
   between `# cube: begin` and `# cube: end` lines, replaced on every setup,
   and into `/usr/local/share/ca-certificates/cube-runner.crt`, so
-  `update-ca-certificates` keeps it in the bundle it writes again;
+  `update-ca-certificates` keeps it in the bundle it writes again, with
+  the link `update-ca-certificates` would make to it,
+  `/etc/ssl/certs/cube-runner.pem` (Debian's ca-certificates-java builds
+  Java's keystore from those links, so a JDK installed later trusts the
+  CA; only cube's own link goes when a setup has no CA);
   `/etc/gitconfig` gets git's credential helper for github.com (the
   placeholder in `GH_TOKEN`) and `/etc/environment` the CA variables, each
   as such a block. `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`,
@@ -172,8 +176,25 @@ cube-init (PID 1)
   the machine is not ready ("the image lacks a place for …"). Every CA a
   setup brings is also kept in `state/runner-cas.pem` and every mount point
   the agent makes in `state/mount-points`, for template publishing. Not
-  done: the `-CApath` hash link, a Java keystore, and taking a replaced CA
-  out of a bundle `update-ca-certificates` wrote (a later follow-up).
+  done: the `-CApath` hash link, and taking a replaced CA out of a bundle
+  `update-ca-certificates` wrote (a later follow-up).
+- **Java's keystore** (`keystore.rs`), on the first setup of a boot and on
+  a setup that brings another CA, before any command runs: when the root
+  has Debian's `/etc/ssl/certs/java/cacerts`, it is read as JKS (its whole
+  structure, not a byte search). Holding every certificate of the CA: `ok`,
+  nothing written. Lacking it: a copy beside it (same owner and mode) gets
+  the CA from the root's own `keytool`, as root in the workload root with
+  60 s per call (`-J-Xmx64m`; a stale certificate under cube's alias
+  `debian:cube-runner.pem`, ca-certificates-java's for the link, is deleted
+  first), is read again and renamed over the keystore only if it holds the
+  CA and every other certificate it had (`repaired`); otherwise the copy
+  goes and the keystore stays (`failed`). PKCS#12, JCEKS or an unreadable
+  file, `cacerts_updates` off or a `storepass` only a shell could read in
+  `/etc/default/cacerts`, or no `keytool`: `skipped`, untouched. Never
+  fatal. The outcome is on the console, in `/run/keel/runner-ca.json`, in
+  `status.guest.hooks["runner-ca"]` and, one line, in the workload's
+  `/run/cube/runner-ca`, which cubed's resume script reports as the
+  outcome `runner-ca`. A JDK with a store of its own is not touched.
   The agent also sets `fs.protected_hardlinks` and `fs.protected_symlinks`.
 - **Hooks**: cubed runs them as commands (its preparation and resume
   scripts); the agent writes the project's two from the boot documents and
