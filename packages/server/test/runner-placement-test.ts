@@ -107,7 +107,8 @@ try {
   // --- what the user and OptChat see while a thread waits ---
   {
     class Waiting extends LocalMachines {
-      waits = 2;
+      // One try waits; OptChat's watcher tries nothing of its own.
+      waits = 1;
       override async start(thread: Thread): Promise<{ booted: boolean }> {
         if (this.waits-- > 0) throw new RunnerWait("waiting for a runner: node-a does not answer, and no other runner with a free thread machine is ready; cube tries again");
         return super.start(thread);

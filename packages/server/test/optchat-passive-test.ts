@@ -6,13 +6,24 @@
  *      and reading (`history`) a suspended or waking thread start nothing,
  *      call no guest and open no agent. The old listing path (the agent's
  *      live history) is checked as it was: it woke no machine, but opened
- *      the agent. A thread whose machine runs is still activated (control).
- *   2. OptChat over cubeThreads with fake Conversations, through a restart:
- *      the restarted chat starts no suspended or waking thread; a stored run
- *      that settled and never reported reports once (idle is not taken for
- *      delivered), one already reported does not report again, a running
- *      thread is watched and reports once, and a thread woken by a message
- *      is watched again and reports its new run once. */
+ *      the agent. Watching an awake thread whose agent is not open starts
+ *      nothing either; a start that failed (an explicit one, the counter's
+ *      control) is still the watcher's failure to start.
+ *   2. The suspend race, over the real Conversations and cubeThreads: an
+ *      idle round suspends an awake thread, and the watcher looks at it
+ *      while the suspend goes on (the registry does not say suspended yet).
+ *      The fake machines wait a start for the suspend under way and then
+ *      resume what it saved, as runner-machines.ts does
+ *      (runner-suspend-test.ts: "a start that comes during a suspend waits
+ *      for it, then resumes the machine"): the watcher starts nothing, so
+ *      nothing is resumed.
+ *   3. OptChat over cubeThreads with fake Conversations, through a restart:
+ *      the watcher activates no thread; a stored run that settled and never
+ *      reported reports once (idle is not taken for delivered), also once
+ *      its agent opens and it is watched; one already reported does not
+ *      report again; a running thread is watched once the recovery loop
+ *      opened its agent and reports once; a thread woken by a message is
+ *      watched again and reports its new run once. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -45,7 +56,7 @@ const makeThread = (id: string, suspension?: Suspension) => ({
 }) as unknown as Thread;
 const registryOf = (threads: Thread[]) => ({
   listThreads: () => threads, getThread: (id: string) => threads.find(thread => thread.id === id) ?? null,
-  getProject: () => ({ id: "p", name: "cube" }), interruptStartupSteps: () => {}, initialPrompt: () => null,
+  getProject: () => ({ id: "p", name: "cube" }), interruptStartupSteps: () => {}, beginStartupStep: () => {}, endStartupStep: () => {}, initialPrompt: () => null,
   runner: () => ({ nodeId: "node", environmentId: 1, configHash: "config" }), runnerSlots: () => ({ free: 0, total: 2 }),
 }) as unknown as Registry;
 const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as never, latestCommits: async () => ({}) as never };
@@ -85,8 +96,8 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
   await threads.history(listed.id, { limit: 1 });
   assert.equal(conversations.agentOpen(listed.id), false, "history opens no agent");
   // Watching: a sleeping machine without its agent is not woken, suspended or waking.
-  assert.equal(await threads.events(listed.id), "suspended");
-  assert.equal(await threads.events(waking.id), "suspended");
+  assert.equal(await threads.events(listed.id), "stored");
+  assert.equal(await threads.events(waking.id), "stored");
   assert.equal(conversations.agentOpen(listed.id), false, "watching opens no agent");
   // With its agent open (it stays open while the machine sleeps): its own
   // events, still without a start.
@@ -94,14 +105,73 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
   assert.ok(own && typeof own === "object" && "watch" in own, "a sleeping thread with its agent open is watched through it");
   assert.deepEqual([starts, guests], [[], []], "passive observation of suspended and waking threads: zero starts, zero guest calls");
 
-  // Control: a thread whose machine is not asleep is activated by its watcher.
-  await assert.rejects(threads.events(awake.id), /no machine in this test/);
-  assert.deepEqual(starts, [awake.id], "an awake thread is still started by its watcher (the counter counts)");
+  // An awake thread whose agent is not open: the watcher reads, starts nothing.
+  assert.equal(await threads.events(awake.id), "stored");
+  assert.equal(conversations.agentOpen(awake.id), false, "watching an awake thread opens no agent");
+  assert.deepEqual([starts, guests], [[], []], "watching an awake thread starts nothing");
+  // Control: an explicit start is counted, and its failure is the watcher's
+  // failure to start, without a start of its own.
+  await conversations.activate(awake.id);
+  assert.deepEqual(starts, [awake.id], "the counter counts an explicit start");
+  await assert.rejects(threads.events(awake.id), /no machine in this test/, "a failed start is the watcher's failure to start");
+  assert.deepEqual(starts, [awake.id], "the watcher did not start it again");
   await conversations.close();
-  console.log("ok: cubeThreads: watching, listing and reading a suspended or waking thread start no machine, call no guest and open no agent; the old listing opened the agent; an awake thread is still activated");
+  console.log("ok: cubeThreads: watching, listing and reading a suspended, waking or awake thread start no machine, call no guest and open no agent; the old listing opened the agent; a failed explicit start is still reported");
 }
 
-// ------------------------------------------------ 2. OptChat through a restart
+// ------------------------------------------------ 2. the suspend race
+
+{
+  const thread = makeThread("a5a5a5a5-0000-4000-8000-000000000005");
+  const registry = registryOf([thread]);
+  const steps: string[] = [];
+  let suspending: Promise<void> | null = null;
+  let entered!: () => void;
+  const inSuspend = new Promise<void>(resolve => { entered = resolve; });
+  let save!: () => void;
+  const saved = new Promise<void>(resolve => { save = resolve; });
+  const machines = {
+    start: async (current: Thread) => {
+      steps.push("start");
+      await suspending;
+      if (registry.getThread(current.id)?.vm?.suspension) steps.push("resumed what the idle round saved");
+      return { booted: false };
+    },
+    guest: () => ({ call: async () => { throw new Error("no guest in this test"); } }),
+    touch: () => {},
+    close: async () => {},
+    suspendIfIdle: async (current: Thread, busy: () => Promise<string | null>) => {
+      let open!: () => void;
+      suspending = new Promise(resolve => { open = resolve; });
+      try {
+        if (await busy()) return false;
+        entered();
+        await saved;
+        (current as { vm: NonNullable<Thread["vm"]> }).vm = { ...current.vm!, suspension: { state: "suspended", at: 2 } };
+        steps.push("suspended");
+        return true;
+      } finally { suspending = null; open(); }
+    },
+  } as unknown as ThreadMachines;
+  const conversations = new Conversations({ registry, directory: path.join(root, "race"), models, machines });
+  const threads = cubeThreads({ registry, conversations, ...noThreads });
+  const round = conversations.suspendIdle();
+  await inSuspend;
+  assert.equal(registry.getThread(thread.id)!.vm!.suspension, undefined, "mid-suspend the registry still says awake");
+  const watched = threads.events(thread.id).catch((error: Error) => `threw: ${error.message}`);
+  await delay(20);
+  save();
+  await round;
+  const result = await watched;
+  assert.deepEqual(steps, ["suspended"], "no start during the suspend, so nothing is resumed after it");
+  assert.equal(result, "stored", "the watcher reads during the suspend");
+  assert.equal(await threads.events(thread.id), "stored", "and after it");
+  assert.equal(conversations.agentOpen(thread.id), false);
+  await conversations.close();
+  console.log("ok: the watcher of a thread an idle round is suspending starts nothing: the machine stays suspended");
+}
+
+// ------------------------------------------------ 3. OptChat through a restart
 
 {
   const ids = ["aaaaaaa1", "bbbbbbb2", "ccccccc3", "ddddddd4", "eeeeeee5"].map(prefix => `${prefix}-0000-4000-8000-00000000000${prefix[7]}`);
@@ -146,8 +216,9 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
     }),
   } as unknown as Conversations;
   let nextSpawn = 0;
+  // spawn starts its thread and opens its agent (its own activation).
   const threads = { ...cubeThreads({ registry, conversations, ...noThreads }),
-    async spawn() { const id = ids[nextSpawn++]!; return { id, title: `thread ${id.slice(0, 8)}` }; } };
+    async spawn() { const id = ids[nextSpawn++]!; open.add(id); return { id, title: `thread ${id.slice(0, 8)}` }; } };
   /** Every report the chat's model was given, in order (the message after the view). */
   const reports: string[] = [];
   faux.setResponses(Array.from({ length: 200 }, () => (request: { messages: Message[] }) => {
@@ -183,7 +254,8 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
   } finally { await chat.close(); }
 
   // While cubed was away: A, B and E were suspended idle, D is being woken
-  // (waiting for a slot), C still works. Agents are closed by the restart.
+  // (waiting for a slot), C still works. Agents are closed by the restart;
+  // the recovery loop opens C's (its machine runs) and goes on with D's wake.
   open.clear();
   listeners.clear();
   setSleep(A, { state: "suspended", at: 1 });
@@ -198,10 +270,18 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
 
   chat = await openChat();
   try {
-    await until(() => listeners.has(C), "the running thread is watched again after the restart");
     await until(() => reportsOf(B).length === 1 && reportsOf(D).length === 1, "the stored runs nobody reported, suspended (B) and waking (D), report");
-    await delay(400); // several watch rounds (50 ms each)
-    assert.deepEqual(activated, [C], "after the restart only the thread whose machine runs is activated: no suspended or waking thread is started");
+    await delay(200); // several watch rounds (50 ms each)
+    assert.equal(listeners.has(C), false, "a thread whose agent is not open yet is not watched");
+    // The recovery loop: C's agent opens (its machine runs); D's wake ends.
+    open.add(C);
+    await until(() => listeners.has(C), "the running thread is watched once its agent is open");
+    setSleep(D, undefined);
+    open.add(D);
+    await until(() => listeners.has(D), "the woken thread is watched once its agent is open");
+    await delay(200);
+    assert.deepEqual(activated, [], "the watcher activates no thread: suspended, waking or running");
+    assert.equal(reportsOf(D).length, 1, "D's run, reported from its store, is not reported again from its agent");
     assert.equal(reportsOf(A).length, 1, "a run reported before the restart is not reported again");
     assert.equal(reportsOf(B).length, 1, "a stored report goes once, however many rounds read it");
     assert.equal(reportsOf(D).length, 1);
@@ -217,14 +297,15 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
     await threads.tell(A, "go on", "tell-1");
     assert.deepEqual(submitted, [`${A}:go on`], "the message goes to the thread itself");
     setSleep(A, undefined);
+    open.add(A);
     stored.set(A, { status: { state: "working", run: "rA2", error: null }, reply: "" });
     await until(() => listeners.has(A), "the woken thread is watched again");
-    assert.deepEqual(activated, [C, A], "A is activated by its watcher only once it is awake");
+    assert.deepEqual(activated, [], "nor is A activated by its watcher: the message woke it");
     stored.set(A, settled("rA2", "A went on"));
     await listeners.get(A)!(transcriptOf(A));
     await until(() => reportsOf(A).length === 2, "the woken thread's new run reports");
     await delay(300);
     assert.deepEqual(ids.map(id => reportsOf(id).length), [2, 1, 1, 1, 0], "every settled run reported exactly once");
   } finally { await chat.close(); fs.rmSync(root, { recursive: true, force: true }); }
-  console.log("ok: OptChat through a restart: no suspended or waking thread is started; stored unreported runs report once, reported ones not again, an idle one not at all; running and woken threads are watched and report once");
+  console.log("ok: OptChat through a restart: the watcher activates no thread; stored unreported runs report once, also once watched, reported ones not again, an idle one not at all; running and woken threads are watched once their agent is open and report once");
 }

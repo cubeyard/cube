@@ -37,9 +37,10 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
     if (conversations.starting(id)) return `starting its machine again (the last try failed: ${error})`;
     return conversations.agentOpen(id) ? `ready (a later check of its machine failed: ${error})` : `error: ${error}`;
   };
-  /** A machine that is suspended, or being woken by someone who asked for it
-   * (a message, the user opening it, a start a restart cut short). Watching
-   * or listing it reads what cubed stored; it never wakes the machine. */
+  /** A machine that is suspended, or being woken (by a message, a portal
+   * connection, an archive's check of its disk, or a wake a restart cut
+   * short that the recovery loop goes on with). Reading the thread in the
+   * UI does not wake it; listing it reads what cubed stored. */
   const dormant = (thread: Thread | null) => !!thread && !thread.archived && !!thread.vm?.suspension;
   const sleepText = (thread: Thread) => thread.vm?.suspension?.state === "waking"
     ? `its machine is being woken${thread.vm.suspension.waiting ? ` (${thread.vm.suspension.waiting})` : ""}` : "its machine is suspended (idle; it wakes when told)";
@@ -195,16 +196,18 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       };
       const left = gone();
       if (left !== false) return left;
-      // Watching a sleeping machine wakes nothing: with its agent open the
-      // agent's own events are watched as they are; without, the watcher
-      // reads the stored run and looks again later.
-      const sleeping = dormant(registry.getThread(id));
-      if (sleeping && !conversations.agentOpen(id)) return "suspended";
-      if (!sleeping) await conversations.activate(id);
-      // A wait for a runner counts as a start not made yet: reported once it lasts.
-      const failure = conversations.error(id) ?? (conversations.agentOpen(id) ? null : conversations.waiting(id));
-      // An agent open on the machine runs on whatever a later check found.
-      if (failure && !conversations.agentOpen(id)) {
+      // Watching starts nothing: no machine, no agent. Machines start for
+      // explicit work (spawn, a message) and in cubed's recovery loop, which
+      // leaves a suspend under way alone; a watcher that activated could
+      // resume a machine an idle round had just suspended. With the agent
+      // open its own events are watched, whatever a later check of the
+      // machine found; without, the watcher reads the stored run and looks
+      // again next round.
+      if (!conversations.agentOpen(id)) {
+        // A wait for a runner counts as a start not made yet: reported once
+        // it lasts. A sleeping machine's wait for a slot is not one.
+        const failure = dormant(registry.getThread(id)) ? null : conversations.error(id) ?? conversations.waiting(id);
+        if (!failure) return "stored";
         const now = gone();
         if (now !== false) return now;
         throw new Error(failure);

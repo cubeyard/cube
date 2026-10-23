@@ -142,8 +142,10 @@ try {
   assert.match(conversations.error(late) ?? "", /unreachable/);
   assert.equal(conversations.agentOpen(late), true);
   assert.match(await adapter.describe([late]), /ready \(a later check of its machine failed: ssh: the guest is unreachable\), completed$/);
-  machines.failStarts.set(late, ["ssh: the guest is unreachable"]);
+  // The watcher checks nothing itself: it watches the open agent with the
+  // last check's failure beside it, and the next check clears that.
   assert.ok(await adapter.events(late), "an open agent is watched whatever a later check found");
+  assert.match(conversations.error(late) ?? "", /unreachable/);
   await conversations.activate(late);
   assert.equal(conversations.error(late), null);
 

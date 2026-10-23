@@ -197,10 +197,11 @@ export interface OptThreads {
   /** One line per thread: its state and title. */
   describe(ids: readonly string[]): Promise<string>;
   /** The thread's events; null once it is archived or gone; "archiving"
-   * while its archive (or a release left unfinished) goes on; "suspended"
-   * while its machine is suspended or being woken and its agent is not open:
-   * nothing is started for a watcher, whose report comes from `history`. */
-  events(id: string): Promise<ThreadEvents | null | "archiving" | "suspended">;
+   * while its archive (or a release left unfinished) goes on; "stored"
+   * while its agent is not open (its machine starting, suspended or being
+   * woken): nothing is started for a watcher, whose report comes from
+   * `history`. */
+  events(id: string): Promise<ThreadEvents | null | "archiving" | "stored">;
   /** What cubed has of a thread, read only: its own record beside a page of
    * the agent's stored transcript, which may disagree. null: no such thread. */
   history(id: string, request?: HistoryRequest): Promise<ThreadRecord | null>;
@@ -1392,7 +1393,7 @@ export class OptChat {
     for (const id of Object.keys(settings?.threads ?? {})) {
       if (this.watchers.has(id)) continue;
       const watching = (async () => {
-        let events: ThreadEvents | null | "archiving" | "suspended";
+        let events: ThreadEvents | null | "archiving" | "stored";
         try { events = await this.options.threads.events(id); }
         catch (error) {
           // cubed retries a machine that failed to start (a lost guest, a
@@ -1415,10 +1416,10 @@ export class OptChat {
         this.startFailing.delete(id);
         // An archive may still be refused: the next round looks again.
         if (events === "archiving") { this.watchers.delete(id); return null; }
-        // A sleeping machine is not woken to be watched: its stored run, if
+        // A thread is not started or woken to be watched: its stored run, if
         // it settled, reports (once: the report's request id), and the next
-        // round looks again, watching it once something has woken it.
-        if (events === "suspended") {
+        // round looks again, watching it once its agent is open.
+        if (events === "stored") {
           await this.reportStored(id);
           this.watchers.delete(id);
           return null;
@@ -1444,7 +1445,7 @@ export class OptChat {
       .catch(error => { if (!this.closing) log.warn("report delivery failed", { thread: id, error }); });
   }
 
-  /** After an archive, or for a thread whose machine sleeps: the thread's
+  /** After an archive, or for a thread whose agent is not open: the thread's
    * last settled run, as stored, reports to the chat if no watcher sent it
    * yet. A run still open (or none) reports nothing. The report's request id
    * keeps it to one delivery. */
