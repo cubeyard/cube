@@ -34,6 +34,12 @@ export class FakeBerth {
   slots: number;
   /** The runner does not answer (UNAVAILABLE), as a down runner. */
   down = false;
+  /** Machines (by id) whose create fails, and with what. */
+  readonly failCreates = new Map<string, string>();
+  /** Machines (by id) whose resume from SUSPENDED fails, and with what. */
+  readonly failResumes = new Map<string, string>();
+  /** How many deletes fail before one succeeds. */
+  failDeletes = 0;
   readonly phases = new Map<string, Phase>();
   readonly events: RunnerEvent[] = [];
   readonly violations: string[] = [];
@@ -47,6 +53,8 @@ export class FakeBerth {
   starts(vm?: string): number { return this.events.filter(e => e.op === "machineStart" && e.from !== Phase.RUNNING && e.to === Phase.RUNNING && (!vm || e.vm === vm)).length; }
   resumes(vm?: string): number { return this.events.filter(e => e.op === "machineStart" && e.from === Phase.SUSPENDED && e.to === Phase.RUNNING && (!vm || e.vm === vm)).length; }
   creates(vm?: string): number { return this.events.filter(e => e.op === "machineCreate" && e.to !== null && (!vm || e.vm === vm)).length; }
+  /** Every request of `op` that reached the runner for `vm`, refused or not. */
+  asked(op: string, vm: string): number { return this.events.filter(e => e.op === op && e.vm === vm).length; }
   /** Every request that reached the runner for `vm` since event `since`. */
   touched(vm: string, since = 0): RunnerEvent[] { return this.events.slice(since).filter(e => e.vm === vm); }
   /** A runner restart: its machines stop (berth marks them interrupted); suspended ones stay so. */
@@ -81,6 +89,8 @@ export class FakeBerth {
         return this.machine(vm);
       case "machineCreate": {
         if (phase !== undefined) return this.machine(vm);
+        const fails = this.failCreates.get(vm);
+        if (fails) { this.events.push({ op, vm, from: null, to: null }); throw new RunnerError("INTERNAL", "", fails); }
         if (this.holding() >= this.slots) { this.events.push({ op, vm, from: null, to: null }); this.refuse("RESOURCE_EXHAUSTED", "the runner hosts as many machines as it may"); }
         const guest = this.guestOf(vm);
         const hooks = path.join(guest.root, "hooks");
@@ -92,6 +102,8 @@ export class FakeBerth {
       case "machineStart": {
         if (phase === undefined) this.refuse("NOT_FOUND", "no such machine");
         if (phase === Phase.RETAINED) throw new RunnerError("FAILED_PRECONDITION", "retained", "the machine was deleted; its disk is kept");
+        const resumeFails = phase === Phase.SUSPENDED ? this.failResumes.get(vm) : undefined;
+        if (resumeFails) { this.events.push({ op, vm, from: phase, to: phase }); throw new RunnerError("INTERNAL", "", resumeFails); }
         if (phase === Phase.SUSPENDED && this.holding() >= this.slots) {
           this.events.push({ op, vm, from: phase, to: phase });
           this.refuse("RESOURCE_EXHAUSTED", "the machine stays suspended");
@@ -110,6 +122,7 @@ export class FakeBerth {
         return this.machine(vm);
       case "machineDelete":
         if (phase === undefined) this.refuse("NOT_FOUND", "no such machine");
+        if (this.failDeletes > 0) { this.failDeletes--; this.events.push({ op, vm, from: phase, to: phase }); throw new RunnerError("INTERNAL", "", "the disk could not be removed"); }
         this.set(op, vm, retain ? Phase.RETAINED : null);
         if (!retain) { this.guestOf(vm).stop(); return create(MachineSchema, { ref: { owner: "", id: vm }, status: { phase: Phase.DELETED } }); }
         return this.machine(vm);
@@ -173,7 +186,7 @@ export function lifecycle(root: string, options: { slots: number; idleMs?: numbe
   const start = (): Cubed => {
     const machines = new RunnerMachines({ registry, threads: path.join(root, "threads"), session: () => berth.session(), policy, log: quiet,
       templates: { enabled: false, ttlMs: 0 }, idleMs: options.idleMs ?? 60_000, now: () => clock.now, wakeRetryMs: 50, wakeWaitMs: options.wakeWaitMs ?? 600 });
-    const conversations = new Conversations({ registry, directory: path.join(root, "threads"), models, machines });
+    const conversations = new Conversations({ registry, directory: path.join(root, "threads"), models, machines, now: () => clock.now });
     machines.onWake = thread => conversations.activate(thread.id);
     return { conversations, machines, close: () => conversations.close(2000) };
   };
