@@ -91,6 +91,8 @@ export function controlledModel(seed: number, options: { tokensPerSecond?: numbe
     const sinceUser = messages.slice(messages.lastIndexOf(lastUser!) + 1);
     const toolRounds = sinceUser.filter(message => message.role === "toolResult").length;
     const random = prng(hash(`${seed}:${said}:${toolRounds}`));
+    // Pi's own compaction of a long thread asks for a summary, never a tool call.
+    if (/context summarization assistant/.test(system) || /context summarization assistant/.test(JSON.stringify(messages.at(-1)))) return fauxAssistantMessage(`summary of the work so far: ${sentence(random, 8, 20)}`);
     if (system.includes("You write the memory of OptChat")) {
       return fauxAssistantMessage(`${sentence(random, 5, 12)}\n${sentence(random, 9, 20)}\n${sentence(random, 14, 30)}`);
     }
@@ -165,7 +167,7 @@ export async function openCubed(root: string, seed: number) {
   isolateGh(root);
   const control = controlledModel(seed, { tokensPerSecond: Number(process.env.PERF_TPS) || undefined });
   const app = await createCubed({ state: path.join(root, "state"), models: control.models, machines: new LocalMachines(path.join(root, "machines")),
-    claude: null, gateway: null, runnerHealth, portal: null, skillSource: null,
+    claude: null, gateway: null, runnerHealth, portal: null, skillSource: null, ...process.env.PERF_WEB ? { web: process.env.PERF_WEB } : {},
     secrets: [], githubPulls: { async pull() { throw new Error("perf harness: no GitHub"); }, async merge() { throw new Error("perf harness: no GitHub"); } } });
   return { app, ...control };
 }

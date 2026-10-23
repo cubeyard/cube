@@ -11,6 +11,7 @@ never logged in. No runner, provider or GitHub is contacted.
 | `seed.ts` | seeds a root through cubed's own routes and agents: projects (local git repositories), OptChat turns (replies, tool calls, spawns, artifact writes and revisions, thread reports), threads (most archived), one long thread, artifact comments. Writes `manifest.json` with counts, sizes and the commit |
 | `serve.ts` | serves a seeded root with the real cubed and the built UI on loopback; logs each request's server time to `requests.jsonl` |
 | `../../../web/test/perf/measure.ts` | copies the root, starts `serve.ts`, drives Google Chrome over CDP: cold/warm chat load, older pages, typing, thread view, lists, phone index, idle polling, route-change leaks, a streamed send; optional Chrome traces and a server CPU profile |
+| `../../../web/test/perf/page-profile.ts` | a Chrome CPU profile of the chat page while it reads older pages and streams a reply (`PERF_WEB` = an unminified build for readable names) |
 | `profile-summary.ts` | summarizes a `.cpuprofile` |
 | `job.ts` | keeps a long seed running under `cube service` in a cube thread |
 
@@ -18,9 +19,9 @@ Content is deterministic for a seed (default 20261023); ids and times are not.
 
 ```sh
 pnpm install --frozen-lockfile && pnpm --filter @cube/web build
-node packages/server/test/perf/seed.ts small  /tmp/perf/small            # ~2 min
-node packages/server/test/perf/seed.ts medium /tmp/perf/medium           # ~25 min
-node packages/server/test/perf/seed.ts large  /tmp/perf/large            # ~1-2 h
+node packages/server/test/perf/seed.ts small  /tmp/perf/small            # ~2 min on 2 vCPUs
+node packages/server/test/perf/seed.ts medium /tmp/perf/medium           # ~28 min
+node packages/server/test/perf/seed.ts large  /tmp/perf/large            # ~75 min
 node packages/web/test/perf/measure.ts --root /tmp/perf/large --out /tmp/perf/out-large --runs 5 --trace
 node packages/web/test/perf/measure.ts --root /tmp/perf/large --out /tmp/perf/prof-large --runs 3 --only api,chat,idle --profile
 node packages/server/test/perf/profile-summary.ts /tmp/perf/prof-large/*.cpuprofile
@@ -30,3 +31,17 @@ node packages/server/test/perf/profile-summary.ts /tmp/perf/prof-large/*.cpuprof
 when it is Chromium), `--headed`, `--only` (`api,chat,older,thread,lists,phone,idle,leak,send`)
 and `--tps` (the controlled model's tokens per second for the streamed send).
 Do not run two seeds or a seed and a measurement at once: they share the CPU.
+
+Notes on what the numbers mean:
+
+- `measure.ts` waits after the server starts until `/api/state` answers in
+  under 20 ms ten times in a row: at start cubed opens every active thread
+  and its machine, and answers take up to seconds meanwhile
+  (`serverStart.quietAfterListenMs`).
+- Typing latency is keydown to the task after the next animation frame
+  (main-thread work). Event Timing's durations are not used: headless
+  Chrome with software raster reported presentation seconds late in one
+  sequence that did not reproduce.
+- The seeds measured on 2026-10-23 had no artifact comments and a long
+  thread whose later turns failed (the controlled model answered Pi's
+  compaction with a tool call); both are fixed in `seed.ts`/`lib.ts` since.
