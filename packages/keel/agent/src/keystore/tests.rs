@@ -75,7 +75,8 @@ fn a_jks_is_read_to_its_digest_and_nothing_else_passes_for_one() {
     }
     let data = jks(2, &[("debian:a.pem", b"AAAA")], 0);
     let other = |bytes: &[u8]| match kind(bytes) {
-        Kind::Other(why) => why,
+        Kind::Damaged(why) => format!("damaged: {why}"),
+        Kind::Foreign(what) => format!("foreign: {what}"),
         found => panic!("{found:?}"),
     };
     assert!(other(&data[..data.len() - 1]).contains("not a 20-byte digest"));
@@ -90,10 +91,20 @@ fn a_jks_is_read_to_its_digest_and_nothing_else_passes_for_one() {
     let at = 12 + 4 + 2 + 1 + 8 + 2;
     wrong_type[at..at + 5].copy_from_slice(b"X.510");
     assert!(other(&wrong_type).contains("X.510"));
-    assert!(other(&[0x30, 0x82, 0x01, 0x00]).contains("PKCS#12"));
-    assert!(other(&[0xce, 0xce, 0xce, 0xce]).contains("JCEKS"));
-    assert!(other(b"").contains("empty"));
-    assert!(other(b"-----BEGIN CERTIFICATE-----").contains("not a keystore"));
+    assert!(other(&data[..30]).starts_with("damaged: "));
+    assert_eq!(
+        other(&[0x30, 0x82, 0x01, 0x00]),
+        "foreign: a PKCS#12 keystore"
+    );
+    assert_eq!(
+        other(&[0xce, 0xce, 0xce, 0xce]),
+        "foreign: a JCEKS keystore"
+    );
+    assert_eq!(other(b""), "damaged: an empty file");
+    assert_eq!(
+        other(b"-----BEGIN CERTIFICATE-----"),
+        "foreign: not a keystore format cube knows"
+    );
 }
 
 #[test]
@@ -154,6 +165,12 @@ impl Root {
         self.path().join(workload.trim_start_matches('/'))
     }
 }
+
+/// No namespace, no cgroup: a call in this test's own world.
+const FREE: Confined = Confined {
+    namespace: None,
+    group: None,
+};
 
 fn arg<'a>(args: &'a [String], name: &str) -> &'a str {
     let at = args.iter().position(|a| a == name).unwrap();
@@ -377,7 +394,7 @@ fn a_repair_that_loses_roots_fails_or_stops_leaves_the_keystore_as_it_was() {
 }
 
 #[test]
-fn what_cannot_be_checked_or_changed_is_skipped_untouched() {
+fn an_opt_out_or_a_foreign_format_is_skipped_and_a_ca_cube_cannot_add_fails_untouched() {
     let mut never = |_: &[String], _: &[u8]| -> io::Result<Ran> { panic!("keytool must not run") };
     let roots = jks(2, &[("debian:root-a.pem", b"ROOT-A")], 0);
 
@@ -397,9 +414,10 @@ fn what_cannot_be_checked_or_changed_is_skipped_untouched() {
     let root = Root::new(&roots);
     fs::remove_file(root.path().join("usr/bin/keytool")).unwrap();
     let outcome = reconcile(&root.file(), &pem(CA), &mut never).unwrap();
+    assert_eq!(outcome.word(), "failed", "the CA is missing and stays so");
     assert_eq!(
         outcome.detail(),
-        "/etc/ssl/certs/java/cacerts lacks the runner's CA; the machine has no keytool to add it with"
+        "/etc/ssl/certs/java/cacerts lacks the runner's CA and cube cannot add it: the machine has no keytool"
     );
 
     let root = Root::new(&roots);
@@ -422,6 +440,7 @@ fn what_cannot_be_checked_or_changed_is_skipped_untouched() {
     )
     .unwrap();
     let outcome = reconcile(&root.file(), &pem(CA), &mut never).unwrap();
+    assert_eq!(outcome.word(), "failed");
     assert!(
         outcome.detail().contains("storepass is not a plain value"),
         "{}",
@@ -437,8 +456,25 @@ fn what_cannot_be_checked_or_changed_is_skipped_untouched() {
         reconcile(&root.file(), &pem(CA), &mut never)
             .unwrap()
             .word(),
-        "skipped"
+        "failed"
     );
+
+    // A damaged JKS (the template test's stand-in: the CA after the magic):
+    // Java cannot load it, so failed, and it is left as it is.
+    let standin = [
+        &[0xfe, 0xed, 0xfe, 0xed][..],
+        b"\x30\x82\x01\x02 the runner's CA",
+    ]
+    .concat();
+    let root = Root::new(&standin);
+    let outcome = reconcile(&root.file(), &pem(CA), &mut never).unwrap();
+    assert_eq!(outcome.word(), "failed");
+    assert!(
+        outcome.detail().contains("a damaged JKS keystore"),
+        "{}",
+        outcome.detail()
+    );
+    assert_eq!(fs::read(root.keystore()).unwrap(), standin);
 }
 
 #[test]
@@ -534,7 +570,7 @@ fn the_keystore_is_found_inside_the_root_through_its_links() {
 #[test]
 fn run_captures_output_feeds_input_and_kills_the_whole_group_on_time() {
     let ran = run(
-        None,
+        &FREE,
         "cat; echo err >&2; exit 3",
         &[],
         b"input\n",
@@ -544,7 +580,7 @@ fn run_captures_output_feeds_input_and_kills_the_whole_group_on_time() {
     assert_eq!((ran.status, ran.timed_out), (Some(3), false));
     assert_eq!(ran.output, "input\nerr\n");
     let ran = run(
-        None,
+        &FREE,
         "printf '%s|' \"$@\"; printf '%s' \"$PATH\"",
         &["a b".into(), "c".into()],
         b"",
@@ -556,7 +592,7 @@ fn run_captures_output_feeds_input_and_kills_the_whole_group_on_time() {
     // A background child keeps the output pipe open: it goes with the group.
     let started = Instant::now();
     let ran = run(
-        None,
+        &FREE,
         "sleep 30 & echo started; sleep 30",
         &[],
         b"",
@@ -572,13 +608,103 @@ fn run_captures_output_feeds_input_and_kills_the_whole_group_on_time() {
     );
     // An exit that leaves a child running does not wait for it either.
     let started = Instant::now();
-    let ran = run(None, "sleep 30 & exit 0", &[], b"", Duration::from_secs(10)).unwrap();
+    let ran = run(
+        &FREE,
+        "sleep 30 & exit 0",
+        &[],
+        b"",
+        Duration::from_secs(10),
+    )
+    .unwrap();
     assert_eq!(ran.status, Some(0));
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "{:?}",
         started.elapsed()
     );
+}
+
+/// A process that left the call's process group and holds its output
+/// (`setsid`) cannot hold the call: its output is waited for 2 s at most.
+#[test]
+fn an_escaped_process_holding_the_output_does_not_hold_the_call() {
+    let started = Instant::now();
+    let ran = run(
+        &FREE,
+        "setsid sleep 6 & sleep 0.3; echo started; exit 0",
+        &[],
+        b"",
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    assert_eq!(ran.status, Some(0));
+    assert!(ran.output.starts_with("started\n"), "{:?}", ran.output);
+    assert!(
+        ran.output
+            .contains("still held open by a process outside the call"),
+        "{:?}",
+        ran.output
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// Needs root and a cgroup v2 filesystem (`sudo cargo test`; CI sets
+/// CUBE_AGENT_ROOT_TESTS; CUBE_TEST_CGROUP names where, default
+/// /sys/fs/cgroup): a process that left the process group is still in the
+/// call's cgroup and is killed with it, and the cgroup is removed.
+#[test]
+fn an_escaped_process_is_killed_with_the_call_s_cgroup() {
+    let parent = std::env::var("CUBE_TEST_CGROUP").unwrap_or_else(|_| "/sys/fs/cgroup".into());
+    let parent = Path::new(&parent);
+    if unsafe { libc::geteuid() } != 0 || !parent.join("cgroup.procs").exists() {
+        assert!(
+            std::env::var_os("CUBE_AGENT_ROOT_TESTS").is_none(),
+            "CUBE_AGENT_ROOT_TESTS is set: run this test as root with a cgroup v2 filesystem"
+        );
+        eprintln!(
+            "SKIP: an_escaped_process_is_killed_with_the_call_s_cgroup needs root and cgroup v2"
+        );
+        return;
+    }
+    let group = parent.join(format!("cube-keystore-test-{}", std::process::id()));
+    let marker = tempfile::tempdir().unwrap();
+    let pid_file = marker.path().join("pid");
+    let started = Instant::now();
+    let ran = run(
+        &Confined { namespace: None, group: Some(&group) },
+        "setsid sh -c 'echo $$ > \"$1\"; exec sleep 30' sh \"$1\" & sleep 0.3; echo started; exit 0",
+        &[pid_file.to_string_lossy().into_owned()],
+        b"",
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    assert_eq!(ran.status, Some(0));
+    assert_eq!(
+        ran.output, "started\n",
+        "the escaped process was killed, so the output ended"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let pid: i32 = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists()
+            || fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|stat| stat.contains(") Z ")),
+        "the escaped sleep {pid} is gone"
+    );
+    assert!(!group.exists(), "the call's cgroup is removed");
 }
 
 /// Needs root (`sudo cargo test`; CI sets CUBE_AGENT_ROOT_TESTS): the
@@ -595,7 +721,10 @@ fn run_enters_the_workload_namespace_at_its_root() {
     }
     let namespace = fs::File::open("/proc/self/ns/mnt").unwrap();
     let ran = run(
-        Some(&namespace),
+        &Confined {
+            namespace: Some(&namespace),
+            group: None,
+        },
         "pwd; id -u",
         &[],
         b"",
@@ -606,7 +735,10 @@ fn run_enters_the_workload_namespace_at_its_root() {
     let not_a_namespace = fs::File::open("/").unwrap();
     assert!(
         run(
-            Some(&not_a_namespace),
+            &Confined {
+                namespace: Some(&not_a_namespace),
+                group: None
+            },
             "true",
             &[],
             b"",
@@ -637,7 +769,7 @@ fn certificate(name: &str) -> String {
 #[test]
 fn the_jdk_s_keytool_repairs_a_real_keystore() {
     if run(
-        None,
+        &FREE,
         "command -v keytool",
         &[],
         b"",
@@ -663,7 +795,7 @@ fn the_jdk_s_keytool_repairs_a_real_keystore() {
                 _ => a.clone(),
             }));
             run(
-                None,
+                &FREE,
                 "exec keytool \"$@\"",
                 &all,
                 stdin,
@@ -676,7 +808,7 @@ fn the_jdk_s_keytool_repairs_a_real_keystore() {
     let store = root.keystore().to_string_lossy().into_owned();
     for name in ["public root a", "public root b"] {
         let ran = run(
-            None,
+            &FREE,
             "exec keytool \"$@\"",
             &[
                 "-importcert",
@@ -711,7 +843,7 @@ fn the_jdk_s_keytool_repairs_a_real_keystore() {
                     entries.len()
                 );
             }
-            Kind::Other(what) => eprintln!("this host's /etc/ssl/certs/java/cacerts: {what}"),
+            other => eprintln!("this host's /etc/ssl/certs/java/cacerts: {other:?}"),
         }
     }
 
@@ -729,7 +861,7 @@ fn the_jdk_s_keytool_repairs_a_real_keystore() {
         "the roots kept"
     );
     let listed = run(
-        None,
+        &FREE,
         "exec keytool -list -keystore \"$1\" -storetype JKS -storepass changeit",
         std::slice::from_ref(&store),
         b"",

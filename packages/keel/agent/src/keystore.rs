@@ -1,5 +1,5 @@
 //! Java's system keystore and the runner's CA, checked on the first
-//! `machine_setup` of each boot and again when the CA changes.
+//! `machine_setup` of each boot and again when a setup brings another CA.
 //!
 //! Debian's ca-certificates-java keeps one keystore for every packaged JDK,
 //! `/etc/ssl/certs/java/cacerts` (JKS; each JDK's `lib/security/cacerts`
@@ -13,16 +13,19 @@
 //! 1. No keystore: nothing to do (no outcome).
 //! 2. The keystore is parsed as JKS (its structure to the end, not a byte
 //!    search). It holds every certificate of the CA as a trusted entry:
-//!    `ok`, nothing is written. PKCS#12, JCEKS, a damaged file or one cube
-//!    cannot read: `skipped`, left as it is.
-//! 3. `/etc/default/cacerts` turns updates off (`cacerts_updates`), or its
-//!    `storepass` cannot be read without a shell, or the root has no
-//!    `keytool`: `skipped`.
+//!    `ok`, nothing is written. PKCS#12, JCEKS or another format cube does
+//!    not read: `skipped` (not checked). A damaged JKS or an empty file
+//!    (Java cannot load it either): `failed`. Both are left as they are.
+//! 3. `/etc/default/cacerts` turns updates off (`cacerts_updates`, the
+//!    administrator's choice): `skipped`. A `storepass` there that cannot
+//!    be read without a shell, or no `keytool` in the root: `failed`, since
+//!    the keystore lacks the CA and stays so.
 //! 4. A copy beside it (`.cacerts.cube-new`, same owner and mode) gets the
-//!    CA from the JDK's own `keytool`, run as root in the workload root with
-//!    20 s per call: a stale entry under cube's alias
-//!    (`debian:cube-runner.pem`, the alias ca-certificates-java gives
-//!    the link) is deleted first, then the CA is imported under it.
+//!    CA from the JDK's own `keytool`, run as root in the workload root and
+//!    in a cgroup of its own, 20 s per call, everything it started killed
+//!    after it: a stale entry under cube's alias (`debian:cube-runner.pem`,
+//!    the alias ca-certificates-java gives the link) is deleted first, then
+//!    the CA is imported under it.
 //! 5. The copy is parsed again and kept only if it holds the CA and every
 //!    other certificate the keystore had (the public roots); then it is
 //!    renamed over the keystore (`repaired`). Anything else removes the copy
@@ -32,10 +35,14 @@
 //! CA's fingerprint: a later setup of this boot under the same CA does
 //! nothing), to `status.guest.hooks["runner-ca"]`, and as one line to the
 //! workload's `/run/cube/runner-ca`, which cubed's resume script reports
-//! as the `runner-ca` outcome. A boot's later setups run while the workload
-//! does, so they leave the keystore alone unless the CA changed. JDKs that
-//! keep their own store (SDKMAN, a tarball, a Gradle toolchain) are not
-//! touched: that stays a project's (docs/project-hooks.md).
+//! as the `runner-ca` outcome and `cube hooks` shows. The first setup of a
+//! boot runs before any command. A later one with another CA (the runner's
+//! CA rotated while the machine ran) repairs at once, while the workload
+//! runs: a package manager writing the keystore at that moment can lose its
+//! write or this one, and a JVM already running (a Gradle daemon) keeps the
+//! trust it loaded until it starts again. JDKs that keep their own store
+//! (SDKMAN, a tarball, a Gradle toolchain) are not touched: that stays a
+//! project's (docs/project-hooks.md).
 use std::{
     fs,
     io::{self, Read, Write},
@@ -81,9 +88,11 @@ pub enum Outcome {
     Ok,
     /// The CA was added (or a stale one under cube's alias replaced).
     Repaired(String),
-    /// Not checked or not changed, and why.
+    /// Left alone on purpose, and why: updates turned off in
+    /// `/etc/default/cacerts`, or a keystore format cube does not read.
     Skipped(String),
-    /// The repair failed; the keystore is as it was.
+    /// The keystore lacks the CA, or cannot be loaded, and cube could not
+    /// fix it; the keystore is as it was.
     Failed(String),
 }
 
@@ -109,8 +118,11 @@ impl Outcome {
 pub enum Kind {
     /// JKS: every trusted certificate entry, alias and DER.
     Jks(Vec<(String, Vec<u8>)>),
-    /// Something else, and why it is not read.
-    Other(String),
+    /// A keystore format cube does not read (whether it holds the CA is
+    /// unknown), and which.
+    Foreign(String),
+    /// Not a keystore the JDK can load, and why.
+    Damaged(String),
 }
 
 struct Reader<'a> {
@@ -156,12 +168,12 @@ pub fn kind(data: &[u8]) -> Kind {
     match data {
         [0xfe, 0xed, 0xfe, 0xed, ..] => match jks(data) {
             Ok(entries) => Kind::Jks(entries),
-            Err(why) => Kind::Other(format!("a JKS keystore cube cannot read ({why})")),
+            Err(why) => Kind::Damaged(format!("a damaged JKS keystore ({why})")),
         },
-        [0xce, 0xce, 0xce, 0xce, ..] => Kind::Other("a JCEKS keystore".into()),
-        [0x30, ..] => Kind::Other("a PKCS#12 keystore (cube reads Debian's JKS only)".into()),
-        [] => Kind::Other("an empty file".into()),
-        _ => Kind::Other("not a keystore cube knows".into()),
+        [0xce, 0xce, 0xce, 0xce, ..] => Kind::Foreign("a JCEKS keystore".into()),
+        [0x30, ..] => Kind::Foreign("a PKCS#12 keystore".into()),
+        [] => Kind::Damaged("an empty file".into()),
+        _ => Kind::Foreign("not a keystore format cube knows".into()),
     }
 }
 
@@ -232,17 +244,35 @@ pub struct Ran {
     pub output: String,
 }
 
-/// Runs `/bin/sh -c script sh args…` as root, in the workload's mount
-/// namespace when given (the root of `namespace` then is `/`, the working
-/// directory too), with a clean environment, `stdin` as its input and the
-/// whole process group killed after `timeout`.
+/// Where a call runs: the workload's mount namespace (its `/` and working
+/// directory), and a cgroup v2 directory made for the call and removed
+/// after it, so what the call starts, a process that left its process group
+/// too, is killed with `cgroup.kill`.
+pub struct Confined<'a> {
+    pub namespace: Option<&'a fs::File>,
+    pub group: Option<&'a Path>,
+}
+
+/// How long the output may stay open after the call ended and its
+/// processes were killed (something outside the call may hold it).
+const OUTPUT_GRACE: Duration = Duration::from_secs(2);
+
+/// Runs `/bin/sh -c script sh args…` as root with a clean environment and
+/// `stdin` as its input, confined as `confined` says; after `timeout`, and
+/// in any case once the shell has ended, its process group and its cgroup
+/// are killed. Bounded in every case: the output is waited for at most
+/// `OUTPUT_GRACE` after that (what was read by then is the output).
 pub fn run(
-    namespace: Option<&fs::File>,
+    confined: &Confined,
     script: &str,
     args: &[String],
     stdin: &[u8],
     timeout: Duration,
 ) -> io::Result<Ran> {
+    let group = match confined.group {
+        Some(group) => Some(Group::new(group)?),
+        None => None,
+    };
     let (mut reader, writer) = io::pipe()?;
     let mut command = Command::new("/bin/sh");
     command
@@ -258,45 +288,64 @@ pub fn run(
         .stdout(writer.try_clone()?)
         .stderr(writer)
         .process_group(0);
-    if let Some(namespace) = namespace {
-        let fd = namespace.as_raw_fd();
-        // SAFETY: only async-signal-safe calls between fork and exec.
-        unsafe {
-            command.pre_exec(move || {
-                if libc::setns(fd, libc::CLONE_NEWNS) != 0 || libc::chdir(c"/".as_ptr()) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+    let procs = group.as_ref().map(|g| g.procs.as_raw_fd());
+    let namespace = confined.namespace.map(|ns| ns.as_raw_fd());
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        command.pre_exec(move || {
+            // Into the cgroup first ("0": the writer itself), through a
+            // descriptor opened before the fork: the workload root has no
+            // cgroup filesystem.
+            if let Some(fd) = procs
+                && libc::write(fd, b"0".as_ptr().cast(), 1) != 1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if let Some(fd) = namespace
+                && (libc::setns(fd, libc::CLONE_NEWNS) != 0 || libc::chdir(c"/".as_ptr()) != 0)
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
     let mut child = command.spawn()?;
     drop(command); // the parent's ends of the output pipe
     let pid = child.id() as libc::pid_t;
-    let output = std::thread::spawn(move || {
-        let mut tail: Vec<u8> = vec![];
-        let mut buffer = [0u8; 4096];
-        loop {
-            let n = match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            };
-            tail.extend_from_slice(&buffer[..n]);
-            if tail.len() > MAX_OUTPUT {
-                tail.drain(..tail.len() - MAX_OUTPUT);
+    let tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    {
+        let tail = std::sync::Arc::clone(&tail);
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            loop {
+                let n = match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                };
+                let mut tail = tail.lock().unwrap();
+                tail.extend_from_slice(&buffer[..n]);
+                if tail.len() > MAX_OUTPUT {
+                    let extra = tail.len() - MAX_OUTPUT;
+                    tail.drain(..extra);
+                }
             }
-        }
-        String::from_utf8_lossy(&tail).into_owned()
-    });
+            let _ = done.send(());
+        });
+    }
     if let Some(mut input) = child.stdin.take() {
-        let _ = input.write_all(stdin); // a child that exits early does not read it
+        let stdin = stdin.to_vec();
+        // Its own thread: a child that never reads it must not hold us.
+        std::thread::spawn(move || {
+            let _ = input.write_all(&stdin);
+        });
     }
     let deadline = Instant::now() + timeout;
     // Waited for without reaping (WNOWAIT): until the child is reaped its
-    // pid, the group's id, cannot be reused, so the kill below reaches only
-    // what it left running (which would hold the output pipe open).
+    // pid, the process group's id, cannot be reused, so the kill below
+    // reaches only what it left running.
     let timed_out = loop {
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         let waited = unsafe {
@@ -313,6 +362,7 @@ pub fn run(
                 continue;
             }
             unsafe { libc::kill(-pid, libc::SIGKILL) };
+            drop(group);
             let _ = child.wait();
             return Err(error);
         }
@@ -326,7 +376,13 @@ pub fn run(
     };
     unsafe { libc::kill(-pid, libc::SIGKILL) };
     let status = child.wait()?;
-    let output = output.join().unwrap_or_default();
+    drop(group); // kills what is left in it, then removes it
+    let complete = finished.recv_timeout(OUTPUT_GRACE).is_ok();
+    let mut output = String::from_utf8_lossy(&tail.lock().unwrap()).into_owned();
+    if !complete {
+        // The reading thread stays blocked until that process ends.
+        output.push_str("\n(the output was still held open by a process outside the call)\n");
+    }
     Ok(Ran {
         status: if timed_out { None } else { status.code() },
         timed_out,
@@ -334,20 +390,63 @@ pub fn run(
     })
 }
 
+/// A cgroup made for one call: killed and removed when dropped.
+struct Group {
+    path: std::path::PathBuf,
+    procs: fs::File,
+}
+
+impl Group {
+    fn new(path: &Path) -> io::Result<Self> {
+        if path.exists() {
+            Self::empty(path); // left by a call cut off before
+        }
+        fs::create_dir(path)?;
+        let procs = fs::OpenOptions::new()
+            .write(true)
+            .open(path.join("cgroup.procs"))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            procs,
+        })
+    }
+    /// `cgroup.kill`, up to two seconds for it to empty, then removed.
+    fn empty(path: &Path) {
+        let _ = fs::write(path.join("cgroup.kill"), "1");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while fs::read_to_string(path.join("cgroup.events"))
+            .is_ok_and(|events| events.lines().any(|line| line == "populated 1"))
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = fs::remove_dir(path);
+    }
+}
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        Self::empty(&self.path);
+    }
+}
+
 /// How the repair calls `keytool` (`run` in the workload; tests give their
 /// own): the arguments after `keytool`, its input.
 pub type Keytool<'a> = dyn FnMut(&[String], &[u8]) -> io::Result<Ran> + 'a;
 
 /// `keytool` as the workload has it, with a small heap.
-pub fn workload_keytool(
-    namespace: &fs::File,
-) -> impl FnMut(&[String], &[u8]) -> io::Result<Ran> + '_ {
+pub fn workload_keytool<'a>(
+    confined: &'a Confined<'a>,
+) -> impl FnMut(&[String], &[u8]) -> io::Result<Ran> + 'a {
     move |args, stdin| {
         let mut all = vec!["-J-Xmx64m".to_string()];
         all.extend_from_slice(args);
-        run(Some(namespace), "exec keytool \"$@\"", &all, stdin, TIMEOUT)
+        run(confined, "exec keytool \"$@\"", &all, stdin, TIMEOUT)
     }
 }
+
+/// The cgroup each `keytool` call runs in, beside the operations' own.
+pub const CGROUP: &str = "/sys/fs/cgroup/cube-keystore";
 
 fn read_regular(
     root: &fs::File,
@@ -389,19 +488,24 @@ pub fn reconcile(root: &fs::File, ca: &str, keytool: &mut Keytool) -> Option<Out
     let shown = format!("/{KEYSTORE}");
     let components = match resolve_in_root(root, KEYSTORE) {
         Ok(components) => components,
-        Err(error) => return Some(Outcome::Skipped(format!("{shown}: {error}"))),
+        Err(error) => return Some(Outcome::Failed(format!("{shown}: {error}"))),
     };
     let (data, meta) = match read_regular(root, &components, MAX_KEYSTORE_BYTES) {
         Ok(Some(found)) => found,
         Ok(None) => return None,
-        Err(error) => return Some(Outcome::Skipped(format!("{shown}: {error}"))),
+        Err(error) => return Some(Outcome::Failed(format!("{shown}: {error}"))),
     };
     let entries = match kind(&data) {
         Kind::Jks(entries) => entries,
-        Kind::Other(what) => {
+        // A format cube does not read: whether it holds the CA is unknown.
+        Kind::Foreign(what) => {
             return Some(Outcome::Skipped(format!(
-                "{shown} is {what}; left as it is"
+                "{shown} is {what}; cube reads Debian's JKS only, so it was not checked"
             )));
+        }
+        // Java cannot load it either.
+        Kind::Damaged(what) => {
+            return Some(Outcome::Failed(format!("{shown} is {what}; left as it is")));
         }
     };
     let certificates = pem_blocks(ca.as_bytes());
@@ -426,14 +530,14 @@ pub fn reconcile(root: &fs::File, ca: &str, keytool: &mut Keytool) -> Option<Out
         }
         Ok((storepass, true)) => storepass,
         Err(why) => {
-            return Some(Outcome::Skipped(format!(
-                "{shown} lacks the runner's CA; {why}"
+            return Some(Outcome::Failed(format!(
+                "{shown} lacks the runner's CA and cube cannot add it: {why}"
             )));
         }
     };
     if !paths::has_command(root, "keytool") {
-        return Some(Outcome::Skipped(format!(
-            "{shown} lacks the runner's CA; the machine has no keytool to add it with"
+        return Some(Outcome::Failed(format!(
+            "{shown} lacks the runner's CA and cube cannot add it: the machine has no keytool"
         )));
     }
     let (parent, _) = components.split_at(components.len() - 1);
@@ -589,7 +693,7 @@ fn repair(
         .map_err(|e| failed("the copy after keytool", e))?;
     let now = match kind(&after) {
         Kind::Jks(entries) => entries,
-        Kind::Other(what) => return Err(format!("keytool left {what}")),
+        Kind::Foreign(what) | Kind::Damaged(what) => return Err(format!("keytool left {what}")),
     };
     let has = |der: &Vec<u8>| now.iter().any(|(_, have)| have == der);
     if certificates.iter().any(|(der, _)| !has(der)) {
@@ -662,7 +766,15 @@ pub fn at_setup(root: &Path, namespace: &Path, ca: Option<&str>) {
     }
     let started = Instant::now();
     let outcome = match fs::File::open(namespace) {
-        Ok(ns) => reconcile(&root_dir, ca, &mut workload_keytool(&ns)),
+        Ok(ns) => {
+            // Without a cgroup filesystem the process group is still killed.
+            let cgroups = Path::new("/sys/fs/cgroup/cgroup.procs").exists();
+            let confined = Confined {
+                namespace: Some(&ns),
+                group: cgroups.then(|| Path::new(CGROUP)),
+            };
+            reconcile(&root_dir, ca, &mut workload_keytool(&confined))
+        }
         Err(error) => Some(Outcome::Failed(format!("the workload namespace: {error}"))),
     };
     let record = match &outcome {
