@@ -4,7 +4,7 @@
  * so, once, at its first mention among the rows shown. Nothing here is
  * inferred from prose or kept by hand: a row that does not name a thread or
  * an artifact in these forms gives none. */
-import type { ArtifactListItem, OverviewThread, ThreadSummary } from "./types.ts";
+import type { ArtifactListItem, ThreadOverview, ThreadSummary } from "./types.ts";
 import type { TranscriptRow } from "./transcript.ts";
 
 /** A thread a spawn line started: its short id and what the line printed. */
@@ -63,7 +63,7 @@ export function mentionsOf(rows: readonly TranscriptRow[]): Mention[] {
       const lines = spawnLines(row.output);
       for (const thread of lines.threads) if (!seenThreads.has(thread.short)) { seenThreads.add(thread.short); mention.threads.push(thread); }
       mention.unstarted = lines.unstarted;
-    } else if (row.kind === "tool" && /^artifact_(write|edit)$/.test(row.name) && row.state === "done") {
+    } else if (row.kind === "tool" && row.name === "artifact_write" && row.state === "done") {
       const written = WRITTEN.exec(row.output);
       if (written) artifact(written[1]!, mention.artifacts);
     } else if (row.kind === "assistant" && !row.reasoning) {
@@ -78,24 +78,28 @@ export function mentionsOf(rows: readonly TranscriptRow[]): Mention[] {
 }
 
 /** A thread a note shows: cubed's overview first (it has the run state),
- * else the thread list (archived ones the overview no longer lists), else
- * only what the spawn line said, as not known to cube. */
+ * else the thread list (archived ones the overview no longer lists). Only
+ * once both have been read, the thread is in neither and the overview counts
+ * threads cubed no longer has, is it `none`: not known to cube. Before that it
+ * is `pending`, with only what the spawn line said: nothing is claimed about
+ * a thread cube has not been asked about. */
 export type NoteThread = {
   short: string; id: string | null; title: string | null; project: string | null;
   /** cubed's state words; null when only the list or nothing knows it. */
-  state: string | null; archived: boolean; known: "overview" | "list" | "none";
+  state: string | null; archived: boolean; known: "overview" | "list" | "none" | "pending";
   /** When the chat started it, as cubed recorded it. */
   spawned: number | null;
 };
 /** What the margin shows beside one row. */
 export type NoteGroup = { row: string; threads: NoteThread[]; artifacts: ArtifactListItem[]; unstarted: Unstarted[] };
 
-export function resolveThread(ref: Pick<ThreadRef, "short" | "project" | "title">, overview: readonly OverviewThread[] | null, threads: readonly ThreadSummary[]): NoteThread {
-  const seen = overview?.find(thread => thread.id.startsWith(ref.short));
+export function resolveThread(ref: Pick<ThreadRef, "short" | "project" | "title">, overview: ThreadOverview | null, threads: readonly ThreadSummary[], listed: boolean): NoteThread {
+  const seen = overview?.threads.find(thread => thread.id.startsWith(ref.short));
   if (seen) return { short: ref.short, id: seen.id, title: seen.title, project: seen.project.name, state: seen.state, archived: seen.archived, known: "overview", spawned: seen.spawned };
-  const listed = threads.find(thread => thread.id.startsWith(ref.short));
-  if (listed) return { short: ref.short, id: listed.id, title: listed.title, project: listed.project.name, state: listed.archived ? "archived" : null, archived: listed.archived, known: "list", spawned: null };
-  return { short: ref.short, id: null, title: ref.title, project: ref.project, state: null, archived: false, known: "none", spawned: null };
+  const record = threads.find(thread => thread.id.startsWith(ref.short));
+  if (record) return { short: ref.short, id: record.id, title: record.title, project: record.project.name, state: record.archived ? "archived" : null, archived: record.archived, known: "list", spawned: null };
+  const gone = listed && !!overview && overview.unknown > 0;
+  return { short: ref.short, id: null, title: ref.title, project: ref.project, state: null, archived: false, known: gone ? "none" : "pending", spawned: null };
 }
 
 /** The artifact a key names, when exactly one readable artifact has it. */
@@ -147,7 +151,7 @@ export function chatToolLine(row: Extract<TranscriptRow, { kind: "tool" }>, name
     const who = name(told) ?? `[${told}]`;
     return row.state === "done" && row.output.startsWith("not sent") ? `not sent to ${who}` : `told ${who}`;
   }
-  if (/^artifact_(write|edit)$/.test(row.name) && row.state === "done") {
+  if (row.name === "artifact_write" && row.state === "done") {
     const wrote = WROTE.exec(row.output);
     return wrote ? `${VERB[wrote[2]!]} ${wrote[1]} · revision ${wrote[3]}` : null;
   }

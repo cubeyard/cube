@@ -3,7 +3,7 @@
   // inline so it renders before any font or asset arrives — it is the one
   // thing on screen while the host is still unreachable.
   // With `onclick` the mark is a key (the chat's way to its index).
-  let { href = null, onclick = null, label = null }: { href?: string | null; onclick?: (() => void) | null; label?: string | null } = $props();
+  let { href = null, onclick = null, label = null }: { href?: string | null; onclick?: ((event: MouseEvent) => void) | null; label?: string | null } = $props();
 </script>
 
 {#snippet mark()}

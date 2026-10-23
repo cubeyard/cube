@@ -51,7 +51,8 @@
     });
     if (JSON.stringify(next) !== JSON.stringify(tops)) tops = next;
     if (JSON.stringify(beside) !== JSON.stringify(level)) level = beside;
-    pin();
+    // The pins read where the notes are drawn: once these tops are, a frame on.
+    void tick().then(() => requestAnimationFrame(pin));
   }
 
   /** The failed threads whose notes are out of view, and which way they are. */
@@ -130,7 +131,7 @@
   <div class="margin-notes">
     {#each groups as group (group.row)}
       <div class="margin-note" data-note={group.row} class:placed={group.row in tops} class:level={level[group.row]} style:top="{tops[group.row] ?? 0}px" use:observe>
-        <WorkNote {group} {open} {onToggle} {reports} {onJump} {unread} />
+        <WorkNote {group} {open} {onToggle} {reports} {onJump} {unread} onBack={() => onJump(group.row)} />
       </div>
     {/each}
   </div>

@@ -20,9 +20,11 @@
   // the message that says so, on a wide screen, or as quiet lines under it
   // on a narrow one. Everything else (every thread, artifacts, projects,
   // settings, the chat's model and memory) is in the index, a step away.
-  let { threads = [] }: {
+  let { threads = [], threadsLoaded = false }: {
     /** Every thread cubed has, archived ones too (App's poll). */
     threads?: ThreadSummary[];
+    /** Whether that list has been read at least once. */
+    threadsLoaded?: boolean;
   } = $props();
 
   let modelState = $state<ThreadModels | null>(null);
@@ -49,10 +51,9 @@
 
   // What the rows shown say they started and named, as cube knows it now.
   let rows = $state<TranscriptRow[]>([]);
-  const overviewThreads = $derived(work.overview?.threads ?? null);
   const groups = $derived<NoteGroup[]>(mentionsOf(rows).map((mention) => ({
     row: mention.row,
-    threads: mention.threads.map((thread) => resolveThread(thread, overviewThreads, threads)),
+    threads: mention.threads.map((thread) => resolveThread(thread, work.overview, threads, threadsLoaded)),
     // An artifact cube cannot show (a link to one that is not there) gets no note.
     artifacts: mention.artifacts.map((key) => resolveArtifact(key, work.artifacts)).filter((item): item is ArtifactListItem => !!item),
     unstarted: mention.unstarted,
@@ -67,15 +68,27 @@
     ...(counts.running ? [`${counts.running} running`] : []), ...(counts.failed ? [`${counts.failed} failed`] : [])].join(" · "));
   let open = $state<string | null>(null);
 
-  const titleOf = (short: string) => resolveThread({ short, project: null, title: null }, overviewThreads, threads).title;
+  const titleOf = (short: string) => resolveThread({ short, project: null, title: null }, work.overview, threads, threadsLoaded).title;
   const toolLine = (row: Extract<TranscriptRow, { kind: "tool" }>) => chatToolLine(row, titleOf);
+
+  /** What a message's note in the margin holds, for its skip key. */
+  const skipText = (group: NoteGroup) => {
+    const count = (n: number, one: string, many: string) => n ? [`${n} ${n === 1 ? one : many}`] : [];
+    return `${[...count(group.threads.length + group.unstarted.length, "thread", "threads"), ...count(group.artifacts.length, "artifact", "artifacts")].join(" and ")} from this message, in the margin`;
+  };
+  function toNote(row: string): void {
+    document.querySelector<HTMLElement>(`.margin-notes > [data-note="${CSS.escape(row)}"] .note-head`)?.focus();
+  }
 
   /** Shows a row of the conversation and puts focus there. */
   function jump(row: string): void {
     const target = document.querySelector<HTMLElement>(`.chat-sheet [data-anchor="${CSS.escape(row)}"]`);
     if (!target) return;
     target.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
-    target.focus({ preventScroll: true });
+    // a tool line's own key is its summary; a message takes focus as a place, not a stop in the tab order
+    const place = target.querySelector<HTMLElement>(":scope > summary") ?? target;
+    if (place === target && !target.hasAttribute("tabindex")) target.tabIndex = -1;
+    place.focus({ preventScroll: true });
   }
 
   async function loadModels(): Promise<void> {
@@ -125,6 +138,17 @@
     }
   }
 
+  /** A press that came from a finger (or a pen): the index then opens
+   * without raising the on-screen keyboard. A key's press has no detail.
+   * The press's own pointer is the one that went down: WebKit reports the
+   * click that follows a tap as a mouse's. */
+  let lastDown = { type: "", at: -Infinity };
+  function tapped(event: MouseEvent): boolean {
+    if (event.detail === 0) return false;
+    const type = event.timeStamp - lastDown.at < 1500 ? lastDown.type : (event as PointerEvent).pointerType;
+    return type === "touch" || type === "pen";
+  }
+
   /** `/` (outside a field) and ctrl/⌘ k open the index. */
   function onKeydown(event: KeyboardEvent): void {
     if (event.defaultPrevented || event.altKey) return;
@@ -159,10 +183,10 @@
   });
 </script>
 
-<svelte:window onkeydown={onKeydown} />
+<svelte:window onkeydown={onKeydown} onpointerdowncapture={(event) => { lastDown = { type: event.pointerType, at: event.timeStamp }; }} />
 
 <header class="sheet-bar">
-  <Wordmark onclick={() => void index?.show()} label="cube · index: threads, artifacts and settings · press /" />
+  <Wordmark onclick={(event) => void index?.show({ touch: tapped(event) })} label="cube · index: threads, artifacts and settings · press /" />
   <span class="spacer"></span>
   <AuthBadge quiet />
 </header>
@@ -201,7 +225,7 @@
 <ChatIndex bind:this={index} {work} settings={chatSettings} />
 
 {#snippet reportLabel(from: string)}
-  {@const thread = resolveThread({ short: from, project: null, title: null }, overviewThreads, threads)}
+  {@const thread = resolveThread({ short: from, project: null, title: null }, work.overview, threads, threadsLoaded)}
   {#if thread.id && !thread.archived}<a class="report-name" href="#/t/{thread.id}">{thread.title ?? `[${from}]`}</a>
   {:else}<span class="report-name">{thread.title ?? `[${from}]`}</span>{/if}<span class="report-kind">· report</span>
 {/snippet}
@@ -210,6 +234,14 @@
   {#if !wide}
     {@const group = inline.get(rowKey(row))}
     {#if group}<WorkNote inline {group} {open} onToggle={(key) => (open = key)} {reports} onJump={jump} {unread} />{/if}
+  {:else}
+    <!-- The margin comes after the whole conversation in reading and tab
+         order: this key, shown only while focused, takes a keyboard or a
+         screen reader from the message to its note and takes no room. -->
+    {@const group = groups.find((item) => item.row === rowKey(row))}
+    {#if group}
+      <div class="note-skip-holder"><button type="button" class="note-skip" onclick={() => toNote(group.row)}>{skipText(group)}</button></div>
+    {/if}
   {/if}
 {/snippet}
 
@@ -219,7 +251,7 @@
 
 {#snippet workKey()}
   <button type="button" class="work-key" aria-haspopup="dialog" aria-label={keyLabel} aria-keyshortcuts="/ Control+K Meta+K"
-    title="{keyLabel} · / or ctrl k" onclick={() => void index?.show()}>
+    title="{keyLabel} · / or ctrl k" onclick={(event) => void index?.show({ touch: tapped(event) })}>
     {#if counts.failed}<span class="work-count"><span class="lamp on-red" aria-hidden="true"></span>{counts.failed}</span>{/if}
     {#if counts.running}<span class="work-count"><span class="lamp on-amber blink" aria-hidden="true"></span>{counts.running}</span>{/if}
     {#if !counts.failed && !counts.running}<Icon name="index" size={16} />{/if}

@@ -190,6 +190,10 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     await page.locator(".composer .work-key").tap();
     const index = page.locator(".chat-index");
     await index.locator(".index-row").first().waitFor();
+    await settle(page);
+    assert.equal(await page.evaluate(() => document.activeElement?.tagName), "DIALOG", "a tap gives the sheet focus, not the filter");
+    assert.equal(await keyboard(page), null, "no keyboard rises");
+    await assertHitArea(page, ".chat-index .index-close");
     const sheet = await box(page, ".chat-index");
     assert.ok(Math.abs(sheet.bottom - phone.height) <= 1 && sheet.width >= phone.width - 1, `a sheet from the bottom edge: ${JSON.stringify(sheet)}`);
     assert.ok(sheet.top >= phone.height * 0.1, "the sheet leaves the top in view");

@@ -31,6 +31,9 @@ export class ScriptedHost {
   bodies: Record<string, string> = {};
   /** The chat's threads answer this error (a 500) while it is set. */
   overviewError: string | null = null;
+  /** Hold the thread list's and the chat's threads' answers until they resolve. */
+  onThreadList: () => Promise<void> | void = () => {};
+  onOverview: () => Promise<void> | void = () => {};
   /** Images the chat uploaded, by id. */
   media = new Map<string, { type: string; body: Buffer }>();
   /** Answers a prompt: by default accepted at once. A thrown error is a 500. */
@@ -119,11 +122,11 @@ export class ScriptedHost {
     const model = { provider: "faux", id: "faux-1" };
     switch (`${request.method} ${url.pathname}`) {
       case "GET /api/state": return json({ auth: { state: "ok", provider: "faux", credentialType: "api" }, onboardingComplete: true });
-      case "GET /api/threads": return json({ threads: [...this.thread ? [this.thread] : [], ...this.threads] });
+      case "GET /api/threads": await this.onThreadList(); return json({ threads: [...this.thread ? [this.thread] : [], ...this.threads] });
       case "GET /api/artifacts": return json({ artifacts: this.artifacts });
       case "GET /api/projects": return json({ projects: [] });
       case "GET /api/optchat/model": return json({ models: [model], selected: model, images: { supported: true, reason: null } });
-      case "GET /api/optchat/threads": return this.overviewError ? json({ error: this.overviewError }, 500) : json(this.overview);
+      case "GET /api/optchat/threads": await this.onOverview(); return this.overviewError ? json({ error: this.overviewError }, 500) : json(this.overview);
       case "GET /api/optchat/view": return json({ view: "<chat>\n</chat>", messages: 0, failure: null });
       case "GET /api/optchat/history": {
         if (url.searchParams.has("before")) await this.onOlder();

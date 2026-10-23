@@ -230,7 +230,7 @@
     <div class="conn-strip" role="status">not connected to the host — retrying</div>
   {/if}
   {#if chatRoute}
-    <ChatView {threads} />
+    <ChatView {threads} {threadsLoaded} />
   {:else if artifactId}
     {#key artifactId}
       <ArtifactView {artifactId} revision={artifactRevision} />

@@ -49,16 +49,24 @@ const talk: ThreadEvent[] = [
 ];
 assert.deepEqual(mentionsOf(transcriptRows({ events: talk, status: { state: "completed", run: "r", error: null } })).map(mention => [mention.row, mention.artifacts]), [["2", [ID.review.slice(0, 8)]]]);
 
-// resolution: the overview's state first, then the list, then only the line
-const seen = overview().threads as OverviewThread[];
+// resolution: the overview's state first, then the list; "not known to cube"
+// only once both were read, the thread is in neither and cube counts lost ones
+const full = overview();
+const seen = full.threads as OverviewThread[];
 const archived: ThreadSummary[] = [...threads, { ...threads[0]!, id: "eeeeeee9-0000-4000-8000-000000000000", title: "old", archived: true }];
-assert.deepEqual(resolveThread({ short: ID.ca.slice(0, 8), project: "x", title: "y" }, seen, threads),
+assert.deepEqual(resolveThread({ short: ID.ca.slice(0, 8), project: "x", title: "y" }, full, threads, true),
   { short: ID.ca.slice(0, 8), id: ID.ca, title: "java trusts runner ca", project: "keel-images", state: "machine failed", archived: false, known: "overview", spawned: seen[2]!.spawned });
-assert.equal(resolveThread({ short: "eeeeeee9", project: null, title: null }, seen, archived).state, "archived");
-assert.equal(resolveThread({ short: "eeeeeee9", project: null, title: null }, seen, archived).known, "list");
-assert.deepEqual(resolveThread({ short: ID.gone.slice(0, 8), project: "keel-images", title: null }, seen, threads),
+assert.equal(resolveThread({ short: "eeeeeee9", project: null, title: null }, full, archived, true).state, "archived");
+assert.equal(resolveThread({ short: "eeeeeee9", project: null, title: null }, full, archived, true).known, "list");
+const gone = { short: ID.gone.slice(0, 8), project: "keel-images", title: null };
+assert.deepEqual(resolveThread(gone, full, threads, true),
   { short: ID.gone.slice(0, 8), id: null, title: null, project: "keel-images", state: null, archived: false, known: "none", spawned: null });
-assert.deepEqual(resolveThread({ short: ID.composer.slice(0, 8), project: null, title: null }, null, threads).state, null, "no overview yet: no state is guessed");
+assert.equal(resolveThread(gone, null, [], false).known, "pending", "nothing read yet: nothing claimed");
+assert.equal(resolveThread(gone, full, [], false).known, "pending", "the overview alone does not know archived threads");
+assert.equal(resolveThread(gone, null, threads, true).known, "pending", "the overview not read (or failed): not claimed lost");
+assert.equal(resolveThread(gone, { ...full, unknown: 0 }, threads, true).known, "pending", "cube counts none lost: not claimed lost");
+assert.equal(resolveThread({ short: ID.composer.slice(0, 8), project: null, title: null }, null, threads, true).state, null, "no overview yet: no state is guessed");
+assert.equal(resolveThread({ short: ID.composer.slice(0, 8), project: null, title: null }, null, threads, true).known, "list");
 
 assert.equal(resolveArtifact(ID.review, artifacts)?.title, "today's review");
 assert.equal(resolveArtifact(ID.proposal.slice(0, 8), artifacts)?.title, "composer room: more space on the phone");
@@ -78,6 +86,11 @@ assert.ok(failing("machine failed") && failing("machine error") && failing("fail
 assert.equal(stateLamp("working"), "on-amber blink");
 assert.equal(stateLamp("stopped"), "");
 assert.deepEqual(workCounts(seen), { running: 1, failed: 1, open: 3 });
+// only the chat's own write tool counts as writing an artifact
+assert.deepEqual(mentionsOf(transcriptRows({ events: [
+  { type: "tool-call", id: "1", callId: "e", name: "artifact_edit", input: {}, final: true },
+  { type: "tool-result", id: "2", callId: "e", name: "artifact_edit", output: `artifact ${ID.review} "x" wrote revision 2.`, isError: false, final: true },
+], status: { state: "completed", run: "r", error: null } })), []);
 
 // layout: in anchor order, no overlap, a held note at its anchor, never past the end
 const tall = [{ anchor: 0, height: 100 }, { anchor: 20, height: 50 }, { anchor: 30, height: 40 }, { anchor: 400, height: 30 }];

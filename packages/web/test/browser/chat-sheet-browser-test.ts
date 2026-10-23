@@ -11,14 +11,18 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { chromium, type Page } from "playwright";
+import fsSync from "node:fs";
+import { chromium, webkit, type Browser, type Page } from "playwright";
 import type { ThreadEvent } from "../../src/lib/types.ts";
 import { artifacts, bodies, chatEvents, ID, overview, threads } from "./chat-sheet-data.ts";
-import { ScriptedHost } from "./scripted-host.ts";
+import { gate, ScriptedHost } from "./scripted-host.ts";
 
 const shots = process.env.CUBE_SCREENSHOTS ?? null;
 if (shots) fs.mkdirSync(shots, { recursive: true });
 const browser = await chromium.launch();
+// Safari's engine, for the touch scenarios, when Playwright has it (CI does)
+const safari: Browser | null = fsSync.existsSync(webkit.executablePath()) ? await webkit.launch() : null;
+if (!safari) console.log("SKIP: webkit touch scenarios (install it: pnpm --filter @cube/web exec playwright install webkit)");
 let failed = false;
 type Viewport = { width: number; height: number; touch?: boolean };
 const desktop: Viewport = { width: 1440, height: 900 };
@@ -27,7 +31,7 @@ const between: Viewport = { width: 1024, height: 768 };
 const phone: Viewport = { width: 390, height: 844, touch: true };
 
 async function scenario(name: string, viewport: Viewport, run: (page: Page, host: ScriptedHost) => Promise<void>,
-  setup: (host: ScriptedHost) => void = () => {}, options: { reducedMotion?: "reduce" } = {}): Promise<void> {
+  setup: (host: ScriptedHost) => void = () => {}, options: { reducedMotion?: "reduce"; engine?: Browser } = {}): Promise<void> {
   const host = await ScriptedHost.start();
   host.transcript = { ...host.transcript, status: { state: "completed", run: "r", error: null }, events: chatEvents() };
   host.overview = overview();
@@ -35,7 +39,9 @@ async function scenario(name: string, viewport: Viewport, run: (page: Page, host
   host.artifacts = artifacts;
   host.bodies = bodies;
   setup(host);
-  const context = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height }, isMobile: !!viewport.touch, hasTouch: !!viewport.touch, reducedMotion: options.reducedMotion ?? "no-preference" });
+  const engine = options.engine ?? browser;
+  // WebKit on Linux has no mobile emulation; it still has touch.
+  const context = await engine.newContext({ viewport: { width: viewport.width, height: viewport.height }, isMobile: !!viewport.touch && engine === browser, hasTouch: !!viewport.touch, reducedMotion: options.reducedMotion ?? "no-preference" });
   const page = await context.newPage();
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(String(error)));
@@ -47,10 +53,10 @@ async function scenario(name: string, viewport: Viewport, run: (page: Page, host
     await settle(page);
     await run(page, host);
     assert.deepEqual(errors, [], "no script errors");
-    console.log(`ok - ${name} (${viewport.width}x${viewport.height})`);
+    console.log(`ok - ${engine === browser ? "" : "webkit "}${name} (${viewport.width}x${viewport.height})`);
   } catch (error) {
     failed = true;
-    console.error(`not ok - ${name} (${viewport.width}x${viewport.height})\n`, error);
+    console.error(`not ok - ${engine === browser ? "" : "webkit "}${name} (${viewport.width}x${viewport.height})\n`, error);
   } finally {
     await context.close();
     await host.close();
@@ -225,7 +231,7 @@ await scenario("a failed thread scrolled away is pinned at the margin's top, wit
   await page.locator(".margin-pin").waitFor({ state: "detached" });
 }, host => { host.transcript = { ...host.transcript, events: [...chatEvents().slice(0, 9), ...chatEvents({ filler: 12 }).slice(4, 4 + 24), ...chatEvents().slice(9)] }; });
 
-for (const viewport of [between, phone]) {
+for (const [viewport, engine] of [[between, browser], [phone, browser], ...safari ? [[phone, safari] as const] : []] as const) {
   await scenario("narrower: the notes are quiet lines under their message, threads only, never twice", viewport, async page => {
     assert.equal(await page.locator(".sheet-margin").count(), 0, "no margin");
     const inline = page.locator(".transcript-column .sheet-note");
@@ -242,7 +248,7 @@ for (const viewport of [between, phone]) {
     if (viewport.touch) assert.ok((await boxOf(page, ".transcript-column .note-head")).height >= 43.9, "a fingertip's height");
     await spawn.locator(".note-head", { hasText: "composer room" }).scrollIntoViewIfNeeded();
     await shoot(page, `sheet-${viewport.width}-inline`);
-  });
+  }, () => {}, { engine });
 }
 
 await scenario("the index: its key, / and ctrl k open it; arrows walk it; escape gives focus back; / in the composer is just text", desktop, async page => {
@@ -290,6 +296,65 @@ await scenario("the index: its key, / and ctrl k open it; arrows walk it; escape
   assert.deepEqual(await index.locator(".index-places a").evaluateAll(all => all.map(link => link.getAttribute("href"))), ["#/threads", "#/artifacts", "#/projects", "#/settings/providers"]);
 });
 
+{
+  const list = gate();
+  const seen = gate();
+  await scenario("before cube has answered, no note claims a thread is lost; once it has, the lost one says so", desktop, async page => {
+    const states = () => page.locator(".margin-note .note-head:not(:has(.note-doc)) .note-state").allTextContents();
+    await page.locator(".margin-note").first().waitFor();
+    await settle(page);
+    const early = await states();
+    assert.deepEqual(early, ["reading state… · keel-images", "reading state… · cube", "reading state… · cube", "reading state… · keel-images", "nope · no project nope"], "reading, never lost");
+    assert.equal(await page.locator(".note-state", { hasText: "not known to cube" }).count(), 0);
+    assert.deepEqual(await page.locator(".margin-note .lamp").evaluateAll(all => all.slice(0, 4).map(lamp => lamp.className.trim())), ["lamp", "lamp", "lamp", "lamp"], "no lamp lit before a state is read");
+    await shoot(page, "sheet-desktop-reading");
+    // the thread list alone cannot say a thread is lost (the overview counts those)
+    list.open();
+    await page.waitForTimeout(3500);
+    assert.equal(await page.locator(".note-state", { hasText: "not known to cube" }).count(), 0, "the list alone claims nothing lost");
+    seen.open();
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await page.locator(".note-state", { hasText: "not known to cube" }).waitFor();
+    assert.deepEqual((await states()).slice(0, 4), ["not known to cube · keel-images", "working · cube", "turn ended · cube", "machine failed · keel-images"]);
+  }, host => { host.onThreadList = () => list.promise; host.onOverview = () => seen.promise; });
+}
+
+await scenario("an overview that cannot be read: a thread not in the list is not called lost either", laptop, async page => {
+  await page.locator(".margin-note").first().waitFor();
+  await page.waitForTimeout(3500);
+  await settle(page);
+  assert.equal(await page.locator(".margin-note[data-note='call:spawn-old'] .note-state").textContent(), "state not read · keel-images");
+  await page.locator(".margin-note[data-note='call:spawn-old'] .note-head").click();
+  await page.locator(".note-peek .failure", { hasText: "its state could not be read" }).waitFor();
+}, host => { host.overviewError = "the host had a problem"; });
+
+await scenario("a failed thread's note in view on the first load is not pinned", desktop, async page => {
+  await page.locator(".margin-note.placed").first().waitFor();
+  for (let frame = 0; frame < 4; frame++) await settle(page);
+  const view = await boxOf(page, ".transcript");
+  const note = await boxOf(page, ".margin-note[data-note='call:spawn-1']");
+  assert.ok(note.top >= view.top && note.bottom <= view.bottom, `the note is in view: ${note.top}–${note.bottom}`);
+  assert.equal(await page.locator(".margin-pin").count(), 0, "so no pin, no scroll needed to clear it");
+});
+
+await scenario("a keyboard or screen reader reaches a message's note from the message, and back", desktop, async page => {
+  await page.locator(".transcript").evaluate(element => { element.scrollTop = 0; });
+  await settle(page);
+  const skip = page.locator(".note-skip").nth(1);
+  assert.equal(await skip.textContent(), "4 threads from this message, in the margin");
+  const before = await rowTops(page);
+  await page.locator(".transcript-column > [data-anchor='call:spawn-1'] summary").focus();
+  await page.keyboard.press("Tab");
+  assert.ok(await skip.evaluate(element => element === document.activeElement), "the skip key is next after the message");
+  assert.ok((await boxOf(page, ".note-skip:focus")).width > 40, "seen while focused");
+  assert.deepEqual(await rowTops(page), before, "and takes no room");
+  await page.keyboard.press("Enter");
+  assert.equal(await page.evaluate(() => document.activeElement?.closest(".margin-note")?.getAttribute("data-note")), "call:spawn-1", "focus in its note");
+  await page.keyboard.press("Enter");
+  await page.locator(".note-peek button", { hasText: "the message that started it" }).click();
+  await page.waitForFunction(() => document.activeElement?.closest("[data-anchor]")?.getAttribute("data-anchor") === "call:spawn-1");
+});
+
 await scenario("an overview that cannot be read is said, never guessed; the last good one stays", desktop, async (page, host) => {
   const spawn = page.locator(`.margin-note[data-note="call:spawn-1"]`);
   assert.deepEqual(await spawn.locator(".note-state").allTextContents(), ["state not read · cube", "state not read · cube", "state not read · keel-images", "nope · no project nope"]);
@@ -306,6 +371,47 @@ await scenario("an overview that cannot be read is said, never guessed; the last
   await page.waitForTimeout(400);
   assert.equal(await spawn.locator(".note-state").first().textContent(), "working · cube", "the last good state stays");
 }, host => { host.overviewError = "the host had a problem"; });
+
+for (const engine of [browser, ...safari ? [safari] : []]) await scenario("a tap opens the index without the keyboard: the sheet takes focus, its close key is in reach, focus goes back", phone, async page => {
+  await page.locator(".work-key").tap();
+  const index = page.locator(".chat-index");
+  await index.locator(".index-row").first().waitFor();
+  await settle(page);
+  assert.equal(await page.evaluate(() => document.activeElement?.className), "chat-index", "the sheet has focus, not the filter");
+  assert.equal(await page.evaluate(() => document.activeElement?.tagName), "DIALOG");
+  const close = index.getByRole("button", { name: "close index" });
+  const key = await boxOf(page, ".index-close");
+  assert.ok(key.top >= 0 && key.bottom <= phone.height, "the close key is on screen");
+  const hits = await page.locator(".index-close").evaluate(element => {
+    const { left, top, width, height } = element.getBoundingClientRect();
+    const [x, y] = [left + width / 2, top + height / 2];
+    return [[-21, 0], [21, 0], [0, -21], [0, 21]].filter(([dx, dy]) => { const hit = document.elementFromPoint(x + dx!, y + dy!); return !(hit === element || element.contains(hit)); }).length;
+  });
+  assert.equal(hits, 0, "a fingertip's 44px around it");
+  await shoot(page, "sheet-390-index-tap");
+  // the filter is a tap away, and only then is it typing
+  await index.locator("input[type=search]").tap();
+  assert.equal(await page.evaluate(() => document.activeElement?.tagName), "INPUT");
+  await close.tap();
+  await index.waitFor({ state: "hidden" });
+  await page.waitForFunction(() => document.activeElement?.classList.contains("work-key"));
+  // the wordmark too
+  await page.locator(".sheet-bar .name-key").tap();
+  await index.locator(".index-row").first().waitFor();
+  await settle(page);
+  assert.equal(await page.evaluate(() => document.activeElement?.tagName), "DIALOG");
+}, () => {}, { engine });
+
+await scenario("a mouse or a key opens the index with the filter ready to type, its focus seen", desktop, async page => {
+  await page.locator(".work-key").click();
+  const input = page.locator(".chat-index input[type=search]");
+  await page.waitForFunction(() => document.activeElement?.matches(".chat-index input"));
+  assert.notEqual(await page.locator(".index-filter").evaluate(element => getComputedStyle(element).boxShadow), "none", "the focused filter shows its rule");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Control+k");
+  await input.waitFor();
+  await page.waitForFunction(() => document.activeElement?.matches(".chat-index input"));
+});
 
 await scenario("an empty chat: an empty margin, the key says only where it goes", desktop, async page => {
   await page.locator(".conversation-empty", { hasText: "one chat, every thread" }).waitFor();
@@ -335,5 +441,6 @@ await scenario("reduced motion: notes and the index open without movement", desk
 }, () => {}, { reducedMotion: "reduce" });
 
 await browser.close();
+await safari?.close();
 if (failed) process.exit(1);
 console.log("chat sheet browser: ok");

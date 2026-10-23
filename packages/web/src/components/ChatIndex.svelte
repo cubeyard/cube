@@ -19,13 +19,19 @@
   let input = $state<HTMLInputElement>();
   let opener: HTMLElement | null = null;
 
-  export async function show(): Promise<void> {
+  /** `touch`: opened by a tap. Then the sheet itself takes focus, not the
+   * filter, so no on-screen keyboard rises over it; the filter is a tap away.
+   * Opened by a key or a mouse, the filter takes focus for typing at once. */
+  export async function show(options: { touch?: boolean } = {}): Promise<void> {
     if (!dialog || dialog.open) return;
     opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     filter = "";
+    // showModal focuses the dialog itself when it carries autofocus, else its first field
+    dialog.toggleAttribute("autofocus", !!options.touch);
     dialog.showModal();
     await tick();
-    input?.focus();
+    if (options.touch) dialog.focus({ preventScroll: true });
+    else input?.focus();
     void work.load();
   }
   export function close(): void { dialog?.close(); }
@@ -70,11 +76,13 @@
 
 <!-- a press on the backdrop closes it, as escape does -->
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-<dialog class="chat-index" bind:this={dialog} aria-label="index" onclose={onClose} onkeydown={onKeydown}
+<dialog class="chat-index" bind:this={dialog} aria-label="index" tabindex="-1" onclose={onClose} onkeydown={onKeydown}
   onclick={(event) => { if (event.target === dialog) dialog?.close(); else if ((event.target as Element).closest("a[href]")) dialog?.close(); }}>
   <div class="index-filter">
+    <span class="index-search"><Icon name="search" size={14} /></span>
     <input bind:this={input} bind:value={filter} type="search" data-index-item aria-label="filter threads, artifacts and places"
-      placeholder="threads, artifacts, settings" autocomplete="off" spellcheck="false" />
+      placeholder="filter" autocomplete="off" spellcheck="false" />
+    <button type="button" class="index-close" aria-label="close index" title="close · esc" onclick={() => dialog?.close()}><Icon name="close" size={14} /></button>
   </div>
   <div class="index-body">
     <section aria-labelledby="index-threads">

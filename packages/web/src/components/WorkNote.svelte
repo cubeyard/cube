@@ -12,7 +12,7 @@
   // to its full view. States are cubed's own words; a thread cube no
   // longer knows says so. When thread names land (#239), the name goes
   // beside the title here, once, for the margin and the inline notes alike.
-  let { group, inline = false, open, onToggle, reports, onJump, unread = null }: {
+  let { group, inline = false, open, onToggle, reports, onJump, unread = null, onBack = null }: {
     group: NoteGroup;
     /** In the conversation's flow (narrow screens), not the margin. */
     inline?: boolean;
@@ -25,6 +25,8 @@
     onJump: (row: string) => void;
     /** Why no state is shown (the overview could not be read), if so. */
     unread?: string | null;
+    /** In the margin: back to the message the note stands beside. */
+    onBack?: (() => void) | null;
   } = $props();
 
   const LIMIT = 4;
@@ -110,14 +112,17 @@
                   <p>cube has no record of this thread now. the chat's log says it started{#if thread.project} in {thread.project}{/if}.</p>
                 {:else if !thread.state && unread}
                   <p class="failure">its state could not be read: {unread}</p>
+                {:else if thread.known === "pending"}
+                  <p class="note-quiet" role="status">asking cube about this thread…</p>
                 {/if}
                 {#if report}
                   <p class="note-report">{excerpt(report.text, 180)}</p>
                   <button type="button" class="note-link" onclick={() => onJump(report.row)}>its report in the chat</button>
-                {:else if thread.known !== "none"}
+                {:else if thread.known === "overview" || thread.known === "list"}
                   <p class="note-quiet">no report in the chat yet</p>
                 {/if}
                 {#if thread.id && !thread.archived}<a class="note-link" href="#/t/{thread.id}">open thread</a>{/if}
+                {#if onBack}<button type="button" class="note-link quiet" onclick={onBack}>the message that started it</button>{/if}
               </div>
             {/if}
           {:else}
@@ -137,6 +142,7 @@
                 {:else if body.error}<p class="failure">{body.error}</p>
                 {:else if body.text}<p class="note-report">{body.text}</p>{/if}
                 <a class="note-link" href="#/a/{artifact.id}">read</a>
+                {#if onBack}<button type="button" class="note-link quiet" onclick={onBack}>the message that named it</button>{/if}
               </div>
             {/if}
           {/if}
