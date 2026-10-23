@@ -98,6 +98,7 @@ export class ProtocolMachines implements ThreadMachines {
   async wake(thread: Thread): Promise<void> { await this.pick(thread).wake?.(thread); }
   touch(thread: Thread): void { this.pick(thread).touch?.(thread); }
   wakeInFlight(thread: Thread): boolean { return this.pick(thread).wakeInFlight?.(thread) ?? false; }
+  async wakeNow(thread: Thread): Promise<string | null> { return (await this.pick(thread).wakeNow?.(thread)) ?? null; }
   async settleWake(thread: Thread): Promise<void> { await this.pick(thread).settleWake?.(thread); }
   dial(thread: Thread, port: number): Promise<Duplex> {
     const machines = this.pick(thread);

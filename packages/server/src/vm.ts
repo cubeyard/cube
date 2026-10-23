@@ -51,6 +51,9 @@ export interface ThreadMachines {
   /** Whether a start or a wake of the thread's machine is under way in this
    * process (the owner of a `waking` it recorded). */
   wakeInFlight?(thread: Thread): boolean;
+  /** Wakes a suspended machine for cubed's own check if a slot is free now;
+   * null once it runs, otherwise why it stays suspended. Never waits. */
+  wakeNow?(thread: Thread): Promise<string | null>;
   /** A `waking` no one in this process owns (a restart cut the wake short):
    * the runner's own phase is recorded instead, and nothing is started. */
   settleWake?(thread: Thread): Promise<void>;
@@ -103,7 +106,12 @@ export async function readStartupLog(transport: GuestTransport, machine: Startup
 }
 
 export interface MachineStart { booted: boolean }
-export interface StartOptions { onBoot?: () => void }
+export interface StartOptions {
+  onBoot?: () => void;
+  /** Never wait for a slot: a suspended machine its runner has no slot for
+   * now stays suspended (RunnerWait), not waiting. */
+  once?: boolean;
+}
 
 export interface VmSizes { vcpus: number; memoryMiB: number; diskGiB: number }
 export const DEFAULT_VM_SIZES: VmSizes = { vcpus: 2, memoryMiB: 4096, diskGiB: 32 };
