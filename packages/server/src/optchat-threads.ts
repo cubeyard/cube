@@ -123,8 +123,8 @@ export function readThreads(options: { registry: Registry; conversations: Thread
     return conversations.agentOpen(id) ? `ready (a later check of its machine failed: ${error})` : `error: ${error}`;
   };
   /** A machine that is suspended, or being woken (by a message, a portal
-   * connection, an archive's check of its disk, or a wake a restart cut
-   * short that the recovery loop goes on with). Reading the thread in the
+   * connection, an archive's check of its disk, or the recovery loop for a
+   * stored run that did not finish). Reading the thread in the
    * UI does not wake it; listing it reads what cubed stored. */
   const dormant = (thread: Thread | null) => !!thread && !thread.archived && !!thread.vm?.suspension;
   const sleepText = (thread: Thread) => thread.vm?.suspension?.state === "waking"

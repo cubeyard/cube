@@ -356,12 +356,12 @@ Restarts and failures:
   settled and was never reported (the request id keeps that to once; an
   idle thread is not taken for a reported one); once the agent is open,
   the next round watches it. Machines start for explicit work (`spawn`,
-  `tell`, the user's message, an archive's check of the disk, a portal
-  connection) and in cubed's recovery loop, which starts every open
-  thread whose machine is not suspended and leaves alone one an idle round
-  is suspending. That includes a wake a restart cut short (`waking`): the
-  loop goes on with it, retrying while the runner is full, whether or not
-  anything still waits for it. Reading a thread in the UI opens its agent
+  `tell`, the user's message, an archive's check of the disk when its
+  runner has a slot free, a portal connection) and in cubed's recovery
+  loop, by its one rule (`recoveryStep`, docs/thread-lifecycle.md): it
+  wakes a sleeping machine only for a stored Pi run that did not finish,
+  and a wake no one in this cubed owns (one a restart cut short) is read
+  back from the runner as suspended or running, never continued. Reading a thread in the UI opens its agent
   but does not start or wake its machine. `threads` lists a sleeping
   thread as "its machine is suspended" or "being woken", with its stored
   run state.
