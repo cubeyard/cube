@@ -2,7 +2,7 @@
  * from the UI, on a runner from the global pool (or the runner the user
  * named: the only way onto a host runner), with its own machine. */
 import { agents, CLAUDE_PROVIDER } from "./claude-agent.ts";
-import { releaseUnfinished, ThreadArchiving, ThreadWorking, type Conversations } from "./conversation.ts";
+import { releaseUnfinished, ThreadWorking, type Conversations, type ThreadReader } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
 import { THREAD_NOTE, type ObservedThread, type OptThreads } from "./optchat.ts";
 import { describeProjectHooks, findProject, writeProjectHooks } from "./project-hooks.ts";
@@ -23,28 +23,9 @@ function hookSummary(hooks: Project["hooks"]): string {
 export function cubeThreads(options: { registry: Registry; conversations: Conversations; catalog: () => Promise<ModelSelection[]>; runners: () => RunnersObservation;
   latestCommits: (projectId: string, signal?: AbortSignal) => Promise<ResolvedRepositories> }): OptThreads {
   const { registry, conversations } = options;
-  const disk = (vm: Thread["vm"]) => !vm ? "no machine disk" : vm.discarded ? "machine disk discarded"
-    : vm.retain ? `machine disk retained${vm.retainReason ? ` (${vm.retainReason})` : ""}` : "machine disk deleted";
   const free = () => { const slots = registry.runnerSlots(); return `${slots.free} of ${slots.total}`; };
-  // A failure is the last try's: cubed's recovery loop tries again, and an
-  // agent still open on the machine goes on with its run.
-  const state = (id: string) => {
-    const error = conversations.error(id);
-    const waiting = conversations.waiting(id);
-    if (conversations.archivingNow(id)) return "being archived";
-    if (waiting && !error) return conversations.agentOpen(id) ? `ready (its runner does not answer now: ${waiting})` : `starting its machine, ${waiting}`;
-    if (!error) return conversations.starting(id) ? "starting its machine" : "ready";
-    if (conversations.starting(id)) return `starting its machine again (the last try failed: ${error})`;
-    return conversations.agentOpen(id) ? `ready (a later check of its machine failed: ${error})` : `error: ${error}`;
-  };
-  /** A machine that is suspended, or being woken (by a message, a portal
-   * connection, an archive's check of its disk, or a wake a restart cut
-   * short that the recovery loop goes on with). Reading the thread in the
-   * UI does not wake it; listing it reads what cubed stored. */
-  const dormant = (thread: Thread | null) => !!thread && !thread.archived && !!thread.vm?.suspension;
-  const sleepText = (thread: Thread) => thread.vm?.suspension?.state === "waking"
-    ? `its machine is being woken${thread.vm.suspension.waiting ? ` (${thread.vm.suspension.waiting})` : ""}` : "its machine is suspended (idle; it wakes when told)";
   return {
+    ...readThreads({ registry, conversations }),
     async projects() {
       const projects = registry.listProjects();
       const models = await options.catalog();
@@ -102,6 +83,53 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
     async tell(id, text, requestId) {
       await conversations.submit(id, text, requestId);
     },
+    async archive(id) {
+      const thread = registry.getThread(id);
+      if (!thread) return null;
+      if (thread.archived) return { already: true, disk: disk(thread.vm), free: free() };
+      // A machine still coming up or reattaching (not one retried after a
+      // failure, nor a quick check of a running one) would hold this call for
+      // minutes; its run may start once it is up.
+      if (conversations.starting(id) && !conversations.error(id) && thread.workspaceState !== "failed") {
+        throw new Error("its machine is still starting or reattaching; try again shortly");
+      }
+      const archived = await conversations.archive(id).catch((error: unknown) => {
+        throw error instanceof ThreadWorking ? new Error(error.waiting ? "it is waiting on its background agents; nothing was stopped" : "it is working; nothing was stopped", { cause: error }) : error;
+      });
+      return { already: !!archived.already, disk: disk(registry.getThread(id)?.vm), free: free() };
+    },
+  };
+}
+
+const disk = (vm: Thread["vm"]) => !vm ? "no machine disk" : vm.discarded ? "machine disk discarded"
+  : vm.retain ? `machine disk retained${vm.retainReason ? ` (${vm.retainReason})` : ""}` : "machine disk deleted";
+
+/** OptChat's reads of its threads: its watcher (`events`), `threads`
+ * (`describe`), `history` and the overview (`observe`). Given only a
+ * ThreadReader, they cannot start or wake a machine, open an agent or wait
+ * for an activation: they read cubed's own state, an agent already open, or
+ * the thread's store. */
+export function readThreads(options: { registry: Registry; conversations: ThreadReader }): Pick<OptThreads, "describe" | "observe" | "history" | "events"> {
+  const { registry, conversations } = options;
+  // A failure is the last try's: cubed's recovery loop tries again, and an
+  // agent still open on the machine goes on with its run.
+  const state = (id: string) => {
+    const error = conversations.error(id);
+    const waiting = conversations.waiting(id);
+    if (conversations.archivingNow(id)) return "being archived";
+    if (waiting && !error) return conversations.agentOpen(id) ? `ready (its runner does not answer now: ${waiting})` : `starting its machine, ${waiting}`;
+    if (!error) return conversations.starting(id) ? "starting its machine" : "ready";
+    if (conversations.starting(id)) return `starting its machine again (the last try failed: ${error})`;
+    return conversations.agentOpen(id) ? `ready (a later check of its machine failed: ${error})` : `error: ${error}`;
+  };
+  /** A machine that is suspended, or being woken (by a message, a portal
+   * connection, an archive's check of its disk, or a wake a restart cut
+   * short that the recovery loop goes on with). Reading the thread in the
+   * UI does not wake it; listing it reads what cubed stored. */
+  const dormant = (thread: Thread | null) => !!thread && !thread.archived && !!thread.vm?.suspension;
+  const sleepText = (thread: Thread) => thread.vm?.suspension?.state === "waking"
+    ? `its machine is being woken${thread.vm.suspension.waiting ? ` (${thread.vm.suspension.waiting})` : ""}` : "its machine is suspended (idle; it wakes when told)";
+  return {
     async describe(ids) {
       const lines: string[] = [];
       for (const id of ids) {
@@ -114,7 +142,8 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
             // A listing reads: the live run from an agent already open, else
             // the stored one. It never opens an agent (which takes the
             // workspace's lease and replays what the agent left running).
-            const status = conversations.agentOpen(id) ? (await conversations.history(id)).status : (await conversations.storedHistory(id, { limit: 1 }))?.status;
+            const live = await conversations.live(id);
+            const status = live ? (await live.read()).status : (await conversations.storedHistory(id, { limit: 1 }))?.status;
             if (status) run = `, ${status.state}${status.waiting?.length && status.state !== "working" ? `, waiting on ${agents(status.waiting)}` : ""}`;
           } catch { /* the state says enough */ }
         }
@@ -172,21 +201,6 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       try { return { ...record, transcript: await conversations.storedHistory(id, request), unreadable: null }; }
       catch (error) { return { ...record, transcript: null, unreadable: error instanceof Error ? error.message : String(error) }; }
     },
-    async archive(id) {
-      const thread = registry.getThread(id);
-      if (!thread) return null;
-      if (thread.archived) return { already: true, disk: disk(thread.vm), free: free() };
-      // A machine still coming up or reattaching (not one retried after a
-      // failure, nor a quick check of a running one) would hold this call for
-      // minutes; its run may start once it is up.
-      if (conversations.starting(id) && !conversations.error(id) && thread.workspaceState !== "failed") {
-        throw new Error("its machine is still starting or reattaching; try again shortly");
-      }
-      const archived = await conversations.archive(id).catch((error: unknown) => {
-        throw error instanceof ThreadWorking ? new Error(error.waiting ? "it is waiting on its background agents; nothing was stopped" : "it is working; nothing was stopped", { cause: error }) : error;
-      });
-      return { already: !!archived.already, disk: disk(registry.getThread(id)?.vm), free: free() };
-    },
     async events(id) {
       // An archive under way (or its release left unfinished) is not a
       // failure to start; the archive tool answers for it.
@@ -212,11 +226,10 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         if (now !== false) return now;
         throw new Error(failure);
       }
-      try { return await conversations.events(id); }
+      try { return await conversations.live(id) ?? "stored"; }
       catch (error) {
         const now = gone();
         if (now !== false) return now;
-        if (error instanceof ThreadArchiving) return "archiving";
         throw error;
       }
     },

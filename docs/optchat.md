@@ -341,7 +341,10 @@ Restarts and failures:
   not sent again (see "A paid call is never sent again on its own").
 - **Duplicate events**: every report has the request id
   `report:<thread>:<run>` and every run its own request id, so a watch
-  reconnect, a restart or an archive sends a report once.
+  reconnect, a restart or an archive sends a report once. A report the
+  chat could not take (its send failed) is read from the thread's store
+  and sent again in a later round; a thread archived (in the UI, say)
+  before a round saw its last run settle reports that run from its store.
 - **A thread whose machine is unavailable** reports a failure to start
   once, after the start grace (cubed keeps retrying); see "Archiving".
 - **The chat's own observation starts nothing**: neither a thread's
@@ -362,6 +365,10 @@ Restarts and failures:
   but does not start or wake its machine. `threads` lists a sleeping
   thread as "its machine is suspended" or "being woken", with its stored
   run state.
+  These reads (`readThreads` in optchat-threads.ts) get only a
+  `ThreadReader` (conversation.ts): cubed's own state, an agent already
+  open and the thread's store. They have no way to start or wake a
+  machine, open an agent or wait for a start.
 - **Archive and model change** refuse a thread waiting on background agents
   (archiving would end them): `not archived: it is waiting on its background
   agents; nothing was stopped`. The user's stop in the UI ends them, as a
