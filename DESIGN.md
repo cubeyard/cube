@@ -334,7 +334,7 @@ destinations fold behind one menu key that names the current page; a
 thread's strip is one row of title and a `details` key, which opens the
 project, model and archive key on the row beneath and folds again when the
 composer takes focus. The chat has no strip: its model and memory are in the
-index, a bottom sheet on a phone. While the on-screen keyboard is up
+index, the whole screen on a phone. While the on-screen keyboard is up
 (`data-keyboard` on the root, from `lib/keyboard.ts`), the header, the
 chat's wordmark row and its memory step aside, and with under ~220px left a
 thread's strip too. On a phone the composer's attach and send keys
@@ -636,7 +636,7 @@ Below 76rem the same thread notes are one-liners under their spawn, the
 state kept whole; artifacts stay links in the text.
 
 ### The Index
-One dialog rising from the composer (a bottom sheet under 40rem), the
+One dialog rising from the composer, the
 system's floating surface: `--s4`, `--line-2` border, well radius,
 `--shadow-float`, a putty-washed backdrop. Its head row: a search mark, the
 filter field (14px, 16px on a phone; focused, a 2px signal rule under the
@@ -651,6 +651,12 @@ puts it on the sheet itself, so no on-screen keyboard rises over it (the
 filter is a tap away). The arrow keys walk its items, enter in the filter
 opens the first match, escape or the close key closes and gives focus back.
 Rows are 2.75rem on touch.
+On a phone (and a phone on its side) the index is the whole screen: no
+border, radius or shadow, the filter row on top with its close key, the
+results scrolling on their own beneath it. Its height and top are the
+visual viewport's, followed as it changes, so while the user types into the
+filter the on-screen keyboard covers neither the filter nor the results
+(iOS keeps the layout viewport whole under its keyboard).
 
 ### Named Rules
 **The Actions-In-The-Module Rule.** A module's controls live inside it, on its
