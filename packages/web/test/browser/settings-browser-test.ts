@@ -25,12 +25,13 @@ async function page(viewport: { width: number; height: number }): Promise<Page> 
   opened.on("pageerror", error => errors.push(String(error)));
   return opened;
 }
-/** From the chat, through the header's one settings entry and the rail. */
+/** From the chat, through its index's one settings entry and the rail. */
 async function memoryPage(url: string, viewport: { width: number; height: number }): Promise<Page> {
   const opened = await page(viewport);
   await opened.goto(`${url}/#/chat`);
   await opened.locator(".composer textarea").waitFor();
-  await opened.locator("header nav a", { hasText: "settings" }).click();
+  await opened.locator(".composer .work-key").click();
+  await opened.locator(".chat-index .index-places a", { hasText: "settings" }).click();
   await opened.waitForURL(/#\/settings\/providers$/);
   await opened.locator("h1", { hasText: "model providers" }).waitFor();
   await opened.getByRole("navigation", { name: "settings" }).getByRole("link", { name: "chat memory" }).click();

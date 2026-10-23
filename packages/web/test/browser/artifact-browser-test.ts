@@ -119,17 +119,24 @@ try {
   const project = (await api("/api/projects")).projects.find((item: { name: string }) => item.name === "demo");
   const thread = (await api("/api/threads", { projectId: project.id, requestId: "notes", text: "publish the notes" })).id as string;
 
-  // The chat writes the review; its reply links it, and the panel lists it.
+  // The chat writes the review; its reply links it, its note stands in the margin, and the index lists it.
   await page.goto(`${url}/#/chat`);
   await page.locator(".composer textarea").fill("please write the review of the work artifacts pull request");
   await page.locator(".composer textarea").press("Enter");
   const link = page.locator(".conversation-message a", { hasText: "post-merge review" });
   await link.waitFor({ timeout: 30_000 });
-  // The thread's notes were written meanwhile; the panel lists both after a reload.
+  await page.locator(".sheet-margin .note-title", { hasText: "post-merge review" }).waitFor({ timeout: 30_000 });
+  // The thread's notes were written meanwhile: the chat never named them, so
+  // no note is made up for them; the index lists both.
   await until(() => api("/api/artifacts"), value => value.artifacts.length === 2, "the thread's notes");
   await page.reload();
-  await page.locator(".work-artifacts a.work-title", { hasText: "machine notes" }).waitFor({ timeout: 30_000 });
+  await page.locator(".sheet-margin .note-title", { hasText: "post-merge review" }).waitFor({ timeout: 30_000 });
+  assert.equal(await page.locator(".sheet-margin .note-title", { hasText: "machine notes" }).count(), 0, "no note for an artifact the chat did not name");
   await shoot(page, "01-chat-desktop");
+  await page.locator(".composer .work-key").click();
+  await page.locator(".chat-index .index-row", { hasText: "machine notes" }).waitFor({ timeout: 30_000 });
+  await shoot(page, "01-chat-index");
+  await page.keyboard.press("Escape");
 
   await link.click();
   await page.locator("article.artifact-body h1", { hasText: "post-merge review" }).waitFor();

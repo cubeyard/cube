@@ -1,6 +1,7 @@
 /** The chat and a thread on a phone, in a real browser against a scripted
- * host: the destinations fold behind a menu key, the strips into one row
- * with a details key, and while the keyboard is up the chrome steps aside
+ * host: the chat is one quiet row over the conversation with its index a
+ * key away; elsewhere the destinations fold behind a menu key, a thread's
+ * strip into one row with a details key, and while the keyboard is up the chrome steps aside
  * so the conversation keeps the screen — both the way Android resizes the
  * page (the viewport shrinks) and the way iOS Safari does (only the visual
  * viewport shrinks; stood in for here, as no desktop engine has an on-screen
@@ -106,8 +107,10 @@ async function scenario(browser: Browser, engine: string, name: string, size: { 
   const label = `${engine} ${name} (${size.width}x${size.height})`;
   try {
     await page.goto(`${host.url}/#/${route}`);
-    await page.locator(".composer textarea").waitFor();
-    await page.getByText("a path with no break").waitFor();
+    if (route === "chat" || route.startsWith("t/")) {
+      await page.locator(".composer textarea").waitFor();
+      await page.getByText("a path with no break").waitFor();
+    } else await page.locator("main h1").waitFor();
     await page.evaluate(() => document.fonts.ready);
     await settle(page);
     await run(page, host);
@@ -145,23 +148,18 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
 
   for (const phone of phones) {
     const tag = `${phone.width}x${phone.height}`;
-    await scenario(browser, engine, "the chat on a phone: one header row, one strip row, the threads folded", phone, "chat", async page => {
-      assert.ok(await visible(page, ".nav-menu-key"), "the menu key shows");
-      assert.equal(await visible(page, "header nav"), false, "the destinations are folded");
-      assert.equal(await visible(page, ".chat-workspace .strip-model"), false, "the model is behind details");
-      assert.equal(await page.locator(".work-fold").getAttribute("aria-expanded"), "false", "the threads panel starts folded");
-      const header = await box(page, "header");
-      const strip = await box(page, ".thread-strip");
-      assert.ok(header.height <= 50, `header is one row: ${header.height}`);
-      assert.ok(strip.height <= 50, `strip is one row: ${strip.height}`);
+    await scenario(browser, engine, "the chat on a phone: one quiet row above the conversation, the index a key away", phone, "chat", async page => {
+      assert.equal(await page.locator(".thread-strip, .work-panel, header nav, .nav-menu-key").count(), 0, "no strip, panel, menu or destinations");
+      const bar = await box(page, ".sheet-bar");
+      assert.ok(bar.height <= 50, `one quiet row: ${bar.height}`);
       const transcript = await box(page, ".transcript");
-      assert.ok(transcript.height >= phone.height * 0.5, `the conversation has half the screen: ${transcript.height}`);
-      for (const key of [".nav-menu-key", ".strip-details-key", ".composer .attach-key", ".composer .send-key"]) await assertHitArea(page, key);
+      assert.ok(transcript.height >= phone.height * 0.65, `the conversation has the screen: ${transcript.height}`);
+      for (const key of [".sheet-bar .name-key", ".composer .work-key", ".composer .attach-key", ".composer .send-key"]) await assertHitArea(page, key);
       await assertNoSideways(page);
       await shoot(page, engine, `chat-${tag}`);
     });
 
-    await scenario(browser, engine, "the menu opens, lists every destination at a fingertip's height and closes", phone, "chat", async page => {
+    await scenario(browser, engine, "elsewhere the menu opens, lists every destination at a fingertip's height and closes", phone, "threads", async page => {
       const key = page.locator(".nav-menu-key");
       await key.tap();
       assert.equal(await key.getAttribute("aria-expanded"), "true");
@@ -177,28 +175,37 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       assert.equal(await key.getAttribute("aria-expanded"), "false", "escape closes it");
       assert.ok(await key.evaluate(el => el === document.activeElement), "and hands focus back to the key");
       await key.tap();
-      const transcript = await box(page, ".transcript");
-      await page.touchscreen.tap(transcript.right - 20, transcript.bottom - 20);
+      const main = await box(page, "main");
+      await page.touchscreen.tap(main.right - 20, main.bottom - 20);
       assert.equal(await key.getAttribute("aria-expanded"), "false", "a press outside closes it");
       await key.tap();
-      await page.locator("header nav a", { hasText: "threads" }).tap();
-      await page.waitForURL(/#\/threads$/);
+      await page.locator("header nav a", { hasText: "projects" }).tap();
+      await page.waitForURL(/#\/projects$/);
       assert.equal(await page.locator(".nav-menu-key").getAttribute("aria-expanded"), "false", "a choice closes it");
     });
   }
 
   const phone = { width: 375, height: 667 };
-  await scenario(browser, engine, "the chat's details key shows the model and memory; the composer folds them", phone, "chat", async (page, host) => {
-    const details = page.locator(".chat-workspace .strip-details-key");
-    await details.tap();
-    assert.equal(await details.getAttribute("aria-expanded"), "true");
-    assert.ok(await visible(page, ".chat-workspace .strip-model select"), "the model shows");
-    assert.ok(await visible(page, ".chat-workspace .strip-toggle[aria-controls=chat-memory]"), "memory shows");
-    await shoot(page, engine, "chat-details-375x667");
+  await scenario(browser, engine, "the work key raises the index as a sheet: threads, places, model and memory at a fingertip", phone, "chat", async (page, host) => {
+    await page.locator(".composer .work-key").tap();
+    const index = page.locator(".chat-index");
+    await index.locator(".index-row").first().waitFor();
+    const sheet = await box(page, ".chat-index");
+    assert.ok(Math.abs(sheet.bottom - phone.height) <= 1 && sheet.width >= phone.width - 1, `a sheet from the bottom edge: ${JSON.stringify(sheet)}`);
+    assert.ok(sheet.top >= phone.height * 0.1, "the sheet leaves the top in view");
+    const heights = await index.locator(".index-row").evaluateAll(all => all.map(row => row.getBoundingClientRect().height));
+    assert.ok(heights.every(height => height >= 43.9), `each row is a fingertip high: ${heights}`);
+    assert.deepEqual(await index.locator(".index-places a").allTextContents(), ["threads", "artifacts", "projects", "settings"]);
+    assert.ok(await index.locator("select[aria-label=model]").isVisible(), "the model is in the index");
     assert.ok(host.requests.includes("GET /api/optchat/model"));
-    await page.locator(".composer textarea").tap();
-    assert.equal(await details.getAttribute("aria-expanded"), "false", "typing folds the details");
-    assert.equal(await visible(page, ".chat-workspace .strip-model"), false);
+    await assertNoSideways(page);
+    await shoot(page, engine, "chat-index-375x667");
+    await index.getByRole("button", { name: /memory/ }).tap();
+    await page.locator("#chat-memory").waitFor();
+    assert.equal(await index.evaluate(element => (element as HTMLDialogElement).open), false, "the index makes way for the memory");
+    await openKeyboard(page, phone, 347);
+    await page.waitForFunction(() => document.documentElement.dataset.keyboard === "open");
+    assert.equal(await visible(page, "#chat-memory"), false, "typing, the memory steps aside");
   });
 
   for (const ios of [false, true]) {
@@ -206,13 +213,10 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     for (const size of [{ width: 375, height: 667, ios }, { width: 390, height: 844, ios }]) {
       const room = size.height - 320;
       await scenario(browser, engine, `typing in the chat: the keyboard takes the ${way}; the conversation keeps the room`, size, "chat", async page => {
-        await page.locator(".work-fold").tap();
         await atEnd(page, "the view starts at the end");
         await openKeyboard(page, size, room);
         await page.waitForFunction(() => document.documentElement.dataset.keyboard === "open");
-        assert.equal(await visible(page, "header"), false, "the header steps aside");
-        assert.equal(await visible(page, ".work-panel"), false, "the threads panel steps aside, even unfolded");
-        assert.ok(await visible(page, ".chat-workspace .thread-strip"), "the strip stays");
+        assert.equal(await visible(page, ".sheet-bar"), false, "the wordmark's row steps aside");
         const composer = await box(page, ".composer");
         const app = await box(page, "#app");
         assert.ok(Math.abs(app.height - room) < 1, `the app is the room above the keyboard: ${app.height} against ${room}`);
@@ -283,15 +287,15 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
   });
 
   await scenario(browser, engine, "turned on its side and back: the chrome folds, a keyboard leaves the composer and the conversation", { width: 667, height: 375 }, "chat", async page => {
-    assert.ok(await visible(page, ".nav-menu-key"), "a short touch screen folds the destinations");
+    assert.ok((await box(page, ".sheet-bar")).height <= 50, "one quiet row");
     assert.equal((await box(page, ".composer .send-key")).height, 36, "a phone on its side has a phone's keys");
     await assertHitArea(page, ".composer .send-key");
-    assert.ok((await box(page, ".thread-strip")).height <= 50);
+    await assertHitArea(page, ".composer .work-key");
     await assertNoSideways(page);
     await shoot(page, engine, "chat-landscape-667x375");
     await openKeyboard(page, { width: 667, height: 375 }, 175);
     await page.waitForFunction(() => document.documentElement.dataset.keyboard === "tight");
-    assert.equal(await visible(page, ".chat-workspace .thread-strip"), false, "with so little room the strip steps aside too");
+    assert.equal(await visible(page, ".sheet-bar"), false, "with so little room only the conversation and the composer stay");
     const transcript = await box(page, ".transcript");
     assert.ok(transcript.height >= 100, `lines of conversation remain: ${transcript.height}`);
     await shoot(page, engine, "chat-landscape-keyboard-667x375");
@@ -299,34 +303,23 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     await page.setViewportSize({ width: 375, height: 667 });
     await settle(page);
     assert.equal(await keyboard(page), null);
-    assert.ok(await visible(page, "header") && await visible(page, ".nav-menu-key"));
+    assert.ok(await visible(page, ".sheet-bar"));
     assert.ok((await box(page, ".composer")).bottom <= 667);
     await assertNoSideways(page);
   });
 
-  await scenario(browser, engine, "the details' model choice is no keyboard; open memory folds with the details", phone, "chat", async page => {
-    await page.locator(".chat-workspace .strip-details-key").tap();
-    await page.locator(".strip-model select").focus();
+  await scenario(browser, engine, "the index's model choice is no keyboard", phone, "chat", async page => {
+    await page.locator(".composer .work-key").tap();
+    await page.locator(".chat-index select[aria-label=model]").focus();
     await page.setViewportSize({ width: 375, height: 347 });
     await settle(page);
     assert.equal(await keyboard(page), null, "a focused select is not typing");
-    assert.ok(await visible(page, "header"));
     await page.setViewportSize({ width: 375, height: 667 });
-    const memory = page.locator(".strip-toggle[aria-controls=chat-memory]");
-    await memory.tap();
-    await page.locator("#chat-memory").waitFor();
-    await page.locator(".composer textarea").tap();
-    assert.equal(await memory.getAttribute("aria-expanded"), "false", "memory folds with its toggle");
-    assert.equal(await page.locator("#chat-memory").count(), 0);
-    // and when the details key itself folds them
-    await page.locator(".chat-workspace .strip-details-key").tap();
-    await memory.tap();
-    await page.locator("#chat-memory").waitFor();
-    await page.locator(".chat-workspace .strip-details-key").tap();
-    assert.equal(await page.locator("#chat-memory").count(), 0, "folding the details folds memory");
+    await page.keyboard.press("Escape");
+    assert.ok(await visible(page, ".sheet-bar"));
   });
 
-  await scenario(browser, engine, "Tab out of the open menu closes it", phone, "chat", async page => {
+  await scenario(browser, engine, "Tab out of the open menu closes it", phone, "threads", async page => {
     const key = page.locator(".nav-menu-key");
     await key.tap();
     const last = page.locator("header nav a").last();
@@ -336,16 +329,16 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.equal(await key.getAttribute("aria-expanded"), "false");
   });
 
-  await scenario(browser, engine, "focus never stays on a destination the menu folded away", phone, "chat", async page => {
+  await scenario(browser, engine, "focus never stays on a destination the menu folded away", phone, "threads", async page => {
     const key = page.locator(".nav-menu-key");
     await key.tap();
     await page.locator("header nav a", { hasText: "projects" }).focus();
-    const transcript = await box(page, ".transcript");
-    await page.touchscreen.tap(transcript.right - 20, transcript.bottom - 20);
+    const main = await box(page, "main");
+    await page.touchscreen.tap(main.right - 20, main.bottom - 20);
     assert.equal(await key.getAttribute("aria-expanded"), "false");
     assert.equal(await page.evaluate(() => !!document.activeElement?.closest("header nav")), false, "a press outside moves focus off the folded menu");
     await key.tap();
-    await page.locator("header nav a", { hasText: "chat" }).tap();
+    await page.locator("header nav a", { hasText: "threads" }).tap();
     assert.equal(await key.getAttribute("aria-expanded"), "false", "the page already open closes the menu");
     assert.ok(await key.evaluate(el => el === document.activeElement), "and focus stays on the key");
   });
@@ -356,7 +349,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     await page.setViewportSize({ width: 667, height: 175 });
     await settle(page);
     assert.equal(await keyboard(page), "tight", "still typing on its side");
-    assert.equal(await visible(page, ".chat-workspace .thread-strip"), false);
+    assert.equal(await visible(page, ".sheet-bar"), false);
     // the keyboard goes down with focus kept (Android's back key): the chrome returns
     await page.setViewportSize({ width: 667, height: 375 });
     await settle(page);
@@ -411,7 +404,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
   });
 
   await scenario(browser, engine, "a narrow desktop window shortened by hand is not a keyboard", { width: 600, height: 800, touch: false }, "chat", async page => {
-    assert.ok(await visible(page, ".nav-menu-key"), "a narrow window gets the menu");
+    assert.ok(await visible(page, ".sheet-bar"), "a narrow window keeps its one row");
     await page.locator(".composer textarea").focus();
     await page.setViewportSize({ width: 600, height: 650 });
     await settle(page);
@@ -419,12 +412,9 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.ok(await visible(page, "header"));
   });
 
-  await scenario(browser, engine, "the desktop keeps its rows: destinations, model and threads in view, no menu or details keys", { width: 1280, height: 800, touch: false }, "chat", async page => {
-    assert.ok(await visible(page, "header nav"));
-    assert.equal(await visible(page, ".nav-menu-key"), false);
-    assert.equal(await visible(page, ".strip-details-key"), false);
-    assert.ok(await visible(page, ".chat-workspace .strip-model select"));
-    assert.equal(await page.locator(".work-fold").getAttribute("aria-expanded"), "true");
+  await scenario(browser, engine, "the desktop: the sheet and its margin, no menu or details keys", { width: 1280, height: 800, touch: false }, "chat", async page => {
+    assert.ok(await visible(page, ".sheet-margin"), "the margin is drawn");
+    assert.equal(await page.locator(".nav-menu-key, .strip-details-key, header nav").count(), 0);
     await page.locator(".composer textarea").focus();
     await settle(page);
     assert.equal(await keyboard(page), null, "a focused field without a keyboard changes nothing");
