@@ -22,6 +22,7 @@ import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWork
   type ThreadMachines } from "./vm.ts";
 import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
+import { needsDemand, recoveryStep, releaseUnfinished } from "./thread-recovery.ts";
 import type { ModelSelection } from "./models.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -55,9 +56,7 @@ export class ThreadWorking extends Error {
 export class ThreadArchiving extends Error {
   constructor() { super("thread is being archived"); this.name = "ThreadArchiving"; }
 }
-/** A release that failed or was cut short: only the release is retried. */
-export const releaseUnfinished = (thread: Thread) => thread.workspaceState === "releasing"
-  || (thread.workspaceState === "failed" && !!thread.workspaceError?.startsWith("workspace release failed:"));
+export { releaseUnfinished };
 export class Conversations {
   private readonly registry: Registry;
   private readonly directory: string;
@@ -116,22 +115,45 @@ export class Conversations {
   }
   /** Whether claude-code threads can run on this host. */
   get claudeAvailable(): boolean { return this.claude !== null; }
-  /** Activates every open thread (machines boot concurrently) and finishes
-   * releases a crash interrupted. Repeated by cubed's recovery loop; an
-   * active thread's machine is only checked, not restarted. */
+  /** One recovery round over every open thread (thread-recovery.ts says
+   * what each gets): releases a crash interrupted are finished, a ready
+   * thread's machine is checked (started again only when its runner lost
+   * it), a machine not yet ready is started. A sleeping machine stays so
+   * until something needs it (P7-5): only an agent with a run to go on
+   * with wakes it here; a wake no one in this process owns (a restart cut
+   * it short) is read back from the runner, not continued. */
   async boot(): Promise<void> {
-    const work: Promise<unknown>[] = [];
-    for (const thread of this.registry.listThreads()) {
-      if (thread.archived || this.closing || this.archiveHolds.has(thread.id)) continue;
-      if (releaseUnfinished(thread)) {
-        work.push(this.command(thread.id, () => this.release(thread.id)).catch(() => {}));
-      }
-      // A suspended machine stays so until something needs it (P7-5); one
-      // being woken (a wake a restart cut short) goes on.
-      else if (thread.vm?.suspension?.state === "suspended" || this.suspends.has(thread.id)) continue;
-      else work.push(this.activate(thread.id));
+    await Promise.all(this.registry.listThreads().map(thread => this.recoverOne(thread)));
+  }
+  private async recoverOne(thread: Thread): Promise<void> {
+    const id = thread.id;
+    if (this.closing || this.archiveHolds.has(id) || this.suspends.has(id)) return;
+    const owned = this.activations.has(id) || !!this.machines.wakeInFlight?.(thread);
+    const demand = needsDemand(thread, owned) && await this.demand(id);
+    switch (recoveryStep(thread, { owned, demand })) {
+      case "release": await this.command(id, () => this.release(id)).catch(() => {}); return;
+      case "check": case "start": await this.activate(id); return;
+      case "settle-wake":
+        // A runner that does not answer is read again next round.
+        await this.machines.settleWake?.(thread).catch((error: unknown) => {
+          if (!(error instanceof RunnerWait)) log.warn("reading back a wake failed", { thread: id, error: error instanceof Error ? error.message : String(error) });
+        });
+        return;
+      case "leave": return;
     }
-    await Promise.all(work);
+  }
+  /** Whether the thread's agent has a run that only a wake lets go on: a Pi
+   * submission its stored conversation has not finished while no agent of
+   * it is open here (an open agent's run wakes the machine itself, by its
+   * guest calls). A Claude Code turn cut off by a stop is not continued at
+   * the reopen (claude-agent.ts), so it needs nothing. */
+  private async demand(id: string): Promise<boolean> {
+    if (this.isClaude(id) || this.agentOpen(id) || this.downs.has(id)) return false;
+    try { return (await this.storedHistory(id, { limit: 1 }))?.status.state === "working"; }
+    catch (error) {
+      log.warn("the stored run could not be read; the machine stays asleep", { thread: id, error: error instanceof Error ? error.message : String(error) });
+      return false;
+    }
   }
   /** One round of cubed's recovery loop (index.ts, every 30 s): every open
    * thread's activation (for a running machine under an open agent only a
