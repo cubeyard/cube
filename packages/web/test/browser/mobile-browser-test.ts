@@ -209,8 +209,11 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.equal(await index.evaluate(element => (element as HTMLDialogElement).open), false, "the index makes way for the memory");
     // its close event gives focus back to the key, a task later: then type
     await page.waitForFunction(() => document.activeElement?.classList.contains("work-key"));
+    await settle(page);
     await openKeyboard(page, phone, 347);
-    await page.waitForFunction(() => document.documentElement.dataset.keyboard === "open");
+    const typing = await page.waitForFunction(() => document.documentElement.dataset.keyboard === "open", undefined, { timeout: 10_000 }).then(() => null, async () =>
+      page.evaluate(() => JSON.stringify({ active: document.activeElement?.tagName + "." + document.activeElement?.className, scale: visualViewport?.scale, vv: visualViewport?.height, inner: innerHeight, dialog: (document.querySelector(".chat-index") as HTMLDialogElement | null)?.open })));
+    assert.equal(typing, null, `the keyboard reads as up: ${typing}`);
     assert.equal(await visible(page, "#chat-memory"), false, "typing, the memory steps aside");
   });
 
