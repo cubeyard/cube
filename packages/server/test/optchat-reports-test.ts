@@ -108,6 +108,8 @@ const READER = ["live", "storedHistory", "agentOpen", "error", "down", "waiting"
   const [A, B] = ids as [string, string];
   const stored = new Map<string, ThreadStatus>();
   const archived = new Set<string>();
+  /** Threads a watch round has seen open (the watcher's `seenOpen`). */
+  const watched = new Set<string>();
   const page = (id: string): HistoryPage | null => {
     const status = stored.get(id);
     return status ? { agent: "pi", owner: null, status, total: 2, answer: { index: 1, text: `${id.slice(0, 2)} did it` }, asked: 0, start: 0, events: [] } : null;
@@ -117,7 +119,7 @@ const READER = ["live", "storedHistory", "agentOpen", "error", "down", "waiting"
     projects: async () => "", runners: async () => "", describe: async () => "", tell: async () => {},
     spawn: async () => { const id = ids[spawned++]!; return { id, title: id.slice(0, 8) }; },
     // Their agents never open here: the watcher reads their stores.
-    events: async id => archived.has(id) ? null : "stored",
+    events: async id => { if (!archived.has(id)) watched.add(id); return archived.has(id) ? null : "stored"; },
     history: async id => ({ transcript: page(id) }) as unknown as ThreadRecord,
   };
   const reports: string[] = [];
@@ -141,7 +143,8 @@ const READER = ["live", "storedHistory", "agentOpen", "error", "down", "waiting"
   }
   try {
     await chat.send("start two threads", "u1");
-    await delay(300); // watch rounds read both stores: nothing settled yet
+    // chat.send returns before the spawn turn ends: wait for a round to see both.
+    await until(() => watched.has(A) && watched.has(B), "watch rounds read both stores: nothing settled yet");
 
     // L1: A's run settles and A is archived (in the UI) before the next round.
     stored.set(A, { state: "completed", run: "rA", error: null });
