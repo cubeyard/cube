@@ -1,5 +1,5 @@
 /** R-1: what OptChat sends to GPT-6 on the OpenAI platform (an sk- key)
- * through pi-ai 1.3.0's real request builder, with fetch replaced so
+ * through pi-ai 1.4.0's real request builder, with fetch replaced so
  * nothing leaves the process. pi-ai fixes `reasoning.effort` at "medium"
  * and sends the thinking level as a trailing `configuration_update` item;
  * OptChat adds `reasoning.context: "all_turns"` and its own cache key and
@@ -73,7 +73,11 @@ const compact = cachedModels(platform, () => "optchat-test-compact", { task: fal
       assert.deepEqual(input(body).at(-1), { type: "configuration_update", reasoning: { effort: "high" } }, `${id} ${label}: the level goes last`);
       assert.equal(input(body).filter(item => item.type === "configuration_update").length, 1, "one configuration item, none before it in a fresh turn");
       assert.equal(body.prompt_cache_key, key, `${id} ${label}: OptChat's own cache key`);
-      assert.deepEqual(breakpoints(body), ["1:124"], `${id} ${label}: the view's breakpoint`);
+      // pi-ai ≥1.4.0 declares the tools in an additional_tools item at the
+      // head of the input; the system prompt and the view (item 2) follow.
+      assert.deepEqual(input(body).map(item => item.type === "message" || !item.type ? item.role : item.type), ["additional_tools", "developer", "user", "configuration_update"], `${id} ${label}: tools, system prompt, view, level`);
+      assert.equal(body.tools, undefined, `${id} ${label}: no top-level tools`);
+      assert.deepEqual(breakpoints(body), ["2:124"], `${id} ${label}: the view's breakpoint`);
       assert.deepEqual(body.prompt_cache_options, label === "chat" ? undefined : { mode: "explicit" });
       assert.equal(JSON.stringify({ ...body, reasoning: plain.reasoning, input: plain.input, prompt_cache_options: plain.prompt_cache_options }), JSON.stringify(plain), `${id} ${label}: otherwise pi-ai's own body`);
       assert.equal(reasoning(plain).context, undefined, "pi-ai itself sends no reasoning.context");

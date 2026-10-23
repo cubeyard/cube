@@ -187,8 +187,11 @@ async function scan<R>(statement: StatementSync, params: Array<number | string>,
 
 // --- Pi ----------------------------------------------------------------------
 
-/** The pi-durable SQLite schema this reader knows; another is refused. */
-export const PI_SCHEMA_VERSION = 1;
+/** The pi-durable SQLite schemas this reader knows; another is refused.
+ * pi-durable 1.4.0 migrates a store it opens from 1 to 2, which rebuilds
+ * only its task table; the entries read here are the same in both. A store
+ * no Harness opened since (an archived thread's) stays at 1. */
+export const PI_SCHEMA_VERSIONS: readonly number[] = [1, 2];
 const ROOT = 1;
 type PiIndex = Index & { last: number };
 
@@ -197,7 +200,7 @@ type PiIndex = Index & { last: number };
 export async function readPiHistory(file: string, owner: ThreadAgent | null, failure: string | null, request: HistoryRequest): Promise<HistoryPage | null> {
   return locked(file, () => snapshot(file, async (db, identity) => {
     const row = db.prepare("SELECT version FROM durable_schema WHERE singleton = 1").get() as { version: number } | undefined;
-    if (row?.version !== PI_SCHEMA_VERSION) throw new Error(`the stored history has schema version ${row?.version ?? "none"}, not ${PI_SCHEMA_VERSION}`);
+    if (row === undefined || !PI_SCHEMA_VERSIONS.includes(row.version)) throw new Error(`the stored history has schema version ${row?.version ?? "none"}, not ${PI_SCHEMA_VERSIONS.join(" or ")}`);
     const parse = (record: string) => JSON.parse(record) as EntryRecord;
     // An entry committed late under a smaller id than the index has read
     // changes the order: the index is built again.

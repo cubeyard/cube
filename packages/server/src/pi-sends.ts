@@ -31,10 +31,19 @@
 import type { Context } from "@earendil-works/chord";
 import { CompactionTask, defineDoc, defineExtension, GenerationTask, hook, LiveDoc, type ConversationId, type Extension, type Harness, type HookApi, type TaskId } from "@earendil-works/pi-durable";
 
+/** `settings.restartLimit` of every cube Harness (threads and OptChat).
+ * pi-durable 1.4.0 parks a task that crashes, kills or failed saves cut off
+ * 5 times in a row without a new state, until `retryTask()`, for which cube
+ * has no control yet: its conversation would stay busy. Cube keeps 1.3.0's
+ * behavior, a cut-off task runs again at every open, until the crash-loop
+ * limit (D1′) is decided. Either way a model request out at a stop is never
+ * sent again: `settleSends` aborts its generation before Pi schedules it. */
+export const RESTART_LIMIT = Number.POSITIVE_INFINITY;
+
 /** `epoch`: the newest open. `through`: memos of epochs up to it are counted.
  * `interrupted`: requests out at a stop, by `provider/model`; their cost is unknown. */
 export type Sends = { epoch: number; through: number; interrupted: Record<string, number>; compactions?: Record<string, true> };
-export const SendsDoc = defineDoc<Sends>({ kind: "cube.sends", version: 1, scope: "session", initial: () => ({ epoch: 0, through: 0, interrupted: {} }) });
+export const SendsDoc = defineDoc<Sends>({ kind: "cube.sends", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({ epoch: 0, through: 0, interrupted: {} }) });
 const MARK = "cube.sent.";
 /** A thread's entry saying its run stopped because its request was out at a stop. */
 export const DROPPED_ENTRY = "cube.send-dropped";

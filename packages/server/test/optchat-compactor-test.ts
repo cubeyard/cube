@@ -77,7 +77,7 @@ const CUT = /^\(no summary, cut short: zoom it\) /;
 /** The stored view, as optchat.ts defines it. A cubed before the shape
  * stores it with `Object.assign` of the fields it knows: `entry`, `shape`
  * and `shapeTotal` stay as a newer cubed left them while `total` grows. */
-const ViewDoc = defineDoc<{ total: number; entry?: number; shape?: string; shapeTotal?: number }>({ kind: "cube.optchat.view", version: 1, scope: "session", initial: () => ({ total: 0 }) });
+const ViewDoc = defineDoc<{ total: number; entry?: number; shape?: string; shapeTotal?: number }>({ kind: "cube.optchat.view", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({ total: 0 }) });
 const view = (chat: OptChat) => chat.agent.conversation.commit(async tx => ({ ...await tx.doc(ViewDoc) }), BACKGROUND_CONTEXT);
 /** Leaves the view's shape at `mark`, as an older cubed that wrote since would. */
 const olderWrote = (chat: OptChat, mark: { entry?: number; shape?: string; shapeTotal?: number }) =>
