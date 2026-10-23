@@ -344,6 +344,24 @@ Restarts and failures:
   reconnect, a restart or an archive sends a report once.
 - **A thread whose machine is unavailable** reports a failure to start
   once, after the start grace (cubed keeps retrying); see "Archiving".
+- **The chat's own observation starts nothing**: neither a thread's
+  watcher, nor `threads`, nor `history` starts its machine, wakes a
+  suspended one or opens its agent. With the agent open in cubed, the
+  watcher watches the agent's own events. Without it (the machine is
+  starting, suspended or being woken), each round (15 s) the watcher reads
+  the stored run (a one-message `history` page) and reports it if it
+  settled and was never reported (the request id keeps that to once; an
+  idle thread is not taken for a reported one); once the agent is open,
+  the next round watches it. Machines start for explicit work (`spawn`,
+  `tell`, the user's message, an archive's check of the disk, a portal
+  connection) and in cubed's recovery loop, which starts every open
+  thread whose machine is not suspended and leaves alone one an idle round
+  is suspending. That includes a wake a restart cut short (`waking`): the
+  loop goes on with it, retrying while the runner is full, whether or not
+  anything still waits for it. Reading a thread in the UI opens its agent
+  but does not start or wake its machine. `threads` lists a sleeping
+  thread as "its machine is suspended" or "being woken", with its stored
+  run state.
 - **Archive and model change** refuse a thread waiting on background agents
   (archiving would end them): `not archived: it is waiting on its background
   agents; nothing was stopped`. The user's stop in the UI ends them, as a
