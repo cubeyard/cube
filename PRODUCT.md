@@ -66,7 +66,8 @@ audit and runner-side evidence.
 ## Design and voice
 
 Preserve the instrument-panel visual world in DESIGN.md: calm lowercase labels,
-compact physical controls, purposeful status lamps, readable transcripts and
+compact physical controls, states in quiet words (no status lamps, glows or
+blinking), readable transcripts and
 accessible keyboard interactions. This is an operating tool, not a marketing
 page. Show concrete errors and retry/reconnect behavior rather than hiding
 failures behind a spinner. Keep navigation stable while work streams.

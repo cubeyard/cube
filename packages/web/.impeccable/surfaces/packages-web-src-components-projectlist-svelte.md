@@ -25,11 +25,12 @@ an explicit checkout name and prints `../repos/<checkout-name>`.
 
 Project switchboard, selected from seed `e0bc0e78`, extending the established
 bench instrument. The project list is one recessed module well; detail is one
-vertical repository control board. The memorable moment is the lamp check:
-repositories move from blinking amber to green one by one while exact errors
-remain printed in their own rows.
+vertical repository control board. The memorable moment is the check:
+repositories move from `checking access and branch…` to their resolved base
+one by one while exact errors remain printed in their own rows. (Status
+lamps were removed app-wide at the user's request: states are words.)
 
-The shipped list row contains the project lamp and name, repository and thread
+The shipped list row contains the project name and status word, repository and thread
 counts, checked time, compact repository names, full wrapping failure text,
 and one flush re-check key. The detail board contains project identity,
 per-repository role/path, URL/base/checkout fields, and inline evidence:
@@ -51,7 +52,7 @@ raise all secondary contrast in pursuit of generic dashboard legibility.
   flow, or user-facing cube vocabulary.
 - Primary checkout is `/workspace`; additional checkouts are
   `../repos/<checkout-name>`. Review, push, and PR actions are repository-scoped.
-- Preserve the 47rem column, lower-case control voice, lamp vocabulary, mobile
+- Preserve the 47rem column, lower-case control voice, printed state words (no lamps), mobile
   stacking, keyboard focus, and reduced-motion behavior.
 - Preserve complete inline repository and action failure text with wrapping;
   do not collapse actionable backend detail into a toast or generic label.

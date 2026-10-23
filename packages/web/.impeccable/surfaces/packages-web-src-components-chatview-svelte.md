@@ -28,7 +28,7 @@ and settings.
   the key to the index, and the auth chip only when auth fails. No strip,
   rail, panel, tagline, destinations row or "you"/"agent" labels (each
   message keeps its accessible name). The physical costume (decks, seams,
-  raised strips) is off this surface; the tokens, lamps, type and the one
+  raised strips) is off this surface; the tokens, type and the one
   signal stay.
 - **One centreline.** The conversation column and the composer share the
   viewport's centreline at every width. The margin hangs outward to the
@@ -49,7 +49,7 @@ and settings.
   read, the thread is in neither and the overview counts lost threads. An artifact
   link cube cannot resolve gets no note. No need-user state is invented: only
   a failure (`failing`) is pinned.
-- **A note** is a lamp (a file mark for an artifact), the title and one line
+- **A note** is the title and one line
   of state. A press opens it in place: short id, start time, the thread's
   newest report among the rows shown (with the way to it), and the full view
   (`open thread`, `read`). Escape folds it and returns focus to its head.
@@ -65,8 +65,8 @@ and settings.
 - **Narrower (< 76rem, phone).** No margin: the thread notes are quiet
   one-liners under their spawn (state whole, the title gives way), artifacts
   stay the links they are in the text, so nothing shows twice.
-- **The index.** The composer's work key (lamps and counts of what moves and
-  what failed, else the index mark), the wordmark, `/` outside a field and
+- **The index.** The composer's work key (the index mark and, in words, what
+  failed, else what runs), the wordmark, `/` outside a field and
   ctrl/⌘ k open one dialog that rises from the composer (a bottom sheet on a
   phone): a filter; the chat's threads, failed then moving then the rest;
   the newest artifacts; the places (threads, artifacts, projects, settings);

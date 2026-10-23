@@ -225,6 +225,18 @@ check in `artifact-browser-test.ts` (real cubed, faux model). Open: thread
 names (#239) beside the titles once merged; no unread marking (cube has no
 seen state); the other pages still wear the bench instrument.
 
+## States in print, no status lamps
+
+At the user's request the glowing and blinking status lamps are gone from the
+whole app (threads, a thread's strip and sidebar, startup steps, tool lines,
+projects, repositories, runners, usage, settings, artifacts, the chat's
+margin, index and work key, auth). States are words: quiet silkscreen ink,
+failures in `--bad` ink, ready silent, each with an accessible name; nothing
+blinks or pulses. The light and dark palettes are unchanged; `--lamp-*`
+tokens became `--ok` and `--wait` for the two document marks that need them.
+DESIGN.md's Printed State Rule. `.impeccable/design.json` (a generated
+sidecar, unchanged since the first release) still describes lamps.
+
 ## Images in the chat
 
 The chat's composer takes pasted, dropped or picked images (PNG, JPEG, GIF,
