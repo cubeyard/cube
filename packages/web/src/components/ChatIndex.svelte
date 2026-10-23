@@ -123,6 +123,7 @@
           {#each artifacts as artifact (artifact.id)}
             <li>
               <a class="index-row" href="#/a/{artifact.id}" data-index-item>
+                <span class="index-doc"><Icon name="file" size={13} /></span>
                 <span class="index-title">{artifact.title}</span>
                 <span class="index-meta">revision {artifact.head} · {relTime(artifact.updatedAt)}</span>
               </a>

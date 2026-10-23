@@ -4,6 +4,7 @@
   import { relTime } from "../lib/time.ts";
   import { failing, stateText } from "../lib/work-state.ts";
   import type { ArtifactListItem } from "../lib/types.ts";
+  import Icon from "./Icon.svelte";
 
   // One note: what one message of the chat started or named, each as a
   // title and one line of state in words. A press opens it in place (the
@@ -126,6 +127,8 @@
             {@const artifact = item.artifact}
             {@const body = bodies[`${artifact.id}@${artifact.head}`]}
             <button type="button" class="note-head artifact" aria-expanded={open === item.key} aria-controls={peekId(item.key)} onclick={() => toggle(item)}>
+              <!-- what kind of thing this is (a document), not a state -->
+              <span class="note-doc"><Icon name="file" size={13} /></span>
               <span class="note-text">
                 <span class="note-title">{artifact.title}</span>
                 <span class="note-state">{[`artifact · revision ${artifact.head}`, commentText(artifact)].filter(Boolean).join(" · ")}</span>

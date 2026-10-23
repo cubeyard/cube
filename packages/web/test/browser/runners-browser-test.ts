@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { chromium, type Page } from "playwright";
+import { chromium, type Locator, type Page } from "playwright";
 import { startChatHost } from "../../../server/test/chat-fixture.ts";
 import type { TrustedRunnerHealth } from "../../../server/src/runner-types.ts";
 
@@ -18,6 +18,15 @@ const shots = process.env.CUBE_SCREENSHOTS;
 if (shots) fs.mkdirSync(shots, { recursive: true });
 const shoot = async (page: Page, name: string) => { if (shots) await page.screenshot({ path: path.join(shots, `${name}.png`), fullPage: true }); };
 const errors: string[] = [];
+/** An element's text colour, and the theme's error ink, as the browser computes them. */
+const inkOf = (locator: Locator) => locator.evaluate(element => getComputedStyle(element).color);
+const badInk = (page: Page) => page.evaluate(() => {
+  const probe = document.body.appendChild(document.createElement("span"));
+  probe.style.color = "var(--bad)";
+  const color = getComputedStyle(probe).color;
+  probe.remove();
+  return color;
+});
 const health: TrustedRunnerHealth = { lifecycle: "ready", draining: false, error: null, activeVms: 1, runningVms: 1, maxActiveVms: 3,
   retainedVms: 0, retainedBytes: 0, softwareVersion: "0.9.0", protocolVersion: 4, kind: "vm", platform: "linux-x86_64", capabilities: [] };
 // Only pool-a answers; the others' probes fail. The p3 runners are never asked.
@@ -57,6 +66,17 @@ try {
   registry.updateThreadVm(kept.id, { retain: true, retainReason: "dirty: work not pushed" });
   registry.beginRelease(kept.id);
   registry.finishRelease(kept.id);
+  // A project whose check failed: its status word is a failure, in error ink.
+  // Its one thread (made while it was ready, archived since) has a store
+  // that cannot be read: its usage is unknown.
+  const broken = { id: "broken", name: "broken", status: "ready" as const, error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] };
+  registry.saveProject(broken);
+  const unread = registry.createThread("broken", "unread", { provider: "fixture", id: "m" }, "unread", "pi", undefined, { runnerId: "pool-a" });
+  fs.mkdirSync(path.join(host.state, "threads", unread.id), { recursive: true });
+  fs.writeFileSync(path.join(host.state, "threads", unread.id, "pi.sqlite"), "not a store");
+  registry.beginRelease(unread.id);
+  registry.finishRelease(unread.id);
+  registry.saveProject({ ...broken, status: "error", error: "github: repository not found" });
 
   for (const [viewport, name] of [[{ width: 1280, height: 900 }, "desktop"], [{ width: 390, height: 844 }, "phone"]] as const) {
     const page = await browser.newPage({ viewport });
@@ -91,7 +111,23 @@ try {
     // The page scrolls in its pane, under a sticky header: the capacity lines go mid-screen.
     await panel.locator(".runner-capacity").evaluate(element => element.scrollIntoView({ block: "center" }));
     await shoot(page, `${name}-runners`);
+
     if (shots) await panel.screenshot({ path: path.join(shots, `${name}-runners-panel.png`) });
+    await page.close();
+  }
+  // The project in error: its status word in error ink, not quiet grey.
+  {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    page.on("pageerror", error => errors.push(String(error)));
+    await page.goto(`${host.url}/#/projects/broken`);
+    const status = page.locator(".project-state-readout .error", { hasText: "error" });
+    await status.waitFor();
+    assert.equal(await inkOf(status), await badInk(page), "a project's error status is printed in error ink");
+    // Its usage that could not be read: "usage unknown" in error ink, as its lamp was red.
+    const unknown = page.locator(".usage-total strong.error", { hasText: "usage unknown" });
+    await unknown.waitFor();
+    assert.equal(await inkOf(unknown), await badInk(page), "usage unknown is printed in error ink");
+    assert.notEqual(await inkOf(page.locator(".usage-total small")), await badInk(page), "the rest stays quiet");
     await page.close();
   }
 } finally {

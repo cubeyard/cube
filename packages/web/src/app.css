@@ -231,6 +231,8 @@ kbd {
   flex: none; color: var(--ink-3); font-size: 11.5px; letter-spacing: 0.02em; white-space: nowrap;
 }
 .tool-state.failure { color: var(--bad); }
+/* the failure words that replaced red lamps: a project in error, usage unknown */
+.project-state-readout .error, .runner-identity strong.error { color: var(--bad); }
 
 /* ============================================================ keys
    Raised controls with real travel: hover brightens the face, press
@@ -1659,6 +1661,8 @@ a.report-name:hover { color: var(--signal); text-decoration: underline; text-und
   background: transparent; color: var(--ink); text-align: left;
 }
 button.note-head:hover { background: var(--s3); }
+/* an artifact's file mark: what kind of thing it is, never a state */
+.note-doc { flex: none; display: inline-flex; color: var(--ink-3); transform: translateY(2px); }
 .note-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.05rem; }
 .note-title {
   font-size: 13px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere;
@@ -1768,6 +1772,8 @@ button.note-head:hover { background: var(--s3); }
   color: var(--ink); text-decoration: none;
 }
 .index-row:hover, .index-row:focus-visible { background: var(--s3); }
+.index-row:has(> .index-doc) { grid-template-columns: 13px minmax(0, 1fr) auto; }
+.index-doc { display: inline-flex; color: var(--ink-3); transform: translateY(2px); }
 .index-title { font-size: 13.5px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .index-title.untitled { color: var(--ink-3); font-weight: 450; }
 .index-meta { font-size: 12px; color: var(--ink-3); white-space: nowrap; font-variant-numeric: tabular-nums; max-width: 14rem; overflow: hidden; text-overflow: ellipsis; }

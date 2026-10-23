@@ -103,6 +103,9 @@ await scenario("the margin: each note beside the message that started or named i
   assert.equal(await page.locator(`.margin-note[data-note="call:spawn-old"] .note-state`).textContent(), "not known to cube · keel-images");
   // an artifact the chat linked and one it wrote: one note each, never one it did not name
   assert.deepEqual(await page.locator(".margin-note .note-head.artifact .note-title").allTextContents(), ["composer room: more space on the phone", "today's review"]);
+  // an artifact keeps its file mark (a kind, not a state); a thread note has none
+  assert.equal(await page.locator(".margin-note .note-head.artifact .note-doc svg").count(), 2, "each artifact note carries the file mark");
+  assert.equal(await page.locator(".margin-note .note-head:not(.artifact) .note-doc").count(), 0);
   // nothing inline on a wide screen: no note twice
   assert.equal(await page.locator(".transcript-column .sheet-note").count(), 0);
   // the chat's own tools in words, the report under its thread's name
@@ -262,6 +265,8 @@ await scenario("the index: its key, / and ctrl k open it; arrows walk it; escape
   await index.locator("input[type=search]").waitFor();
   assert.ok(await index.locator("input[type=search]").evaluate(element => element === document.activeElement), "focus in the filter");
   assert.deepEqual(await index.locator(".index-row[href^='#/t/'] .index-meta").allTextContents(), ["machine failed · keel-images", "working · cube", "turn ended · cube"], "failed, then moving, then the rest");
+  assert.equal(await index.locator(".index-row[href^='#/a/'] .index-doc svg").count(), 2, "artifact rows carry the file mark");
+  assert.equal(await index.locator(".index-row[href^='#/t/'] .index-doc").count(), 0, "thread rows carry no mark");
   await settle(page);
   await shoot(page, "sheet-desktop-index");
   await page.keyboard.press("ArrowDown");
