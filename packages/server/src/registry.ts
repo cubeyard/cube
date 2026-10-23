@@ -159,6 +159,12 @@ export interface Thread {
   /** Started on this runner by name: it never moves, and waits while the
    * runner is down. */
   pinned?: true;
+  /** Tries of the thread's start (or of its release) that failed in a row:
+   * how many, when the last one ended and its error. A success clears it.
+   * The recovery loop waits longer after each and stops starting after
+   * START_TRIES; a release it tries for as long as it fails
+   * (thread-recovery.ts). A wait for a runner is no failed try. */
+  retry?: { failures: number; at: number; error: string };
 }
 /** Where the thread's own machine stands on `thread.runnerId`:
  * `provisional`: no `vm.allocate` for it ever reached that runner, so the
@@ -755,11 +761,37 @@ export class Registry {
       this.db.exec("COMMIT");
     } catch (cause) { this.db.exec("ROLLBACK"); throw cause; }
   }
-  beginRelease(threadId: string): Thread {
+  /** Counts a failed try of the thread's start or release (`retry`). */
+  recordFailure(threadId: string, error: string, at = Date.now()): NonNullable<Thread["retry"]> {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const thread = this.getThread(threadId);
       if (!thread) throw new Error("thread not found");
+      const retry = { failures: (thread.retry?.failures ?? 0) + 1, at, error: error.slice(0, 1024) };
+      this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, retry }), threadId);
+      this.db.exec("COMMIT");
+      return retry;
+    } catch (cause) { this.db.exec("ROLLBACK"); throw cause; }
+  }
+  /** A try succeeded: the failed ones before it no longer count. */
+  clearFailures(threadId: string): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const thread = this.getThread(threadId);
+      if (thread?.retry) {
+        const { retry: _, ...rest } = thread;
+        this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify(rest), threadId);
+      }
+      this.db.exec("COMMIT");
+    } catch (cause) { this.db.exec("ROLLBACK"); throw cause; }
+  }
+  beginRelease(threadId: string): Thread {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const found = this.getThread(threadId);
+      if (!found) throw new Error("thread not found");
+      // The release's own tries count from here.
+      const { retry: _, ...thread } = found;
       this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, workspaceState: "releasing", workspaceError: null }), threadId);
       this.syncRunner(thread.runnerId);
       this.db.exec("COMMIT");
