@@ -97,6 +97,8 @@ export class ProtocolMachines implements ThreadMachines {
   }
   async wake(thread: Thread): Promise<void> { await this.pick(thread).wake?.(thread); }
   touch(thread: Thread): void { this.pick(thread).touch?.(thread); }
+  wakeInFlight(thread: Thread): boolean { return this.pick(thread).wakeInFlight?.(thread) ?? false; }
+  async settleWake(thread: Thread): Promise<void> { await this.pick(thread).settleWake?.(thread); }
   dial(thread: Thread, port: number): Promise<Duplex> {
     const machines = this.pick(thread);
     if (!machines.dial) return Promise.reject(new Error("this thread's runner has no portal (dial)"));

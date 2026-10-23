@@ -48,6 +48,12 @@ export interface ThreadMachines {
   suspendIfIdle?(thread: Thread, busy: () => Promise<string | null>): Promise<boolean>;
   wake?(thread: Thread): Promise<void>;
   touch?(thread: Thread): void;
+  /** Whether a start or a wake of the thread's machine is under way in this
+   * process (the owner of a `waking` it recorded). */
+  wakeInFlight?(thread: Thread): boolean;
+  /** A `waking` no one in this process owns (a restart cut the wake short):
+   * the runner's own phase is recorded instead, and nothing is started. */
+  settleWake?(thread: Thread): Promise<void>;
   /** Read-only evidence about the thread's machine (vm-diagnostics.ts);
    * never starts, stops or attaches it. */
   diagnose?(thread: Thread): Promise<MachineEvidence>;

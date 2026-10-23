@@ -6,7 +6,7 @@
  *      about counts until its timeout and the grace; a portal connection
  *      until it closes; idle time runs from the last of them.
  *   2. conversation.ts: the recovery loop leaves a suspended machine alone
- *      (one being woken goes on); an idle round asks the machines with the
+ *      (and does not continue a wake no one owns); an idle round asks the machines with the
  *      conversation's own busy check (a start, an archive, the agent's run
  *      or its background agents); a message to a suspended thread wakes it
  *      before the agent gets it.
@@ -154,7 +154,7 @@ import type { ThreadMachines } from "../src/vm.ts";
   const registry = { listThreads: () => threads, getThread: (id: string) => threads.find(t => t.id === id) ?? null, interruptStartupSteps: () => {} } as unknown as Registry;
   const conversations = new Conversations({ registry, directory: fs.mkdtempSync(path.join(os.tmpdir(), "cube-suspend-conv-")), models: createModels(), machines });
   await conversations.boot();
-  assert.deepEqual(started.sort(), ["claude", "idle", "waking", "working"], "the recovery loop leaves the suspended machine alone and goes on with one being woken");
+  assert.deepEqual(started.sort(), ["claude", "idle", "working"], "the recovery loop leaves the suspended machine alone, and a wake no one owns (thread-lifecycle-test.ts R1) is not continued");
   // The conversation's own busy check: the agent's run, its background agents.
   const inside = conversations as unknown as { claudes: Map<string, Promise<unknown>>; activations: Map<string, Promise<void>> };
   inside.claudes.set("claude", Promise.resolve({ running: false, waiting: ["a background agent"] }));
