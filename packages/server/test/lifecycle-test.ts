@@ -258,6 +258,12 @@ try {
   await assert.rejects(conversations.history(stuck), /workspace release failed/, "a reader is told the release failed");
   assert.equal(machines.attempts.get(stuck), startsBefore, "a release to finish is never a start");
   assert.equal(conversations.error(stuck), "workspace release failed: the runner is unreachable");
+  // The recovery loop waits 30 s after a failed try (thread-recovery.ts): let it pass.
+  const failed = app.registry.getThread(stuck)!;
+  assert.equal(failed.retry?.failures, 1, "the failed release is counted");
+  await conversations.boot();
+  assert.equal(app.registry.getThread(stuck)!.archived, false, "not retried before its pause");
+  app.registry.saveThread({ ...failed, retry: { ...failed.retry!, at: failed.retry!.at - 30_000 } });
   await conversations.boot();
   assert.equal(app.registry.getThread(stuck)!.archived, true, "the recovery round finishes the release");
   assert.equal(conversations.error(stuck), null);

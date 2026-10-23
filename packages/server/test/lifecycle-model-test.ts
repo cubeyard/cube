@@ -5,6 +5,7 @@
  * checked after every step:
  *
  *   I1  a read changes nothing on the runner;
+ *   I2  a replayed message changes nothing on the runner;
  *   I3  an archived thread's machine is never asked for anything again but
  *       its release;
  *   I4  the runner never holds more machines than the registry counts, nor
@@ -13,6 +14,7 @@
  *   I5  after a restart's first round no `waking` is left without an owner;
  *   I6  a restart wakes exactly the sleeping threads with a stored run that
  *       did not finish;
+ *   I8  a machine whose create keeps failing is asked for at most 8 times;
  *   I9  an archive answers within seconds, also for a sleeping machine on a
  *       full runner;
  *   G   no guest call reaches a machine that does not run;
@@ -25,6 +27,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { START_TRIES } from "../src/thread-recovery.ts";
 import { lifecycle, until, Phase, type Cubed } from "./lifecycle-fixture.ts";
 
 const seeds = (process.env.LIFECYCLE_SEEDS ?? "1,2").split(",").map(Number);
@@ -50,6 +53,7 @@ for (const seed of seeds) {
   let cubed: Cubed = life.start();
   const tells: Array<{ id: string; requestId: string; text: string }> = [];
   const archivedAt = new Map<string, number>();
+  const broken = new Set<string>();
   const trace: string[] = [];
   const open = () => registry.listThreads().filter(t => !t.archived);
   const stored = async (id: string) => (await cubed.conversations.storedHistory(id, { limit: 1 }).catch(() => null))?.status;
@@ -62,6 +66,22 @@ for (const seed of seeds) {
       try { thread = life.thread(); } catch { trace.push("create refused: no free slot"); return; }
       await cubed.conversations.activate(thread.id);
       trace.push(`create ${thread.id.slice(0, 8)} -> ${fresh(thread.id).workspaceState}`);
+    },
+    async broken() {
+      let thread;
+      try { thread = life.thread(); } catch { trace.push("broken create refused: no free slot"); return; }
+      berth.failCreates.set(vmOf(thread.id), "the runner cannot make its disk");
+      broken.add(vmOf(thread.id));
+      await cubed.conversations.activate(thread.id);
+      trace.push(`broken ${thread.id.slice(0, 8)} -> ${fresh(thread.id).workspaceState}`);
+    },
+    async replay() {
+      const tell = rng.pick(tells.filter(t => !fresh(t.id).archived));
+      if (!tell) return;
+      const since = berth.events.length;
+      await cubed.conversations.submit(tell.id, tell.text, tell.requestId);
+      assert.deepEqual(berth.events.slice(since).filter(e => e.op !== "machineGet"), [], `I2: replaying ${tell.requestId} changed nothing on the runner`);
+      trace.push(`replay ${tell.requestId}`);
     },
     async tell() {
       const t = rng.pick(open().filter(t => t.workspaceState === "available"));
@@ -90,8 +110,10 @@ for (const seed of seeds) {
       trace.push(`idle (${berth.running()} running)`);
     },
     async recover() {
-      await cubed.conversations.recover();
-      trace.push("recover");
+      // Recovery rounds over a few minutes of the clock.
+      const minutes = 1 + Math.floor(rng.next() * 20);
+      for (let spent = 0; spent < minutes; spent++) { clock.now += 60_000; await cubed.conversations.recover(); }
+      trace.push(`recover ${minutes} min`);
     },
     async restart() {
       // Sometimes cubed stops in the middle of a wake.
@@ -125,7 +147,7 @@ for (const seed of seeds) {
       trace.push(`archive ${t.id.slice(0, 8)}: ${result}`);
     },
   };
-  const weights: Array<[string, number]> = [["create", 3], ["tell", 4], ["read", 4], ["idle", 3], ["recover", 2], ["restart", 2], ["archive", 1]];
+  const weights: Array<[string, number]> = [["create", 3], ["broken", 1], ["tell", 4], ["replay", 2], ["read", 4], ["idle", 3], ["recover", 2], ["restart", 2], ["archive", 1]];
   const choose = () => {
     let roll = rng.next() * weights.reduce((sum, [, w]) => sum + w, 0);
     for (const [name, w] of weights) { roll -= w; if (roll < 0) return name; }
@@ -138,6 +160,7 @@ for (const seed of seeds) {
       await actions[name]!();
       assert.deepEqual(berth.violations, [], `G after ${name}`);
       assert.ok(berth.holding() <= held() && held() <= berth.slots, `I4 after ${name}: the runner holds ${berth.holding()}, the registry counts ${held()}, of ${berth.slots} slots`);
+      for (const vm of broken) assert.ok(berth.asked("machineCreate", vm) <= START_TRIES, `I8: ${vm}'s create was asked for ${berth.asked("machineCreate", vm)} times`);
       for (const [vm, at] of archivedAt) {
         assert.deepEqual(berth.touched(vm, at).filter(e => e.op !== "machineGet" && e.op !== "machineDelete" && e.op !== "machineDiscard"), [],
           `I3: archived machine ${vm} was not asked to run again`);
@@ -150,7 +173,7 @@ for (const seed of seeds) {
       db.close();
       assert.equal(n, 1, `${tell.requestId} is in its thread's store once`);
     }
-    console.log(`ok: lifecycle model seed ${seed}: ${steps} steps (${trace.filter(line => line.startsWith("restart")).length} restarts, ${tells.length} messages, ${archivedAt.size} archives, ${berth.starts()} starts on the runner); I1, I3, I4, I5, I6, I9 and G held`);
+    console.log(`ok: lifecycle model seed ${seed}: ${steps} steps (${trace.filter(line => line.startsWith("restart")).length} restarts, ${tells.length} messages, ${archivedAt.size} archives, ${berth.starts()} starts on the runner); I1–I6, I8, I9 and G held`);
   } catch (error) {
     console.error(`seed ${seed} trace:\n  ${trace.join("\n  ")}`);
     throw error;
