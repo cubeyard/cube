@@ -13,9 +13,12 @@ export type AuthState =
   | { state: "missing"; provider: string };
 export interface DaemonState { auth: AuthState; onboardingComplete: boolean }
 export type ThreadState = "starting" | "ready" | "error";
+export type { ThreadIdentity } from "../../../server/src/thread-names.ts";
 export interface ThreadSummary {
   id: string;
   title: string | null;
+  /** The thread's name ("🦦 calm otter"), chosen once at creation. */
+  identity?: import("../../../server/src/thread-names.ts").ThreadIdentity;
   state: ThreadState;
   error: string | null;
   createdAt: number | null;

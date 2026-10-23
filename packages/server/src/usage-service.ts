@@ -118,8 +118,9 @@ export class UsageService {
     catch (error) { log.warn("usage snapshot not stored", { thread: id, error }); }
   }
 
-  private base(thread: Thread): Pick<SubjectUsage, "subject" | "kind" | "title" | "projectId" | "agent" | "archived"> {
-    return { subject: thread.id, kind: "thread", title: thread.title, projectId: thread.projectId, agent: threadAgent(thread), archived: thread.archived };
+  private base(thread: Thread): Pick<SubjectUsage, "subject" | "kind" | "title" | "identity" | "projectId" | "agent" | "archived"> {
+    return { subject: thread.id, kind: "thread", title: thread.title, ...(thread.identity ? { identity: thread.identity } : {}),
+      projectId: thread.projectId, agent: threadAgent(thread), archived: thread.archived };
   }
 
   private piThread(thread: Thread, state: PiUsage, read: SubjectUsage["read"], readAt: number): SubjectUsage {

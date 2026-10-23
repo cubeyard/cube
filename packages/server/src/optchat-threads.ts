@@ -8,6 +8,7 @@ import { THREAD_NOTE, type ObservedThread, type OptThreads } from "./optchat.ts"
 import { describeProjectHooks, findProject, writeProjectHooks } from "./project-hooks.ts";
 import { threadAgent, type Project, type Registry, type ResolvedRepositories, type Thread } from "./registry.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
+import { identityText } from "./thread-names.ts";
 
 /** How long the overview waits for one thread's stored state. */
 const OBSERVE_MS = 2000;
@@ -67,7 +68,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       if (!project) throw new Error(`no project ${task.project}`);
       // A replayed call finds its thread even if the default model changed since.
       const prior = registry.threadByRequest(project.id, requestId);
-      if (prior) return { id: prior.id, title: prior.title ?? "untitled" };
+      if (prior) return { id: prior.id, title: prior.title ?? "untitled", identity: prior.identity };
       const models = await options.catalog();
       const model = task.model
         ? models.find(candidate => `${candidate.provider}/${candidate.id}` === task.model)
@@ -90,7 +91,10 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       const title = task.task.replace(/\s+/g, " ").slice(0, 80) || null;
       if (thread.title === text.replace(/\s+/g, " ").slice(0, 80) && thread.title !== title) registry.saveThread(thread = { ...thread, title });
       void conversations.activate(thread.id);
-      return { id: thread.id, title: thread.title ?? "untitled" };
+      return { id: thread.id, title: thread.title ?? "untitled", identity: thread.identity };
+    },
+    identity(id) {
+      return registry.getThread(id)?.identity;
     },
     async tell(id, text, requestId) {
       await conversations.submit(id, text, requestId);
@@ -108,7 +112,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
             run = `, ${status.state}${status.waiting?.length && status.state !== "working" ? `, waiting on ${agents(status.waiting)}` : ""}`;
           } catch { /* the state says enough */ }
         }
-        lines.push(`[${id.slice(0, 8)}] ${project} · ${thread.title ?? "untitled"} · ${thread.archived ? "archived" : state(id)}${run}`);
+        lines.push(`[${id.slice(0, 8)}] ${thread.identity ? `${identityText(thread.identity)} · ` : ""}${project} · ${thread.title ?? "untitled"} · ${thread.archived ? "archived" : state(id)}${run}`);
       }
       return lines.join("\n") || "no threads";
     },
@@ -137,7 +141,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
           } catch { run = "unknown"; }
           finally { clearTimeout(timer); }
         }
-        return { id, title: thread.title, project, state: run, archived: thread.archived };
+        return { id, title: thread.title, ...(thread.identity ? { identity: thread.identity } : {}), project, state: run, archived: thread.archived };
       };
       return new Map(await Promise.all(ids.map(async id => [id, await one(id)] as const)));
     },
@@ -153,7 +157,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         `workspace writer: ${conversations.owner(id) ?? "none"}`,
       ];
       const record = {
-        project: registry.getProject(thread.projectId)?.name ?? thread.projectId, title: thread.title, archived: thread.archived,
+        project: registry.getProject(thread.projectId)?.name ?? thread.projectId, title: thread.title, identity: thread.identity, archived: thread.archived,
         machine: thread.archived ? null : (conversations.error(id) || conversations.waiting(id) || conversations.starting(id) || thread.workspaceState === "available") ? state(id)
           : thread.workspaceState === "allocating" ? "not started" : thread.workspaceState,
         facts, agentOpen: conversations.agentOpen(id),

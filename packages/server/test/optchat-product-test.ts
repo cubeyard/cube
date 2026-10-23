@@ -89,7 +89,7 @@ try {
   assert.equal(sent.status, 200, await sent.clone().text());
 
   // The thread exists, in the project, started by the chat.
-  const thread = (await until(async () => (await (await fetch(`${base}/api/threads`)).json()).threads as Array<{ id: string; title: string; projectId: string; state: string }>,
+  const thread = (await until(async () => (await (await fetch(`${base}/api/threads`)).json()).threads as Array<{ id: string; title: string; projectId: string; state: string; identity?: { name: string; emoji: string } }>,
     threads => threads.length === 1 && threads[0]!.state === "ready", "the spawned thread starts"))[0]!;
   assert.equal(thread.projectId, project.project.id);
   assert.equal(thread.title, "count the files in the repository with bash", "the title is the task's, without the note");
@@ -115,7 +115,8 @@ try {
   // it, in its project, with its own run state as cubed records it.
   const overview = await (await fetch(`${base}/api/optchat/threads`)).json();
   assert.deepEqual(overview.threads.map((item: { spawned: number }) => ({ ...item, spawned: typeof item.spawned })),
-    [{ id: thread.id, title: thread.title, project: { id: project.project.id, name: "demo" }, state: "completed", archived: false, spawned: "number" }]);
+    [{ id: thread.id, title: thread.title, identity: thread.identity, project: { id: project.project.id, name: "demo" }, state: "completed", archived: false, spawned: "number" }]);
+  assert.ok(thread.identity, "the thread was named when it was created");
   assert.deepEqual([overview.archived, overview.unknown], [{ shown: 0, total: 0 }, 0]);
   assert.equal((await fetch(`${base}/api/optchat/tasks`)).status, 404, "the task list is gone");
   // No model-inferred wish list: neither its list nor its dismissal is served.
@@ -126,7 +127,10 @@ try {
   const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [],
     runners: () => observeRunners(app.registry, 60_000), latestCommits: () => { throw new Error("a replay resolves nothing"); } });
   assert.match(await adapter.runners(), /^capacity: p4 \(protocol 4, berth\) VM runners \(the pool[^\n]*0 of 1 slots free on 1 runner[^\n]*\nrunners as cubed last heard from them[^]*unknown for every runner/, "OptChat's runners tool reads cubed's registry");
-  assert.deepEqual(await adapter.spawn({ project: "demo", task: "count the files in the repository with bash" }, "optchat:call-spawn:0"), { id: thread.id, title: thread.title });
+  assert.deepEqual(await adapter.spawn({ project: "demo", task: "count the files in the repository with bash" }, "optchat:call-spawn:0"), { id: thread.id, title: thread.title, identity: thread.identity });
+  // The chat reads each thread's name beside its id and title.
+  assert.match(await adapter.describe([thread.id]), new RegExp(`^\\[${thread.id.slice(0, 8)}\\] ${thread.identity!.emoji} ${thread.identity!.name} · demo · `));
+  assert.deepEqual(adapter.identity?.(thread.id), thread.identity);
   // A new spawn whose latest commits cannot be fetched starts no thread.
   const threadCount = app.registry.listThreads().length;
   const unfetched = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [{ provider: faux.getModel().provider, id: faux.getModel().id }],
@@ -156,6 +160,7 @@ try {
   assert.equal(open.transcript?.status.state, "completed");
   assert.equal(open.transcript?.owner, "pi", "the agent still holds its workspace");
   assert.match(formatHistory(thread.id, open, "delivered"), /\nlatest answer #3: the repository has 1 file\n/);
+  assert.ok(formatHistory(thread.id, open, "delivered").startsWith(`[${thread.id.slice(0, 8)}] ${thread.identity!.emoji} ${thread.identity!.name} · demo · `), "history names the thread");
   const workspaceBase = app.registry.getThread(thread.id)!.workspaceBase;
   const failure = "workspace allocation failed: thread workspace already has a writable owner";
   app.registry.markWorkspaceFailed(thread.id, failure);

@@ -13,6 +13,7 @@ OFFLINE_TESTS=(
   scripts/fake-github-test.ts
   packages/server/test/log-test.ts
   packages/server/test/registry-test.ts
+  packages/server/test/thread-names-test.ts
   packages/server/test/runner-slots-test.ts
   packages/server/test/runner-suspend-test.ts
   packages/server/test/runner-placement-test.ts

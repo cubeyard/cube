@@ -23,6 +23,7 @@
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
   import StartupPanel from "./StartupPanel.svelte";
+  import ThreadName from "./ThreadName.svelte";
 
   let { threadId, threads, command = null, onConsume = () => {}, onNewThread }: {
     threadId: string;
@@ -222,6 +223,7 @@
     {#if summary}
       <span class="lamp {lampClass(summary)}" aria-hidden="true"></span>
       <span class="strip-title" class:untitled={!summary.title}>{summary.title ?? "untitled"}</span>
+      {#if summary.identity}<span class="strip-name"><ThreadName identity={summary.identity} /></span>{/if}
       <button
         class="mobile-thread-switch"
         class:untitled={!summary.title}
@@ -230,6 +232,7 @@
         aria-controls="thread-sidebar"
         onclick={openSidebar}
       >
+        {#if summary.identity}<span class="mobile-thread-emoji" aria-hidden="true">{summary.identity.emoji}</span>{/if}
         <span>{summary.title ?? "untitled"}</span>
         <Icon name="chevron" size={12} />
       </button>
@@ -344,8 +347,11 @@
                 {#if !stateLabel(thread)}<span class="sr-only">ready</span>{/if}
                 <span class="thread-sidebar-copy">
                   <span class="thread-sidebar-title" class:untitled={!thread.title}>{thread.title ?? "untitled"}</span>
-                  {#if stateLabel(thread)}
-                    <span class="thread-sidebar-meta"><span class:error={thread.state === "error"}>{stateLabel(thread)}</span></span>
+                  {#if thread.identity || stateLabel(thread)}
+                    <span class="thread-sidebar-meta">
+                      <ThreadName identity={thread.identity} />
+                      {#if stateLabel(thread)}<span class:error={thread.state === "error"}>{stateLabel(thread)}</span>{/if}
+                    </span>
                   {/if}
                 </span>
               </a>

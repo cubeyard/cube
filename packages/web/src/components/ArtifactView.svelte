@@ -4,6 +4,7 @@
   import { renderArtifact } from "../lib/artifact-render.ts";
   import { mark, placeAnchor, selectionAnchor, textNodes, textRange, type Anchor, type Placement } from "../lib/anchor.ts";
   import { drawDiagram } from "../lib/mermaid.ts";
+  import { nameText } from "../lib/thread-name.ts";
   import { relTime } from "../lib/time.ts";
   import { uid } from "../lib/uid.ts";
   import type { ActionPreview, ArtifactAction, ArtifactComment, ArtifactView, Revision } from "../lib/types.ts";
@@ -56,7 +57,7 @@
   const drafts = $derived(comments.filter((comment) => comment.state === "draft"));
   const sent = $derived(comments.filter((comment) => comment.state !== "draft").toReversed());
   const author = $derived(!artifact ? "" : artifact.author.kind === "optchat" ? "optchat"
-    : `thread ${artifact.thread?.title ? `“${artifact.thread.title}”` : `[${artifact.author.thread.slice(0, 8)}]`}`);
+    : `thread ${artifact.thread?.identity ? `${nameText(artifact.thread.identity)} ` : ""}${artifact.thread?.title ? `“${artifact.thread.title}”` : `[${artifact.author.thread.slice(0, 8)}]`}`);
   const authorLink = $derived(artifact?.author.kind === "thread" && artifact.thread && !artifact.thread.archived ? `#/t/${artifact.author.thread}` : artifact?.author.kind === "optchat" ? "#/chat" : null);
   const meta = $derived(view?.revisions.find((item) => item.number === shown?.number) ?? null);
   // Whether there is one, not meta itself: each poll brings a new meta object.

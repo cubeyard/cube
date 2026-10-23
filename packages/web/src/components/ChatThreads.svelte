@@ -5,6 +5,7 @@
   import { relTime } from "../lib/time.ts";
   import type { ArtifactListItem, OverviewThread, ThreadOverview } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
+  import ThreadName from "./ThreadName.svelte";
 
   // The threads OptChat started, found from its own spawns, each with its
   // own state as cubed records it: nobody keeps this list by hand. A thread
@@ -114,7 +115,7 @@
                 <span class="lamp {lamp(thread)}" aria-hidden="true"></span>
                 <div class="work-thread-text">
                   <a class="work-title" href="#/t/{thread.id}" title={thread.title ?? undefined}>{thread.title ?? "untitled"}</a>
-                  <span class="work-state" title="the thread's own state as cube records it now">{thread.id.slice(0, 8)} · {stateText(thread)}</span>
+                  <span class="work-meta"><ThreadName identity={thread.identity} /><span class="work-state" title="the thread's own state as cube records it now">{thread.id.slice(0, 8)} · {stateText(thread)}</span></span>
                 </div>
               </li>
             {/each}

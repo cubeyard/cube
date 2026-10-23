@@ -29,6 +29,7 @@ import { boundedOutput, CHAT_OUTPUT_TOKENS } from "./optchat-output.ts";
 import { piReports, reportText as errorText } from "./pi-report.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
 import { PENDING_ID, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
+import { identityText, type ThreadIdentity } from "./thread-names.ts";
 import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
 import type { Artifacts } from "./artifact-service.ts";
 import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
@@ -191,11 +192,13 @@ export interface OptThreads {
   /** Starts one thread; the same request id finds the same thread again. */
   /** `runner`: a runner's node id or id; the thread starts there and stays
    * (a host runner takes no other threads). Absent: the pool chooses. */
-  spawn(task: { project: string; task: string; model?: string | undefined; runner?: string | undefined }, requestId: string, signal?: AbortSignal): Promise<{ id: string; title: string }>;
+  spawn(task: { project: string; task: string; model?: string | undefined; runner?: string | undefined }, requestId: string, signal?: AbortSignal): Promise<{ id: string; title: string; identity?: ThreadIdentity | undefined }>;
   /** A message to a thread; refused while it works. */
   tell(id: string, text: string, requestId: string): Promise<void>;
-  /** One line per thread: its state and title. */
+  /** One line per thread: its name, state and title. */
   describe(ids: readonly string[]): Promise<string>;
+  /** A thread's name (thread-names.ts); undefined: no such thread. */
+  identity?(id: string): ThreadIdentity | undefined;
   /** The thread's events; null once it is archived or gone; "archiving"
    * while its archive (or a release left unfinished) goes on. */
   events(id: string): Promise<ThreadEvents | null | "archiving">;
@@ -228,6 +231,8 @@ export interface OptThreads {
 export type ThreadRecord = {
   project: string;
   title: string | null;
+  /** The thread's name (thread-names.ts). */
+  identity?: ThreadIdentity | undefined;
   archived: boolean;
   /** The machine as cubed sees it ("ready", "starting its machine",
    * "error: …"); null once archived. */
@@ -269,7 +274,7 @@ const reportText = (report: ReportState) => report === "delivered" ? "delivered"
  * report (or, without a transcript, the failure to start), what disagrees,
  * then the record's page of messages, numbered from the first. */
 export function formatHistory(id: string, record: ThreadRecord, report: ReportState): string {
-  const lines = [`[${short(id)}] ${record.project} · ${record.title ?? "untitled"}`,
+  const lines = [`[${short(id)}] ${record.identity ? `${identityText(record.identity)} · ` : ""}${record.project} · ${record.title ?? "untitled"}`,
     `cubed: ${[record.archived ? "archived" : `machine ${record.machine}`, ...record.facts].join("; ")}`];
   const transcript = record.transcript;
   if (!transcript) {
@@ -1161,8 +1166,10 @@ export class OptChat {
   }
 
   /** The short ids of the threads this chat started. */
-  async threadPrefixes(): Promise<Set<string>> {
-    return new Set(Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {}).map(short));
+  /** The threads this chat started, by their short ids, with their names. */
+  async threadPrefixes(): Promise<Map<string, ThreadIdentity | undefined>> {
+    const ids = Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {});
+    return new Map(ids.map(id => [short(id), this.options.threads.identity?.(id)]));
   }
 
   /** Messages accepted but not yet shown in the chat, oldest first. */
@@ -1547,7 +1554,7 @@ export class OptChat {
           try {
             const thread = await this.options.threads.spawn(task, `optchat:${api.callId}:${index}`, signal);
             await api.commit(async tx => { (await tx.doc(SettingsDoc)).threads[thread.id] ??= { at: Date.now() }; }, callContext);
-            lines.push(`[${short(thread.id)}] started in ${task.project}: ${thread.title}`);
+            lines.push(`[${short(thread.id)}] started in ${task.project}${thread.identity ? ` as ${identityText(thread.identity)}` : ""}: ${thread.title}`);
           } catch (error) {
             if (signal?.aborted) throw error;
             lines.push(`task ${index + 1} (${task.project}) not started: ${error instanceof Error ? error.message : String(error)}`);
@@ -2051,10 +2058,12 @@ export class OptChatEvents implements ThreadEvents {
     // A report of a thread this chat started is marked as the thread's.
     const threads = await this.chat.threadPrefixes();
     const report = (text: string) => /^\[([0-9a-f]{8})\] /.exec(text)?.[1];
-    const transcript = { ...input, events: input.events.map(event => {
-      const from = event.type === "user-message" ? report(event.text) : undefined;
-      return from && threads.has(from) ? { ...event, from } : event;
-    }) };
+    const marked = (from: string | undefined) => {
+      if (!from || !threads.has(from)) return {};
+      const identity = threads.get(from);
+      return identity ? { from, fromIdentity: identity } : { from };
+    };
+    const transcript = { ...input, events: input.events.map(event => event.type === "user-message" ? { ...event, ...marked(report(event.text)) } : event) };
     const failure = this.chat.failure();
     if (!pending.length) return transcript;
     // A pending message is shown until the log has it after the point it was
@@ -2066,8 +2075,7 @@ export class OptChatEvents implements ThreadEvents {
     return {
       ...transcript,
       events: [...transcript.events, ...pending.filter(item => !placed(item)).map(item => {
-        const from = report(item.text);
-        return { type: "user-message" as const, id: `${PENDING_ID}${item.requestId}`, text: item.text, ...(from && threads.has(from) ? { from } : {}),
+        return { type: "user-message" as const, id: `${PENDING_ID}${item.requestId}`, text: item.text, ...marked(report(item.text)),
           ...item.images?.length ? { images: item.images.map(image => ({ ...image })) } : {} };
       })],
       status: transcript.status.state === "working" ? { ...transcript.status, error: transcript.status.error ?? failure } : { state: "working", run: "pending", error: failure },

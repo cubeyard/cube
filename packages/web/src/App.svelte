@@ -181,13 +181,13 @@
     }
   }
 
-  // The tab title names the place, newest first: "<thread> · cube".
+  // The tab title names the place, newest first: "🦦 <thread> · cube".
   // Project routes set their own once the project's name is known.
   $effect(() => {
     if (projectId || artifactId || artifactsRoute) return;
     const current = threadId ? threads.find((thread) => thread.id === threadId) : null;
     document.title =
-      threadId ? `${current?.title ?? "untitled"} · cube`
+      threadId ? `${current?.identity ? `${current.identity.emoji} ` : ""}${current?.title ?? current?.identity?.name ?? "untitled"} · cube`
       : projectsRoute ? "projects · cube"
       : chatRoute ? "chat · cube"
       : settingsPage === "providers" ? "model providers · settings · cube"

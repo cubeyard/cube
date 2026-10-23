@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { errorText, fetchUsage } from "../lib/api.ts";
+  import { nameText } from "../lib/thread-name.ts";
   import { relTime } from "../lib/time.ts";
   import type { SubjectUsage, UsageLine, UsageReport } from "../lib/types.ts";
   import { gapsText, spendText, tokensText } from "../../../server/src/usage.ts";
@@ -30,6 +31,7 @@
 
   const subjectCost = (item: SubjectUsage) => item.coverage === "unavailable" ? "usage unknown" : spendText(item.spend);
   const subjectMeta = (item: SubjectUsage) => [
+    nameText(item.identity),
     !projectId && report?.projects.find((project) => project.id === item.projectId)?.name,
     item.agent === "claude-code" ? "claude · max" : item.agent,
     item.archived ? "archived" : null,

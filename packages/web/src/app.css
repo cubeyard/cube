@@ -420,6 +420,16 @@ header .spacer { margin-left: auto; }
 .module-meta .state-label { letter-spacing: 0.06em; font-size: 11px; font-weight: 550; }
 .module-meta .state-label.error { color: var(--bad); }
 .module-project { color: var(--ink-2); font-weight: 550; }
+/* a thread's name: its animal's emoji, then two words in silkscreen ink.
+   It sits beside the title, never in its place. */
+.thread-name {
+  display: inline-flex; align-items: baseline; gap: 0.32em; min-width: 0;
+  white-space: nowrap; color: var(--ink-2);
+}
+.thread-name-emoji, .mobile-thread-emoji {
+  flex: none; font-size: 1.08em; line-height: 1;
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+}
 /* the full failure, wrapped — never an ellipsis hiding the next step */
 .module-error { color: var(--bad); font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
 
@@ -513,6 +523,7 @@ header .spacer { margin-left: auto; }
   flex: 0 1 auto; min-width: 3rem;
 }
 .strip-title.untitled { color: var(--ink-3); font-weight: 450; }
+.strip-name { flex: none; font-size: 12px; }
 .mobile-thread-switch { display: none; }
 .strip-state {
   flex: none; font-size: 11px; font-weight: 550; letter-spacing: 0.06em;
@@ -1404,7 +1415,9 @@ select.compose-input {
     box-shadow: var(--shadow-key);
   }
   .thread-strip .key-bank { order: 2; }
-  .thread-strip > :is(.strip-project, .strip-base, .strip-machine, .strip-state, .strip-usage, .spacer, .strip-model) { order: 3; }
+  .thread-strip > :is(.strip-name, .strip-project, .strip-base, .strip-machine, .strip-state, .strip-usage, .spacer, .strip-model) { order: 3; }
+  .thread-strip > .strip-name { margin-left: calc(8px + 0.6rem); }
+  .thread-strip > .strip-name ~ .strip-project { margin-left: 0; }
   .thread-strip > .strip-project { margin-left: calc(8px + 0.6rem); }
   .mobile-thread-switch span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mobile-thread-switch svg { flex: none; transform: rotate(-90deg); }
@@ -1567,7 +1580,7 @@ select.compose-input {
   /* a failure stays in print, beside the details key */
   /* …and so does the machine's sleep (suspended, waking, waiting for a
      slot) and what the user should know about it (B7-2, B7-5) */
-  .thread-strip:has(> .strip-details-key):not(.details-open) > :is(.strip-project, .strip-base, .strip-machine:not(.error), .strip-state:not(.error, .attention), .strip-usage, .strip-model, .bank-note, .key-bank, .strip-toggle:not(.strip-details-key)) { display: none; }
+  .thread-strip:has(> .strip-details-key):not(.details-open) > :is(.strip-name, .strip-project, .strip-base, .strip-machine:not(.error), .strip-state:not(.error, .attention), .strip-usage, .strip-model, .bank-note, .key-bank, .strip-toggle:not(.strip-details-key)) { display: none; }
   .thread-strip.details-open > .strip-reason { display: inline; flex-basis: 100%; white-space: normal; }
   .thread-strip > .strip-notice { flex-basis: 100%; white-space: normal; }
   .thread-strip.details-open { padding-bottom: 0.45rem; }
@@ -1640,6 +1653,8 @@ a.work-title { text-decoration: none; }
 a.work-title:hover { color: var(--signal); }
 .work-thread.archived .work-title { color: var(--ink-3); font-weight: 550; }
 .work-state { font: 10.5px/1.4 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
+.work-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.5rem; min-width: 0; }
+.work-meta .thread-name { font-size: 11.5px; }
 .work-dismiss {
   flex: none; display: inline-grid; place-items: center; width: 22px; height: 22px; margin: -2px -4px 0 0;
   border: 0; border-radius: var(--r-key); background: transparent; color: var(--ink-3); cursor: pointer;

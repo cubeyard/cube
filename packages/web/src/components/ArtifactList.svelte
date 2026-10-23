@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { errorText, fetchArtifacts } from "../lib/api.ts";
+  import { nameText } from "../lib/thread-name.ts";
   import { relTime } from "../lib/time.ts";
   import type { ArtifactListItem } from "../lib/types.ts";
   import Header from "./Header.svelte";
@@ -16,7 +17,7 @@
     catch (cause) { error = errorText(cause); }
   }
   const author = (item: ArtifactListItem) => item.author.kind === "optchat" ? "optchat"
-    : item.thread?.title ? `thread “${item.thread.title}”` : `thread [${item.author.thread.slice(0, 8)}]`;
+    : `thread ${item.thread?.identity ? `${nameText(item.thread.identity)} ` : ""}${item.thread?.title ? `“${item.thread.title}”` : `[${item.author.thread.slice(0, 8)}]`}`;
   const comments = (item: ArtifactListItem) => [
     item.comments.draft && `${item.comments.draft} not sent`,
     item.comments.queued && `${item.comments.queued} waiting`,

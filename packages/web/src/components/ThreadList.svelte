@@ -9,6 +9,7 @@
   import type { Project, ThreadSummary } from "../lib/types.ts";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
+  import ThreadName from "./ThreadName.svelte";
 
   let {
     threads,
@@ -208,6 +209,7 @@
                   use:focusSelect
                 />
                 <span class="module-meta">
+                  <ThreadName identity={thread.identity} />
                   <span class="module-project">project / {thread.project.name}</span>
                   {#if thread.createdAt}<span>{relTime(thread.createdAt)}</span>{/if}
                 </span>
@@ -220,6 +222,7 @@
               <span class="module-text">
                 <span class="module-title" class:untitled={!thread.title}>{thread.title ?? "untitled"}</span>
                 <span class="module-meta">
+                  <ThreadName identity={thread.identity} />
                   <span class="module-project">project / {thread.project.name}</span>
                   {#if thread.createdAt}<span>{relTime(thread.createdAt)}</span>{/if}
                   {#if stateLabel(thread)}

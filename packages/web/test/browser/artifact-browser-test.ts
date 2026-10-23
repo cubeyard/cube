@@ -212,6 +212,9 @@ try {
   await page.locator(".artifact-provenance", { hasText: `revision 3 · ` }).waitFor();
   await page.locator(".artifact-provenance", { hasText: `pi thread · [${reviewer.slice(0, 8)}]` }).waitFor();
   await page.locator(".strip-state", { hasText: "by thread" }).waitFor();
+  // The author is named as its thread: the thread's name, then its title.
+  const author = (await api("/api/threads")).threads.find((item: { id: string }) => item.id === thread) as { identity: { name: string; emoji: string }; title: string };
+  await page.locator(".strip-state", { hasText: `by thread ${author.identity.emoji} ${author.identity.name} “${author.title}”` }).waitFor();
   await shoot(page, "07b-revised-by-another-thread");
   await page.goto(`${url}/#/a/${notes.id}?rev=2`);
   await page.locator(".strip-note", { hasText: "revision 2 of 3" }).waitFor();

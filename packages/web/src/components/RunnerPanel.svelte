@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { checkRunner, discardThreadMachine, errorText, fetchObservedRunners, fetchRunners, fetchThreads, retireRunner } from "../lib/api.ts";
+  import { nameText } from "../lib/thread-name.ts";
   import { relTime } from "../lib/time.ts";
   import type { CapacityGroup, RunnersObservation, RunnerStatus, ThreadSummary } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
@@ -241,7 +242,7 @@
             <span class="lamp off" aria-hidden="true"></span>
             <span>
               <strong>{thread.title ?? thread.id.slice(0, 8)}</strong>
-              <small>{thread.project.name}{thread.createdAt ? ` · created ${relTime(thread.createdAt)} ago` : ""}</small>
+              <small>{thread.identity ? `${nameText(thread.identity)} · ` : ""}{thread.project.name}{thread.createdAt ? ` · created ${relTime(thread.createdAt)} ago` : ""}</small>
             </span>
           </div>
           <div class="runner-evidence">

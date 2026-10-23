@@ -21,7 +21,7 @@ export type MessageImage = { id: string; mimeType: string };
 export type ThreadEvent =
   /** `from` marks a report from a thread the chat started: its short id.
    * `images`: the images attached to the message, if any. */
-  | { type: "user-message"; id: string; text: string; from?: string; images?: MessageImage[] }
+  | { type: "user-message"; id: string; text: string; from?: string; fromIdentity?: import("./thread-names.ts").ThreadIdentity; images?: MessageImage[] }
   /** Assistant text; `reasoning` marks the model's visible thinking. */
   | { type: "assistant-text"; id: string; text: string; reasoning: boolean; final: boolean }
   /** A tool call; its result, if any, carries the same `callId`. */

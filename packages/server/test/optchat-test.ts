@@ -79,7 +79,8 @@ const THREAD = "abcdef12-0000-4000-8000-000000000001";
 const threads: OptThreads = {
   async projects() { inProjects = true; await projectsGate; inProjects = false; return "projects:\ncube (id p1; ready): https://github.com/cubeyard/cube.git@main"; },
   async runners() { return "runners as cubed last heard from them:\n- node-a (id r1)"; },
-  async spawn(task, requestId) { spawned.push({ task: task.task, requestId }); return { id: THREAD, title: task.task.slice(0, 20) }; },
+  async spawn(task, requestId) { spawned.push({ task: task.task, requestId }); return { id: THREAD, title: task.task.slice(0, 20), identity: { name: "calm otter", emoji: "🦦" } }; },
+  identity(id) { return id === THREAD ? { name: "calm otter", emoji: "🦦" } : undefined; },
   async tell(id, text) { if (text === "refused") throw new Error("thread is already working or message is invalid"); told.push(`${id}:${text}`); },
   async describe(ids) { return ids.map(id => `[${id.slice(0, 8)}] cube · ready`).join("\n"); },
   async history() { return null; },
@@ -121,7 +122,7 @@ try {
         fauxToolCall("spawn", { tasks: [{ project: "cube", task: "fix the gateway Host check" }] }, { id: "call-spawn" })], { stopReason: "toolUse" });
     },
     turn => {
-      assert.match(textOf(turn.messages.at(-1)!), /\[abcdef12\] started in cube/);
+      assert.match(textOf(turn.messages.at(-1)!), /\[abcdef12\] started in cube as 🦦 calm otter: fix the gateway Host/, "the chat learns the thread's name beside its id");
       return fauxAssistantMessage("a thread is fixing the gateway; I will tell you when it reports");
     },
   ];
@@ -158,6 +159,8 @@ try {
   const shown = (await new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => null })).read()).events
     .filter(event => event.type === "user-message");
   assert.equal(shown.find(event => event.text.startsWith("[abcdef12] ended"))?.from, "abcdef12", "a report is marked as its thread's");
+  assert.deepEqual(shown.find(event => event.text.startsWith("[abcdef12] ended"))?.fromIdentity, { name: "calm otter", emoji: "🦦" }, "and carries the thread's name");
+  assert.ok(shown.find(event => event.text.startsWith("[abcdef12] ended"))?.text.startsWith("[abcdef12] "), "the report's text keeps its id");
   assert.ok(shown.filter(event => !event.text.startsWith("[")).every(event => event.from === undefined), "the user's messages are theirs");
   // SCALE beside the step was merged into real lines; it lives in the system
   // prompt, marked as an invented example, and never in a step.

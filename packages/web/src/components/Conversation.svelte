@@ -11,6 +11,10 @@
   import { tailStart, WINDOW_EVENTS } from "../../../server/src/transcript-window.ts";
   import type { TranscriptPage } from "../../../server/src/thread-events.ts";
   import Icon from "./Icon.svelte";
+  import ThreadName from "./ThreadName.svelte";
+
+  /** Between a report's thread name and its id; a template would trim the spaces. */
+  const NAME_SEPARATOR = " · ";
 
   let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread", images = null }: {
     threadId?: string;
@@ -433,7 +437,7 @@
             </details>
           {:else if row.kind === "user" && row.from}
             <article class="conversation-message report" aria-label="thread report">
-              <span class="message-label">thread {row.from}</span>
+              <span class="message-label">{#if row.fromIdentity}<ThreadName identity={row.fromIdentity} />{NAME_SEPARATOR}{/if}thread {row.from}</span>
               <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text and allows only http(s)/mailto links -->
               <div class="message-copy markdown">{@html renderMarkdown(row.text)}</div>
             </article>
