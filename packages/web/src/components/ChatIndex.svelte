@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, type Snippet } from "svelte";
+  import { onDestroy, tick, type Snippet } from "svelte";
   import { COMPACT_MEDIA } from "../lib/keyboard.ts";
   import { relTime } from "../lib/time.ts";
   import { failing, moving, stateText } from "../lib/work-state.ts";
@@ -30,6 +30,9 @@
     room = dialog?.open && view && matchMedia(COMPACT_MEDIA).matches ? { top: view.offsetTop, height: view.height } : null;
   }
   let unfit: (() => void) | null = null;
+  // Left while open (a route change, back, a swipe): the dialog goes without
+  // a close event, so its listeners go here. unfit is safe to call twice.
+  onDestroy(() => unfit?.());
   function follow(): void {
     unfit?.();
     const view = window.visualViewport;

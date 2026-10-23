@@ -364,6 +364,53 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     });
   }
 
+  await scenario(browser, engine, "leaving the chat while the index is open (a route change, back) leaves none of its viewport listeners behind", { ...phone, ios: true }, "chat", async page => {
+    // Every resize/scroll listener added from here on to the window and the
+    // visual viewport, by function, while it is live. (Installed in the page
+    // as it is: a reload would cut the open stream, which WebKit reports as an error.)
+    await page.evaluate(() => {
+      const live = new Set<unknown>();
+      const ids = new Map<unknown, number>();
+      const key = (target: EventTarget, type: string, listener: unknown) => {
+        if (!ids.has(listener)) ids.set(listener, ids.size);
+        return `${target === window ? "window" : "viewport"}:${type}:${ids.get(listener)}`;
+      };
+      const watched = (target: EventTarget, type: string) => (target === window || target === window.visualViewport) && (type === "resize" || type === "scroll");
+      const add = EventTarget.prototype.addEventListener;
+      const remove = EventTarget.prototype.removeEventListener;
+      EventTarget.prototype.addEventListener = function (type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | AddEventListenerOptions) {
+        if (listener && watched(this, type)) live.add(key(this, type, listener));
+        return add.call(this, type, listener, options);
+      };
+      EventTarget.prototype.removeEventListener = function (type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | EventListenerOptions) {
+        if (listener && watched(this, type)) live.delete(key(this, type, listener));
+        return remove.call(this, type, listener, options);
+      };
+      (window as unknown as { liveListeners: () => string[] }).liveListeners = () => [...live] as string[];
+    });
+    const listeners = () => page.evaluate(() => (window as unknown as { liveListeners: () => string[] }).liveListeners());
+    // history: chat, threads, chat
+    await page.evaluate(() => { location.hash = "#/threads"; });
+    await page.locator("main h1").waitFor();
+    await page.evaluate(() => { location.hash = "#/chat"; });
+    await page.locator(".composer .work-key").waitFor();
+    for (const leave of ["back", "route"] as const) {
+      const before = new Set(await listeners());
+      await page.locator(".composer .work-key").tap();
+      await page.locator(".chat-index .index-row").first().waitFor();
+      const opened = (await listeners()).filter(item => !before.has(item));
+      assert.equal(opened.length, 3, `the open index follows the viewport: ${opened.join(" ")}`);
+      if (leave === "back") await page.goBack();
+      else await page.evaluate(() => { location.hash = "#/projects"; });
+      await page.locator("main h1").waitFor();
+      await settle(page);
+      assert.equal(await page.locator(".chat-index").count(), 0, "the index went with the chat");
+      const left = (await listeners()).filter(item => opened.includes(item));
+      assert.deepEqual(left, [], `after ${leave === "back" ? "going back" : "a route change"} none of the index's listeners is left`);
+      if (leave === "back") { await page.goForward(); await page.locator(".composer .work-key").waitFor(); }
+    }
+  });
+
   await scenario(browser, engine, "the index's model choice is no keyboard", phone, "chat", async page => {
     await page.locator(".composer .work-key").tap();
     await page.locator(".chat-index select[aria-label=model]").focus();
