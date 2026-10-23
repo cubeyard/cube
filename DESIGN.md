@@ -619,12 +619,17 @@ an artifact (a write or edit result, a `#/a/` link in a reply, a comment
 message), each thread and artifact once, at its first row shown. A note is
 flush: a lamp (a file mark for an artifact), the 13px/600 title clamped to
 two lines, one 12px `--ink-3` line of state in cubed's words (`turn ended`,
-`machine failed` in `--bad`, `not known to cube`, `state not read`); a short
+`machine failed` in `--bad`, `reading state…` until cube has answered,
+`state not read` when it could not, `not known to cube` only once both the
+overview and the thread list were read and cube counts it lost); a short
 `--line` hairline reaches toward its message while the note stands level
 with it (a note moved off its message draws none). A press opens it in place on a
 hairline frame: short id, start time, the thread's newest report among the
 rows shown with the way to it, then `open thread` or `read` in signal ink.
-Four items per note, then `n more`. Notes go down past a taller one and up
+Four items per note, then `n more`. The margin follows the whole
+conversation in reading and tab order, so after each message with a note a
+key that takes no room (seen only while focused) leads to it, and an opened
+note leads back to its message. Notes go down past a taller one and up
 near the end; the opened one stays by its message; the margin never moves
 the conversation or lengthens the page. A failed thread whose note is
 scrolled away is pinned at the margin's top, with an arrow for the way back.
@@ -634,13 +639,18 @@ state kept whole; artifacts stay links in the text.
 ### The Index
 One dialog rising from the composer (a bottom sheet under 40rem), the
 system's floating surface: `--s4`, `--line-2` border, well radius,
-`--shadow-float`, a putty-washed backdrop. A filter field (16px on a phone),
+`--shadow-float`, a putty-washed backdrop. Its head row: a search mark, the
+filter field (14px, 16px on a phone; focused, a 2px signal rule under the
+row) and a close key (a 2.75rem hit area on touch),
 then the chat's threads (failed, moving, the rest; lamp, title, state ·
 project), archived and lost counts, the newest artifacts, the places
 (threads, artifacts, projects, settings) and the chat's model select and
 memory toggle. Opened by the work key, the wordmark, `/` outside a field and
-ctrl/⌘ k; the arrow keys walk its items, enter in the filter opens the first
-match, escape closes and gives focus back. Rows are 2.75rem on touch.
+ctrl/⌘ k. A key, `/`, ctrl/⌘ k or a mouse puts focus in the filter; a tap
+puts it on the sheet itself, so no on-screen keyboard rises over it (the
+filter is a tap away). The arrow keys walk its items, enter in the filter
+opens the first match, escape or the close key closes and gives focus back.
+Rows are 2.75rem on touch.
 
 ### Named Rules
 **The Actions-In-The-Module Rule.** A module's controls live inside it, on its

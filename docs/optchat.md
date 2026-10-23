@@ -485,12 +485,15 @@ either:
   the chat started needs no further step to appear.
 - **Where a note stands.** At the row whose spawn result names the thread
   (`[id] started in <project>…`), among the rows shown; an artifact's note at
-  the first row that wrote it (`artifact_write`/`artifact_edit`), linked it
+  the first row that wrote it (`artifact_write`), linked it
   (`#/a/<id>`) or brought its comments (`[artifact <id>]`). A link to an
   artifact cube cannot show gets no note, and an artifact the chat never
   named gets none (the index lists it). A thread the overview no longer has
-  is read from the thread list (archived) or says `not known to cube`; when
-  the overview cannot be read the notes say `state not read`.
+  is read from the thread list (archived). Until cube has answered a note
+  says `reading state…`, and `state not read` when the overview could not be
+  read; `not known to cube` only once the overview and the thread list were
+  both read, the thread is in neither and the overview counts threads cubed
+  no longer has.
 - **What it shows.** Each open thread with
   its title and its own state as cubed records it when the page reads
   `GET /api/optchat/threads` (`working`, `turn ended`, `waiting on a

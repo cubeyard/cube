@@ -36,15 +36,17 @@ and settings.
   with the column or shifts it left.
 - **The margin (≥ 76rem).** Beside the column, scrolling with it: one note
   per message that started threads (a `spawn` result) or named an artifact
-  (an `artifact_write`/`artifact_edit` result, a `#/a/<id>` link in a reply,
+  (an `artifact_write` result, a `#/a/<id>` link in a reply,
   an `[artifact <id>]` comment message), each thread and artifact once, at its
   first row shown. Nothing else: no counters, filters, project groups or
   settings. Empty is empty, and the margin's room is kept so the column never
   jumps.
 - **Truth only.** A thread's state is cubed's own word from the chat's
   overview (`turn ended`, never `done`); a thread the overview no longer has
-  is read from the thread list (`archived`) or says `not known to cube`; an
-  unreadable overview says `state not read` with an unlit lens. An artifact
+  is read from the thread list (`archived`); before cube has answered a note
+  says `reading state…`, an unreadable overview `state not read`, both with
+  an unlit lens; `not known to cube` only once the overview and the list were
+  read, the thread is in neither and the overview counts lost threads. An artifact
   link cube cannot resolve gets no note. No need-user state is invented: only
   a failure (`failing`) is pinned.
 - **A note** is a lamp (a file mark for an artifact), the title and one line
@@ -68,8 +70,9 @@ and settings.
   ctrl/⌘ k open one dialog that rises from the composer (a bottom sheet on a
   phone): a filter; the chat's threads, failed then moving then the rest;
   the newest artifacts; the places (threads, artifacts, projects, settings);
-  the chat's model and memory. Arrows walk it, enter opens, escape closes and
-  gives focus back. It is the one floating surface (`--shadow-float`).
+  the chat's model and memory. A key or a mouse focuses the filter; a tap
+  focuses the sheet, so no keyboard rises; a close key is always there.
+  Arrows walk it, enter opens, escape closes and gives focus back. It is the one floating surface (`--shadow-float`).
 - Composer, uploads, history paging and scroll keeping, routes and deep
   links, artifact reading, comments and confirmed merge actions are the
   existing ones, unchanged.
@@ -85,6 +88,11 @@ artifact actions stay where they are (the artifact page).
 - Thread names with emoji (#239, not merged): when they land, the note, the
   pin, the index row and the report label show the name beside the title,
   from the overview's `identity` and the report's `fromIdentity`.
+- The margin follows the whole conversation in the DOM: a skip key after
+  each noted message leads to its note and the note leads back, but reading
+  straight through, a screen reader meets the notes after the last message.
+- `GET /api/artifacts` answers the newest 200: an artifact named early in a
+  long history and older than those gets no note.
 - Reports are not marked unread until seen: there is no seen state in cube
   to read, and none is invented in the browser.
 - The rest of the app (threads, a thread, projects, settings, artifacts)
