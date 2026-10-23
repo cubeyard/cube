@@ -323,9 +323,11 @@ diff never moves the conversation. Spacing rhythm is in rem with recurring
 steps of 0.55 / 0.7–0.75 / 0.85–0.9 / 1.0 / 1.4 / 2.1.
 
 The chat is the exception: one sheet with no header row beyond the wordmark
-(the index key), the 47rem column and, at 76rem and wider, a 17rem margin
-3.25rem beside it; the column and margin are centred together and the
-composer keeps the column's line, its work key hanging before it. Below
+(the index key) and the 47rem column on the viewport's centreline, the
+composer on the same line (both reserve the scrollbar's room on both
+edges), its work key hanging before it. At 76rem and wider a margin hangs
+outward to the right, 1.5rem beside the column, as wide as the room there
+allows up to 18rem; it never shifts the column or the composer. Below
 76rem the margin is not drawn and its thread notes sit under their messages.
 
 At the 40rem mobile breakpoint (and on a touch screen under 30rem tall, a
@@ -610,7 +612,8 @@ chat's threads that move (blinking amber) and that failed (red), else the
 index mark. Its accessible name says the counts in words.
 
 ### The Margin
-At 76rem and wider, a 17rem margin beside the column, scrolling with it.
+At 76rem and wider, a margin to the right of the centred column (up to
+18rem, never moving it), scrolling with it.
 One note per message that started threads (a spawn's result lines) or named
 an artifact (a write or edit result, a `#/a/` link in a reply, a comment
 message), each thread and artifact once, at its first row shown. A note is

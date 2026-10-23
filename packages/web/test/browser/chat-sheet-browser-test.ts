@@ -87,7 +87,7 @@ await scenario("the margin: each note beside the message that started or named i
   // in the margin, right of the column
   const column = await boxOf(page, ".transcript-column");
   const margin = await boxOf(page, ".sheet-margin");
-  assert.ok(margin.left >= column.right + 40, "the margin stands apart from the column");
+  assert.ok(margin.left >= column.right + 16, "the margin stands apart from the column");
   // the states are cubed's own words; a thread cube lost says so; a task that did not start says why
   const spawn = page.locator(`.margin-note[data-note="call:spawn-1"]`);
   assert.deepEqual(await spawn.locator(".note-state").allTextContents(), ["working · cube", "turn ended · cube", "machine failed · keel-images", "nope · no project nope"]);
@@ -106,6 +106,29 @@ await scenario("the margin: each note beside the message that started or named i
   assert.ok(scroll <= content + 1, `no longer than the conversation: ${scroll} against ${content}`);
   await shoot(page, "sheet-desktop-top");
 });
+
+for (const viewport of [desktop, laptop, { width: 1216, height: 800 }]) {
+  await scenario("the column and the composer share the viewport's centreline; the margin hangs to the right, inside the window", viewport, async page => {
+    const centre = viewport.width / 2;
+    const column = await boxOf(page, ".transcript-column");
+    const field = await boxOf(page, ".composer-field");
+    const margin = await boxOf(page, ".sheet-margin");
+    assert.ok(Math.abs((column.left + column.right) / 2 - centre) <= 0.5, `the column is centred: ${column.left}–${column.right} on ${viewport.width}`);
+    assert.ok(Math.abs(field.left - column.left) <= 0.5 && Math.abs(field.right - column.right) <= 0.5, `the composer keeps the column's line: ${field.left}–${field.right}`);
+    assert.ok(margin.left >= column.right + 16, `the margin hangs outward to the right: ${margin.left} after ${column.right}`);
+    assert.ok(margin.right <= viewport.width - 8 && margin.width >= 180, `the margin fits the window: ${margin.left}–${margin.right}, ${margin.width} wide`);
+    assert.ok((await boxOf(page, ".work-key")).right <= field.left, "the work key hangs before the field");
+    for (const note of await page.locator(".margin-note.placed").all()) {
+      const box = await note.evaluate(element => element.getBoundingClientRect().right);
+      assert.ok(box <= margin.right + 0.5, "every note within the margin");
+    }
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "nothing sideways");
+    assert.ok(await page.locator(".transcript").evaluate(element => element.scrollWidth <= element.clientWidth), "the transcript does not scroll sideways");
+    await page.locator(".transcript").evaluate(element => { element.scrollTop = 0; });
+    await settle(page);
+    await shoot(page, `sheet-centre-${viewport.width}`);
+  });
+}
 
 await scenario("opening a note keeps the conversation still; it opens in place, escape folds it back", desktop, async page => {
   await page.locator(".transcript").evaluate(element => { element.scrollTop = 0; });

@@ -30,6 +30,10 @@ and settings.
   message keeps its accessible name). The physical costume (decks, seams,
   raised strips) is off this surface; the tokens, lamps, type and the one
   signal stay.
+- **One centreline.** The conversation column and the composer share the
+  viewport's centreline at every width. The margin hangs outward to the
+  right of the column in the room there (up to 18rem); it never centres
+  with the column or shifts it left.
 - **The margin (≥ 76rem).** Beside the column, scrolling with it: one note
   per message that started threads (a `spawn` result) or named an artifact
   (an `artifact_write`/`artifact_edit` result, a `#/a/<id>` link in a reply,

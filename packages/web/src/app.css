@@ -1645,20 +1645,25 @@ a.report-name:hover { color: var(--signal); text-decoration: underline; text-und
 /* the margin: as wide as a note needs, a short hairline toward its message */
 .transcript-page { position: relative; display: flex; justify-content: center; min-height: 100%; }
 .transcript-page > .transcript-column { flex: 1 1 auto; min-width: 0; margin: 0; }
-.conversation { --margin-width: 17rem; --margin-gap: 3.25rem; }
-.sheet-margin { position: relative; flex: 0 0 var(--margin-width); margin-left: var(--margin-gap); overflow-x: visible; overflow-y: clip; overflow-clip-margin: 4px; }
-/* with a margin the composer keeps the column's line, the work key hanging before it */
-.conversation.has-margin :is(.composer-row, .composer-attachments) {
-  max-width: calc(var(--col) + var(--margin-width) + var(--margin-gap));
-  padding-right: calc(var(--margin-width) + var(--margin-gap));
+/* The column and the composer stay on the viewport's centreline (both
+   reserve the scrollbar's room on both edges); the margin hangs outward in
+   the room to the column's right, as wide as that room allows up to 18rem,
+   reaching into the pane's side padding but not to the edge. */
+.conversation { --margin-gap: 1.5rem; }
+.conversation.sheet :is(.transcript, .composer) { scrollbar-gutter: stable both-edges; }
+.sheet-margin {
+  position: absolute; inset-block: 0; left: calc(50% + var(--col) / 2 + var(--margin-gap));
+  width: min(18rem, calc(50% - var(--col) / 2 - var(--margin-gap) + var(--pane-gutter) - 0.75rem));
+  overflow-x: visible; overflow-y: clip; overflow-clip-margin: 4px;
 }
+/* with a margin the composer keeps the column's line, the work key hanging before it */
 .conversation.has-margin .composer-row { position: relative; }
 .conversation.has-margin .work-key { position: absolute; right: calc(100% + 0.45rem); bottom: 0; }
 .margin-notes { position: absolute; inset: 0; }
 .margin-note { position: absolute; left: 0; right: 0; visibility: hidden; transition: top 120ms ease; }
 .margin-note.placed { visibility: visible; }
 .margin-note.level::before {
-  content: ""; position: absolute; left: -2.25rem; top: 0.95rem; width: 1.5rem;
+  content: ""; position: absolute; left: calc(0.25rem - var(--margin-gap)); top: 0.95rem; width: calc(var(--margin-gap) - 0.5rem);
   border-top: 1px solid var(--line);
 }
 .margin-pins {
@@ -1805,8 +1810,6 @@ button.note-head:hover { background: var(--s3); }
   .sheet-note .note-head { min-height: 2.75rem; align-items: center; }
   .sheet-note .note-head .lamp { transform: none; }
 }
-/* beside a margin the column sits left of centre: the index rises over it */
-@media (min-width: 76rem) { .chat-index { translate: calc(-0.5 * (17rem + 3.25rem)) 0; } }
 @media (max-width: 40rem) {
   .chat-index {
     width: 100vw; max-width: 100vw; max-height: 85dvh; margin: auto 0 0;
