@@ -120,7 +120,6 @@
     <div class="margin-pins">
       {#each pins as item (item.thread.short)}
         <button type="button" class="margin-pin" onclick={() => back(item)} title="show where the chat started it">
-          <span class="lamp on-red" aria-hidden="true"></span>
           <span class="note-title">{item.thread.title ?? `[${item.thread.short}]`}</span>
           <span class="note-state failure">{stateText(item.thread.state ?? "")}</span>
           <span class="pin-way"><Icon name={item.direction === "up" ? "arrow" : "down"} size={12} /><span class="sr-only">{item.direction === "up" ? "above" : "below"}, show it</span></span>

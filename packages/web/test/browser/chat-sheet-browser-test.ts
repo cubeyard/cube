@@ -97,10 +97,12 @@ await scenario("the margin: each note beside the message that started or named i
   // the states are cubed's own words; a thread cube lost says so; a task that did not start says why
   const spawn = page.locator(`.margin-note[data-note="call:spawn-1"]`);
   assert.deepEqual(await spawn.locator(".note-state").allTextContents(), ["working · cube", "turn ended · cube", "machine failed · keel-images", "nope · no project nope"]);
-  assert.deepEqual(await spawn.locator(".lamp").evaluateAll(all => all.map(lamp => lamp.className.replace("lamp", "").trim())), ["on-amber blink", "", "on-red", "on-red"], "blinking amber, the unlit lens, steady red");
+  assert.deepEqual(await spawn.locator(".note-state").evaluateAll(all => all.map(state => state.classList.contains("failure"))), [false, false, true, true], "failures in error ink, the rest quiet");
+  assert.equal(await page.locator(".lamp, .blink").count(), 0, "no lamp, glow or blink anywhere: states are words");
+  assert.ok(await page.evaluate(() => [...document.querySelectorAll("*")].every(element => getComputedStyle(element).animationIterationCount !== "infinite")), "nothing pulses");
   assert.equal(await page.locator(`.margin-note[data-note="call:spawn-old"] .note-state`).textContent(), "not known to cube · keel-images");
   // an artifact the chat linked and one it wrote: one note each, never one it did not name
-  assert.deepEqual(await page.locator(".margin-note .note-head:has(.note-doc) .note-title").allTextContents(), ["composer room: more space on the phone", "today's review"]);
+  assert.deepEqual(await page.locator(".margin-note .note-head.artifact .note-title").allTextContents(), ["composer room: more space on the phone", "today's review"]);
   // nothing inline on a wide screen: no note twice
   assert.equal(await page.locator(".transcript-column .sheet-note").count(), 0);
   // the chat's own tools in words, the report under its thread's name
@@ -236,7 +238,7 @@ for (const [viewport, engine] of [[between, browser], [phone, browser], ...safar
     assert.equal(await page.locator(".sheet-margin").count(), 0, "no margin");
     const inline = page.locator(".transcript-column .sheet-note");
     assert.equal(await inline.count(), 2, "under the two spawns");
-    assert.equal(await page.locator(".transcript-column .sheet-note .note-doc").count(), 0, "artifacts stay links in the text");
+    assert.equal(await page.locator(".transcript-column .sheet-note .note-head.artifact").count(), 0, "artifacts stay links in the text");
     const spawn = page.locator(".transcript-column [data-anchor='call:spawn-1'] + .sheet-note");
     assert.deepEqual(await spawn.locator(".note-state").allTextContents(), ["working", "turn ended", "machine failed", "nope · no project nope"]);
     // each state is whole on its line: the title gives way first
@@ -300,13 +302,13 @@ await scenario("the index: its key, / and ctrl k open it; arrows walk it; escape
   const list = gate();
   const seen = gate();
   await scenario("before cube has answered, no note claims a thread is lost; once it has, the lost one says so", desktop, async page => {
-    const states = () => page.locator(".margin-note .note-head:not(:has(.note-doc)) .note-state").allTextContents();
+    const states = () => page.locator(".margin-note .note-head:not(.artifact) .note-state").allTextContents();
     await page.locator(".margin-note").first().waitFor();
     await settle(page);
     const early = await states();
     assert.deepEqual(early, ["reading state… · keel-images", "reading state… · cube", "reading state… · cube", "reading state… · keel-images", "nope · no project nope"], "reading, never lost");
     assert.equal(await page.locator(".note-state", { hasText: "not known to cube" }).count(), 0);
-    assert.deepEqual(await page.locator(".margin-note .lamp").evaluateAll(all => all.slice(0, 4).map(lamp => lamp.className.trim())), ["lamp", "lamp", "lamp", "lamp"], "no lamp lit before a state is read");
+    assert.equal(await page.locator(".margin-note .note-state.failure").count(), 1, "only the task that did not start, before a state is read");
     await shoot(page, "sheet-desktop-reading");
     // the thread list alone cannot say a thread is lost (the overview counts those)
     list.open();
@@ -358,7 +360,7 @@ await scenario("a keyboard or screen reader reaches a message's note from the me
 await scenario("an overview that cannot be read is said, never guessed; the last good one stays", desktop, async (page, host) => {
   const spawn = page.locator(`.margin-note[data-note="call:spawn-1"]`);
   assert.deepEqual(await spawn.locator(".note-state").allTextContents(), ["state not read · cube", "state not read · cube", "state not read · keel-images", "nope · no project nope"]);
-  assert.deepEqual(await spawn.locator(".lamp").evaluateAll(all => all.slice(0, 3).map(lamp => lamp.className.trim())), ["lamp", "lamp", "lamp"], "no lamp is lit for a state not read");
+  assert.equal(await spawn.locator(".note-state.failure").count(), 1, "no state is shown as failed when it was not read");
   await page.locator(".work-key").click();
   await page.locator(".chat-index .index-error", { hasText: "threads could not be read" }).waitFor();
   host.overviewError = null;

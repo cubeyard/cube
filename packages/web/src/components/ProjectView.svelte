@@ -231,11 +231,6 @@
   );
 
   const evidence = (index: number): ProjectRepository | null => project?.repositories[index] ?? null;
-  const lampClass = (status: ProjectRepository["status"] | undefined) =>
-    status === "checking" ? "on-amber blink"
-    : status === "error" ? "on-red"
-    : status === "ready" ? "on-green"
-    : "off";
   const focusSelect = (element: HTMLInputElement) => {
     if (!isNew) return;
     element.focus();
@@ -283,8 +278,7 @@
       </div>
       {#if project}
         <div class="project-state-readout">
-          <span class="lamp {lampClass(project.status)}" aria-hidden="true"></span>
-          <span>{project.status}</span>
+          <span class:error={project.status === "error"}>{project.status}</span>
           {#if project.checkedAt}
             <span title={new Date(project.checkedAt).toLocaleString()}>· checked {relTime(project.checkedAt)}</span>
           {/if}
@@ -330,7 +324,6 @@
           {@const checked = evidence(index)}
           <div class="repository-row">
             <div class="repository-role">
-              <span class="lamp {lampClass(checked?.status)}" aria-hidden="true"></span>
               <span>
                 <strong>{index === 0 ? "primary" : `reference ${index}`}</strong>
                 <small>{index === 0 ? "/workspace" : `../repos/${repository.checkoutName || "…"}`}</small>

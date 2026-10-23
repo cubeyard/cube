@@ -319,7 +319,6 @@
     return notice.state === "delivered" ? `told ${who}${notice.deliveredAt ? ` · ${relTime(notice.deliveredAt)}` : ""}`
       : notice.state === "queued" ? `to ${who}: ${notice.note ?? "waiting"}` : `not told ${who}: ${notice.note ?? "undeliverable"}`;
   };
-  const lamp = (comment: { state: string }) => comment.state === "queued" ? "on-amber" : comment.state === "delivered" ? "on-green" : comment.state === "undeliverable" ? "on-red" : "";
   const placeText = (comment: ArtifactComment) => {
     const placed = placements[comment.id];
     if (!shown || !placed) return "";
@@ -361,7 +360,6 @@
   <main class="artifact-workspace">
     <section class="artifact-pane" aria-label="document">
       <section class="thread-strip artifact-strip" aria-label="artifact">
-        <span class="lamp {drafts.length ? 'on-amber' : ''}" aria-hidden="true"></span>
         <h1 class="strip-title artifact-title">{artifact.title}</h1>
         <span class="strip-state">by {#if authorLink}<a class="strip-link" href={authorLink}>{author}</a>{:else}{author}{/if}{artifact.thread?.archived ? " (archived)" : ""}</span>
         {#if artifact.project}<a class="strip-project" href={`#/projects/${artifact.project.id}`}>{artifact.project.name}</a>{/if}
@@ -396,14 +394,13 @@
             {#each shown.actions as action (action.id)}
               {@const last = runs(action.id).at(-1)}
               <div class="artifact-action">
-                <span class="lamp {last?.state === 'succeeded' ? 'on-green' : last?.state === 'failed' ? 'on-red' : last?.state === 'running' ? 'on-amber blink' : ''}" aria-hidden="true"></span>
                 <div class="artifact-action-text">
                   <span class="artifact-action-label">{action.label}</span>
                   <span class="artifact-action-target">github.merge · {action.repository}#{action.pull} · head {action.headSha.slice(0, 12)} · {action.method}</span>
                   {#if last}<span class="artifact-action-run {last.state}">{last.state}: {last.detail}</span>{/if}
                   {#if last}
                     {#each told(last.id) as notice (notice.id)}
-                      <span class="artifact-action-told"><span class="lamp mini {lamp(notice)}" aria-hidden="true"></span><span>{noticeText(notice)}</span></span>
+                      <span class="artifact-action-told" class:failure={notice.state === "undeliverable"}><span>{noticeText(notice)}</span></span>
                     {/each}
                   {/if}
                 </div>
@@ -471,8 +468,7 @@
               <li id={`comment-${comment.id}`} class="comment-item" class:focused={focused === comment.id}>
                 <button class="work-quote comment-quote" onclick={() => locate(comment)} title="show in the document">{comment.anchor.quote}</button>
                 <p class="comment-body">{comment.body}</p>
-                <div class="comment-foot">
-                  <span class="lamp mini {lamp(comment)}" aria-hidden="true"></span>
+                <div class="comment-foot" class:failure={comment.state === "undeliverable"}>
                   <span>{stateText(comment)}{placeText(comment) ? ` · ${placeText(comment)}` : ""}</span>
                 </div>
               </li>

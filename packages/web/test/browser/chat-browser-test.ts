@@ -399,7 +399,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844,
     host.overview = { threads: [thread("aaaaaaa1", "cube", "fix the gateway host check", "completed"), thread("bbbbbbb2", "site", "a much longer thread title that has to wrap or clamp in the narrow panel without overflowing it at all", "working"),
       thread("ccccccc3", "cube", "old work", "stopped", true)], archived: { shown: 1, total: 3 }, unknown: 0 };
     await page.reload();
-    await page.locator(".work-key .lamp.on-amber").waitFor();
+    await page.locator(".work-key .work-count", { hasText: "1 running" }).waitFor();
     assert.match(await page.locator(".work-key").getAttribute("aria-label") ?? "", /1 running$/);
     await page.locator(".work-key").click();
     const rows = page.locator(".chat-index .index-row[href^='#/t/']");

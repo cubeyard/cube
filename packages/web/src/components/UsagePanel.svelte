@@ -60,9 +60,8 @@
     <div class="runner-board well">
       <article class="runner-row usage-total">
         <div class="runner-identity">
-          <span class="lamp {report.totals.coverage === 'complete' ? 'on-green' : report.totals.coverage === 'unavailable' ? 'on-red' : 'off'}" aria-hidden="true"></span>
           <span>
-            <strong>{report.totals.coverage === "unavailable" ? "usage unknown" : spendText(report.totals.spend)}</strong>
+            <strong class:error={report.totals.coverage === "unavailable"}>{report.totals.coverage === "unavailable" ? "usage unknown" : spendText(report.totals.spend)}</strong>
             <small>{report.totals.subjects} {report.totals.subjects === 1 ? "record" : "records"}{report.totals.coverage === "complete" ? " · complete" : ""}</small>
           </span>
         </div>
@@ -75,7 +74,6 @@
       {#if report.optchat}
         <article class="runner-row">
           <div class="runner-identity">
-            <span class="lamp off" aria-hidden="true"></span>
             <span><strong>optchat</strong><small>its own model calls and compactor</small></span>
           </div>
           <div class="runner-evidence">
@@ -93,7 +91,6 @@
         {#each report.projects as project (project.id)}
           <article class="runner-row">
             <div class="runner-identity">
-              <span class="lamp off" aria-hidden="true"></span>
               <span><a href="#/projects/{project.id}"><strong>{project.name}</strong></a><small>{project.totals.subjects} {project.totals.subjects === 1 ? "thread" : "threads"}</small></span>
             </div>
             <div class="runner-evidence">
@@ -111,7 +108,6 @@
         {#each report.models as line (`${line.source}/${line.provider}/${line.model}`)}
           <article class="runner-row">
             <div class="runner-identity">
-              <span class="lamp off" aria-hidden="true"></span>
               <span><strong title={`${line.provider}/${line.model}`}>{line.model}</strong><small>{line.provider === "claude-code" ? "claude · max" : line.provider}{line.source.startsWith("optchat") ? ` · ${line.source.replace("-", " ")}` : ""}{line.calls !== null ? ` · ${line.calls} calls` : ""}</small></span>
             </div>
             <div class="runner-evidence">
@@ -130,7 +126,6 @@
         {#each threads as item (item.subject)}
           <article class="runner-row">
             <div class="runner-identity">
-              <span class="lamp {item.archived ? 'off' : 'on-green'}" aria-hidden="true"></span>
               <span>
                 {#if item.archived}<strong>{item.title ?? item.subject.slice(0, 8)}</strong>
                 {:else}<a href="#/t/{item.subject}"><strong>{item.title ?? item.subject.slice(0, 8)}</strong></a>{/if}

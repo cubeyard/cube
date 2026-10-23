@@ -9,10 +9,6 @@ export const moving = (state: string): boolean =>
 export const failing = (state: string): boolean =>
   state === "failed" || state.includes("error") || state.includes("failed");
 
-/** The lamp for a thread state: blinking amber while it moves, steady red
- * when it failed, the unlit lens otherwise (a turn that ended is not done). */
-export const stateLamp = (state: string): string => moving(state) ? "on-amber blink" : failing(state) ? "on-red" : "";
-
 /** A thread's state in the chat's words: a finished turn is "turn ended", never "done". */
 export const stateText = (state: string): string => state === "completed" ? "turn ended" : state;
 

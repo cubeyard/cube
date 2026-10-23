@@ -2,12 +2,11 @@
   import { errorText, fetchRevision } from "../lib/api.ts";
   import { excerpt, type NoteGroup, type NoteThread } from "../lib/provenance.ts";
   import { relTime } from "../lib/time.ts";
-  import { failing, stateLamp, stateText } from "../lib/work-state.ts";
+  import { failing, stateText } from "../lib/work-state.ts";
   import type { ArtifactListItem } from "../lib/types.ts";
-  import Icon from "./Icon.svelte";
 
   // One note: what one message of the chat started or named, each as a
-  // lamp, its title and one line of state. A press opens it in place (the
+  // title and one line of state in words. A press opens it in place (the
   // conversation stays where it is) with what cube knows of it and the way
   // to its full view. States are cubed's own words; a thread cube no
   // longer knows says so. When thread names land (#239), the name goes
@@ -84,7 +83,6 @@
       {#if item.kind === "unstarted"}
         <li class="note-item">
           <div class="note-head static">
-            <span class="lamp on-red" aria-hidden="true"></span>
             <span class="note-text">
               <span class="note-title">task {item.task} not started</span>
               <span class="note-state failure">{item.project} · {item.reason}</span>
@@ -98,7 +96,6 @@
           {#if item.kind === "thread"}
             {@const thread = item.thread}
             <button type="button" class="note-head" aria-expanded={open === item.key} aria-controls={peekId(item.key)} onclick={() => toggle(item)}>
-              <span class="lamp {thread.state ? stateLamp(thread.state) : ''}" aria-hidden="true"></span>
               <span class="note-text">
                 <span class="note-title" class:untitled={!thread.title}>{thread.title ?? `[${thread.short}]`}</span>
                 <span class="note-state" class:failure={!!thread.state && failing(thread.state)}>{[threadState(thread), !inline && thread.project].filter(Boolean).join(" · ")}</span>
@@ -128,8 +125,7 @@
           {:else}
             {@const artifact = item.artifact}
             {@const body = bodies[`${artifact.id}@${artifact.head}`]}
-            <button type="button" class="note-head" aria-expanded={open === item.key} aria-controls={peekId(item.key)} onclick={() => toggle(item)}>
-              <span class="note-doc"><Icon name="file" size={13} /></span>
+            <button type="button" class="note-head artifact" aria-expanded={open === item.key} aria-controls={peekId(item.key)} onclick={() => toggle(item)}>
               <span class="note-text">
                 <span class="note-title">{artifact.title}</span>
                 <span class="note-state">{[`artifact · revision ${artifact.head}`, commentText(artifact)].filter(Boolean).join(" · ")}</span>

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, type Snippet } from "svelte";
   import { relTime } from "../lib/time.ts";
-  import { failing, moving, stateLamp, stateText } from "../lib/work-state.ts";
+  import { failing, moving, stateText } from "../lib/work-state.ts";
   import type { ChatWork } from "../lib/work.svelte.ts";
   import type { OverviewThread } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
@@ -100,7 +100,6 @@
           {#each threads as thread (thread.id)}
             <li>
               <a class="index-row" href="#/t/{thread.id}" data-index-item>
-                <span class="lamp {stateLamp(thread.state)}" aria-hidden="true"></span>
                 <span class="index-title" class:untitled={!thread.title}>{thread.title ?? "untitled"}</span>
                 <span class="index-meta" class:failure={failing(thread.state)}>{stateText(thread.state)} · {thread.project.name}</span>
               </a>
@@ -124,7 +123,6 @@
           {#each artifacts as artifact (artifact.id)}
             <li>
               <a class="index-row" href="#/a/{artifact.id}" data-index-item>
-                <span class="index-doc"><Icon name="file" size={13} /></span>
                 <span class="index-title">{artifact.title}</span>
                 <span class="index-meta">revision {artifact.head} · {relTime(artifact.updatedAt)}</span>
               </a>

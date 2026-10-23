@@ -251,7 +251,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     });
   }
 
-  await scenario(browser, engine, "a thread's strip is one row: lamp, title, details; details hold project, model and archive", phone, "t/t1", async page => {
+  await scenario(browser, engine, "a thread's strip is one row: title, details; details hold project, model and archive", phone, "t/t1", async page => {
     const strip = await box(page, ".thread-pane .thread-strip");
     assert.ok(strip.height <= 50, `one row: ${strip.height}`);
     for (const hidden of [".strip-project", ".strip-model", ".thread-strip .key-bank"]) assert.equal(await visible(page, hidden), false, `${hidden} folded`);

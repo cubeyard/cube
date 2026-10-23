@@ -1,8 +1,8 @@
-/** The startup panel's words: labels, durations, the lamp of each step, the
+/** The startup panel's words: labels, durations, the state of each step, the
  * memory advice (only when something ran out of memory) and the note on a
  * step that has run long. */
 import assert from "node:assert/strict";
-import { duration, longStep, memoryAdvice, startupShown, stepLabel, stepLamp, totalMs } from "../src/lib/startup.ts";
+import { duration, longStep, memoryAdvice, startupShown, stepLabel, stepState, totalMs } from "../src/lib/startup.ts";
 import type { StartupStep } from "../src/lib/types.ts";
 
 const at = 1_000_000;
@@ -12,8 +12,8 @@ const step = (name: StartupStep["name"], state: StartupStep["state"], startedAt:
 assert.equal(stepLabel(step("build-prepare", "running", at)), "template build · pre-setup and setup");
 assert.equal(stepLabel(step("prepare", "failed", at, at, { attempt: 2 })), "prepare · try 2");
 assert.deepEqual([400, 12_400, 185_000].map(duration), ["0.4 s", "12 s", "3 min 05 s"]);
-assert.deepEqual((["running", "ok", "failed", "interrupted"] as const).map(state => stepLamp(step("boot", state, at))), ["on-amber blink", "on-green", "on-red", ""]);
-console.log("ok: labels, durations and lamps");
+assert.deepEqual((["running", "ok", "failed", "interrupted"] as const).map(state => stepState(step("boot", state, at))), ["running", null, "failed", "interrupted"], "every state in print but a quiet ok");
+console.log("ok: labels, durations and step states");
 
 const oom = step("prepare", "failed", at, at + 494_000, { attempt: 1, detail: "pre-setup was stopped: the machine ran out of memory",
   memory: { peakBytes: 3758096384, totalBytes: 4013504 * 1024, oomKills: 1 } });

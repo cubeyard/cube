@@ -40,10 +40,10 @@ export function size(bytes: number): string {
   return bytes >= 1024 * mib ? `${(bytes / (1024 * mib)).toFixed(1)} GB` : bytes >= mib ? `${Math.round(bytes / mib)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-/** The lamp of a step: running blinks amber, ok is green, failed red, an
- * interrupted one an unlit lens. */
-export function stepLamp(step: StartupStep): string {
-  return step.state === "running" ? "on-amber blink" : step.state === "ok" ? "on-green" : step.state === "failed" ? "on-red" : "";
+/** A step's state in print, for every state but a quiet ok (its time
+ * says it ended): `running`, `failed`, `interrupted`. */
+export function stepState(step: StartupStep): string | null {
+  return step.state === "ok" ? null : step.state;
 }
 
 /** The newest step whose command the kernel stopped for want of memory. */

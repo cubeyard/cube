@@ -252,9 +252,10 @@
 {#snippet workKey()}
   <button type="button" class="work-key" aria-haspopup="dialog" aria-label={keyLabel} aria-keyshortcuts="/ Control+K Meta+K"
     title="{keyLabel} · / or ctrl k" onclick={(event) => void index?.show({ touch: tapped(event) })}>
-    {#if counts.failed}<span class="work-count"><span class="lamp on-red" aria-hidden="true"></span>{counts.failed}</span>{/if}
-    {#if counts.running}<span class="work-count"><span class="lamp on-amber blink" aria-hidden="true"></span>{counts.running}</span>{/if}
-    {#if !counts.failed && !counts.running}<Icon name="index" size={16} />{/if}
+    <Icon name="index" size={16} />
+    <!-- the one count that matters most, in words: what failed, else what runs -->
+    {#if counts.failed}<span class="work-count failure">{counts.failed} failed</span>
+    {:else if counts.running}<span class="work-count">{counts.running} running</span>{/if}
   </button>
 {/snippet}
 

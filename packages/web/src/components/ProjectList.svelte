@@ -55,11 +55,6 @@
     }
   }
 
-  const lampClass = (project: Project) =>
-    project.status === "checking" ? "on-amber blink"
-    : project.status === "error" ? "on-red"
-    : "on-green";
-
   const repoShort = (url: string) => url.replace(/\.git$/, "").split("/").slice(-2).join("/");
 </script>
 
@@ -87,7 +82,6 @@
       {#each projects as project (project.id)}
         <div class="module project-module">
           <a class="module-face" href="#/projects/{project.id}">
-            <span class="lamp {lampClass(project)}" aria-hidden="true"></span>
             <span class="module-text">
               <span class="module-title">{project.name}</span>
               <span class="module-meta project-summary">

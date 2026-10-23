@@ -11,7 +11,7 @@
   import { CLAUDE_DURABILITY, isClaude, providerLabel } from "../lib/agent.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
   import type { Command } from "../lib/command.ts";
-  import { composerWaiting, lampClass, machineLabel, machineNotice, sleepState, stateLabel } from "../lib/thread-state.ts";
+  import { composerWaiting, machineLabel, machineNotice, sleepState, stateLabel } from "../lib/thread-state.ts";
   import { startupShown } from "../lib/startup.ts";
   import type {
     SubjectUsage,
@@ -220,7 +220,6 @@
 {#snippet threadControls()}
   <section class="thread-strip" class:hidden={!summary} class:details-open={detailsOpen} aria-label="thread controls">
     {#if summary}
-      <span class="lamp {lampClass(summary)}" aria-hidden="true"></span>
       <span class="strip-title" class:untitled={!summary.title}>{summary.title ?? "untitled"}</span>
       <button
         class="mobile-thread-switch"
@@ -340,7 +339,6 @@
                 href="#/t/{thread.id}"
                 aria-current={thread.id === threadId ? "page" : undefined}
               >
-                <span class="lamp {lampClass(thread)}" aria-hidden="true"></span>
                 {#if !stateLabel(thread)}<span class="sr-only">ready</span>{/if}
                 <span class="thread-sidebar-copy">
                   <span class="thread-sidebar-title" class:untitled={!thread.title}>{thread.title ?? "untitled"}</span>

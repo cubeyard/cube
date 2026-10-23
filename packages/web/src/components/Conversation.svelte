@@ -413,7 +413,6 @@
     if (open !== toolOpen(row, chosen)) chosen.set(row.callId, open);
   }
 
-  const toolLamp: Record<ToolState, string> = { waiting: "on-amber", running: "on-amber blink", done: "on-green", error: "on-red", open: "" };
   const toolStateLabel: Record<ToolState, string> = { waiting: "waiting", running: "running", done: "done", error: "error", open: "no result" };
 </script>
 
@@ -433,7 +432,6 @@
         <p class="conversation-empty">{waitingText ?? "reading thread…"}</p>
       {:else if rows.length === 0}
         <div class="conversation-empty">
-          <span class="lamp on-green" aria-hidden="true"></span>
           <p>{empty?.title ?? "ready when you are"}</p>
           <span>{empty?.hint ?? "Ask for a change, paste an error, or describe what you want to understand."}</span>
         </div>
@@ -443,9 +441,9 @@
             {@const line = toolLine?.(row) ?? null}
             <details class="tool-strip" data-anchor={rowKey(row)} open={toolOpen(row, chosen)} ontoggle={(event) => onToolToggle(event, row)}>
               <summary title={row.summary || row.name}>
-                <span class="lamp mini {toolLamp[row.state]}" aria-hidden="true"></span><span class="sr-only">{toolStateLabel[row.state]}</span>
                 {#if line}<span class="tool-said">{line}</span><code class="tool-name">{row.name}</code>
                 {:else}<code>{row.name}</code>{#if row.summary}<span class="tool-summary">{row.summary}</span>{/if}{/if}
+                {#if row.state === "done"}<span class="sr-only">done</span>{:else}<span class="tool-state" class:failure={row.state === "error"}>{toolStateLabel[row.state]}</span>{/if}
                 {#if row.input || row.output || row.images}<span class="tool-chevron"><Icon name="chevron" size={12} /></span>{/if}
               </summary>
               {#if row.input}<pre class="tool-input">{row.input}</pre>{/if}
@@ -477,11 +475,11 @@
           {@render after?.(row)}
         {/each}
         {#if working}
-          <div class="working-line" role="status"><span class="lamp on-amber blink" aria-hidden="true"></span>working</div>
+          <div class="working-line" role="status">working…</div>
         {:else if waiting}
-          <div class="working-line" role="status"><span class="lamp on-amber" aria-hidden="true"></span>waiting on {status.waiting!.length === 1 ? "a background agent" : `${status.waiting!.length} background agents`}: {status.waiting!.map(description => description.length > 80 ? `${description.slice(0, 79)}…` : description).join(", ")}</div>
+          <div class="working-line" role="status">waiting on {status.waiting!.length === 1 ? "a background agent" : `${status.waiting!.length} background agents`}: {status.waiting!.map(description => description.length > 80 ? `${description.slice(0, 79)}…` : description).join(", ")}</div>
         {:else if status.state === "stopped"}
-          <div class="working-line" role="status"><span class="lamp" aria-hidden="true"></span>stopped</div>
+          <div class="working-line" role="status">stopped</div>
         {/if}
       {/if}
     </div>
@@ -489,7 +487,7 @@
     </div>
   </div>
 
-  {#if reconnecting}<div class="conversation-note" role="status"><span class="lamp on-amber blink" aria-hidden="true"></span>reconnecting to the thread…</div>{/if}
+  {#if reconnecting}<div class="conversation-note" role="status">reconnecting to the thread…</div>{/if}
   {#if error || historyError || status.state === "failed"}<div class="conversation-error" role="alert">{error ?? historyError ?? status.error ?? "the run failed"}</div>{/if}
   <form class="composer" aria-busy={busy} onsubmit={(event) => { event.preventDefault(); void submit(); }}
     ondragover={(event) => { if (images && event.dataTransfer?.types.includes("Files")) event.preventDefault(); }} ondrop={onDrop}>
