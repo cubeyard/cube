@@ -10,6 +10,7 @@ type Step = { uses?: string; run?: string; env?: Record<string, string>; with?: 
 type Job = {
   name?: string;
   "runs-on": string;
+  container?: { image: string; options?: string };
   needs?: string | string[];
   strategy?: { matrix: Record<string, unknown[]> };
   steps: Step[];
@@ -32,6 +33,11 @@ for (const w of [ci, platforms]) {
   assert.match(w.concurrency?.group ?? "", /github\.event\.pull_request\.number \|\| github\.sha/);
 }
 for (const [id, job] of Object.entries(ci.jobs)) assert.equal(job["runs-on"], "ubuntu-latest", `ci.yml ${id} runs on Linux`);
+
+// The browser job runs in Playwright's image for the pinned Playwright, by
+// digest, so its browsers and their system libraries need no install.
+const playwright = (JSON.parse(read("packages/web/package.json")) as { devDependencies: Record<string, string> }).devDependencies.playwright;
+assert.match(ci.jobs.browser!.container?.image ?? "", new RegExp(`^mcr\\.microsoft\\.com/playwright:v${playwright!.replaceAll(".", "\\.")}-noble@sha256:[0-9a-f]{64}$`), `the browser job's image is Playwright ${playwright}'s`);
 
 // Every offline suite runs in exactly one shard.
 const test = ci.jobs.test!;
@@ -125,7 +131,7 @@ for (const file of [...fs.readdirSync(path.join(root, ".github/workflows")).map(
     if (uses!.startsWith("./")) assert.ok(fs.existsSync(path.join(root, uses!, "action.yml")), `${file}: ${uses}`);
   }
 }
-console.log("ci-test: Linux-only pull request gate, cancelled superseded runs, every suite in one shard, no check dropped, macOS on main, keel built twice and compared before signing, berth signed only after its key is checked, pinned actions");
+console.log("ci-test: Linux-only pull request gate, the browser job in Playwright's pinned image, cancelled superseded runs, every suite in one shard, no check dropped, macOS on main, keel built twice and compared before signing, berth signed only after its key is checked, pinned actions");
 
 // The release gate against a fake gh: each call takes the scenario's next answer.
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "release-gate-"));
