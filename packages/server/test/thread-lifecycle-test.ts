@@ -26,7 +26,9 @@
  *   R8  a release that keeps failing is retried with the same pauses past 8
  *       tries until it succeeds: the obligation is never dropped.
  *   R9  a replayed message to a sleeping thread wakes nothing; a new one
- *       wakes it once. */
+ *       wakes it once.
+ *   R10 a wake that keeps failing hard leaves no `waking` holding a slot:
+ *       not after the starts stopped, not after a restart. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -60,6 +62,9 @@ import { lifecycle, Phase, until, type Cubed } from "./lifecycle-fixture.ts";
     ["start failed 7 times, 30 min ago", t("failed", undefined, failed(7, 1_000_000 - 1_800_000)), none, "start"],
     ["start failed 8 times, long ago", t("failed", undefined, failed(8, 0)), none, "leave"],
     ["check failed 8 times, long ago", t("available", undefined, failed(8, 0)), none, "leave"],
+    ["waking, no owner, a stored run, its pause running", t("available", "waking", failed(1, 1_000_000 - 29_000)), { ...none, demand: true }, "settle-wake"],
+    ["waking, no owner, starts stopped", t("available", "waking", failed(8, 0)), none, "settle-wake"],
+    ["suspended with a stored run, starts stopped", t("available", "suspended", failed(8, 0)), { ...none, demand: true }, "leave"],
     ["release failed 20 times, 30 min ago", t("failed", undefined, { workspaceError: "workspace release failed: boom", ...failed(20, 1_000_000 - 1_800_000) }), none, "release"],
     ["release failed 20 times, 29 min ago", t("failed", undefined, { workspaceError: "workspace release failed: boom", ...failed(20, 1_000_000 - 1_740_000) }), none, "leave"],
   ];
@@ -255,7 +260,7 @@ try {
 }
 {
   const life = lifecycle(path.join(root, "retry"), { slots: 2 });
-  const { berth, clock, fresh, vmOf } = life;
+  const { registry, berth, clock, fresh, vmOf } = life;
   let cubed = life.start();
   const status = async (id: string) => (await cubed.conversations.storedHistory(id, { limit: 1 }))?.status;
   const done = (id: string) => until(`${id.slice(0, 8)} settles`, async () => { const s = await status(id); return !!s && s.state !== "working" && s.state !== "idle"; });
@@ -324,6 +329,25 @@ try {
     await done(g.id);
     assert.equal(berth.resumes(vmOf(g.id)), 1, "a new one wakes it once");
     console.log("ok: R9 a replayed message to a sleeping thread wakes nothing; a new one wakes it once");
+
+    // ---------------------------------------------------------------- R10
+    const w = life.thread();
+    await cubed.conversations.activate(w.id);
+    await done(w.id);
+    clock.now += 40 * 60_000;
+    for (let round = 0; round < 3; round++) await cubed.conversations.suspendIdle();
+    assert.equal(fresh(w.id).vm?.suspension?.state, "suspended");
+    berth.failResumes.set(vmOf(w.id), "the snapshot could not be restored");
+    for (let tell = 1; tell <= 8; tell++) await cubed.conversations.submit(w.id, `more ${tell}`, `tell-w-${tell}`).catch(() => {});
+    assert.ok((fresh(w.id).retry?.failures ?? 0) >= 8, "its starts stopped");
+    await rounds(3 * 3600_000);
+    assert.deepEqual([fresh(w.id).vm?.suspension?.state, life.held(), berth.holding()], ["suspended", 0, 0], "the failed wake is read back: no slot held");
+    registry.updateThreadVm(w.id, { suspension: { ...fresh(w.id).vm!.suspension!, state: "waking" } });
+    await cubed.close();
+    cubed = life.start();
+    await cubed.conversations.recover();
+    assert.deepEqual([fresh(w.id).vm?.suspension?.state, life.held()], ["suspended", 0], "also after a restart");
+    console.log("ok: R10 a wake that keeps failing leaves no waking holding a slot, after the starts stopped and after a restart");
     assert.deepEqual(berth.violations, []);
   } finally {
     await cubed.close().catch(() => {});

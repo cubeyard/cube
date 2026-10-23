@@ -36,6 +36,8 @@ export class FakeBerth {
   down = false;
   /** Machines (by id) whose create fails, and with what. */
   readonly failCreates = new Map<string, string>();
+  /** Machines (by id) whose resume from SUSPENDED fails, and with what. */
+  readonly failResumes = new Map<string, string>();
   /** How many deletes fail before one succeeds. */
   failDeletes = 0;
   readonly phases = new Map<string, Phase>();
@@ -100,6 +102,8 @@ export class FakeBerth {
       case "machineStart": {
         if (phase === undefined) this.refuse("NOT_FOUND", "no such machine");
         if (phase === Phase.RETAINED) throw new RunnerError("FAILED_PRECONDITION", "retained", "the machine was deleted; its disk is kept");
+        const resumeFails = phase === Phase.SUSPENDED ? this.failResumes.get(vm) : undefined;
+        if (resumeFails) { this.events.push({ op, vm, from: phase, to: phase }); throw new RunnerError("INTERNAL", "", resumeFails); }
         if (phase === Phase.SUSPENDED && this.holding() >= this.slots) {
           this.events.push({ op, vm, from: phase, to: phase });
           this.refuse("RESOURCE_EXHAUSTED", "the machine stays suspended");

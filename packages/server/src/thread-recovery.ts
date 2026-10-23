@@ -46,14 +46,16 @@ export function recoveryStep(thread: Thread, facts: RecoveryFacts): RecoveryStep
   // After a failed try, the next one waits its pause.
   const due = !thread.retry || facts.now >= thread.retry.at + retryPause(thread.retry.failures);
   if (releaseUnfinished(thread)) return due ? "release" : "leave";
-  if (retriesExhausted(thread)) return "leave";
+  const exhausted = retriesExhausted(thread);
   const sleep = thread.vm?.suspension;
   if (sleep) {
     if (facts.owned) return "leave";
-    if (facts.demand) return due ? "start" : "leave";
+    if (facts.demand && due && !exhausted) return "start";
+    // Not woken this round: a `waking` left by a failed wake would hold its
+    // slot through the pause, or for good once the starts stopped.
     return sleep.state === "waking" ? "settle-wake" : "leave";
   }
-  if (!due) return "leave";
+  if (exhausted || !due) return "leave";
   return thread.workspaceState === "available" ? "check" : "start";
 }
 
