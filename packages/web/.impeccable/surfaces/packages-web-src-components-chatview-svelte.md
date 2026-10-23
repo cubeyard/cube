@@ -50,7 +50,8 @@ and settings.
   Four items per note, the rest behind `n more`.
 - **Stability.** The margin never moves the conversation and never makes the
   page longer than it: notes go down past a taller one, up near the end, and
-  the opened one stays by its message. Streaming, a longer state line or an
+  the opened one stays by its message. Only a note level with its message
+  draws the hairline to it. Streaming, a longer state line or an
   opened note leave every message where it was.
 - **Pinned.** A failed thread whose note is scrolled away is pinned at the
   margin's top with an arrow saying which way; a press shows its message and

@@ -7,7 +7,8 @@
   import WorkNote from "./WorkNote.svelte";
 
   // The desktop margin: each note beside the message that started or
-  // named what it shows, scrolling with the conversation. A note that grows
+  // named what it shows, scrolling with the conversation; a hairline ties a
+  // note to its message while it stands level with it. A note that grows
   // (opened, or a longer state) moves the notes after it, never the
   // conversation; the one opened stays by its message. A thread that failed
   // while its note is scrolled away is pinned at the margin's top with the
@@ -23,6 +24,8 @@
 
   let aside = $state<HTMLElement>();
   let tops = $state<Record<string, number>>({});
+  /** The notes level with their message: only these draw the hairline to it. */
+  let level = $state<Record<string, boolean>>({});
   type Pin = { row: string; thread: NoteThread; direction: "up" | "down" };
   let pins = $state<Pin[]>([]);
   const GAP = 14;
@@ -40,8 +43,14 @@
     const notes = placed.map(({ anchor, note }) => ({ anchor: anchor ? anchor.offsetTop - base : 0, height: note?.offsetHeight ?? 0 }));
     const result = place(notes, { gap: GAP, limit: aside.clientHeight, hold: held >= 0 ? held : null });
     const next: Record<string, number> = {};
-    placed.forEach(({ group, anchor }, index) => { if (anchor) next[group.row] = Math.round(result[index]!); });
+    const beside: Record<string, boolean> = {};
+    placed.forEach(({ group, anchor }, index) => {
+      if (!anchor) return;
+      next[group.row] = Math.round(result[index]!);
+      beside[group.row] = Math.abs(result[index]! - notes[index]!.anchor) < 3;
+    });
     if (JSON.stringify(next) !== JSON.stringify(tops)) tops = next;
+    if (JSON.stringify(beside) !== JSON.stringify(level)) level = beside;
     pin();
   }
 
@@ -120,7 +129,7 @@
   {/if}
   <div class="margin-notes">
     {#each groups as group (group.row)}
-      <div class="margin-note" data-note={group.row} class:placed={group.row in tops} style:top="{tops[group.row] ?? 0}px" use:observe>
+      <div class="margin-note" data-note={group.row} class:placed={group.row in tops} class:level={level[group.row]} style:top="{tops[group.row] ?? 0}px" use:observe>
         <WorkNote {group} {open} {onToggle} {reports} {onJump} {unread} />
       </div>
     {/each}

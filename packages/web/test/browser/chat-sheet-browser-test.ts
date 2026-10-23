@@ -83,6 +83,7 @@ await scenario("the margin: each note beside the message that started or named i
   assert.equal(overlap, false, "no two notes overlap");
   for (const box of boxes) assert.ok(Math.abs(box.top - await anchorTop(page, box.row)) <= 2 || box.top > await anchorTop(page, box.row), `${box.row} at or below its message`);
   assert.ok(Math.abs(boxes[1]!.top - await anchorTop(page, "call:spawn-1")) <= 2, "the spawn's note is level with it");
+  assert.equal(await page.locator(`.margin-note[data-note="call:spawn-1"]`).evaluate(element => element.classList.contains("level")), true, "and tied to it by a hairline");
   // in the margin, right of the column
   const column = await boxOf(page, ".transcript-column");
   const margin = await boxOf(page, ".sheet-margin");
@@ -169,7 +170,12 @@ await scenario("many threads from one message: four shown, the rest a press away
   await page.locator(".note-more").click();
   assert.equal(await page.locator(".margin-note[data-note='call:spawn-many'] .note-item").count(), 10);
   await settle(page);
-  assert.equal((await notes(page)).overlap, false, "the notes below moved down");
+  assert.equal((await notes(page)).overlap, false, "the notes made room");
+  // near the end they move up rather than lengthen the page; a note moved off its message draws no tie to it
+  for (const box of (await notes(page)).boxes) {
+    const tied = await page.locator(`.margin-note[data-note="${box.row}"]`).evaluate(element => element.classList.contains("level"));
+    assert.equal(tied, Math.abs(box.top - await anchorTop(page, box.row)) < 3, `${box.row}: tied only when level`);
+  }
   const [scroll, content] = await page.locator(".transcript").evaluate(element => [element.scrollHeight, (element.querySelector(".transcript-page") as HTMLElement).offsetHeight + parseFloat(getComputedStyle(element).paddingTop) + parseFloat(getComputedStyle(element).paddingBottom)]);
   assert.ok(scroll <= content + 1, "still no longer than the conversation");
   await shoot(page, "sheet-desktop-many");

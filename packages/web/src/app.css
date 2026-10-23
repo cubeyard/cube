@@ -1657,7 +1657,7 @@ a.report-name:hover { color: var(--signal); text-decoration: underline; text-und
 .margin-notes { position: absolute; inset: 0; }
 .margin-note { position: absolute; left: 0; right: 0; visibility: hidden; transition: top 120ms ease; }
 .margin-note.placed { visibility: visible; }
-.margin-note::before {
+.margin-note.level::before {
   content: ""; position: absolute; left: -2.25rem; top: 0.95rem; width: 1.5rem;
   border-top: 1px solid var(--line);
 }

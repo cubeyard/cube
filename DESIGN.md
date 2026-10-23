@@ -617,7 +617,8 @@ message), each thread and artifact once, at its first row shown. A note is
 flush: a lamp (a file mark for an artifact), the 13px/600 title clamped to
 two lines, one 12px `--ink-3` line of state in cubed's words (`turn ended`,
 `machine failed` in `--bad`, `not known to cube`, `state not read`); a short
-`--line` hairline reaches toward its message. A press opens it in place on a
+`--line` hairline reaches toward its message while the note stands level
+with it (a note moved off its message draws none). A press opens it in place on a
 hairline frame: short id, start time, the thread's newest report among the
 rows shown with the way to it, then `open thread` or `read` in signal ink.
 Four items per note, then `n more`. Notes go down past a taller one and up
