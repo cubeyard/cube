@@ -234,8 +234,10 @@ margin, index and work key, auth). States are words: quiet silkscreen ink,
 failures in `--bad` ink, ready silent, each with an accessible name; nothing
 blinks or pulses. The light and dark palettes are unchanged; `--lamp-*`
 tokens became `--ok` and `--wait` for the two document marks that need them.
-DESIGN.md's Printed State Rule. `.impeccable/design.json` (a generated
-sidecar, unchanged since the first release) still describes lamps.
+DESIGN.md's Printed State Rule; `.impeccable/design.json` (the design
+panel's sidecar) was corrected to match: no lamp tokens, motion or
+components, a State Words component instead. An artifact's file mark in the
+chat's margin and index is a kind, not a state, and stays.
 
 ## Images in the chat
 

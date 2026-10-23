@@ -231,7 +231,9 @@ dots, glows, halos, pulses or blinking, anywhere. Moving states (`working…`,
 `running`, `starting the thread's machine`) are quiet silkscreen words; a
 failure is the same word in `--bad` ink with its full text where the Full
 Failure Rule applies; ready, done and signed in are the default and say
-nothing or almost nothing. Each state keeps an accessible name.
+nothing or almost nothing. Each state keeps an accessible name. A mark of
+kind is not a state: an artifact's file mark in the chat's margin and index
+stays.
 
 **The One Glass Rule.** Code is one material in both themes. The `--glass*`
 and `--syn-*` tokens are defined once on `:root` and never overridden. Audit:
@@ -613,7 +615,8 @@ At 76rem and wider, a margin to the right of the centred column (up to
 One note per message that started threads (a spawn's result lines) or named
 an artifact (a write or edit result, a `#/a/` link in a reply, a comment
 message), each thread and artifact once, at its first row shown. A note is
-flush: the 13px/600 title clamped to
+flush: the 13px/600 title (an artifact's after its `--ink-3` file mark, its
+kind) clamped to
 two lines, one 12px `--ink-3` line of state in cubed's words (`turn ended`,
 `machine failed` in `--bad`, `reading state…` until cube has answered,
 `state not read` when it could not, `not known to cube` only once both the
@@ -639,7 +642,8 @@ system's floating surface: `--s4`, `--line-2` border, well radius,
 filter field (14px, 16px on a phone; focused, a 2px signal rule under the
 row) and a close key (a 2.75rem hit area on touch),
 then the chat's threads (failed, moving, the rest; title, state ·
-project), archived and lost counts, the newest artifacts, the places
+project), archived and lost counts, the newest artifacts (each after its file
+mark), the places
 (threads, artifacts, projects, settings) and the chat's model select and
 memory toggle. Opened by the work key, the wordmark, `/` outside a field and
 ctrl/⌘ k. A key, `/`, ctrl/⌘ k or a mouse puts focus in the filter; a tap

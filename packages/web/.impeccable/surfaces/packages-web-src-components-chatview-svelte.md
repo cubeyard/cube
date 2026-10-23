@@ -49,7 +49,7 @@ and settings.
   read, the thread is in neither and the overview counts lost threads. An artifact
   link cube cannot resolve gets no note. No need-user state is invented: only
   a failure (`failing`) is pinned.
-- **A note** is the title and one line
+- **A note** is the title (an artifact's after its file mark, its kind) and one line
   of state. A press opens it in place: short id, start time, the thread's
   newest report among the rows shown (with the way to it), and the full view
   (`open thread`, `read`). Escape folds it and returns focus to its head.
