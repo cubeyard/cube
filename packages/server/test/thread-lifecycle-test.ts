@@ -12,14 +12,21 @@
  *       did not finish: it is woken once and the run finishes.
  *   R2b a restart over a `waking` whose machine the runner already runs: the
  *       suspension is cleared, nothing is started.
- *   T   recoveryStep, the recovery round's rule, over every kind of thread. */
+ *   T   recoveryStep, the recovery round's rule, over every kind of thread.
+ *   R4  one slot: a wake does not take the slot the registry gave a new
+ *       thread; it waits, and resumes once that thread is archived.
+ *   R5  one slot taken: archiving a suspended thread keeps its disk
+ *       unchecked at once (no wait for a slot); with a slot free its machine
+ *       is woken, checked and deleted. Nothing starts an archived thread.
+ *   R6  a runner fuller than the registry knows: a new machine waits for a
+ *       slot (not a failure) and starts once one frees. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Thread } from "../src/registry.ts";
 import { recoveryStep } from "../src/thread-recovery.ts";
-import { lifecycle, until, type Cubed } from "./lifecycle-fixture.ts";
+import { lifecycle, Phase, until, type Cubed } from "./lifecycle-fixture.ts";
 
 {
   const t = (workspaceState: Thread["workspaceState"], suspension?: "suspended" | "waking", extra: Partial<Thread> = {}) =>
@@ -126,7 +133,7 @@ try {
   await idle(cubed);
   assert.equal(fresh(b.id).vm?.suspension?.state, "suspended");
   registry.updateThreadVm(b.id, { suspension: { ...fresh(b.id).vm!.suspension!, state: "waking" } });
-  berth.phases.set(vmOf(b.id), 4 /* RUNNING */);
+  berth.phases.set(vmOf(b.id), Phase.RUNNING);
   await cubed.close();
   const startsBefore = berth.starts();
   cubed = life.start();
@@ -140,6 +147,94 @@ try {
 } finally {
   await cubed.close().catch(() => {});
   berth.stopAll();
-  fs.rmSync(root, { recursive: true, force: true });
 }
+
+// One slot, a fresh cubed for each of R4–R6.
+{
+  const one = lifecycle(path.join(root, "one"), { slots: 1, wakeWaitMs: 20_000 });
+  const { registry, berth, clock, fresh, vmOf, held } = one;
+  const cubed = one.start();
+  const status = async (id: string) => (await cubed.conversations.storedHistory(id, { limit: 1 }))?.status;
+  const done = (id: string) => until(`${id.slice(0, 8)} settles`, async () => { const s = await status(id); return !!s && s.state !== "working" && s.state !== "idle"; });
+  const idle = async () => { clock.now += 40 * 60_000; for (let round = 0; round < 3; round++) await cubed.conversations.suspendIdle(); };
+  /** I4: the registry never counts fewer machines than the runner holds, nor more than its slots. */
+  const slots = (what: string) => {
+    assert.ok(berth.holding() <= held() && held() <= berth.slots, `${what}: runner holds ${berth.holding()}, registry ${held()}, slots ${berth.slots}`);
+  };
+  try {
+    // ---------------------------------------------------------------- R4
+    const a = one.thread();
+    await cubed.conversations.activate(a.id);
+    await done(a.id);
+    await idle();
+    assert.equal(fresh(a.id).vm?.suspension?.state, "suspended");
+    const b = one.thread();
+    slots("a new thread reserved the slot a freed");
+    // A message to a while b's machine does not exist yet.
+    const told = cubed.conversations.submit(a.id, "wake up", "tell-a");
+    await until("a's wake waits", () => fresh(a.id).vm?.suspension?.waiting !== undefined);
+    assert.equal(berth.resumes(vmOf(a.id)), 0, "the wake did not take b's slot");
+    slots("a waits");
+    await cubed.conversations.activate(b.id);
+    assert.equal(fresh(b.id).workspaceState, "available", `b starts in its slot: ${cubed.conversations.error(b.id)}`);
+    slots("b runs");
+    await told;
+    await done(b.id);
+    const archived = await cubed.conversations.archive(b.id);
+    assert.equal(archived.retained, false);
+    await done(a.id);
+    assert.equal(berth.resumes(vmOf(a.id)), 1, "a resumed once b's slot was free");
+    assert.equal((await status(a.id))?.state, "completed", "and its run finished");
+    slots("a runs");
+    console.log("ok: R4 a wake waits for the slot a new thread was given, and resumes once it frees");
+
+    // ---------------------------------------------------------------- R5
+    await idle();
+    const c = one.thread();
+    await cubed.conversations.activate(c.id);
+    await done(c.id);
+    assert.equal(berth.running(), 1, "c holds the only slot");
+    const began = Date.now();
+    const kept = await cubed.conversations.archive(a.id);
+    const took = Date.now() - began;
+    assert.ok(took < 5_000, `the archive did not wait for a slot (${took} ms)`);
+    assert.equal(kept.retained, true);
+    assert.match(kept.reason, /suspended and was not woken to check it \(waiting for a free slot on runner node-life.*\); its disk is kept unchecked/);
+    assert.equal(berth.resumes(vmOf(a.id)), 1, "a was not woken for the archive");
+    assert.equal(berth.phases.get(vmOf(a.id)), Phase.RETAINED, "its disk is kept on the runner");
+    const after = berth.events.length;
+    await assert.rejects(cubed.machines.start(fresh(a.id)), /thread not found/, "nothing starts an archived thread's machine");
+    await assert.rejects(cubed.conversations.submit(a.id, "again", "tell-a-2"), /thread not found/);
+    await cubed.conversations.recover();
+    assert.deepEqual(berth.touched(vmOf(a.id), after), [], "the archived machine was not asked for anything");
+    slots("a archived");
+    // With a slot free the machine is woken, checked and deleted.
+    await idle();
+    const resumes = berth.resumes(vmOf(c.id));
+    const clean = await cubed.conversations.archive(c.id);
+    assert.deepEqual([clean.retained, berth.resumes(vmOf(c.id)) - resumes, berth.phases.has(vmOf(c.id))], [false, 1, false], `c was woken for its check and deleted (${clean.reason})`);
+    slots("c archived");
+    console.log("ok: R5 archiving a suspended thread on a full runner keeps its disk unchecked at once; with a slot free it is checked and deleted; nothing starts an archived thread");
+
+    // ---------------------------------------------------------------- R6
+    berth.slots = 0;
+    const d = one.thread();
+    await cubed.conversations.activate(d.id);
+    assert.equal(fresh(d.id).workspaceState, "allocating", `d waits, it did not fail: ${fresh(d.id).workspaceError}`);
+    assert.match(cubed.conversations.waiting(d.id) ?? "", /waiting for a free slot on runner node-life/);
+    assert.equal(cubed.conversations.error(d.id), null);
+    assert.equal(fresh(d.id).vm?.steps?.find(step => step.name === "boot")?.state, "interrupted", "its boot step says it was interrupted, not failed");
+    berth.slots = 1;
+    await cubed.conversations.recover();
+    assert.equal(fresh(d.id).workspaceState, "available", "it starts once the runner has room");
+    slots("d runs");
+    console.log("ok: R6 a new machine on a runner fuller than the registry knows waits for a slot, then starts");
+    assert.deepEqual(berth.violations, []);
+  } finally {
+    await cubed.close().catch(() => {});
+    berth.stopAll();
+    void registry;
+  }
+}
+fs.rmSync(root, { recursive: true, force: true });
 process.exit(0);
