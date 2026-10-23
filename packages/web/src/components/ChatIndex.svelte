@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick, type Snippet } from "svelte";
+  import { COMPACT_MEDIA } from "../lib/keyboard.ts";
   import { relTime } from "../lib/time.ts";
   import { failing, moving, stateText } from "../lib/work-state.ts";
   import type { ChatWork } from "../lib/work.svelte.ts";
@@ -19,6 +20,32 @@
   let input = $state<HTMLInputElement>();
   let opener: HTMLElement | null = null;
 
+  // On a phone the index is the whole screen, and the screen is what the
+  // on-screen keyboard leaves of it: the visual viewport. iOS keeps the
+  // layout viewport whole under its keyboard, so a fixed sheet would run on
+  // behind it; the sheet takes the visual viewport's height and offset.
+  let room = $state<{ top: number; height: number } | null>(null);
+  function fit(): void {
+    const view = window.visualViewport;
+    room = dialog?.open && view && matchMedia(COMPACT_MEDIA).matches ? { top: view.offsetTop, height: view.height } : null;
+  }
+  let unfit: (() => void) | null = null;
+  function follow(): void {
+    unfit?.();
+    const view = window.visualViewport;
+    fit();
+    view?.addEventListener("resize", fit);
+    view?.addEventListener("scroll", fit);
+    window.addEventListener("resize", fit);
+    unfit = () => {
+      view?.removeEventListener("resize", fit);
+      view?.removeEventListener("scroll", fit);
+      window.removeEventListener("resize", fit);
+      unfit = null;
+      room = null;
+    };
+  }
+
   /** `touch`: opened by a tap. Then the sheet itself takes focus, not the
    * filter, so no on-screen keyboard rises over it; the filter is a tap away.
    * Opened by a key or a mouse, the filter takes focus for typing at once. */
@@ -29,6 +56,7 @@
     // showModal focuses the dialog itself when it carries autofocus, else its first field
     dialog.toggleAttribute("autofocus", !!options.touch);
     dialog.showModal();
+    follow();
     await tick();
     if (options.touch) dialog.focus({ preventScroll: true });
     else input?.focus();
@@ -68,6 +96,7 @@
   }
 
   function onClose(): void {
+    unfit?.();
     // Back to where the reader was, unless a link took them elsewhere.
     if (opener?.isConnected) opener.focus({ preventScroll: true });
     opener = null;
@@ -77,6 +106,7 @@
 <!-- a press on the backdrop closes it, as escape does -->
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
 <dialog class="chat-index" bind:this={dialog} aria-label="index" tabindex="-1" onclose={onClose} onkeydown={onKeydown}
+  style:top={room ? `${room.top}px` : null} style:height={room ? `${room.height}px` : null}
   onclick={(event) => { if (event.target === dialog) dialog?.close(); else if ((event.target as Element).closest("a[href]")) dialog?.close(); }}>
   <div class="index-filter">
     <span class="index-search"><Icon name="search" size={14} /></span>

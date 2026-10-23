@@ -67,8 +67,9 @@ and settings.
   stay the links they are in the text, so nothing shows twice.
 - **The index.** The composer's work key (the index mark and, in words, what
   failed, else what runs), the wordmark, `/` outside a field and
-  ctrl/⌘ k open one dialog that rises from the composer (a bottom sheet on a
-  phone): a filter; the chat's threads, failed then moving then the rest;
+  ctrl/⌘ k open one dialog that rises from the composer (on a phone the whole
+  screen, sized to the visual viewport so the keyboard never covers the
+  filter or its results while the user types): a filter; the chat's threads, failed then moving then the rest;
   the newest artifacts; the places (threads, artifacts, projects, settings);
   the chat's model and memory. A key or a mouse focuses the filter; a tap
   focuses the sheet, so no keyboard rises; a close key is always there.

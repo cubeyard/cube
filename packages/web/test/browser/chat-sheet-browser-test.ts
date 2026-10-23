@@ -414,6 +414,8 @@ await scenario("a mouse or a key opens the index with the filter ready to type, 
   const input = page.locator(".chat-index input[type=search]");
   await page.waitForFunction(() => document.activeElement?.matches(".chat-index input"));
   assert.notEqual(await page.locator(".index-filter").evaluate(element => getComputedStyle(element).boxShadow), "none", "the focused filter shows its rule");
+  const floating = await boxOf(page, ".chat-index");
+  assert.ok(floating.width <= 576.5 && floating.top > 100 && floating.bottom < desktop.height - 40, `on a desktop the index still rises over the composer, not over the screen: ${JSON.stringify(floating)}`);
   await page.keyboard.press("Escape");
   await page.keyboard.press("Control+k");
   await input.waitFor();

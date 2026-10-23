@@ -186,7 +186,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
   }
 
   const phone = { width: 375, height: 667 };
-  await scenario(browser, engine, "the work key raises the index as a sheet: threads, places, model and memory at a fingertip", phone, "chat", async (page, host) => {
+  await scenario(browser, engine, "the work key raises the index over the whole screen: threads, places, model and memory at a fingertip", phone, "chat", async (page, host) => {
     await page.locator(".composer .work-key").tap();
     const index = page.locator(".chat-index");
     await index.locator(".index-row").first().waitFor();
@@ -195,8 +195,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.equal(await keyboard(page), null, "no keyboard rises");
     await assertHitArea(page, ".chat-index .index-close");
     const sheet = await box(page, ".chat-index");
-    assert.ok(Math.abs(sheet.bottom - phone.height) <= 1 && sheet.width >= phone.width - 1, `a sheet from the bottom edge: ${JSON.stringify(sheet)}`);
-    assert.ok(sheet.top >= phone.height * 0.1, "the sheet leaves the top in view");
+    assert.ok(Math.abs(sheet.top) <= 1 && Math.abs(sheet.bottom - phone.height) <= 1 && sheet.width >= phone.width - 1, `the index is the whole screen: ${JSON.stringify(sheet)}`);
     const heights = await index.locator(".index-row").evaluateAll(all => all.map(row => row.getBoundingClientRect().height));
     assert.ok(heights.every(height => height >= 43.9), `each row is a fingertip high: ${heights}`);
     assert.deepEqual(await index.locator(".index-places a").allTextContents(), ["threads", "artifacts", "projects", "settings"]);
@@ -316,6 +315,54 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.ok((await box(page, ".composer")).bottom <= 667);
     await assertNoSideways(page);
   });
+
+  for (const ios of [false, true]) {
+    const way = ios ? "visual viewport only (iOS)" : "whole viewport (Android)";
+    await scenario(browser, engine, `typing in the index's filter with the keyboard up, ${way}: the index is the whole screen above it, its results scroll on their own`, { ...phone, ios }, "chat", async (page, host) => {
+      // enough threads that the results outgrow the room the keyboard leaves
+      host.overview = { threads: Array.from({ length: 14 }, (_, n) => ({ id: `t${n}`, title: n === 3 ? "fix the flaky artifact test" : `thread number ${n} about the gateway`, state: n % 3 ? "completed" : "working",
+        project: { id: "p1", name: "cube" }, archived: false, spawned: null })), archived: { shown: 0, total: 0 }, unknown: 0 };
+      await page.locator(".composer .work-key").tap();
+      const index = page.locator(".chat-index");
+      await index.locator(".index-row").nth(13).waitFor({ state: "attached" });
+      const filter = index.locator("input[type=search]");
+      await filter.tap();
+      // the keyboard rises over the bottom 320px, as the user types
+      const room = phone.height - 320;
+      if (ios) await page.evaluate(height => (window.visualViewport as unknown as { set: (h: number) => void }).set(height), room);
+      else await page.setViewportSize({ width: phone.width, height: room });
+      await settle(page);
+      await page.keyboard.type("gateway");
+      await settle(page);
+      assert.equal(await page.evaluate(() => (document.activeElement as HTMLInputElement | null)?.value), "gateway", "the filter keeps focus and the words typed");
+      const sheet = await box(page, ".chat-index");
+      assert.ok(Math.abs(sheet.top) <= 1 && Math.abs(sheet.bottom - room) <= 1 && sheet.left <= 0.5 && sheet.width >= phone.width - 1,
+        `the index fills the room above the keyboard: ${JSON.stringify(sheet)} in ${phone.width}x${room}`);
+      const field = await box(page, ".chat-index input[type=search]");
+      assert.ok(field.top >= 0 && field.bottom <= room, `the filter is in view: ${field.top}–${field.bottom} of ${room}`);
+      const close = await box(page, ".chat-index .index-close");
+      assert.ok(close.top >= 0 && close.bottom <= room, "the close key is in view");
+      const first = await box(page, ".chat-index .index-row");
+      assert.ok(first.top >= field.bottom && first.bottom <= room, `the first result is in view: ${first.top}–${first.bottom} of ${room}`);
+      assert.equal(await index.locator(".index-row[href^='#/t/']").count(), 13, "the filter narrows the results");
+      // the results scroll on their own; the filter and the page stay put
+      const scrolled = await page.locator(".chat-index .index-body").evaluate(body => { body.scrollTop = body.scrollHeight; return { top: body.scrollTop, room: body.scrollHeight - body.clientHeight }; });
+      assert.ok(scrolled.room > 0 && scrolled.top > 0, `the results scroll: ${JSON.stringify(scrolled)}`);
+      await settle(page);
+      assert.deepEqual(await box(page, ".chat-index input[type=search]"), field, "the filter stays where it is");
+      assert.equal(await page.evaluate(() => [window.scrollY, document.scrollingElement?.scrollTop ?? 0].join()), "0,0", "the page behind does not scroll");
+      await assertNoSideways(page);
+      await shoot(page, engine, `index-filter-keyboard-${ios ? "ios" : "android"}-375x667`, room);
+      // closing gives focus back to the key that opened it
+      await page.locator(".chat-index .index-close").tap();
+      await index.waitFor({ state: "hidden" });
+      await page.waitForFunction(() => document.activeElement?.classList.contains("work-key"));
+      if (ios) await page.evaluate(() => (window.visualViewport as unknown as { set: (h: null) => void }).set(null));
+      else await page.setViewportSize({ width: phone.width, height: phone.height });
+      await settle(page);
+      assert.equal(await keyboard(page), null, "no field, no keyboard");
+    });
+  }
 
   await scenario(browser, engine, "the index's model choice is no keyboard", phone, "chat", async page => {
     await page.locator(".composer .work-key").tap();

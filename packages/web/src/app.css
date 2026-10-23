@@ -1803,13 +1803,19 @@ button.note-head:hover { background: var(--s3); }
   .index-row { min-height: 2.75rem; align-content: center; }
   .sheet-note .note-head { min-height: 2.75rem; align-items: center; }
 }
-@media (max-width: 40rem) {
+/* a phone (lib/keyboard.ts COMPACT_MEDIA): the index is the whole screen,
+   the filter on top, the results scrolling under it; its height is the
+   visual viewport's (ChatIndex), so a keyboard never covers filter or results */
+@media (max-width: 40rem), (pointer: coarse) and (max-height: 30rem) {
   .chat-index {
-    width: 100vw; max-width: 100vw; max-height: 85dvh; margin: auto 0 0;
-    border-width: 1px 0 0; border-radius: var(--r-well) var(--r-well) 0 0;
-    padding-bottom: env(safe-area-inset-bottom);
+    inset: 0 auto auto 0; width: 100vw; max-width: 100vw; height: 100dvh; max-height: none; margin: 0;
+    border: 0; border-radius: 0; box-shadow: none;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
   }
+  .chat-index[open] { animation: none; }
+  .index-filter { padding-inline: 1rem 0.35rem; }
   .index-filter input { font-size: 16px; }
+  .index-close { width: 2.75rem; height: 2.75rem; }
   .index-meta { max-width: 9rem; }
   .index-model select { font-size: 16px; max-width: 12rem; }
 }
