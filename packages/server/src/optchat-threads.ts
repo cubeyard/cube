@@ -37,6 +37,12 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
     if (conversations.starting(id)) return `starting its machine again (the last try failed: ${error})`;
     return conversations.agentOpen(id) ? `ready (a later check of its machine failed: ${error})` : `error: ${error}`;
   };
+  /** A machine that is suspended, or being woken by someone who asked for it
+   * (a message, the user opening it, a start a restart cut short). Watching
+   * or listing it reads what cubed stored; it never wakes the machine. */
+  const dormant = (thread: Thread | null) => !!thread && !thread.archived && !!thread.vm?.suspension;
+  const sleepText = (thread: Thread) => thread.vm?.suspension?.state === "waking"
+    ? `its machine is being woken${thread.vm.suspension.waiting ? ` (${thread.vm.suspension.waiting})` : ""}` : "its machine is suspended (idle; it wakes when told)";
   return {
     async projects() {
       const projects = registry.listProjects();
@@ -104,11 +110,14 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         let run = "";
         if (!thread.archived && !conversations.starting(id) && (!(conversations.error(id) || conversations.waiting(id)) || conversations.agentOpen(id))) {
           try {
-            const status = (await conversations.history(id)).status;
-            run = `, ${status.state}${status.waiting?.length && status.state !== "working" ? `, waiting on ${agents(status.waiting)}` : ""}`;
+            // A listing reads: the live run from an agent already open, else
+            // the stored one. It never opens an agent (which takes the
+            // workspace's lease and replays what the agent left running).
+            const status = conversations.agentOpen(id) ? (await conversations.history(id)).status : (await conversations.storedHistory(id, { limit: 1 }))?.status;
+            if (status) run = `, ${status.state}${status.waiting?.length && status.state !== "working" ? `, waiting on ${agents(status.waiting)}` : ""}`;
           } catch { /* the state says enough */ }
         }
-        lines.push(`[${id.slice(0, 8)}] ${project} · ${thread.title ?? "untitled"} · ${thread.archived ? "archived" : state(id)}${run}`);
+        lines.push(`[${id.slice(0, 8)}] ${project} · ${thread.title ?? "untitled"} · ${thread.archived ? "archived" : dormant(thread) ? sleepText(thread) : state(id)}${run}`);
       }
       return lines.join("\n") || "no threads";
     },
@@ -186,7 +195,12 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       };
       const left = gone();
       if (left !== false) return left;
-      await conversations.activate(id);
+      // Watching a sleeping machine wakes nothing: with its agent open the
+      // agent's own events are watched as they are; without, the watcher
+      // reads the stored run and looks again later.
+      const sleeping = dormant(registry.getThread(id));
+      if (sleeping && !conversations.agentOpen(id)) return "suspended";
+      if (!sleeping) await conversations.activate(id);
       // A wait for a runner counts as a start not made yet: reported once it lasts.
       const failure = conversations.error(id) ?? (conversations.agentOpen(id) ? null : conversations.waiting(id));
       // An agent open on the machine runs on whatever a later check found.

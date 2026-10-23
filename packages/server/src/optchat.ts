@@ -197,8 +197,10 @@ export interface OptThreads {
   /** One line per thread: its state and title. */
   describe(ids: readonly string[]): Promise<string>;
   /** The thread's events; null once it is archived or gone; "archiving"
-   * while its archive (or a release left unfinished) goes on. */
-  events(id: string): Promise<ThreadEvents | null | "archiving">;
+   * while its archive (or a release left unfinished) goes on; "suspended"
+   * while its machine is suspended or being woken and its agent is not open:
+   * nothing is started for a watcher, whose report comes from `history`. */
+  events(id: string): Promise<ThreadEvents | null | "archiving" | "suspended">;
   /** What cubed has of a thread, read only: its own record beside a page of
    * the agent's stored transcript, which may disagree. null: no such thread. */
   history(id: string, request?: HistoryRequest): Promise<ThreadRecord | null>;
@@ -1390,7 +1392,7 @@ export class OptChat {
     for (const id of Object.keys(settings?.threads ?? {})) {
       if (this.watchers.has(id)) continue;
       const watching = (async () => {
-        let events: ThreadEvents | null | "archiving";
+        let events: ThreadEvents | null | "archiving" | "suspended";
         try { events = await this.options.threads.events(id); }
         catch (error) {
           // cubed retries a machine that failed to start (a lost guest, a
@@ -1413,6 +1415,14 @@ export class OptChat {
         this.startFailing.delete(id);
         // An archive may still be refused: the next round looks again.
         if (events === "archiving") { this.watchers.delete(id); return null; }
+        // A sleeping machine is not woken to be watched: its stored run, if
+        // it settled, reports (once: the report's request id), and the next
+        // round looks again, watching it once something has woken it.
+        if (events === "suspended") {
+          await this.reportStored(id);
+          this.watchers.delete(id);
+          return null;
+        }
         if (!events || this.closing) return null;
         const watch = await events.watch(transcript => this.observe(id, transcript), { onEnd: () => { this.watchers.delete(id); } });
         // An archived thread's source closes; the next round finds it gone.
@@ -1434,14 +1444,15 @@ export class OptChat {
       .catch(error => { if (!this.closing) log.warn("report delivery failed", { thread: id, error }); });
   }
 
-  /** After an archive: the thread's last settled run reports to the chat if
-   * its watcher had not sent that yet (archiving ends the watch). The report's
-   * request id keeps it to one delivery. */
-  private async reportArchived(id: string): Promise<void> {
+  /** After an archive, or for a thread whose machine sleeps: the thread's
+   * last settled run, as stored, reports to the chat if no watcher sent it
+   * yet. A run still open (or none) reports nothing. The report's request id
+   * keeps it to one delivery. */
+  private async reportStored(id: string): Promise<void> {
     try {
       const page: HistoryPage | null | undefined = (await this.options.threads.history(id, { limit: 1 }))?.transcript;
       if (page) this.settle(id, page.status, () => runReport(page.status, page.answer && page.answer.index > page.asked ? page.answer.text : ""));
-    } catch (error) { log.warn("archived thread's report not checked", { thread: id, error }); }
+    } catch (error) { log.warn("stored report not checked", { thread: id, error }); }
   }
 
   /** The thread a short id names, among the ones this chat started. */
@@ -1665,7 +1676,7 @@ export class OptChat {
             const line = `${name} ${result.already && prior === undefined ? "was already archived" : "archived"}: ${result.disk}; history still reads it`;
             await record(id, line, result.free);
             lines.push(line);
-            await this.reportArchived(id);
+            await this.reportStored(id);
           } catch (error) {
             if (callContext.abortSignal?.aborted) throw error;
             lines.push(`${name} not archived: ${error instanceof Error ? error.message : String(error)}`);
