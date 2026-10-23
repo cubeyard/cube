@@ -1,7 +1,7 @@
 /* ============================================================ tokens
    THE BENCH INSTRUMENT. cube rendered as a machine you own: a putty
    enclosure (black edition in dark), recessed display wells, raised keys
-   with real travel, LED state lamps, lowercase silkscreen labels, one
+   with real travel, states printed as words, lowercase silkscreen labels, one
    signal orange. Surfaces live on a NUMBERED ramp (s0 deepest recess ->
    s4 reading field); nothing outside the ramp. Depth is physical:
    wells are inset, keys cast a small offset shadow. */
@@ -29,14 +29,10 @@
   --signal-ink: #ffffff;
   --signal-soft: rgba(204, 63, 0, 0.12);
 
-  /* lamps (state is a lamp, never a tint of text) */
-  --lamp-green: #2e7d4a;
-  --lamp-amber: #b06f14;
-  --lamp-red: #b13421;
-  --lamp-blue: #3d6b96;
-  /* an off lamp is a dark lens, present and readable, not absence */
-  --lamp-lens: #c9c3b4;
-  --lamp-ring: rgba(38, 35, 28, 0.3);
+  /* state inks: a state is printed in words; these tint only the few that
+     must stand apart (done, waiting marks in a document); failure is --bad */
+  --ok: #2e7d4a;
+  --wait: #b06f14;
 
   /* notice inks (banners) */
   --bad: #a03522;
@@ -78,7 +74,6 @@
   --face-rest: transparent;
 
   /* physical depth */
-  --shadow-lamp: inset 0 1px 2px rgba(0, 0, 0, 0.35);
   --shadow-key: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 1px 2px rgba(38, 32, 18, 0.22);
   --shadow-key-down: 0 1px 0 rgba(255, 255, 255, 0.4) inset, 0 0 1px rgba(38, 32, 18, 0.2);
   --shadow-well: inset 0 1px 3px rgba(38, 32, 18, 0.14), inset 0 0 0 1px rgba(38, 32, 18, 0.05);
@@ -118,12 +113,8 @@
     --signal: #ff5a14;
     --signal-ink: #1c0d03;
     --signal-soft: rgba(255, 90, 20, 0.14);
-    --lamp-green: #57c97e;
-    --lamp-amber: #e5a33c;
-    --lamp-red: #e5604a;
-    --lamp-blue: #6fa3d8;
-    --lamp-lens: #26262c;
-    --lamp-ring: rgba(234, 232, 226, 0.22);
+    --ok: #57c97e;
+    --wait: #e5a33c;
     --bad: #e5604a;
     --bad-soft: rgba(229, 96, 74, 0.09);
     --bad-line: rgba(229, 96, 74, 0.35);
@@ -215,7 +206,7 @@ kbd {
   color: var(--ink-3);
 }
 
-/* screen-reader-only text: state that only a lamp carries visually */
+/* screen-reader-only text: what the eye reads from the layout alone */
 .sr-only {
   position: absolute; width: 1px; height: 1px;
   padding: 0; margin: -1px; overflow: hidden;
@@ -227,26 +218,21 @@ kbd {
 .banner, .module, .files-shelf, .empty-state, .strip-note {
   animation: settle-in 140ms ease-out;
 }
-/* lamps warm up once when a panel arrives */
-@keyframes lamp-on { from { opacity: 0; } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 
-/* ============================================================ lamps */
-.lamp {
-  width: 8px; height: 8px; border-radius: 50%; flex: none;
-  background: var(--lamp-lens);
-  box-shadow: var(--shadow-lamp), 0 0 0 1px var(--lamp-ring);
+/* ============================================================ states
+   A state is printed, never lit: no dots, glows, halos or blinking. Quiet
+   words in silkscreen ink; a failure in --bad ink; ready is the default
+   and says nothing. */
+.tool-state {
+  flex: none; color: var(--ink-3); font-size: 11.5px; letter-spacing: 0.02em; white-space: nowrap;
 }
-.lamp.on-green { background: var(--lamp-green); box-shadow: 0 0 5px 0 color-mix(in srgb, var(--lamp-green) 55%, transparent); }
-.lamp.on-amber { background: var(--lamp-amber); box-shadow: 0 0 5px 0 color-mix(in srgb, var(--lamp-amber) 55%, transparent); }
-.lamp.on-red   { background: var(--lamp-red);   box-shadow: 0 0 5px 0 color-mix(in srgb, var(--lamp-red) 55%, transparent); }
-.lamp.on-blue  { background: var(--lamp-blue);  box-shadow: 0 0 5px 0 color-mix(in srgb, var(--lamp-blue) 55%, transparent); }
-.lamp.blink { animation: lamp-blink 1.2s ease-in-out infinite; }
-@keyframes lamp-blink { 50% { opacity: 0.3; } }
-.lamp.mini { width: 6px; height: 6px; }
+.tool-state.failure { color: var(--bad); }
+/* the failure words that replaced red lamps: a project in error, usage unknown */
+.project-state-readout .error, .runner-identity strong.error { color: var(--bad); }
 
 /* ============================================================ keys
    Raised controls with real travel: hover brightens the face, press
@@ -288,7 +274,7 @@ kbd {
 }
 
 /* ============================================================ header
-   The instrument's top panel: wordmark engraving left, lamps and keys
+   The instrument's top panel: wordmark engraving left, state words and keys
    right, a machined seam below. */
 header {
   display: flex; gap: 0.9rem; align-items: center;
@@ -318,15 +304,12 @@ header nav a:hover { color: var(--ink); }
 header nav a.active { color: var(--ink); border-bottom-color: var(--signal); }
 header .spacer { margin-left: auto; }
 
-/* lamp field: every header lamp carries its silkscreen label */
-.lamp-field {
+/* auth: a quiet word when fine, a printed warning when broken */
+.auth-ok {
   display: flex; align-items: center; gap: 0.4rem;
-  font-size: 11px; font-weight: 550; letter-spacing: 0.1em;
+  font-size: 11px; font-weight: 550; letter-spacing: 0.08em;
   color: var(--ink-3); white-space: nowrap;
 }
-
-/* auth: a labeled lamp when fine, a printed warning when broken */
-.auth-ok { display: flex; align-items: center; gap: 0.4rem; }
 .auth-missing {
   display: flex; align-items: center; gap: 0.45rem;
   color: var(--bad); background: var(--bad-soft);
@@ -336,7 +319,7 @@ header .spacer { margin-left: auto; }
 .auth-short { display: none; }
 
 /* ============================================================ thread list
-   A recessed well holding one module per thread: lamp, title, meta —
+   A recessed well holding one module per thread: title, meta and state —
    and the actions live INSIDE the module, on its right edge. */
 /* the reading measure is padding, not a max-width, so the scrollbar sits
    at the window edge rather than beside the column */
@@ -394,17 +377,6 @@ header .spacer { margin-left: auto; }
   transition: background 120ms ease;
 }
 .module-face:hover { background: color-mix(in srgb, var(--s3) 55%, transparent); }
-/* staggered lamp check when the panel arrives; a blinking lamp keeps its
-   blink — the entrance and the state animation compose, never replace */
-.module .lamp { animation: lamp-on 300ms ease-out backwards; }
-.module .lamp.blink {
-  animation: lamp-on 300ms ease-out backwards, lamp-blink 1.2s ease-in-out infinite;
-}
-.module:nth-child(2) .lamp { animation-delay: 60ms; }
-.module:nth-child(3) .lamp { animation-delay: 120ms; }
-.module:nth-child(4) .lamp { animation-delay: 180ms; }
-.module:nth-child(5) .lamp { animation-delay: 240ms; }
-.module:nth-child(n + 6) .lamp { animation-delay: 300ms; }
 
 .module-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
 .module-title {
@@ -489,7 +461,7 @@ header .spacer { margin-left: auto; }
 .thread-navigation .auth-missing .auth-full { display: none; }
 .thread-navigation .auth-missing .auth-short { display: inline; }
 /* the docked sidebar is too narrow for the full panel: the glyph stands
-   for the name and the auth lamp keeps its label in its title */
+   for the name and the auth state keeps its words in its title */
 @media (min-width: 52.001rem) {
   .thread-navigation header nav { gap: 0.7rem; }
   .thread-navigation .name-text {
@@ -626,7 +598,7 @@ button.strip-machine[aria-expanded="true"] { color: var(--ink-2); text-decoratio
 
 /* ============================================================ thread sidebar
    A permanent channel bank beside the working surface. Every live thread is
-   one labeled selector with its own state lamp; no switcher mode to discover. */
+   one labeled selector with its own state in words; no switcher mode to discover. */
 .thread-body {
   flex: 1; min-height: 0; display: flex; position: relative;
 }
@@ -760,8 +732,6 @@ button.strip-machine[aria-expanded="true"] { color: var(--ink-2); text-decoratio
 .strip-note-text { flex: 1; min-width: 0; }
 .strip-note.bad { color: var(--bad); background: var(--bad-soft); border-bottom-color: var(--bad-line); }
 .strip-note a { color: var(--signal); text-underline-offset: 3px; }
-/* a lifecycle notice — setting up, waking — is a lamp and a line, never red */
-.strip-note.wait .lamp { flex: none; }
 .note-dismiss.key.icon { width: 1.6rem; height: 1.6rem; flex: none; margin-left: auto; }
 
 /* ============================================================ workspace split
@@ -969,7 +939,7 @@ button.strip-machine[aria-expanded="true"] { color: var(--ink-2); text-decoratio
 }
 /* the reading measure, centred in the pane */
 .transcript-column {
-  min-height: 100%; max-width: var(--col); margin: 0 auto;
+  max-width: var(--col);
   display: flex; flex-direction: column; gap: 1rem;
 }
 .conversation-empty {
@@ -1392,7 +1362,7 @@ select.compose-input {
      the keys keep their places */
   .thread-strip .bank-note { flex: 1 1 100%; order: 10; text-align: left; max-width: none; }
   .strip-title { display: none; }
-  /* first line: lamp, the thread switch and the archive key; the project,
+  /* first line: the thread switch and the archive key; the project,
      base, state and model wrap beneath, under the title */
   .mobile-thread-switch {
     order: 1; min-width: 0; flex: 1 1 calc(100% - 5rem);
@@ -1405,7 +1375,7 @@ select.compose-input {
   }
   .thread-strip .key-bank { order: 2; }
   .thread-strip > :is(.strip-project, .strip-base, .strip-machine, .strip-state, .strip-usage, .spacer, .strip-model) { order: 3; }
-  .thread-strip > .strip-project { margin-left: calc(8px + 0.6rem); }
+  .thread-strip > .strip-project { margin-left: 0; }
   .mobile-thread-switch span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mobile-thread-switch svg { flex: none; transform: rotate(-90deg); }
   .mobile-thread-switch.untitled { color: var(--ink-3); font-weight: 450; }
@@ -1442,7 +1412,7 @@ select.compose-input {
 }
 
 /* the narrowest phones: the destinations take their own row under the
-   wordmark and lamp, and scroll rather than push the page sideways */
+   wordmark, and scroll rather than push the page sideways */
 @media (max-width: 24rem) {
   header { flex-wrap: wrap; row-gap: 0.15rem; }
   header nav { order: 3; flex-basis: 100%; min-width: 0; overflow-x: auto; scrollbar-width: none; padding-block: 2px; }
@@ -1453,7 +1423,7 @@ select.compose-input {
 @media (max-width: 40rem) {
   header { gap: 0.6rem; padding: 0.5rem 0.8rem; }
   header nav { gap: 0.55rem; margin-left: 0; }
-  /* the lamp keeps a two-letter label rather than going mute */
+  /* the auth word shrinks to two letters rather than going mute */
   header .auth-ok .auth-full { display: none; }
   header .auth-ok .auth-short { display: inline; }
   header .auth-missing { padding-inline: 0.45rem; }
@@ -1538,14 +1508,13 @@ select.compose-input {
   /* 16px keeps iOS from zooming into the field */
   .composer textarea { font-size: 16px; }
   .composer .attach-key { border-radius: 50%; }
-  .composer :is(.attach-key, .send-key), .nav-menu-key, .strip-details-key, .mobile-thread-switch { position: relative; }
-  .composer :is(.attach-key, .send-key)::after, .nav-menu-key::after, .strip-details-key::after, .mobile-thread-switch::after {
+  .composer :is(.attach-key, .send-key, .work-key), .nav-menu-key, .strip-details-key, .mobile-thread-switch, .name-key { position: relative; }
+  .composer :is(.attach-key, .send-key, .work-key)::after, .nav-menu-key::after, .strip-details-key::after, .mobile-thread-switch::after, .name-key::after {
     content: ""; position: absolute;
     inset: min(0px, calc((100% - 2.75rem) / 2)) min(0px, calc((100% - 2.75rem) / 2));
   }
 
-  :root[data-keyboard] :is(.main-header, .chat-workspace > .work-panel, .chat-memory) { display: none; }
-  :root[data-keyboard] .chat-workspace { grid-template-columns: minmax(0, 1fr); }
+  :root[data-keyboard] :is(.main-header, .sheet-bar, .chat-memory) { display: none; }
   /* the keyboard sits where the home indicator's inset is */
   :root[data-keyboard] .composer { padding-bottom: 0.4rem; }
   :root[data-keyboard="tight"] .thread-strip { display: none; }
@@ -1558,8 +1527,7 @@ select.compose-input {
 /* a strip too narrow for one row: title and details key, the rest a tap
    away. Only the chat's and a thread's strips have the key; others keep theirs. */
 @media (max-width: 40rem), (pointer: coarse) and (max-height: 30rem) and (max-width: 52rem) {
-  /* the chat's threads head stays as tall as its strip */
-  .thread-strip:has(> .strip-details-key), .chat-workspace .work-head { --rail-pad: 0.25rem 0.8rem; }
+  .thread-strip:has(> .strip-details-key) { --rail-pad: 0.25rem 0.8rem; }
   .thread-strip:has(> .strip-details-key) { row-gap: 0.25rem; }
   .thread-strip:has(> .strip-details-key) > .spacer { display: none; }
   .mobile-thread-switch { flex: 1 1 0; }
@@ -1576,41 +1544,290 @@ select.compose-input {
   .thread-strip:has(> .strip-details-key) > .key-bank { margin-left: auto; }
 }
 
-/* ============================================================ chat memory
-   The view OptChat reads each turn, behind a key on the chat strip. */
+/* ============================================================ the sheet
+   OptChat, cube's home (A+ · ark med marg): one quiet sheet on the reading
+   field. No deck, seam, rail or panel: the wordmark (the way to the index)
+   and, only on failure, the auth chip; the conversation; one composer.
+   What the chat started and named stands in a margin beside the message
+   that says so (≥76rem) or as quiet lines under it. The bench instrument's
+   tokens and one signal stay; its physical costume does not. */
+.sheet-bar, .chat-sheet, .chat-sheet .composer { background: var(--s4); }
+header.sheet-bar {
+  border-bottom: 0; box-shadow: none;
+  padding: 0.4rem clamp(0.85rem, 3vw, 2rem);
+}
+.name-key {
+  margin-left: -0.5rem; padding: 0.35rem 0.5rem; border: 0; border-radius: var(--r-key);
+  background: transparent; cursor: pointer;
+  transition: background 120ms ease;
+}
+.name-key:hover { background: var(--s3); }
+.chat-sheet { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.chat-sheet > .conversation { background: var(--s4); }
+
+/* messages: no labels; the user's own words sit right on a soft face */
+.conversation.sheet .transcript { padding-top: 0.5rem; }
+.conversation.sheet .transcript-column { gap: 1.15rem; }
+.conversation.sheet .conversation-message.user {
+  min-width: 0; padding: 0.55rem 0.95rem;
+  border: 0; border-radius: var(--r-well); background: var(--s3); box-shadow: none;
+}
+.conversation.sheet .conversation-message.user .message-sending { display: block; text-align: right; }
+.conversation.sheet .conversation-message.continued { margin-top: -0.6rem; }
+/* a thread's report: its name, then its words, set off by one hairline */
+.conversation.sheet .conversation-message.report {
+  min-width: 0; max-width: min(42rem, 92%); padding: 0.05rem 0 0.05rem 0.95rem;
+  border: 0; border-left: 1px solid var(--line-2); border-radius: 0; background: none;
+}
+.conversation.sheet .report .message-label { margin-bottom: 0.3rem; font-size: 12.5px; letter-spacing: 0.01em; font-weight: 450; }
+.report-name { color: var(--ink); font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
+a.report-name:hover { color: var(--signal); text-decoration: underline; text-underline-offset: 3px; }
+.report-kind { margin-left: 0.3em; color: var(--ink-3); }
+.conversation.sheet [data-anchor]:focus-visible { outline-offset: 6px; }
+/* tools: a quiet line, folded open on a press, never a raised strip */
+.conversation.sheet .tool-strip { border-color: transparent; background: transparent; }
+.conversation.sheet .tool-strip summary { padding: 0.25rem 0; }
+.conversation.sheet .tool-strip summary:hover { background: none; }
+.conversation.sheet .tool-strip summary:hover :is(.tool-said, .tool-summary, code) { color: var(--ink); }
+.conversation.sheet .tool-strip[open] { border-color: var(--line); }
+.conversation.sheet .tool-strip[open] summary { padding-inline: 0.65rem; }
+.conversation.sheet .tool-strip pre { background: var(--s3); }
+.tool-said { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: 13px; }
+.tool-strip code.tool-name { font-weight: 400; color: var(--ink-3); font-size: 11px; }
+
+/* the composer: one round field on the sheet, the work key before it */
+.chat-sheet .composer { border-top: 0; box-shadow: none; padding-bottom: max(0.85rem, env(safe-area-inset-bottom)); }
+.chat-sheet .composer-field { border-radius: var(--r-well); box-shadow: 0 1px 3px rgba(38, 32, 18, 0.08); }
+.chat-sheet .composer-field:has(textarea:focus) { box-shadow: 0 0 0 1px var(--signal); }
+.chat-sheet .composer .attach-key { border-color: transparent; background: transparent; box-shadow: none; }
+.chat-sheet .composer .attach-key:hover:not(:disabled) { background: var(--s3); }
+.work-key {
+  flex: none; position: relative; align-self: flex-end;
+  height: calc(var(--composer-key) + 2 * var(--composer-pad) + 2px); min-width: calc(var(--composer-key) + 2 * var(--composer-pad) + 2px);
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.55rem; padding: 0 0.55rem;
+  border: 1px solid transparent; border-radius: var(--r-well); background: transparent;
+  color: var(--ink-2); font: 550 12.5px/1 var(--font-ui); font-variant-numeric: tabular-nums;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.work-key:hover { background: var(--s3); border-color: var(--line); color: var(--ink); }
+.work-count { white-space: nowrap; }
+.work-count.failure { color: var(--bad); }
+
+/* the margin: as wide as a note needs, a short hairline toward its message */
+.transcript-page { position: relative; display: flex; justify-content: center; min-height: 100%; }
+.transcript-page > .transcript-column { flex: 1 1 auto; min-width: 0; margin: 0; }
+/* The column and the composer stay on the viewport's centreline (both
+   reserve the scrollbar's room on both edges); the margin hangs outward in
+   the room to the column's right, as wide as that room allows up to 18rem,
+   reaching into the pane's side padding but not to the edge. */
+.conversation { --margin-gap: 1.5rem; }
+.conversation.sheet :is(.transcript, .composer) { scrollbar-gutter: stable both-edges; }
+.sheet-margin {
+  position: absolute; inset-block: 0; left: calc(50% + var(--col) / 2 + var(--margin-gap));
+  width: min(18rem, calc(50% - var(--col) / 2 - var(--margin-gap) + var(--pane-gutter) - 0.75rem));
+  overflow-x: visible; overflow-y: clip; overflow-clip-margin: 4px;
+}
+/* with a margin the composer keeps the column's line, the work key hanging before it */
+.conversation.has-margin .composer-row { position: relative; }
+.conversation.has-margin .work-key { position: absolute; right: calc(100% + 0.45rem); bottom: 0; }
+.margin-notes { position: absolute; inset: 0; }
+.margin-note { position: absolute; left: 0; right: 0; visibility: hidden; transition: top 120ms ease; }
+.margin-note.placed { visibility: visible; }
+.margin-note.level::before {
+  content: ""; position: absolute; left: calc(0.25rem - var(--margin-gap)); top: 0.95rem; width: calc(var(--margin-gap) - 0.5rem);
+  border-top: 1px solid var(--line);
+}
+.margin-pins {
+  position: sticky; top: -0.5rem; z-index: 2;
+  display: flex; flex-direction: column; gap: 0.1rem; padding: 0.3rem 0 0.4rem;
+  background: color-mix(in srgb, var(--s4) 94%, transparent); border-bottom: 1px solid var(--line);
+}
+.margin-pin {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 0.5rem;
+  width: 100%; padding: 0.3rem 0.5rem; border: 0; border-radius: var(--r-key);
+  background: transparent; color: var(--ink); text-align: left;
+}
+.margin-pin:hover { background: var(--s3); }
+.margin-pin .note-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.pin-way { display: inline-flex; color: var(--ink-3); }
+
+/* a note: title and one line of state in words; opened, what cube knows of it */
+.sheet-note ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.1rem; }
+.note-item { border: 1px solid transparent; border-radius: var(--r-key); transition: border-color 120ms ease, background 120ms ease; }
+.note-item.open { border-color: var(--line); background: var(--s4); }
+.note-head {
+  display: flex; align-items: baseline; gap: 0.6rem; width: 100%;
+  padding: 0.35rem 0.5rem; border: 0; border-radius: var(--r-key);
+  background: transparent; color: var(--ink); text-align: left;
+}
+button.note-head:hover { background: var(--s3); }
+/* an artifact's file mark: what kind of thing it is, never a state */
+.note-doc { flex: none; display: inline-flex; color: var(--ink-3); transform: translateY(2px); }
+.note-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.05rem; }
+.note-title {
+  font-size: 13px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
+}
+.note-title.untitled { font: 500 12px/1.4 var(--font-mono); color: var(--ink-2); }
+.note-state { font-size: 12px; line-height: 1.4; color: var(--ink-3); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.note-state.failure, .note-peek .failure, .index-meta.failure, .index-error { color: var(--bad); }
+.note-peek {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 0.35rem;
+  padding: 0.1rem 0.6rem 0.55rem 0.5rem;
+  font-size: 12.5px; line-height: 1.5; color: var(--ink-2);
+  animation: settle-in 140ms ease-out;
+}
+.note-peek p { margin: 0; overflow-wrap: anywhere; }
+.note-peek code { font: 11.5px/1.4 var(--font-mono); color: var(--ink-3); }
+.note-facts { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.note-report { padding-left: 0.6rem; border-left: 1px solid var(--line-2); color: var(--ink-2); }
+.note-quiet, .index-quiet { color: var(--ink-3); }
+.note-link {
+  padding: 0; border: 0; background: none; cursor: pointer;
+  color: var(--signal); font: 550 12.5px/1.5 var(--font-ui); text-decoration: underline; text-underline-offset: 3px;
+  text-decoration-color: color-mix(in srgb, var(--signal) 40%, transparent);
+}
+.note-link:hover { text-decoration-color: currentColor; }
+.note-link.quiet { color: var(--ink-3); font-weight: 450; text-decoration-color: color-mix(in srgb, var(--ink-3) 40%, transparent); }
+/* the key from a message to its note: no room taken, seen only while focused */
+.note-skip-holder { position: relative; height: 0; margin-top: -1.15rem; }
+.note-skip {
+  position: absolute; top: 0.2rem; right: 0; z-index: 3;
+  width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  border: 1px solid var(--line-2); border-radius: var(--r-key); background: var(--s4); color: var(--ink-2); font-size: 12.5px;
+}
+.note-skip:focus-visible { width: auto; height: auto; padding: 0.25rem 0.6rem; clip-path: none; }
+.note-more {
+  margin: 0.15rem 0 0 0.5rem; padding: 0.1rem 0; border: 0; background: none;
+  color: var(--ink-3); font-size: 12px; text-decoration: underline; text-underline-offset: 3px;
+}
+.note-more:hover { color: var(--ink); }
+/* inline, under its message: one quiet line per thread */
+.sheet-note.inline { margin-top: -0.55rem; }
+.sheet-note.inline .note-head { padding-block: 0.3rem; }
+.sheet-note.inline .note-text { flex-direction: row; align-items: baseline; gap: 0.6rem; }
+.sheet-note.inline .note-title { flex: 1 1 auto; min-width: 0; display: block; white-space: nowrap; text-overflow: ellipsis; }
+/* the state is the truth worth the room: the title gives way first */
+.sheet-note.inline .note-state { flex: 0 0 auto; max-width: 60%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sheet-note.inline .note-item.open :is(.note-title, .note-state) { white-space: normal; }
+.sheet-note.inline .note-item:has(.static) .note-text { flex-direction: column; gap: 0; }
+.sheet-note.inline .note-item:has(.static) .note-state { max-width: none; white-space: normal; }
+
+/* the chat's memory: what it reads each turn, opened from the index */
 .chat-memory {
   flex: none; max-height: 40vh; display: flex; flex-direction: column;
-  background: var(--s1); border-bottom: 1px solid var(--line-2);
-  box-shadow: var(--shadow-well);
+  margin: 0 auto 0.5rem; width: min(var(--col), calc(100% - 2 * clamp(0.85rem, 3vw, 2rem)));
+  background: var(--s3); border: 1px solid var(--line); border-radius: var(--r-well);
 }
 .chat-memory-head {
-  display: flex; align-items: center; gap: 0.6rem; padding: 0.35rem 0.7rem;
+  display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.4rem 0.35rem 0.85rem;
   color: var(--ink-3); font-size: 11px; font-weight: 550; letter-spacing: 0.05em;
 }
-.chat-memory-head .key { margin-left: auto; }
+.chat-memory-head span { flex: 1; }
 .chat-memory pre {
-  margin: 0; padding: 0.2rem 0.7rem 0.6rem; overflow: auto;
+  margin: 0; padding: 0.2rem 0.85rem 0.7rem; overflow: auto;
   color: var(--ink-2); font: 11px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere;
 }
-@media (max-width: 52rem) {
-  .thread-strip .chat-title { display: block; }
-  .chat-tagline { display: none; }
-}
-.chat-memory-error { margin: 0; padding: 0 0.7rem 0.5rem; color: var(--bad); font-size: 12px; }
+.chat-memory-error { margin: 0; padding: 0 0.85rem 0.5rem; color: var(--bad); font-size: 12px; }
 
-/* ============================================================ threads
-   The chat's threads beside the conversation, by project: a recessed bank
-   of lamps and lines. On a narrow screen it folds above the conversation. */
-.chat-workspace:has(.work-panel) { grid-template-columns: minmax(0, 1fr) minmax(16rem, 22rem); }
-.chat-workspace > .thread-pane { grid-column: 1; grid-row: 1; }
+/* the index: rises from the composer; the one floating surface */
+.chat-index {
+  width: min(36rem, calc(100vw - 2rem)); max-height: min(72dvh, 42rem);
+  margin: auto auto 5.25rem; padding: 0; overflow: hidden;
+  display: none; flex-direction: column;
+  color: var(--ink); background: var(--s4);
+  border: 1px solid var(--line-2); border-radius: var(--r-well); box-shadow: var(--shadow-float);
+}
+.chat-index[open] { display: flex; animation: settle-in 140ms ease-out; }
+.chat-index::backdrop { background: color-mix(in srgb, var(--s0) 45%, transparent); }
+.index-filter {
+  flex: none; display: flex; align-items: center; gap: 0.35rem;
+  padding: 0.45rem 0.45rem 0.45rem 1.05rem; border-bottom: 1px solid var(--line);
+}
+/* the filter is engraved: focused, a 2px signal rule under the row */
+.index-filter:has(input:focus) { box-shadow: inset 0 -2px 0 var(--signal); }
+.index-search { flex: none; display: inline-flex; color: var(--ink-3); }
+.index-filter input {
+  flex: 1; min-width: 0; padding: 0.4rem 0.3rem; border: 0;
+  background: transparent; color: var(--ink); font: 14px/1.4 var(--font-ui);
+}
+.index-filter input:focus { outline: none; }
+.index-filter input::-webkit-search-cancel-button { display: none; }
+.index-close {
+  flex: none; position: relative; display: inline-grid; place-items: center; width: 2rem; height: 2rem;
+  border: 0; border-radius: var(--r-key); background: transparent; color: var(--ink-3);
+}
+.index-close:hover { background: var(--s3); color: var(--ink); }
+@media (pointer: coarse) { .index-close::after { content: ""; position: absolute; inset: -0.375rem; } }
+.chat-index:focus { outline: none; }
+.index-filter input::placeholder { color: var(--ink-3); }
+.index-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0.4rem 0.6rem 0.6rem; overscroll-behavior: contain; }
+.index-body section + section, .index-places { margin-top: 0.7rem; }
+.index-body h2 { margin: 0.35rem 0.6rem 0.25rem; font-size: 11px; font-weight: 550; letter-spacing: 0.08em; color: var(--ink-3); }
+.index-body ul { list-style: none; margin: 0; padding: 0; }
+.index-body > section > p { margin: 0.2rem 0.6rem; font-size: 12.5px; overflow-wrap: anywhere; }
+.index-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 0.6rem;
+  padding: 0.4rem 0.6rem; border-radius: var(--r-key);
+  color: var(--ink); text-decoration: none;
+}
+.index-row:hover, .index-row:focus-visible { background: var(--s3); }
+.index-row:has(> .index-doc) { grid-template-columns: 13px minmax(0, 1fr) auto; }
+.index-doc { display: inline-flex; color: var(--ink-3); transform: translateY(2px); }
+.index-title { font-size: 13.5px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.index-title.untitled { color: var(--ink-3); font-weight: 450; }
+.index-meta { font-size: 12px; color: var(--ink-3); white-space: nowrap; font-variant-numeric: tabular-nums; max-width: 14rem; overflow: hidden; text-overflow: ellipsis; }
+.index-places { display: flex; flex-wrap: wrap; gap: 0.2rem; padding: 0.55rem 0.2rem 0; border-top: 1px solid var(--line); }
+.index-places a {
+  padding: 0.35rem 0.6rem; border-radius: var(--r-key);
+  color: var(--ink-2); font-size: 13px; font-weight: 550; text-decoration: none;
+}
+.index-places a:hover, .index-places a:focus-visible { background: var(--s3); color: var(--ink); }
+.index-chat { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 1rem; margin-top: 0.4rem; padding: 0.55rem 0.6rem 0; border-top: 1px solid var(--line); }
+.index-label { font-size: 11px; font-weight: 550; letter-spacing: 0.08em; color: var(--ink-3); }
+.index-model { display: flex; align-items: center; gap: 0.5rem; min-width: 0; flex-wrap: wrap; }
+.index-model select {
+  max-width: 16rem; padding: 0.3rem 0.5rem; border: 1px solid var(--line); border-radius: var(--r-key);
+  background: var(--s4); color: var(--ink); font: 12px/1.4 var(--font-mono);
+}
+.index-model .index-quiet { font-size: 12px; }
+.index-memory {
+  display: inline-flex; align-items: baseline; gap: 0.5rem; padding: 0.3rem 0.5rem; margin-left: -0.5rem;
+  border: 0; border-radius: var(--r-key); background: transparent; color: var(--ink-2); font-size: 12.5px;
+}
+.index-memory:hover { background: var(--s3); color: var(--ink); }
+.index-keys { flex: none; margin: 0; padding: 0.4rem 1.2rem 0.5rem; border-top: 1px solid var(--line); color: var(--ink-3); font-size: 11.5px; }
+.index-keys kbd { margin-right: 0.15rem; }
+@media (pointer: coarse) {
+  .index-keys { display: none; }
+  .index-row { min-height: 2.75rem; align-content: center; }
+  .sheet-note .note-head { min-height: 2.75rem; align-items: center; }
+}
+/* a phone (lib/keyboard.ts COMPACT_MEDIA): the index is the whole screen,
+   the filter on top, the results scrolling under it; its height is the
+   visual viewport's (ChatIndex), so a keyboard never covers filter or results */
+@media (max-width: 40rem), (pointer: coarse) and (max-height: 30rem) {
+  .chat-index {
+    inset: 0 auto auto 0; width: 100vw; max-width: 100vw; height: 100dvh; max-height: none; margin: 0;
+    border: 0; border-radius: 0; box-shadow: none;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  }
+  .chat-index[open] { animation: none; }
+  .index-filter { padding-inline: 1rem 0.35rem; }
+  .index-filter input { font-size: 16px; }
+  .index-close { width: 2.75rem; height: 2.75rem; }
+  .index-meta { max-width: 9rem; }
+  .index-model select { font-size: 16px; max-width: 12rem; }
+}
+
+/* ============================================================ artifact comments bank
+   The comments beside an artifact: a recessed bank of quotes and keys. */
 .work-panel {
-  grid-column: 2; grid-row: 1; min-width: 0; min-height: 0;
+  grid-row: 1; min-width: 0; min-height: 0;
   display: flex; flex-direction: column;
   background: var(--s1); border-left: 1px solid var(--line-2);
   box-shadow: var(--shadow-well);
 }
-/* the same rail as the conversation's strip beside it: height, padding,
-   hairline, so the two read as one band */
 .work-head {
   flex: none; min-height: var(--rail);
   display: flex; align-items: center; gap: 0.6rem;
@@ -1619,27 +1836,8 @@ select.compose-input {
 }
 .work-head h2 { margin: 0; font-size: 11px; font-weight: 550; letter-spacing: 0.08em; color: var(--ink-3); }
 .work-summary { margin-left: auto; font: 11px/1.5 var(--font-mono); color: var(--ink-3); font-variant-numeric: tabular-nums; }
-.work-fold { display: none; }
 .work-body { flex: 1; min-height: 0; overflow: auto; padding: 0.5rem 0.6rem 0.7rem; }
-.work-group + .work-group { margin-top: 0.7rem; }
-.work-group h3 { margin: 0 0.2rem 0.3rem; font: 550 11px/1.4 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
 .work-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
-.work-thread {
-  display: flex; align-items: baseline; gap: 0.5rem;
-  padding: 0.4rem 0.55rem; border: 1px solid var(--line); border-radius: var(--r-key);
-  background: var(--s4);
-}
-.work-thread .lamp { flex: none; transform: translateY(-1px); }
-.work-thread.archived { background: transparent; }
-.work-thread-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
-.work-title {
-  font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--ink);
-  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere;
-}
-a.work-title { text-decoration: none; }
-a.work-title:hover { color: var(--signal); }
-.work-thread.archived .work-title { color: var(--ink-3); font-weight: 550; }
-.work-state { font: 10.5px/1.4 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
 .work-dismiss {
   flex: none; display: inline-grid; place-items: center; width: 22px; height: 22px; margin: -2px -4px 0 0;
   border: 0; border-radius: var(--r-key); background: transparent; color: var(--ink-3); cursor: pointer;
@@ -1651,18 +1849,7 @@ a.work-title:hover { color: var(--signal); }
   font-size: 11.5px; line-height: 1.4; color: var(--ink-3); overflow-wrap: anywhere;
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical;
 }
-.work-empty { margin: 0.4rem 0.2rem; font-size: 12.5px; color: var(--ink-3); }
-.work-note { margin: 0.45rem 0.2rem 0; font: 10.5px/1.4 var(--font-mono); color: var(--ink-3); }
 .work-error { margin: 0.2rem 0.2rem 0.5rem; font-size: 12px; color: var(--bad); display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
-.work-foot { margin: 0.8rem 0.2rem 0; font: 10.5px/1.4 var(--font-mono); color: var(--ink-3); }
-@media (max-width: 52rem) {
-  .chat-workspace:has(.work-panel) { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .chat-workspace > .thread-pane { grid-column: 1; grid-row: 2; }
-  .work-panel { grid-column: 1; grid-row: 1; border-left: 0; border-bottom: 1px solid var(--line-2); max-height: 38vh; }
-  .work-fold { display: inline-flex; }
-  .work-panel.folded .work-body { display: none; }
-  .work-panel.folded .work-head { border-bottom: 0; }
-}
 
 /* ============================================================ artifacts
    A document an agent wrote, on the reading field, with the comments bank
@@ -1702,9 +1889,9 @@ a.work-title:hover { color: var(--signal); }
 .diagram-source summary { cursor: pointer; font: 11px/1.5 var(--font-mono); color: var(--ink-3); }
 .diagram-source pre { margin: 0.4rem 0 0; }
 /* the user's selections */
-.artifact-body mark.anchor { background: color-mix(in srgb, var(--lamp-amber) 22%, transparent); color: inherit; border-bottom: 2px solid var(--lamp-amber); cursor: pointer; }
-.artifact-body mark.anchor.delivered { background: color-mix(in srgb, var(--lamp-green) 14%, transparent); border-bottom-color: var(--lamp-green); }
-.artifact-body mark.anchor.undeliverable { background: var(--bad-soft); border-bottom-color: var(--lamp-red); }
+.artifact-body mark.anchor { background: color-mix(in srgb, var(--wait) 22%, transparent); color: inherit; border-bottom: 2px solid var(--wait); cursor: pointer; }
+.artifact-body mark.anchor.delivered { background: color-mix(in srgb, var(--ok) 14%, transparent); border-bottom-color: var(--ok); }
+.artifact-body mark.anchor.undeliverable { background: var(--bad-soft); border-bottom-color: var(--bad); }
 .artifact-body mark.anchor.composing { background: var(--signal-soft); border-bottom-color: var(--signal); }
 /* centred with translate, so a key's pressed transform does not undo it */
 .artifact-select-key { position: fixed; z-index: 20; translate: -50% 0; }
@@ -1714,14 +1901,14 @@ a.work-title:hover { color: var(--signal); }
   display: flex; align-items: center; gap: 0.7rem; padding: 0.55rem 0.75rem;
   border: 1px solid var(--line-2); border-radius: var(--r-key); background: var(--s2); box-shadow: var(--shadow-well);
 }
-.artifact-action .lamp { flex: none; }
 .artifact-action-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
 .artifact-action-label { font-size: 13.5px; font-weight: 600; overflow-wrap: anywhere; }
 .artifact-action-target, .artifact-action-run { font: 11px/1.45 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
 .artifact-action-run.failed { color: var(--bad); }
-.artifact-action-run.succeeded { color: var(--lamp-green); }
+.artifact-action-run.succeeded { color: var(--ok); }
 .artifact-action-told { display: flex; align-items: center; gap: 0.4rem; font: 10.5px/1.4 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
-.artifact-action-told > span:not(.lamp) { flex: 1; min-width: 0; }
+.artifact-action-told > span { flex: 1; min-width: 0; }
+.artifact-action-told.failure, .comment-foot.failure { color: var(--bad); }
 /* comments */
 .comment-item { padding: 0.45rem 0.55rem; border: 1px solid var(--line); border-radius: var(--r-key); background: var(--s4); }
 .comment-item.draft { border-style: dashed; border-color: var(--line-2); }
@@ -1730,7 +1917,7 @@ a.work-title:hover { color: var(--signal); }
 .comment-quote:hover { color: var(--ink); }
 .comment-body { margin: 0.3rem 0 0; font-size: 13px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .comment-foot { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.3rem; font: 10.5px/1.4 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
-.comment-foot > span:not(.lamp) { flex: 1; min-width: 0; }
+.comment-foot > span { flex: 1; min-width: 0; }
 .comment-composer { margin-bottom: 0.7rem; padding: 0.5rem; border: 1px solid var(--signal); border-radius: var(--r-key); background: var(--s4); }
 .comment-composer .work-quote { margin-top: 0; }
 .comment-composer textarea {
@@ -1751,7 +1938,7 @@ a.work-title:hover { color: var(--signal); }
 .action-problems { margin: 0; padding: 0.55rem 0.75rem 0.55rem 1.6rem; border: 1px solid var(--bad-line); border-radius: var(--r-key); background: var(--bad-soft); color: var(--bad); }
 p.action-problems { padding-left: 0.75rem; }
 .action-status { margin: 0; color: var(--ink-2); }
-.action-done { margin: 0; color: var(--lamp-green); font-weight: 600; }
+.action-done { margin: 0; color: var(--ok); font-weight: 600; }
 .action-footer { align-items: center; }
 .action-footer .spacer { margin-left: auto; }
 /* the list */

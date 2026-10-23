@@ -207,6 +207,38 @@ deleted; the wish finder's past spend in it is no longer in usage reports.
 Regression: `usage-test.ts` (only the chat and compactor call a model),
 `optchat-product-test.ts` (routes 404) and the browser panel scenario.
 
+## The chat as one sheet (A+ · ark med marg)
+
+The chat page is the user's chosen redesign A+: one sheet with no strip,
+rail, panel or labels; the threads panel is gone. What the chat started and
+named stands in a margin beside the message that says so (≥76rem; quiet
+lines under it below that), read from its own log (spawn result lines,
+artifact tool results, `#/a/` links, comment messages) and resolved against
+the overview, the thread list and the artifacts; nothing is inferred and
+nothing is kept by hand (`lib/provenance.ts`, `lib/margin-layout.ts`). The
+index (work key, wordmark, `/`, ctrl/⌘ k) holds the chat's threads,
+artifacts, the places, the chat's model and its memory. UI only: no route,
+API or tool changed. Contract: DESIGN.md "The Sheet", "The Margin", "The
+Index" and the chat's surface brief. Regression: `provenance-test.ts`,
+`chat-sheet-browser-test.ts` (scripted host, mocked data) and the margin
+check in `artifact-browser-test.ts` (real cubed, faux model). Open: thread
+names (#239) beside the titles once merged; no unread marking (cube has no
+seen state); the other pages still wear the bench instrument.
+
+## States in print, no status lamps
+
+At the user's request the glowing and blinking status lamps are gone from the
+whole app (threads, a thread's strip and sidebar, startup steps, tool lines,
+projects, repositories, runners, usage, settings, artifacts, the chat's
+margin, index and work key, auth). States are words: quiet silkscreen ink,
+failures in `--bad` ink, ready silent, each with an accessible name; nothing
+blinks or pulses. The light and dark palettes are unchanged; `--lamp-*`
+tokens became `--ok` and `--wait` for the two document marks that need them.
+DESIGN.md's Printed State Rule; `.impeccable/design.json` (the design
+panel's sidecar) was corrected to match: no lamp tokens, motion or
+components, a State Words component instead. An artifact's file mark in the
+chat's margin and index is a kind, not a state, and stays.
+
 ## Images in the chat
 
 The chat's composer takes pasted, dropped or picked images (PNG, JPEG, GIF,

@@ -11,7 +11,6 @@
   let disposed = false;
   let requestId: string | null = null;
   const busy = $derived(status ? busyPhases.has(status.phase) : false);
-  const lamp = $derived(status?.error ? "red" : busy ? "amber" : status?.installation === "managed" ? "green" : "off");
 
   async function refresh() {
     try {
@@ -62,10 +61,9 @@
   {:else}
     <section class="update-board" aria-labelledby="update-title">
       <div class="board-head">
-        <span class="lamp" class:on-green={lamp === "green"} class:on-amber={lamp === "amber"} class:blink={lamp === "amber"} class:on-red={lamp === "red"}></span>
         <div>
           <h2 id="update-title">cubed software</h2>
-          <p class="status-line" aria-live="polite">{status.message ?? status.phase}</p>
+          <p class="status-line" class:error={!!status.error} aria-live="polite">{status.message ?? status.phase}</p>
         </div>
       </div>
 
@@ -111,6 +109,7 @@
   .board-head { display: flex; align-items: center; gap: 0.75rem; }
   .board-head h2 { font-size: 15px; }
   .status-line { color: var(--ink-3); font-size: 13px; overflow-wrap: anywhere; }
+  .status-line.error { color: var(--bad); }
   .readout { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 1rem 0 0; border-top: 1px solid var(--line-2); border-bottom: 1px solid var(--line-2); }
   .readout div { min-width: 0; padding: 0.75rem; border-right: 1px solid var(--line); }
   .readout div:last-child { border-right: 0; }

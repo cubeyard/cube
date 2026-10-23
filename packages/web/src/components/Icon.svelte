@@ -11,6 +11,9 @@
     file: "M6.5 3.5 H14 l3.5 3.5 V20.5 H6.5 Z M14 3.5 V7 h3.5",
     refresh: "M20 7 V3 l-2.5 2.5 A8 8 0 0 0 4 10 M20 3 h-4 M4 17 v4 l2.5 -2.5 A8 8 0 0 0 20 14 M4 21 h4",
     arrow: "M12 19 V5 M6.5 10.5 12 5 l5.5 5.5",
+    index: "M9.5 7 H19 M9.5 12 H19 M9.5 17 H19 M5 7 h0.01 M5 12 h0.01 M5 17 h0.01",
+    down: "M12 6 V18 M7 13 12 18 l5 -5",
+    search: "M10.5 17 a6.5 6.5 0 1 0 0 -13 a6.5 6.5 0 0 0 0 13 Z M15.3 15.3 L20 20",
   } as const satisfies Record<string, string>;
 
   // keyof-typed: a misspelled icon name fails `pnpm typecheck` instead of

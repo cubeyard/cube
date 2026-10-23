@@ -100,9 +100,7 @@
   const legacy = (runner: RunnerStatus) => observation(runner)?.protocol === 3;
   const canRetire = (runner: RunnerStatus) => runner.allocationState === "available" && runner.activeThreads === 0 &&
     (legacy(runner) || runner.contactStatus === "stale" || (runner.contactStatus === "reachable" && runner.health?.activeVms === 0));
-  const lampClass = (runner: RunnerStatus) => legacy(runner) ? "off" : runner.contactStatus === "reachable" ? "on-green"
-    : runner.contactStatus === "unreachable" || runner.contactStatus === "stale" ? "on-red"
-    : "off";
+  const contactFailed = (runner: RunnerStatus) => !legacy(runner) && (runner.contactStatus === "unreachable" || runner.contactStatus === "stale");
   const contactCopy = (runner: RunnerStatus) => legacy(runner) && !runner.retiredAt
     ? "protocol 3: cube no longer contacts this runner; its last report is shown"
     : runner.contactStatus === "reachable"
@@ -169,7 +167,6 @@
       {#each runners as runner (runner.id)}
         <article class="runner-row">
           <div class="runner-identity">
-            <span class="lamp {lampClass(runner)}" aria-hidden="true"></span>
             <span>
               <strong>{runner.nodeId}</strong>
               {#if protocolLabel(runner)}<small class="runner-protocol">{protocolLabel(runner)}</small>{/if}
@@ -179,7 +176,7 @@
             </span>
           </div>
           <div class="runner-evidence">
-            <strong>{runner.contactStatus}</strong> · {contactCopy(runner)}
+            <strong class:error={contactFailed(runner)}>{runner.contactStatus}</strong> · {contactCopy(runner)}
             <span>
               last contact:
               {#if runner.lastContactAt}
@@ -238,7 +235,6 @@
       {#each retained as thread (thread.id)}
         <article class="runner-row">
           <div class="runner-identity">
-            <span class="lamp off" aria-hidden="true"></span>
             <span>
               <strong>{thread.title ?? thread.id.slice(0, 8)}</strong>
               <small>{thread.project.name}{thread.createdAt ? ` · created ${relTime(thread.createdAt)} ago` : ""}</small>

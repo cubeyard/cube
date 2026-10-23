@@ -1,6 +1,6 @@
 ---
 name: cube
-description: a bench instrument for running agents — putty enclosure, LED lamps, one signal orange
+description: a bench instrument for running agents — putty enclosure, states in print, one signal orange
 colors:
   s0: "#dcd7ca"
   s1: "#e4e0d4"
@@ -14,10 +14,8 @@ colors:
   line-2: "#b3ac9c"
   signal: "#cc3f00"
   signal-ink: "#ffffff"
-  lamp-green: "#2e7d4a"
-  lamp-amber: "#b06f14"
-  lamp-red: "#b13421"
-  lamp-lens: "#c9c3b4"
+  ok: "#2e7d4a"
+  wait: "#b06f14"
   bad: "#a03522"
   glass: "#17181c"
   glass-head: "#1f2126"
@@ -115,13 +113,13 @@ components:
 **Reference — binding:** Dieter Rams / Braun (the user's stated design idol).
 Every component cites Rams-era Braun hardware grammar: machined panels and
 seams, flush hairline-divided control banks, small precise radii, restrained
-silkscreen, one signal color, states as lamps. "Weniger, aber besser" —
+silkscreen, one signal color, states printed as words. "Weniger, aber besser" —
 when torn between renditions, the quieter, more machined one wins.
 
 cube is rendered as a machine you own: a warm silkscreened bench instrument in
 the Braun / Teenage Engineering panel lineage. The screen is the instrument's
 front panel — a putty enclosure carrying recessed display wells, raised keys
-with real 1px press travel, LED state lamps, lowercase silkscreen micro-labels,
+with real 1px press travel, lowercase silkscreen micro-labels and states,
 and exactly one signal orange for the controls that are yours to touch. It is a
 deliberate refusal of the category default: this is not a near-black chat app
 with a neon accent.
@@ -129,23 +127,36 @@ with a neon accent.
 Depth here is physical, never atmospheric. Every surface sits on a numbered
 ramp (`--s0` deepest recess through `--s4` reading field) and nothing exists
 outside the ramp; wells are sunk with inset shadows, keys sit proud with a
-small offset shadow and travel down when pressed. State is never a colored
-word — it is a lamp: lit green, blinking amber, steady red, or an unlit dark
-lens for sleeping. Code lives behind dark glass in both themes, like a
-display window set into the panel.
+small offset shadow and travel down when pressed. State is printed, never
+lit: a quiet word in silkscreen ink (`working`, `suspended`, `turn ended`),
+a failure in `--bad` ink, and nothing at all for the ready default. There
+are no status lamps, glows, halos or blinking anywhere (the user's call).
+Code lives behind dark glass in both themes, like a display window set into
+the panel.
 
 Dark mode is the black edition of the same instrument, not a second design:
 the enclosure is anodized (the surface ramp inverts around a reading field
-that goes darker than the enclosure), the silkscreen goes pale, the lamps glow
-harder, the signal warms up to `#ff5a14`, and the glass stays glass. Motion is
-mechanical and small: 120ms state changes, 80ms key travel, 140ms settle-in
-entrances, a 300ms staggered lamp warm-up when the panel arrives, and a 1.2s
-lamp blink — all silenced under `prefers-reduced-motion`.
+that goes darker than the enclosure), the silkscreen goes pale, the signal
+warms up to `#ff5a14`, and the glass stays glass. Motion is mechanical and
+small: 120ms state changes, 80ms key travel and 140ms settle-in entrances —
+all silenced under `prefers-reduced-motion`. Nothing repeats: no motion
+says a state.
+
+**The sheet (OptChat, cube's home).** The user chose direction **A+ · ark
+med marg** for the chat: one quiet sheet on the reading field where the
+conversation has the screen, what it started or named stands in a margin
+beside the message that says so, and everything else is one step away in an
+index. The chat sheds the instrument's physical costume (decks, seams,
+rails, raised strips, labels) but keeps its tokens, type and one
+signal; the other pages keep the bench instrument until they move too. Its
+contract is the chat's surface brief
+(`packages/web/.impeccable/surfaces/packages-web-src-components-chatview-svelte.md`)
+and the Sheet components below.
 
 **Key Characteristics:**
 - Warm putty enclosure on a numbered five-step surface ramp; no surface outside it
 - One signal orange, theme-tuned, reserved for what the user can touch
-- LED lamps as the entire state vocabulary — lit / blinking / steady / unlit lens
+- States in print: quiet words, failure in error ink, ready says nothing; no lamps or blinking
 - Physical depth: raised keys with real press travel, recessed wells, machined seams
 - Dark-glass code windows that stay dark glass in both themes
 - Lowercase silkscreen labels (11px, tracked); Archivo for the enclosure, JetBrains Mono for machine truth
@@ -154,7 +165,7 @@ lamp blink — all silenced under `prefers-reduced-motion`.
 ## Colors
 
 Warm putty neutrals (OKLCH hue 87–95° in the light theme), one signal orange,
-four lamp pigments, and a single dark-glass material. Frontmatter values are
+two state inks, one error ink, and a single dark-glass material. Frontmatter values are
 the light-theme (`:root`) values; the black edition redefines each token in
 the `prefers-color-scheme: dark` block of `packages/web/src/app.css`.
 
@@ -167,15 +178,12 @@ the `prefers-color-scheme: dark` block of `packages/web/src/app.css`.
   (`--signal-ink`: #ffffff on the light key, #1c0d03 on the bright dark key).
 
 ### Secondary
-The lamp pigments. They color lamps and nothing else — never text (the one
-exception is error ink, which is `--bad`, a separate notice ink).
-- **Lamp Green** (#2e7d4a / #57c97e dark): lit steady — ready, done, signed in.
-- **Lamp Amber** (#b06f14 / #e5a33c dark): always blinking — working, setting
-  up, a running tool. Static amber does not occur.
-- **Lamp Red** (#b13421 / #e5604a dark): lit steady — error, failed, not signed in.
-- **Lamp Lens** (#c9c3b4 / #26262c dark): the unlit lamp — a dark lens with an
-  inset shadow and a `--lamp-ring` rim. Sleeping threads show this; an off
-  lamp is present and readable, not absent.
+The state inks, used sparingly: a state is a word, and most words stay in
+silkscreen ink.
+- **OK** (`--ok`, #2e7d4a / #57c97e dark): a done merge and a delivered
+  comment's mark in a document. Never a dot.
+- **Wait** (`--wait`, #b06f14 / #e5a33c dark): a waiting comment's mark in a
+  document. Never a dot, never blinking.
 - **Error Ink** (`--bad`, #a03522 / #e5604a dark): printed red ink for error
   banners, error state labels, the delete key's hover. Paired with
   `--bad-soft` and `--bad-line` alpha washes. Info notices use `--note-soft` /
@@ -207,10 +215,6 @@ hairline ramps. Add/delete ink and washes have explicit light and dark values
 (`--diff-add*`, `--diff-del*`) so full-row changes remain legible in both
 editions without turning the whole editor dark in light mode.
 
-`--lamp-blue` (#3d6b96 / #6fa3d8) and its `.on-blue` class are declared but
-unused by any shipped component; sleeping uses the unlit lens. Blue is
-reserved, not part of the active vocabulary.
-
 ### Named Rules
 **The Numbered Ramp Rule.** Every background is one of `--s0`–`--s4`; nothing
 exists outside the ramp. Audit: in the light theme OKLCH lightness ascends
@@ -220,11 +224,16 @@ around the reading field — s4 (#101013) is darker than the enclosure s2
 
 **The One Signal Rule.** One accent. `--signal` marks only what the user can
 act on, and each theme pairs it with its own `--signal-ink`. Never use the
-signal for state, and never use a lamp pigment on a clickable affordance.
+signal for state, and never use a state ink on a clickable affordance.
 
-**The Lamps-Not-Tints Rule.** State is a lamp, and the four states are
-structurally distinct — lit green, *blinking* amber, steady red, unlit lens —
-never four tints of one dot. The off state is a physical lens, not absence.
+**The Printed State Rule.** A state is a word, never a light. No status
+dots, glows, halos, pulses or blinking, anywhere. Moving states (`working…`,
+`running`, `starting the thread's machine`) are quiet silkscreen words; a
+failure is the same word in `--bad` ink with its full text where the Full
+Failure Rule applies; ready, done and signed in are the default and say
+nothing or almost nothing. Each state keeps an accessible name. A mark of
+kind is not a state: an artifact's file mark in the chat's margin and index
+stays.
 
 **The One Glass Rule.** Code is one material in both themes. The `--glass*`
 and `--syn-*` tokens are defined once on `:root` and never overridden. Audit:
@@ -249,7 +258,7 @@ lowercase as written; nothing in the system uppercases.
 - **Key** (550, 13px, 0.01em): key cap labels ("new thread", "files").
 - **Label / Silkscreen** (550, 11px, 0.08em, `--ink-3`): micro-labels printed
   on the enclosure — state labels (0.06em), files-shelf head, code-window
-  language. Header lamp-field labels go one step smaller (10px, 0.1em).
+  language.
 - **Code** (400, 12–12.5px/1.45–1.55 mono): tool heads and output (12px),
   code blocks and inline code (12.5px), the model id and language label (11px).
   Weight 600 marks tool names and syntax `strong` only.
@@ -311,16 +320,24 @@ at `40dvh`. The right workspace bay scrolls independently so expanding a long
 diff never moves the conversation. Spacing rhythm is in rem with recurring
 steps of 0.55 / 0.7–0.75 / 0.85–0.9 / 1.0 / 1.4 / 2.1.
 
+The chat is the exception: one sheet with no header row beyond the wordmark
+(the index key) and the 47rem column on the viewport's centreline, the
+composer on the same line (both reserve the scrollbar's room on both
+edges), its work key hanging before it. At 76rem and wider a margin hangs
+outward to the right, 1.5rem beside the column, as wide as the room there
+allows up to 18rem; it never shifts the column or the composer. Below
+76rem the margin is not drawn and its thread notes sit under their messages.
+
 At the 40rem mobile breakpoint (and on a touch screen under 30rem tall, a
-phone on its side): the conversation keeps the screen. The destinations fold
-behind one menu key that names the current page; the chat and thread strips
-are one row of lamp, title and a `details` key, which opens the project,
-model, memory and archive key on the row beneath and folds again when the
-composer takes focus; the chat's threads panel starts folded. While the
-on-screen keyboard is up (`data-keyboard` on the root, from
-`lib/keyboard.ts`), the header, threads panel and memory step aside, and with
-under ~220px left the strip too. The busy lamp drops its label (the blinking
-lamp alone carries "working"). On a phone the composer's attach and send keys
+phone on its side): the conversation keeps the screen. Elsewhere the
+destinations fold behind one menu key that names the current page; a
+thread's strip is one row of title and a `details` key, which opens the
+project, model and archive key on the row beneath and folds again when the
+composer takes focus. The chat has no strip: its model and memory are in the
+index, the whole screen on a phone. While the on-screen keyboard is up
+(`data-keyboard` on the root, from `lib/keyboard.ts`), the header, the
+chat's wordmark row and its memory step aside, and with under ~220px left a
+thread's strip too. On a phone the composer's attach and send keys
 are 2.25rem faces with a 2.75rem hit area; the textarea rises to 16px, and the
 form pads its bottom with `env(safe-area-inset-bottom)` except over a keyboard.
 
@@ -336,9 +353,8 @@ iOS Safari does not zoom on focus. Any new text input inherits this rule.
 
 Depth is physical, never atmospheric. A surface is raised (key shadow), sunk
 (well shadow), or flush on the ramp — there are no floating layers and no
-ambient glows. The only "elevation" in the classic sense, `--shadow-float`, is
-declared but unused: reserved for a true overlay (menu, dialog) that does not
-yet exist.
+ambient glows. The only "elevation" in the classic sense, `--shadow-float`,
+belongs to true overlays: the folded menu and the chat's index dialog.
 
 ### Shadow Vocabulary
 - **Key** (`--shadow-key`: `0 1px 0 rgba(255,255,255,0.7) inset, 0 1px 2px
@@ -372,34 +388,33 @@ message strips, tool strips, code windows, the composer textarea), **14px
 wells** (`--r-well`; module faces inside a well use `calc(--r-well − 5px)`),
 and **7px chips** (`--r-chip`: banners, the not-signed-in warning, framed
 transcript images). Small utility radii (3–5px) appear only on the focus ring,
-inline code, and hover washes. Circles are reserved for lamps (8px, 6px mini)
-and the round send key (2.4rem). There are no pills anywhere. The single
+inline code, and hover washes. The one circle is the round send key (2.4rem). There are no pills anywhere. The single
 dashed border in the system is the missing-image retry placeholder.
 
 Iconography is one authored stroke family in `Icon.svelte`: 24-box, 2px
 stroke, round caps and joins, drawn to match the cube wireframe glyph (the
-brand mark, drawn inline in the header and favicon). Eight icons ship: plus,
-send, pencil, trash, chevron, check, copy, file. No icon libraries, and no
+brand mark, drawn inline in the header and favicon). The set: plus, close,
+pencil, trash, chevron, file, refresh, arrow (up), down and index (three
+rules with dots, the chat's work key at rest). No icon libraries, and no
 unicode glyphs standing in for controls.
 
 ## Components
 
 Motion grammar, shared by everything below: state changes at 120ms ease, press
 travel at 80ms, entrances via `settle-in` (140ms ease-out, 2px rise — nothing
-bounces), lamps warm up once on arrival (`lamp-on` 300ms, staggered 60ms per
-module up to 300ms), `lamp-blink` at 1.2s ease-in-out (50% → 0.3 opacity), and
-a blanket `prefers-reduced-motion` guard silences all of it.
+bounces), and a blanket `prefers-reduced-motion` guard silences all of it.
+Nothing loops.
 
 ### First-run onboarding
 Onboarding is a quiet welcome, not an instrument panel. This surface explicitly
-omits cards, recessed wells, lamps, glows, raised keys, and the header seam.
+omits cards, recessed wells, glows, raised keys, and the header seam.
 Use the existing warm palette and Archivo type on an open, centered reading
 column: one question, adjacent login/skip choices, and plain text status. The
 primary action is the app's own orange key and secondary actions are plain
 keys — the same `.key` system as the rest of the product, so the first run
 looks like the app it hands over to. A small
 step count lives in the header, while access details sit below a single hairline.
-Pending codes, connected accounts, and errors use text rather than status lamps.
+Pending codes, connected accounts, and errors use text, as states do everywhere.
 GitHub login from a project uses this same full-screen treatment at the project's
 `/github` subroute, not an inline widget. It explains the underlying GitHub CLI
 login and returns to the project, rechecking access after successful login.
@@ -415,7 +430,7 @@ memory, system. Beside the page sits a **selector bank**: a recessed well
 (`--s1`, `--shadow-well`) holding one item per page, each a name (key type)
 over a silkscreen hint. The open page's item stands proud as a key face
 (`--s3`, `--line` border, `--shadow-key`) with `aria-current="page"`; the
-others are flush and wash on hover. No signal colour, lamp or side stripe
+others are flush and wash on hover. No signal colour or side stripe
 marks the selection. At 46rem and below the bank lies flat above the page as
 one row of equal keys carrying short names (the full name stays the link's
 accessible name). Each page keeps one headline
@@ -436,19 +451,22 @@ accessible name). Each page keeps one headline
 - **Danger hover** (`.key.danger`): `--bad` ink on `--bad-soft` wash.
 - **Disabled:** 0.45 opacity, cursor default.
 
-### Lamps
-8px circles (6px `.mini` in tool strips). Base is the unlit lens (`--lamp-lens`
-with inset shadow + `--lamp-ring` rim); `.on-green` / `.on-amber` / `.on-red`
-light the lamp with a 5px `color-mix` glow; `.blink` adds the 1.2s pulse.
-Thread mapping: busy or setting-up → amber blink; error → red; sleeping →
-unlit lens; ready → green. Tool mapping: running → amber blink; done → green;
-failed → red. Header lamps ride in a `.lamp-field` with a 10px silkscreen
-label; the busy lamp exists only while working (`display: none` otherwise).
+### States
+Words in place of lamps (the Printed State Rule). Threads: `starting the
+thread's machine`, `waking…`, `waiting for a free slot`, `suspended`, `error`
+(in `--bad`); ready prints nothing. Tools and startup steps: a quiet
+`.tool-state` word after the summary — `running`, `waiting`, `no result`,
+`interrupted`, and `error` / `failed` in `--bad`; done and ok print nothing
+(an `sr-only` word keeps the accessible name). Projects, repositories and
+runners print their status word (`checking`, `ready`, `unreachable` in
+`--bad`). The conversation's busy line is `working…`, static. Auth is the
+quiet word `signed in` (`ok` on a phone) or the red-ink `connect provider`
+chip.
 
 ### Thread Module Well
 The list is one recessed well (`--s1`, 14px radius, `--shadow-well`, 0.35rem
 padding) holding one module per thread, separated by `--line` hairlines. A
-module face is the whole link: lamp, title, tabular meta (relative time, state
+module face is the whole link: title, tabular meta (relative time, state
 label, project attribution, error preview). The thread list is global by
 default and its compact project select writes the filter into the hash URL;
 project context never becomes a separate thread silo. Rest face is
@@ -466,7 +484,7 @@ status or clipped preview.
 
 Detail is a vertical repository control board. The first row is permanently
 the writable primary checkout at `/workspace`; read-only reference rows print
-`../repos/<checkout-name>`. Each row combines a state lamp, URL/base/checkout
+`../repos/<checkout-name>`. Each row combines its role, URL/base/checkout
 fields, and exact evidence: not checked, checking access and branch, resolved
 base plus abbreviated OID, or the complete repository error. Saving makes the
 configuration dirty and therefore not checked; check and thread creation stay
@@ -497,9 +515,10 @@ start opens the file picker (paste and drop attach too; never a worded
 "image" key), and the round signal send key at the end. Stop, while a run is
 on, is a worded key beside the field at the field's height. Enter sends; Shift+Enter inserts a new
 line. The keyboard hint lives in the field's tooltip and accessible description,
-not a permanent extra row. Model selection belongs in the conversation pane's top rail:
+not a permanent extra row. A thread's model selection belongs in its conversation pane's top rail
+(the chat's is in its index):
 the actual model id as a quiet text control, with providers grouped in the
-opened list. Toggles in a rail (the chat's `memory`, the now bay's fold) are
+opened list. Toggles in a rail (the now bay's fold) are
 quiet text controls too (`.strip-toggle`): the rail's 11px label type, no face,
 a hover wash, pressed in with a turned chevron while open. Rails beside each
 other share `--rail` height, padding and hairline, so they read as one band. Never substitute an effort label such as "high" for the model.
@@ -513,9 +532,9 @@ with the single `--syn-*` highlight set. Inline code is different — putty
 (`--s1` fill, `--line` border, 4px radius), not glass.
 
 ### Tool Strip
-A meter strip on the reading field: `--s3`, 9px radius, hairline border, mini
-lamp + mono tool name + plain primary argument (the command or path — raw
-JSON only as fallback, truncated at 300 chars) + chevron (turns 180° over 120ms when
+A meter strip on the reading field: `--s3`, 9px radius, hairline border, mono
+tool name + plain primary argument (the command or path — raw JSON only as
+fallback, truncated at 300 chars) + its state word unless done + chevron (turns 180° over 120ms when
 open). Output sits in a recessed `--s1` window underneath (12px mono,
 16rem max-height) inside a native disclosure, so it stays in the DOM. A strip opens while it runs,
 waits or failed, or when it returned images; once the reader opens or folds one, that choice holds through
@@ -531,9 +550,9 @@ While a thread's machine starts (and after a start that failed) a panel sits
 under the thread strip on the `--s2` enclosure, capped at 45dvh (38dvh on a
 phone) so the composer stays on screen: a silkscreen head (`machine startup`,
 the running total in tabular mono, a quiet link to the project's hooks and
-machine size) over one tool strip per step — mini lamp (running amber blink,
-ok green, failed red, interrupted unlit), mono step name, the detail cut to
-one line, the step's time. The running hook's log opens beneath its step in
+machine size) over one tool strip per step — mono step name, the detail cut
+to one line, its state word (`running`, `failed` in `--bad`, `interrupted`;
+ok prints none), the step's time. The running hook's log opens beneath its step in
 the strip's recessed `--s1` window and follows its end. A failed step opens
 with its whole error (the Full Failure Rule), its memory and the end of its
 log; it folds while a later try runs, and the reader's own open or fold
@@ -546,8 +565,8 @@ a close key.
 Printed notices, 7px radius, one per tone: error is red ink on `--bad-soft`
 with `--bad-line` border; info is silkscreen (`--note-soft` / `--note-line`,
 `--ink-2` text). Lifecycle notices (setting up, waking) are info, never error.
-The not-signed-in state is a red-lamp chip in the header; healthy auth is a
-green lamp with a 10px "auth" label — loud is earned only by failure.
+The not-signed-in state is a red-ink chip in the header; healthy auth is the
+quiet word "signed in" — loud is earned only by failure.
 
 ### Files Shelf
 A tray pulled out under the header: full-bleed `--s1` with the well shadow,
@@ -574,19 +593,70 @@ code scrolls inside its keyboard-focusable diff region. Opening an untracked
 text file reads it on demand and presents its complete contents as a new-file
 addition; binary and oversized files report why they cannot render.
 
-### Threads Panel
-The chat's right bay: a recessed `--s1` well with a `threads` head rail (open
-and running counts in tabular mono). The threads OptChat started sit under
-their project's name in mono, newest project first. Each is a hairline `--s4`
-card: a lamp (amber working, starting or waiting, red failed or machine
-error, unlit otherwise) beside the bold title, linked to the thread while it
-is open, and the short id with the thread's own state in muted mono (`turn
-ended`, never `done`). An archived thread is a transparent card, its title
-muted and unlinked, its state `archived · <last run>`. Empty and loading
-states are one muted line, never a placeholder card. The foot says states come
-from cube, archived is not done and merged is not released. Under 52rem the bay
-stacks above the conversation, capped at 38vh and foldable by a chevron rail
-toggle, so the composer always stays on screen.
+### The Sheet (OptChat)
+The chat's page is the reading field (`--s4`) from edge to edge: the
+wordmark row (a key that opens the index; the auth chip only on failure),
+the conversation, the composer. User messages are soft `--s3` faces with the
+well radius, no border or shadow, right-aligned; replies are plain prose; a
+thread's report is its words under its name (linked to the thread while it
+is open) and `· report`, set off by one `--line-2` hairline. No message
+carries a "you"/"agent" label; each keeps its accessible name. Tool lines
+are quiet: no face until opened. The chat's own tools speak in words —
+`started 3 threads · 1 not started`, `told <thread>`, `created <title> ·
+revision 1` — with the tool's mono name after; other tools keep their raw
+primary argument. The composer field takes the well radius and a soft
+1px-offset shadow; before it sits the **work key**: the index mark and the
+one count that matters most in words (`1 failed` in `--bad`, else `2
+running`). Its accessible name says every count.
+
+### The Margin
+At 76rem and wider, a margin to the right of the centred column (up to
+18rem, never moving it), scrolling with it.
+One note per message that started threads (a spawn's result lines) or named
+an artifact (a write or edit result, a `#/a/` link in a reply, a comment
+message), each thread and artifact once, at its first row shown. A note is
+flush: the 13px/600 title (an artifact's after its `--ink-3` file mark, its
+kind) clamped to
+two lines, one 12px `--ink-3` line of state in cubed's words (`turn ended`,
+`machine failed` in `--bad`, `reading state…` until cube has answered,
+`state not read` when it could not, `not known to cube` only once both the
+overview and the thread list were read and cube counts it lost); a short
+`--line` hairline reaches toward its message while the note stands level
+with it (a note moved off its message draws none). A press opens it in place on a
+hairline frame: short id, start time, the thread's newest report among the
+rows shown with the way to it, then `open thread` or `read` in signal ink.
+Four items per note, then `n more`. The margin follows the whole
+conversation in reading and tab order, so after each message with a note a
+key that takes no room (seen only while focused) leads to it, and an opened
+note leads back to its message. Notes go down past a taller one and up
+near the end; the opened one stays by its message; the margin never moves
+the conversation or lengthens the page. A failed thread whose note is
+scrolled away is pinned at the margin's top, with an arrow for the way back.
+Below 76rem the same thread notes are one-liners under their spawn, the
+state kept whole; artifacts stay links in the text.
+
+### The Index
+One dialog rising from the composer, the
+system's floating surface: `--s4`, `--line-2` border, well radius,
+`--shadow-float`, a putty-washed backdrop. Its head row: a search mark, the
+filter field (14px, 16px on a phone; focused, a 2px signal rule under the
+row) and a close key (a 2.75rem hit area on touch),
+then the chat's threads (failed, moving, the rest; title, state ·
+project), archived and lost counts, the newest artifacts (each after its file
+mark), the places
+(threads, artifacts, projects, settings) and the chat's model select and
+memory toggle. Opened by the work key, the wordmark, `/` outside a field and
+ctrl/⌘ k. A key, `/`, ctrl/⌘ k or a mouse puts focus in the filter; a tap
+puts it on the sheet itself, so no on-screen keyboard rises over it (the
+filter is a tap away). The arrow keys walk its items, enter in the filter
+opens the first match, escape or the close key closes and gives focus back.
+Rows are 2.75rem on touch.
+On a phone (and a phone on its side) the index is the whole screen: no
+border, radius or shadow, the filter row on top with its close key, the
+results scrolling on their own beneath it. Its height and top are the
+visual viewport's, followed as it changes, so while the user types into the
+filter the on-screen keyboard covers neither the filter nor the results
+(iOS keeps the layout viewport whole under its keyboard).
 
 ### Named Rules
 **The Actions-In-The-Module Rule.** A module's controls live inside it, on its
@@ -614,8 +684,8 @@ story — the command or the path — never raw JSON when a primary argument exi
   `packages/web/scripts/make-icons.mjs` with `icons.provenance.json` updated).
 - **Do** author new icons in `Icon.svelte`'s 2px round-cap/round-join 24-box
   family; every control's icon is drawn there.
-- **Do** give every state a lamp and choose its rendering structurally: lit,
-  blinking (amber only), or unlit lens.
+- **Do** print every state as a word with an accessible name; failure in
+  `--bad` ink, the ready default silent.
 - **Do** keep transitions at 120ms ease (80ms for press travel) and entrances
   at 140ms `settle-in`; the blanket reduced-motion guard covers new motion.
 - **Do** give icon-only keys both `title` and `aria-label`, and give any
@@ -630,19 +700,17 @@ story — the command or the path — never raw JSON when a primary argument exi
 
 ### Don't:
 - **Don't** paint any background outside `--s0`–`--s4`.
-- **Don't** add a second accent, use the signal for state, or put a lamp
-  pigment on a clickable affordance.
-- **Don't** render state as tints of one dot — sleeping is an unlit lens, and
-  amber never appears without `.blink`.
+- **Don't** add a second accent, use the signal for state, or put a state
+  ink on a clickable affordance.
+- **Don't** bring back status lamps: no dots, glows, halos, pulses or
+  blinking to say a state.
 - **Don't** theme the code window; glass is one material in both themes.
 - **Don't** introduce cool grays into the enclosure: light-theme neutrals live
   at OKLCH hue 87–95°. Audit: a new putty neutral within ~10° of hue 90.
-- **Don't** add pills (99px radii) or new circles; circles are lamps and the
-  send key only.
-- **Don't** float anything: no drop-shadow overlays until a true overlay
-  surface exists to claim the reserved `--shadow-float`.
-- **Don't** light the reserved `--lamp-blue` without a genuine fifth
-  structurally-distinct state; it ships unused.
+- **Don't** add pills (99px radii) or new circles; the send key is the one
+  circle.
+- **Don't** float anything but a true overlay (the folded menu, the chat's
+  index): `--shadow-float` is theirs alone.
 - **Don't** uppercase anything, anywhere.
 - **Don't** add font or icon packages beyond the two self-hosted faces
   (Archivo Variable + italic, JetBrains Mono 400/600).

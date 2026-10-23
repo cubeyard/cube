@@ -54,8 +54,8 @@ and delete the thread.
 
 World: the bench instrument (seed 1a30da04), extended by the project switchboard
 (seed `e0bc0e78`). The terminal is dark glass in both themes. Above it, global
-navigation and the thread strip form one compact control rail: status lamp and
-title, project label, service links, and neutral file/delete controls. The terminal
+navigation and the thread strip form one compact control rail: title and its
+state word, project label, service links, and neutral file/delete controls. The terminal
 has no redundant pane label, so this is the only vertical chrome between browser
 and work. The thread rail has no signal-orange primary or repository selector.
 Muted branch/ahead/dirty evidence stays subordinate to the terminal rather than

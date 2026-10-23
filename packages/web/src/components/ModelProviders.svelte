@@ -61,8 +61,7 @@
       <section class="provider" aria-label={provider.name}>
         <div class="provider-row">
           <div class="provider-title">
-            <span class:blink={provider.flow?.state === "pending"} class:on-amber={provider.flow?.state === "pending"} class:on-green={provider.connected && provider.flow?.state !== "pending"} class="lamp"></span>
-            <div><h2>{provider.name}</h2><span class="hint">{provider.checkError ? "status unavailable" : provider.connected ? `connected · ${provider.type === "oauth" ? "oauth" : "api key / host credentials"}` : "not connected"}</span></div>
+            <div><h2>{provider.name}</h2><span class="hint">{provider.flow?.state === "pending" ? "signing in…" : provider.checkError ? "status unavailable" : provider.connected ? `connected · ${provider.type === "oauth" ? "oauth" : "api key / host credentials"}` : "not connected"}</span></div>
           </div>
           <div class="actions">
             {#if provider.flow?.state === "pending"}

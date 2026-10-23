@@ -148,8 +148,8 @@ one), under one request id. Then:
 
 Every attempt sends the same text under the same request id, which Pi and
 Claude Code accept once, so a retry, a restart or a repeated send delivers
-the batch once. The page shows each comment's state with a lamp: not sent,
-waiting (with the reason), sent, undeliverable.
+the batch once. The page prints each comment's state in words: not sent,
+waiting (with the reason), sent, undeliverable (in error ink).
 
 On another revision a comment is looked for again: its quote where the text
 around it fits best (`found here`), or `not in this one` when the quote is

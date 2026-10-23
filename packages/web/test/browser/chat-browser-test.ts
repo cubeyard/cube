@@ -53,14 +53,6 @@ const box = (page: Page, selector: string): Promise<Box> => page.locator(selecto
   const { top, bottom, left, right, height, width } = element.getBoundingClientRect();
   return { top, bottom, left, right, height, width };
 });
-/** The box of an element's own text: two labels of one size share a baseline when these share a bottom. */
-const textBox = (page: Page, selector: string): Promise<Box> => page.locator(selector).first().evaluate(element => {
-  const text = [...element.childNodes].find(node => node.nodeType === Node.TEXT_NODE && node.textContent!.trim())!;
-  const range = document.createRange();
-  range.selectNodeContents(text);
-  const { top, bottom, left, right, height, width } = range.getBoundingClientRect();
-  return { top, bottom, left, right, height, width };
-});
 const near = (actual: number, expected: number, what: string) => assert.ok(Math.abs(actual - expected) < 0.75, `${what}: ${actual} against ${expected}`);
 /** A 1x1 png. */
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
@@ -249,31 +241,27 @@ await scenario("a message sent while the agent works shows at once and the run r
 });
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 1024, height: 768, touch: true }, { width: 390, height: 844, touch: true }]) {
-  await scenario("the chat's rails are one band and the composer's keys sit on the text's line", async page => {
-    const strip = await box(page, ".thread-strip");
-    const work = await box(page, ".work-head");
-    near(work.height, strip.height, "the threads head is as tall as the chat strip");
-    if (viewport.width <= 832) {
-      // stacked: the threads bay above the strip, labels on one left edge
-      near((await textBox(page, ".work-head h2")).left, (await box(page, ".thread-strip .lamp")).left, "the threads label starts where the strip's lamp does");
-    } else {
-      near(work.top, strip.top, "the rails start on one line");
-      near(work.bottom, strip.bottom, "the rails' hairlines meet");
-      const label = await textBox(page, ".work-head h2");
-      near((await textBox(page, ".strip-toggle[aria-controls=chat-memory]")).bottom, label.bottom, "memory and threads share a baseline");
-      near((await textBox(page, ".chat-tagline")).bottom, label.bottom, "the tagline and threads share a baseline");
-    }
-    // memory is a quiet rail toggle, not a raised key, and says when it is open;
-    // on a phone it is behind the strip's details key
-    const phone = viewport.width <= 640;
-    if (phone) await page.getByRole("button", { name: "details" }).click();
-    const memory = page.getByRole("button", { name: "memory" });
+  await scenario("the chat is one sheet: no rails or labels; memory and model are in the index; the composer's keys sit on the text's line", async page => {
+    // nothing above the conversation but the wordmark, which opens the index
+    assert.equal(await page.locator(".thread-strip, .work-panel, header nav, .chat-tagline").count(), 0, "no strip, panel or destinations row");
+    assert.equal(await page.locator(".chat-sheet .message-label").count(), 0, "no you/agent labels");
+    assert.equal(await page.locator(".conversation-message.user").first().getAttribute("aria-label"), "user message", "messages keep their names");
+    const bar = await box(page, ".sheet-bar");
+    assert.ok(bar.height <= 50, `one quiet row: ${bar.height}`);
+    // memory: in the index, a quiet control that says when it is open
+    await page.getByRole("button", { name: /^cube · index/ }).click();
+    const memory = page.locator(".chat-index").getByRole("button", { name: /memory/ });
     assert.equal(await memory.evaluate(element => element.classList.contains("key")), false);
+    assert.ok(await page.locator(".chat-index select[aria-label=model]").isVisible(), "the model is in the index");
     await memory.click();
-    assert.equal(await memory.getAttribute("aria-expanded"), "true");
     await page.locator("#chat-memory").waitFor();
+    assert.equal(await page.locator(".chat-index").evaluate(element => (element as HTMLDialogElement).open), false, "the index makes way for the memory");
+    await page.getByRole("button", { name: /^cube · index/ }).click();
+    assert.equal(await memory.getAttribute("aria-expanded"), "true");
     await memory.click();
-    assert.equal(await memory.getAttribute("aria-expanded"), "false");
+    await page.locator("#chat-memory").waitFor({ state: "detached" });
+    await page.keyboard.press("Escape");
+    const phone = viewport.width <= 640;
 
     // no "image" key: a + at the field's start, send at its end, one line
     assert.equal(await page.getByRole("button", { name: "image", exact: true }).count(), 0);
@@ -405,33 +393,34 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844,
     assert.ok(await page.locator(".transcript-column").evaluate(element => element.scrollWidth <= element.clientWidth), "nothing overflows the transcript sideways");
   }, viewport);
 
-  await scenario("the chat's threads show by project with their own state; no inferred wish list", async (page, host) => {
+  await scenario("the index lists the chat's threads with their own state; archived ones are counted; no inferred wish list", async (page, host) => {
     const thread = (id: string, project: string, title: string, state: string, archived = false) =>
       ({ id: `${id}-0000-4000-8000-000000000000`, title, project: { id: project, name: project }, state, archived, spawned: 1 });
-    host.overview = { threads: [thread("aaaaaaa1", "cube", "fix the gateway host check", "working"), thread("bbbbbbb2", "site", "a much longer thread title that has to wrap or clamp in the narrow panel without overflowing it at all", "completed"),
+    host.overview = { threads: [thread("aaaaaaa1", "cube", "fix the gateway host check", "completed"), thread("bbbbbbb2", "site", "a much longer thread title that has to wrap or clamp in the narrow panel without overflowing it at all", "working"),
       thread("ccccccc3", "cube", "old work", "stopped", true)], archived: { shown: 1, total: 3 }, unknown: 0 };
     await page.reload();
-    // a phone starts with the panel folded
-    if (viewport.width <= 640) await page.getByRole("button", { name: "show threads" }).click();
-    await page.locator(".work-thread").first().waitFor();
-    assert.deepEqual(await page.locator(".work-group h3").allTextContents(), ["cube", "site"], "grouped by project, newest first");
-    assert.deepEqual(await page.locator(".work-state").allTextContents(), ["aaaaaaa1 · working", "bbbbbbb2 · turn ended"], "archived threads are not listed");
-    assert.equal(await page.getByText("old work").count(), 0);
-    assert.equal(await page.locator(".work-thread a.work-title").first().getAttribute("href"), "#/t/aaaaaaa1-0000-4000-8000-000000000000");
-    await page.getByText("3 archived not shown").waitFor();
-    assert.match(await page.locator(".work-summary").textContent() ?? "", /^2 open · 1 running$/);
-    const panel = await box(page, ".work-panel");
-    assert.ok(await page.locator(".work-body").evaluate(element => element.scrollWidth <= element.clientWidth), "nothing overflows the panel sideways");
-    assert.ok(panel.right <= viewport.width + 0.5, "the panel fits the screen");
+    await page.locator(".work-key .work-count", { hasText: "1 running" }).waitFor();
+    assert.match(await page.locator(".work-key").getAttribute("aria-label") ?? "", /1 running$/);
+    await page.locator(".work-key").click();
+    const rows = page.locator(".chat-index .index-row[href^='#/t/']");
+    await rows.first().waitFor();
+    assert.deepEqual(await page.locator(".chat-index .index-row[href^='#/t/'] .index-meta").allTextContents(), ["working · site", "turn ended · cube"], "moving first, each in its own state; archived ones not listed");
+    assert.equal(await page.locator(".chat-index").getByText("old work").count(), 0);
+    assert.equal(await rows.first().getAttribute("href"), "#/t/bbbbbbb2-0000-4000-8000-000000000000");
+    await page.locator(".chat-index").getByText("3 archived").waitFor();
+    assert.ok(await page.locator(".index-body").evaluate(element => element.scrollWidth <= element.clientWidth), "nothing overflows the index sideways");
+    const index = await box(page, ".chat-index");
+    assert.ok(index.right <= viewport.width + 0.5 && index.left >= -0.5, "the index fits the screen");
 
     // a thread archived meanwhile leaves the list on the next read
     host.overview = { threads: [thread("aaaaaaa1", "cube", "fix the gateway host check", "completed"), thread("bbbbbbb2", "site", "a much longer thread title that has to wrap or clamp in the narrow panel without overflowing it at all", "stopped", true),
       thread("ccccccc3", "cube", "old work", "stopped", true)], archived: { shown: 2, total: 4 }, unknown: 0 };
     await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-    await page.getByText("4 archived not shown").waitFor();
-    assert.deepEqual(await page.locator(".work-group h3").allTextContents(), ["cube"], "a project with only archived threads leaves the list");
-    assert.deepEqual(await page.locator(".work-state").allTextContents(), ["aaaaaaa1 · turn ended"], "the thread that is not archived stays");
-    assert.match(await page.locator(".work-summary").textContent() ?? "", /^1 open$/);
+    await page.locator(".chat-index").getByText("4 archived").waitFor();
+    assert.deepEqual(await page.locator(".chat-index .index-row[href^='#/t/'] .index-meta").allTextContents(), ["turn ended · cube"], "the thread that is not archived stays");
+    await page.keyboard.press("Escape");
+    await page.locator(".work-key svg").waitFor();
+    assert.equal(await page.locator(".work-key").getAttribute("aria-label"), "index: threads, artifacts and settings", "nothing running: the key says only where it goes");
 
     // no model-inferred wish list: no section, no request for one
     assert.equal(await page.locator(".work-wishes, .work-wish").count(), 0);

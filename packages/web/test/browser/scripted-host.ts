@@ -6,7 +6,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import type { ThreadEvent, ThreadOverview, ThreadStatus, ThreadSummary, ThreadTranscript } from "../../src/lib/types.ts";
+import type { ArtifactListItem, ThreadEvent, ThreadOverview, ThreadStatus, ThreadSummary, ThreadTranscript } from "../../src/lib/types.ts";
 import { streamWindow, TranscriptWindowError, windowed, windowOf, windowQuery } from "../../../server/src/transcript-window.ts";
 
 const DIST = path.resolve(import.meta.dirname, "../../dist");
@@ -24,6 +24,16 @@ export class ScriptedHost {
   requests: string[] = [];
   /** One thread, served at /api/threads/<id>/ with the chat's transcript, stream and media. */
   thread: ThreadSummary | null = null;
+  /** More threads in the thread list, with no routes of their own. */
+  threads: ThreadSummary[] = [];
+  /** The artifacts list, and each one's newest body by id. */
+  artifacts: ArtifactListItem[] = [];
+  bodies: Record<string, string> = {};
+  /** The chat's threads answer this error (a 500) while it is set. */
+  overviewError: string | null = null;
+  /** Hold the thread list's and the chat's threads' answers until they resolve. */
+  onThreadList: () => Promise<void> | void = () => {};
+  onOverview: () => Promise<void> | void = () => {};
   /** Images the chat uploaded, by id. */
   media = new Map<string, { type: string; body: Buffer }>();
   /** Answers a prompt: by default accepted at once. A thrown error is a 500. */
@@ -112,10 +122,11 @@ export class ScriptedHost {
     const model = { provider: "faux", id: "faux-1" };
     switch (`${request.method} ${url.pathname}`) {
       case "GET /api/state": return json({ auth: { state: "ok", provider: "faux", credentialType: "api" }, onboardingComplete: true });
-      case "GET /api/threads": return json({ threads: this.thread ? [this.thread] : [] });
+      case "GET /api/threads": await this.onThreadList(); return json({ threads: [...this.thread ? [this.thread] : [], ...this.threads] });
+      case "GET /api/artifacts": return json({ artifacts: this.artifacts });
       case "GET /api/projects": return json({ projects: [] });
       case "GET /api/optchat/model": return json({ models: [model], selected: model, images: { supported: true, reason: null } });
-      case "GET /api/optchat/threads": return json(this.overview);
+      case "GET /api/optchat/threads": await this.onOverview(); return this.overviewError ? json({ error: this.overviewError }, 500) : json(this.overview);
       case "GET /api/optchat/view": return json({ view: "<chat>\n</chat>", messages: 0, failure: null });
       case "GET /api/optchat/history": {
         if (url.searchParams.has("before")) await this.onOlder();
@@ -157,6 +168,11 @@ export class ScriptedHost {
         return json({ image: { id, mimeType: request.headers["content-type"], width: 1, height: 1 } });
       }
       default: {
+        const revision = request.method === "GET" ? /^\/api\/artifacts\/([^/]+)\/revisions\/(\d+)$/.exec(url.pathname) : null;
+        const artifact = revision ? this.artifacts.find(item => item.id === decodeURIComponent(revision[1]!)) : undefined;
+        if (revision && artifact) {
+          return json({ revision: { artifact: artifact.id, number: Number(revision[2]), title: artifact.title, body: this.bodies[artifact.id] ?? "", actions: [], provenance: { kind: "tool" }, createdAt: artifact.updatedAt, editor: artifact.author } });
+        }
         const image = request.method === "GET" && url.pathname.startsWith("/api/optchat/media/") ? this.media.get(decodeURIComponent(url.pathname.slice("/api/optchat/media/".length))) : undefined;
         if (!image) return json({ error: "not found" }, 404);
         response.writeHead(200, { "content-type": image.type });

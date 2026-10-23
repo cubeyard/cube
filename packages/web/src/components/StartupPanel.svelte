@@ -2,7 +2,7 @@
   import { tick, untrack } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
   import { errorText, fetchStartupLog, fetchThreadSteps } from "../lib/api.ts";
-  import { duration, LOGGED_STEPS, longStep, memoryAdvice, size, stepLabel, stepLamp, stepMs, totalMs } from "../lib/startup.ts";
+  import { duration, LOGGED_STEPS, longStep, memoryAdvice, size, stepLabel, stepState, stepMs, totalMs } from "../lib/startup.ts";
   import type { StartupLog, StartupStep, ThreadSummary } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
 
@@ -115,9 +115,9 @@
       <li data-step={stepKey(step)}>
         <details class="tool-strip startup-step" open={chosen.get(stepKey(step)) ?? openByDefault(step)} ontoggle={(event) => onToggle(event, step)}>
           <summary title={step.detail ?? stepLabel(step)}>
-            <span class="lamp mini {stepLamp(step)}" aria-hidden="true"></span><span class="sr-only">{step.state}</span>
             <code>{stepLabel(step)}</code>
             {#if step.detail}<span class="tool-summary">{step.detail}</span>{/if}
+            {#if stepState(step)}<span class="tool-state" class:failure={step.state === "failed"}>{stepState(step)}</span>{:else}<span class="sr-only">ok</span>{/if}
             <span class="startup-time">{duration(stepMs(step, now))}</span>
             {#if body}<span class="tool-chevron"><Icon name="chevron" size={12} /></span>{/if}
           </summary>

@@ -1,18 +1,20 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, type Snippet } from "svelte";
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { errorText, imageUrl, sendPrompt, stopThread, threadBase, threadEvents, uploadImage } from "../lib/api.ts";
   import { ACCEPT, MEDIA_LIMITS, pastedImages, prepareImage } from "../lib/images.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
   import { echo, echoRows, unanswered, unlogged, type Echo } from "../lib/outbox.ts";
   import { picturePath, toolOpen, transcriptRows, type ToolState, type TranscriptRow } from "../lib/transcript.ts";
+  import { rowKey } from "../lib/provenance.ts";
   import { uid } from "../lib/uid.ts";
   import type { MessageImage, ModelSelection, ThreadStatus, ThreadTranscript } from "../lib/types.ts";
   import { tailStart, WINDOW_EVENTS } from "../../../server/src/transcript-window.ts";
   import type { TranscriptPage } from "../../../server/src/thread-events.ts";
   import Icon from "./Icon.svelte";
 
-  let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread", images = null }: {
+  let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread", images = null,
+    sheet = false, onRows, toolLine, reportLabel, after, margin, composerStart }: {
     threadId?: string;
     /** Messages may be sent while the agent works; they reach it between tool calls. */
     steer?: boolean;
@@ -30,6 +32,21 @@
     /** Messages may carry images (pasted, dropped or picked) when the model
      * takes them; null: this conversation takes none. */
     images?: { supported: boolean; reason: string | null } | null;
+    /** The chat's sheet: no "you"/"agent" labels over the messages (each
+     * keeps its accessible name), quieter tool lines, room for a margin. */
+    sheet?: boolean;
+    /** Told the rows shown, for what is drawn beside them. */
+    onRows?: (rows: TranscriptRow[]) => void;
+    /** A tool row's line in plain words, in place of its raw input. */
+    toolLine?: (row: Extract<TranscriptRow, { kind: "tool" }>) => string | null;
+    /** A thread report's label, given its short id; default "thread <id>". */
+    reportLabel?: Snippet<[string]>;
+    /** Drawn after a row, in the conversation's flow. */
+    after?: Snippet<[TranscriptRow]>;
+    /** Drawn beside the conversation's column, scrolling with it; rows carry `data-anchor` (`rowKey`). */
+    margin?: Snippet;
+    /** Drawn before the composer's field, at its height. */
+    composerStart?: Snippet;
   } = $props();
   // The neutral thread event model is the only input; no agent shapes here.
   const events = $derived(threadEvents(base));
@@ -50,6 +67,7 @@
   const outgoing = $derived(unanswered(transcript, echoes));
   const rows = $derived([...transcriptRows({ events: [...earlier.events, ...transcript.events], status: transcript.status }), ...echoRows(outgoing)]);
   const status = $derived<ThreadStatus>(transcript.status);
+  $effect(() => { onRows?.(rows); });
   let prompt = $state("");
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -395,12 +413,12 @@
     if (open !== toolOpen(row, chosen)) chosen.set(row.callId, open);
   }
 
-  const toolLamp: Record<ToolState, string> = { waiting: "on-amber", running: "on-amber blink", done: "on-green", error: "on-red", open: "" };
   const toolStateLabel: Record<ToolState, string> = { waiting: "waiting", running: "running", done: "done", error: "error", open: "no result" };
 </script>
 
-<div class="conversation">
+<div class="conversation" class:sheet class:has-margin={!!margin}>
   <div class="transcript" bind:this={scroller} aria-busy={working}>
+    <div class="transcript-page">
     <div class="transcript-column" bind:this={column}>
       {#if notice}<p class="conversation-notice" role="note">{notice}</p>{/if}
       {#if !loading && first > 0}
@@ -414,17 +432,18 @@
         <p class="conversation-empty">{waitingText ?? "reading thread…"}</p>
       {:else if rows.length === 0}
         <div class="conversation-empty">
-          <span class="lamp on-green" aria-hidden="true"></span>
           <p>{empty?.title ?? "ready when you are"}</p>
           <span>{empty?.hint ?? "Ask for a change, paste an error, or describe what you want to understand."}</span>
         </div>
       {:else}
         {#each rows as row (row.id)}
           {#if row.kind === "tool"}
-            <details class="tool-strip" open={toolOpen(row, chosen)} ontoggle={(event) => onToolToggle(event, row)}>
+            {@const line = toolLine?.(row) ?? null}
+            <details class="tool-strip" data-anchor={rowKey(row)} open={toolOpen(row, chosen)} ontoggle={(event) => onToolToggle(event, row)}>
               <summary title={row.summary || row.name}>
-                <span class="lamp mini {toolLamp[row.state]}" aria-hidden="true"></span><span class="sr-only">{toolStateLabel[row.state]}</span>
-                <code>{row.name}</code>{#if row.summary}<span class="tool-summary">{row.summary}</span>{/if}
+                {#if line}<span class="tool-said">{line}</span><code class="tool-name">{row.name}</code>
+                {:else}<code>{row.name}</code>{#if row.summary}<span class="tool-summary">{row.summary}</span>{/if}{/if}
+                {#if row.state === "done"}<span class="sr-only">done</span>{:else}<span class="tool-state" class:failure={row.state === "error"}>{toolStateLabel[row.state]}</span>{/if}
                 {#if row.input || row.output || row.images}<span class="tool-chevron"><Icon name="chevron" size={12} /></span>{/if}
               </summary>
               {#if row.input}<pre class="tool-input">{row.input}</pre>{/if}
@@ -432,39 +451,43 @@
               {#if row.images}{@render messageImages(row.images, row.summary || row.name)}{/if}
             </details>
           {:else if row.kind === "user" && row.from}
-            <article class="conversation-message report" aria-label="thread report">
-              <span class="message-label">thread {row.from}</span>
+            <article class="conversation-message report" aria-label="thread report" data-anchor={rowKey(row)} tabindex="-1">
+              <span class="message-label">{#if reportLabel}{@render reportLabel(row.from)}{:else}thread {row.from}{/if}</span>
               <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text and allows only http(s)/mailto links -->
               <div class="message-copy markdown">{@html renderMarkdown(row.text)}</div>
             </article>
           {:else if row.kind === "user"}
-            <article class="conversation-message user" class:sending={row.sending} aria-label="user message">
-              <span class="message-label">you{#if row.sending}<span class="message-sending"> · sending</span>{/if}</span>
+            <article class="conversation-message user" class:sending={row.sending} aria-label="user message" data-anchor={rowKey(row)}>
+              {#if !sheet}<span class="message-label">you{#if row.sending}<span class="message-sending"> · sending</span>{/if}</span>
+              {:else if row.sending}<span class="message-label message-sending">sending</span>{/if}
               {#if row.images}{@render messageImages(row.images, "")}{/if}
               {#if row.text}<div class="message-copy">{row.text}</div>{/if}
             </article>
           {:else}
-            <article class="conversation-message assistant" class:continued={!row.labelled} aria-label={row.reasoning ? "agent reasoning" : "agent message"}>
-              {#if row.labelled}<span class="message-label">agent</span>{/if}
+            <article class="conversation-message assistant" class:continued={!row.labelled} aria-label={row.reasoning ? "agent reasoning" : "agent message"} data-anchor={rowKey(row)}>
+              {#if row.labelled && !sheet}<span class="message-label">agent</span>{/if}
               <!-- a press on an image the thread read opens it; the keys are in the rendered markup -->
               <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
               <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text, allows only http(s)/mailto links and shows only images the thread read -->
               <div class="message-copy markdown" class:reasoning={row.reasoning} onclick={onProseClick}>{@html renderMarkdown(row.text, pictureOf(row))}</div>
             </article>
           {/if}
+          {@render after?.(row)}
         {/each}
         {#if working}
-          <div class="working-line" role="status"><span class="lamp on-amber blink" aria-hidden="true"></span>working</div>
+          <div class="working-line" role="status">working…</div>
         {:else if waiting}
-          <div class="working-line" role="status"><span class="lamp on-amber" aria-hidden="true"></span>waiting on {status.waiting!.length === 1 ? "a background agent" : `${status.waiting!.length} background agents`}: {status.waiting!.map(description => description.length > 80 ? `${description.slice(0, 79)}…` : description).join(", ")}</div>
+          <div class="working-line" role="status">waiting on {status.waiting!.length === 1 ? "a background agent" : `${status.waiting!.length} background agents`}: {status.waiting!.map(description => description.length > 80 ? `${description.slice(0, 79)}…` : description).join(", ")}</div>
         {:else if status.state === "stopped"}
-          <div class="working-line" role="status"><span class="lamp" aria-hidden="true"></span>stopped</div>
+          <div class="working-line" role="status">stopped</div>
         {/if}
       {/if}
     </div>
+    {@render margin?.()}
+    </div>
   </div>
 
-  {#if reconnecting}<div class="conversation-note" role="status"><span class="lamp on-amber blink" aria-hidden="true"></span>reconnecting to the thread…</div>{/if}
+  {#if reconnecting}<div class="conversation-note" role="status">reconnecting to the thread…</div>{/if}
   {#if error || historyError || status.state === "failed"}<div class="conversation-error" role="alert">{error ?? historyError ?? status.error ?? "the run failed"}</div>{/if}
   <form class="composer" aria-busy={busy} onsubmit={(event) => { event.preventDefault(); void submit(); }}
     ondragover={(event) => { if (images && event.dataTransfer?.types.includes("Files")) event.preventDefault(); }} ondrop={onDrop}>
@@ -490,6 +513,7 @@
     {/if}
     <!-- the deck is full-bleed; the field sits in the transcript's measure -->
     <div class="composer-row">
+      {@render composerStart?.()}
       <!-- a press on the field's padding puts the caret in the text; the keys keep their own -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <div class="composer-field" onclick={(event) => { if (event.target === event.currentTarget) composer?.focus(); }}>

@@ -12,7 +12,7 @@ export type Seen = {
   /** Agent rows' text, in order. */
   agent: string[];
   draft: string;
-  /** The chat lamp or the composer says a run is on. */
+  /** The composer says a run is on. */
   busy: boolean;
   working: boolean;
   error: string | null;

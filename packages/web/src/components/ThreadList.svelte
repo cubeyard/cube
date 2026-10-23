@@ -3,7 +3,7 @@
   import { deleteThread, errorText, fetchProjects, isUnreachable, renameThread } from "../lib/api.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
   import type { Command } from "../lib/command.ts";
-  import { lampClass, stateLabel } from "../lib/thread-state.ts";
+  import { stateLabel } from "../lib/thread-state.ts";
   import { relTime } from "../lib/time.ts";
   import { createTransient } from "../lib/transient.svelte.ts";
   import type { Project, ThreadSummary } from "../lib/types.ts";
@@ -197,7 +197,6 @@
         <div class="module">
           {#if renaming === thread.id}
             <div class="module-face">
-              <span class="lamp {lampClass(thread)}" aria-hidden="true"></span>
               <span class="module-text">
                 <input
                   class="rename-input"
@@ -215,7 +214,6 @@
             </div>
           {:else}
             <a class="module-face" href="#/t/{thread.id}">
-              <span class="lamp {lampClass(thread)}" aria-hidden="true"></span>
               {#if !stateLabel(thread)}<span class="sr-only">ready</span>{/if}
               <span class="module-text">
                 <span class="module-title" class:untitled={!thread.title}>{thread.title ?? "untitled"}</span>

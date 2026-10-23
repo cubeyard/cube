@@ -47,14 +47,14 @@ try {
     // While the first try runs: its step and its hook's log as it grows.
     await panel.waitFor();
     const first = panel.locator("details.startup-step", { hasText: "prepare · try 1" });
-    await first.locator(".lamp.on-amber.blink").waitFor();
+    await first.locator(".tool-state", { hasText: "running" }).waitFor();
     await first.locator("pre.startup-log", { hasText: "building the services" }).waitFor({ timeout: 15_000 });
     assert.match(await first.locator(".startup-log-head").innerText(), /^pre-setup log$/);
     await shot(page, `${size}-1-running`);
 
     // The OOM killer stops it: the full error, the memory, its log, the advice.
     fs.writeFileSync(path.join(guest(), "oom"), "");
-    await first.locator(".lamp.on-red").waitFor({ timeout: 20_000 });
+    await first.locator(".tool-state.failure", { hasText: "failed" }).waitFor({ timeout: 20_000 });
     // Read as text, open or not: cubed's recovery loop (every 30 s) may start
     // the next try at once, and the failed one folds then.
     const text = async (selector: string) => (await first.locator(selector).textContent() ?? "").trim();
@@ -102,7 +102,6 @@ try {
     if (layout === "phone") await page.locator(".strip-details-key").click();
     const strip = page.locator("section.thread-strip");
     const state = strip.locator(".strip-state:not(.strip-reason, .strip-notice)");
-    const lamp = strip.locator(".lamp").first();
     const composer = page.locator(".composer textarea");
     const seen = async (text: string) => {
       await state.filter({ hasText: text }).waitFor({ timeout: 15_000 });
@@ -110,7 +109,7 @@ try {
     };
     host.sleep(thread, { suspension: { state: "suspended", at: Date.now() } });
     await seen("suspended");
-    assert.doesNotMatch(await lamp.getAttribute("class") ?? "", /on-/, "a suspended machine is an unlit lens");
+    assert.equal(await page.locator(".lamp, .blink").count(), 0, "no lamp: the state is in words");
     assert.equal(await composer.isEnabled(), true);
     assert.equal(await composer.getAttribute("placeholder"), "message this thread", "a message wakes it");
     await shot(page, `${size}-5-suspended`);
@@ -118,7 +117,6 @@ try {
     host.sleep(thread, { suspension: { state: "waking", at: Date.now(), waiting } });
     await seen("waiting for a free slot");
     assert.equal(await state.filter({ hasText: "waiting for a free slot" }).getAttribute("title"), waiting);
-    assert.match(await lamp.getAttribute("class") ?? "", /on-amber blink/);
     await page.locator(`.composer textarea[placeholder="waiting for a free slot…"]`).waitFor({ timeout: 15_000 });
     assert.equal(await strip.locator(".strip-reason").isVisible(), false, "the full reason is the label's title, or a line of the details");
     await shot(page, `${size}-6-waiting`);
@@ -132,7 +130,6 @@ try {
     host.sleep(thread, { notice: { text: notice, at: Date.now() } });
     await strip.locator(".strip-notice", { hasText: notice }).waitFor({ timeout: 15_000 });
     assert.ok(await strip.locator(".strip-notice").isVisible(), `the notice is in print (${size}, details closed)`);
-    assert.match(await lamp.getAttribute("class") ?? "", /on-green/);
     await shot(page, `${size}-8-notice`);
     host.sleep(thread, {});
     await strip.locator(".strip-notice").waitFor({ state: "detached", timeout: 15_000 });

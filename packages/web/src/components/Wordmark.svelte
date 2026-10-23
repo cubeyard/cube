@@ -2,7 +2,8 @@
   // The brand mark: the wireframe cube glyph and the lowercase name, drawn
   // inline so it renders before any font or asset arrives — it is the one
   // thing on screen while the host is still unreachable.
-  let { href = null }: { href?: string | null } = $props();
+  // With `onclick` the mark is a key (the chat's way to its index).
+  let { href = null, onclick = null, label = null }: { href?: string | null; onclick?: ((event: MouseEvent) => void) | null; label?: string | null } = $props();
 </script>
 
 {#snippet mark()}
@@ -15,7 +16,9 @@
   <span class="name-text">cube</span>
 {/snippet}
 
-{#if href}
+{#if onclick}
+  <button type="button" class="name name-key" aria-haspopup="dialog" aria-label={label ?? undefined} title={label ?? undefined} {onclick}>{@render mark()}</button>
+{:else if href}
   <a class="name" {href}>{@render mark()}</a>
 {:else}
   <span class="name">{@render mark()}</span>

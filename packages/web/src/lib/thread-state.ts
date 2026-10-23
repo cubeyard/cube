@@ -3,9 +3,6 @@ import type { ThreadSummary } from "./types.ts";
 /** The machine is suspended (idle; it holds no slot) or being woken; a
  * full runner makes it wait, and the label says so (P7-5, B7-2). */
 const suspension = (thread: ThreadSummary) => thread.state === "error" ? null : thread.vm?.suspension ?? null;
-/** A suspended machine is an unlit lens (DESIGN.md: sleeping). */
-export const lampClass = (thread: ThreadSummary) => thread.state === "error" ? "on-red" : thread.state === "starting" ? "on-amber blink"
-  : suspension(thread)?.state === "waking" ? "on-amber blink" : suspension(thread) ? "" : "on-green";
 /** A wake says what it waits for, also while each try starts the machine
  * again (the API says `starting` then), so the label does not flicker. */
 export const stateLabel = (thread: ThreadSummary) => {

@@ -20,7 +20,7 @@ and delete.
 
 ## Content and constraints
 
-- One module per thread: lamp, title, explicit `project / name` attribution,
+- One module per thread: title, explicit `project / name` attribution,
   relative time, state label, actions. Preserve full inline action failures;
   project attribution is not optional metadata that may disappear for space.
 - The list polls every 3s; a slow response must never resurrect a deleted row
@@ -41,10 +41,11 @@ and delete.
 ## Direction and memorable moment
 
 World: the bench instrument (redesign 2026-08-27, seed 1a30da04). The list is a
-recessed well in the instrument's putty panel, one module per thread. The LED
-lamp is the screen's whole idea: lit green (ready), blinking amber (in motion),
-steady red (error), and — the honest detail — an UNLIT dark lens for sleeping.
-Lamps warm up in a quick stagger when the panel arrives. Rename and delete are
+recessed well in the instrument's putty panel, one module per thread. State is
+printed, never lit (status lamps were removed app-wide at the user's request):
+ready says nothing, a moving or sleeping machine says so in a quiet word
+(`starting the thread's machine`, `suspended`), an error says `error` in red
+ink. Rename and delete are
 keys INSIDE the module in a permanently visible, flush hairline-divided bank.
 Muted ink and the warm ramp keep it quiet at rest; only the approached key
 lifts to the reading surface. The empty state holds the single orange key, and
