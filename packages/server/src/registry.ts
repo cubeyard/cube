@@ -657,6 +657,29 @@ export class Registry {
       return updated;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
+  /** Reserves the thread's slot for a wake of its suspended machine, in one
+   * IMMEDIATE transaction as `createThread`'s: with a slot free on its
+   * runner (counting every other open thread that holds one, a new thread
+   * whose machine does not exist yet included) it becomes `waking` and holds
+   * the slot; otherwise `waking` + `waiting` (holding none) and the runner is
+   * not asked. True when the slot is reserved. */
+  beginWake(threadId: string, waiting: string): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const thread = this.getThread(threadId);
+      if (!thread?.vm || thread.archived) throw new Error("thread not found");
+      const runner = this.getRunner(thread.runnerId);
+      if (!runner) throw new Error("thread runner allocation is missing");
+      const row = this.db.prepare(`SELECT count(*) AS active FROM thread WHERE runner_id=? AND id<>? AND ${OPEN_THREAD} AND ${HOLDS_SLOT}`).get(thread.runnerId, threadId);
+      const admitted = Number(row!.active) < runnerSlots(runner);
+      const { waiting: _, ...sleep } = thread.vm.suspension ?? { state: "suspended" as const, at: Date.now() };
+      const suspension: NonNullable<ThreadVm["suspension"]> = { ...sleep, state: "waking", ...admitted ? {} : { waiting } };
+      this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, vm: { ...thread.vm, suspension } }), threadId);
+      this.syncRunner(thread.runnerId);
+      this.db.exec("COMMIT");
+      return admitted;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
   /** Begins a startup step of the thread's machine (`vm.steps`); a step of
    * the same name and attempt still running is marked interrupted. */
   beginStartupStep(threadId: string, step: Pick<StartupStep, "name" | "attempt" | "detail">, at = Date.now()): void {
@@ -677,7 +700,7 @@ export class Registry {
    * never began (a cubed that restarted in between) is recorded as it ends.
    * `resumed`: a step marked interrupted may end after all (a preparation
    * try that went on in the guest while cubed was away), in its own place. */
-  endStartupStep(threadId: string, step: Pick<StartupStep, "name" | "attempt" | "detail" | "memory" | "log"> & { state: "ok" | "failed" }, at = Date.now(), resumed = false): void {
+  endStartupStep(threadId: string, step: Pick<StartupStep, "name" | "attempt" | "detail" | "memory" | "log"> & { state: "ok" | "failed" | "interrupted" }, at = Date.now(), resumed = false): void {
     this.changeSteps(threadId, steps => {
       const same = (old: StartupStep) => old.name === step.name && old.attempt === step.attempt;
       let index = steps.findLastIndex(old => old.state === "running" && same(old));

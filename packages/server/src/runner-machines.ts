@@ -291,6 +291,17 @@ export class RunnerMachines implements ThreadMachines {
     return waking;
   }
 
+  /** Wakes the thread's suspended machine for cubed's own check (an
+   * archive's release check) if its runner has a slot free now; it never
+   * waits for one. Null once the machine runs; otherwise why it stays
+   * suspended (no slot, or the runner does not answer). */
+  async wakeNow(thread: Thread): Promise<string | null> {
+    if (!this.suspended(thread)) return null;
+    try { await this.start(this.options.registry.getThread(thread.id) ?? thread, { once: true }); }
+    catch (error) { if (error instanceof RunnerWait) return error.message; throw error; }
+    return this.suspended(thread) ? "it is still suspended" : null;
+  }
+
   wakeInFlight(thread: Thread): boolean { return this.waking.has(thread.id) || this.starting.has(thread.id); }
 
   /** A `waking` that no start or wake of this process owns: one a cubed
@@ -432,6 +443,8 @@ export class RunnerMachines implements ThreadMachines {
   start(thread: Thread, options: StartOptions = {}): Promise<MachineStart> {
     const pending = this.starting.get(thread.id);
     if (pending) return pending;
+    // An archived thread's machine is released: nothing starts it again.
+    if (this.options.registry.getThread(thread.id)?.archived !== false) return Promise.reject(new Error("thread not found"));
     // A suspend under way ends first: the start then resumes what it saved,
     // never races its save (B-207-1).
     const suspending = this.suspending.get(thread.id);
@@ -441,10 +454,16 @@ export class RunnerMachines implements ThreadMachines {
     return starting;
   }
 
-  /** A failure that only means the runner is not there now: the thread waits. */
+  /** A failure that only means the runner cannot take the machine now (it
+   * does not answer, or it is full): the thread waits. */
   private waitFor(thread: Thread, error: unknown): unknown {
-    if (!(error instanceof RunnerError && error.code === "UNAVAILABLE")) return error;
     const node = this.options.registry.getRunner(thread.runnerId)?.nodeId ?? thread.runnerId;
+    // A new machine on a full runner (its slot was reserved, but the runner
+    // counts otherwise: another cubed, a lowered bound) waits; it is no failure.
+    if (error instanceof RunnerError && error.code === "RESOURCE_EXHAUSTED") {
+      return new RunnerWait(`waiting for a free slot on runner ${node}: it hosts as many machines as it may; this thread stays on it`, { cause: error });
+    }
+    if (!(error instanceof RunnerError && error.code === "UNAVAILABLE")) return error;
     return new RunnerWait(`waiting for runner ${node}: it does not answer; this thread was `
       + `${thread.pinned ? "started on it by name" : "placed on it"} and stays there`
       + (this.onVm(thread) ? "" : " (a host runner runs only while someone runs berth host)"), { cause: error });
@@ -494,18 +513,26 @@ export class RunnerMachines implements ThreadMachines {
       // from its disk); one the runner no longer holds suspended is simply started.
       const suspension = this.options.registry.getThread(thread.id)?.vm?.suspension;
       const resuming = machine.status?.phase === MachineStatus_Phase.SUSPENDED;
+      const waiting = `waiting for a free slot on runner ${node}: the machine is suspended and resumes once one frees`;
+      // B7-2: a full runner; the thread waits, saying so, and tries again.
+      // A start that does not wait (`once`) leaves the machine suspended.
+      const full = (cause?: unknown) => {
+        if (options.once) this.options.registry.updateThreadVm(thread.id, { suspension: { ...(suspension ?? { at: Date.now() }), state: "suspended", waiting: undefined } });
+        return new RunnerWait(waiting, cause === undefined ? undefined : { cause });
+      };
       if (resuming) {
-        this.options.registry.updateThreadVm(thread.id, { suspension: { ...(suspension ?? { at: Date.now() }), state: "waking" } });
+        // The registry reserves the slot first, as for a new thread: a wake
+        // never takes the slot of a thread whose machine is not created yet.
+        if (!this.options.registry.beginWake(thread.id, waiting)) throw full();
       } else if (suspension) this.options.registry.updateThreadVm(thread.id, { suspension: undefined });
       const startAndWait = async () => {
         let started: Machine;
         try { started = await session.machine({ case: "machineStart", value: { ref, fence: this.fence(thread), ...start } }); }
         catch (error) {
-          // B7-2: a full runner; the thread waits, saying so, and tries again.
+          // The runner is full all the same (another cubed, a lowered bound).
           if (resuming && error instanceof RunnerError && error.code === "RESOURCE_EXHAUSTED") {
-            const waiting = `waiting for a free slot on runner ${node}: the machine is suspended and resumes once one frees`;
-            this.options.registry.updateThreadVm(thread.id, { suspension: { ...(suspension ?? { at: Date.now() }), state: "waking", waiting } });
-            throw new RunnerWait(waiting, { cause: error });
+            if (!options.once) this.options.registry.updateThreadVm(thread.id, { suspension: { ...(suspension ?? { at: Date.now() }), state: "waking", waiting } });
+            throw full(error);
           }
           throw error;
         }
@@ -783,11 +810,13 @@ export class RunnerMachines implements ThreadMachines {
     await this.removeTemplates(this.session(thread), [templateId], "its setup changed");
   }
 
-  /** Ends the thread's `boot` step as failed when `work` fails. */
+  /** Ends the thread's `boot` step as failed when `work` fails, or as
+   * interrupted when the runner cannot take it now (the thread waits). */
   private async step<T>(thread: Thread, work: () => Promise<T>): Promise<T> {
     try { return await work(); }
     catch (error) {
-      this.options.registry.endStartupStep(thread.id, { name: "boot", state: "failed", detail: error instanceof Error ? error.message : String(error) });
+      const waits = error instanceof RunnerError && (error.code === "RESOURCE_EXHAUSTED" || error.code === "UNAVAILABLE");
+      this.options.registry.endStartupStep(thread.id, { name: "boot", state: waits ? "interrupted" : "failed", detail: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
