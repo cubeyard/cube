@@ -513,6 +513,13 @@ export class OptChat {
   private compactorError: string | null = null;
   private readonly watchers = new Map<string, Promise<ThreadWatch | null>>();
   private readonly reported = new Map<string, string>();
+  /** Threads whose report could not be handed to the chat: the next watch
+   * round reads their stored run again (the request id keeps it to once). */
+  private readonly unsent = new Set<string>();
+  /** Threads seen open by a watch round of this process: once one is gone
+   * (archived in the UI, say), its stored run is read once more, so a run
+   * that settled just before is not lost. */
+  private readonly seenOpen = new Set<string>();
   private readonly startReported = new Set<string>();
   /** When each thread's machine was first seen failing to start, until it starts. */
   private readonly startFailing = new Map<string, number>();
@@ -1390,6 +1397,7 @@ export class OptChat {
   private async watchThreads(): Promise<void> {
     if (this.closing) return;
     const settings = await this.harness.snapshot(SettingsDoc, context);
+    for (const id of [...this.unsent]) { this.unsent.delete(id); void this.reportStored(id); }
     for (const id of Object.keys(settings?.threads ?? {})) {
       if (this.watchers.has(id)) continue;
       const watching = (async () => {
@@ -1406,7 +1414,9 @@ export class OptChat {
           const lasted = Date.now() - since;
           if (lasted >= (this.options.limits?.startGraceMs ?? START_GRACE_MS) && !this.startReported.has(id) && !this.closing) {
             this.startReported.add(id);
-            void this.send(`[${short(id)}] failed to start for ${Math.round(lasted / 1000)} s; cubed keeps retrying: ${message}`, `report:${id}:start`).catch(() => {});
+            // Not handed over: a later round says it again (once, by its request id).
+            void this.send(`[${short(id)}] failed to start for ${Math.round(lasted / 1000)} s; cubed keeps retrying: ${message}`, `report:${id}:start`)
+              .catch(() => { this.startReported.delete(id); });
           }
           this.watchers.delete(id);
           return null;
@@ -1416,6 +1426,13 @@ export class OptChat {
         this.startFailing.delete(id);
         // An archive may still be refused: the next round looks again.
         if (events === "archiving") { this.watchers.delete(id); return null; }
+        // Gone since a round of this process saw it open: its last run, if
+        // no watcher reported it, reports from its store (once).
+        if (!events) {
+          if (this.seenOpen.delete(id)) await this.reportStored(id);
+          return null;
+        }
+        this.seenOpen.add(id);
         // A thread is not started or woken to be watched: its stored run, if
         // it settled, reports (once: the report's request id), and the next
         // round looks again, watching it once its agent is open.
@@ -1440,9 +1457,15 @@ export class OptChat {
 
   private settle(id: string, status: ThreadStatus, report: () => string): void {
     if (status.state === "idle" || status.state === "working" || !status.run || this.reported.get(id) === status.run) return;
-    this.reported.set(id, status.run);
-    void this.send(`[${short(id)}] ${capText(report())}`, `report:${id}:${status.run}`)
-      .catch(error => { if (!this.closing) log.warn("report delivery failed", { thread: id, error }); });
+    const run = status.run;
+    this.reported.set(id, run);
+    void this.send(`[${short(id)}] ${capText(report())}`, `report:${id}:${run}`).catch(error => {
+      if (this.closing) return;
+      // Not handed over: the next round reads the stored run and sends it again.
+      log.warn("report delivery failed; it is tried again", { thread: id, error });
+      if (this.reported.get(id) === run) this.reported.delete(id);
+      this.unsent.add(id);
+    });
   }
 
   /** After an archive, or for a thread whose agent is not open: the thread's
