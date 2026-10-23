@@ -5,6 +5,8 @@
 
   // Pi owns credentials; the models page supplies its interactive login UI.
   let auth = $state<AuthState | null>(null);
+  // quiet: healthy auth shows nothing at all; only a failure is printed.
+  let { quiet = false }: { quiet?: boolean } = $props();
 
   onMount(() => {
     const refresh = () => fetchState().then((state) => (auth = state.auth), () => {});
@@ -14,7 +16,9 @@
   });
 </script>
 
-{#if auth?.state === "ok"}
+{#if auth?.state === "ok" && quiet}
+  <!-- signed in: nothing to say -->
+{:else if auth?.state === "ok"}
   <!-- Healthy auth is a steady green lamp, not information to shout. On a
        phone the label shrinks to two letters rather than vanishing. -->
   <span class="auth-ok lamp-field" title="signed in: {auth.provider} ({auth.credentialType})">
