@@ -1,6 +1,7 @@
 /** What cubed logs of an error Pi reports through `onReport`: a hook's or a
  * listener's throw, a task Pi cannot run (`task_too_old`), a failed cleanup.
  * Pi drops these when no `onReport` is given. */
+import type { ReportInfo } from "@earendil-works/pi-durable";
 import type { LogFields, Logger } from "./log.ts";
 import { redact, REDACTED, safeText } from "./vm-diagnostics.ts";
 
@@ -26,10 +27,13 @@ export function reportText(error: unknown): string {
     .replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@/]+@/gi, `$1${REDACTED}@`)).slice(0, REPORT_CHARS);
 }
 
-/** `onReport` for a Harness: each report is one warning, never a throw. */
-export function piReports(log: Logger, fields: LogFields = {}): (error: unknown) => void {
-  return error => {
-    try { log.warn("pi reported an error", { ...fields, error: reportText(error) }); }
+/** `onReport` for a Harness: each report is one warning, never a throw.
+ * `report` is what Pi (≥1.4.0) says it is about (`ReportInfo.type`, a
+ * fixed name such as `task_faulted` or `host_error`); its task and
+ * extension fields are not logged. */
+export function piReports(log: Logger, fields: LogFields = {}): (error: unknown, info?: ReportInfo) => void {
+  return (error, info) => {
+    try { log.warn("pi reported an error", { ...fields, ...info ? { report: String(info.type) } : {}, error: reportText(error) }); }
     catch { /* a report must never fail the Harness */ }
   };
 }

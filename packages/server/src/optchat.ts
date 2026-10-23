@@ -24,7 +24,7 @@ import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { CAP, capText, Memory, pages, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import { imageNote } from "./thread-images.ts";
-import { countCut, markSent, SendsDoc, settleSends } from "./pi-sends.ts";
+import { countCut, markSent, RESTART_LIMIT, SendsDoc, settleSends } from "./pi-sends.ts";
 import { boundedOutput, CHAT_OUTPUT_TOKENS } from "./optchat-output.ts";
 import { piReports, reportText as errorText } from "./pi-report.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
@@ -313,14 +313,14 @@ export function formatHistory(id: string, record: ThreadRecord, report: ReportSt
 /** `archives`: by archive call (its task id), each thread it named and the
  * line it answered, "" while it was out; a replay answers those lines. */
 type Settings = { tree: number; cache: string; threads: Record<string, { at: number; tells?: string[] }>; archives?: Record<string, Record<string, string>> };
-const SettingsDoc = defineDoc<Settings>({ kind: "cube.optchat", version: 1, scope: "session", initial: () => ({ tree: 0, cache: "", threads: {} }) });
+const SettingsDoc = defineDoc<Settings>({ kind: "cube.optchat", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({ tree: 0, cache: "", threads: {} }) });
 /** The view parts the current turn started with; the request hook renders
  * them. `userInputs`: the latest run inputs that carry a message of the
  * user (not a thread's report); project_hooks_write needs one among the
  * running run's inputs. `images`: the store ids of the images the turn's
  * messages carry, by request id (turns started before it lack it). */
 const TurnDoc = defineDoc<{ started: boolean; parts: number[]; userInputs?: number[]; images?: Record<string, string[]> }>({
-  kind: "cube.optchat.turn", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ started: false, parts: [] }),
+  kind: "cube.optchat.turn", version: 1, checkpointWhen: () => false, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ started: false, parts: [] }),
 });
 const isReport = (requestId: string) => requestId.startsWith("report:");
 /** A message accepted when the log had `after` as its newest entry. */
@@ -328,25 +328,25 @@ type PendingItem = { text: string; requestId: string; after: number; images?: Me
 /** Messages accepted but not yet in the chat: waiting (`items`), going into
  * the next turn (`batch`), or submitted but not placed by Pi yet (`sent`). */
 type Pending = { items: PendingItem[]; batch: PendingItem[] | null; sent: PendingItem[] };
-const PendingDoc = defineDoc<Pending>({ kind: "cube.optchat.pending", version: 1, scope: "session", initial: () => ({ items: [], batch: null, sent: [] }) });
+const PendingDoc = defineDoc<Pending>({ kind: "cube.optchat.pending", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({ items: [], batch: null, sent: [] }) });
 /** The view as of the newest node, over the first `total` messages: a reopen
  * goes on from it instead of folding a different view. `batch` is set while
  * a batch has not yet merged the view down to its low mark; views stored
  * before batching lack it and were never mid-batch. `compaction` and
  * `compactionBatch` are the compactor's view and its batch the same way;
  * views stored before it lack them, and it is merged down from the view. */
-const ViewDoc = defineDoc<{ total: number; parts: number[]; batch?: boolean; compaction?: number[]; compactionBatch?: boolean; entry?: number; shape?: string; shapeTotal?: number }>({ kind: "cube.optchat.view", version: 1, scope: "session", initial: () => ({ total: 0, parts: [] }) });
+const ViewDoc = defineDoc<{ total: number; parts: number[]; batch?: boolean; compaction?: number[]; compactionBatch?: boolean; entry?: number; shape?: string; shapeTotal?: number }>({ kind: "cube.optchat.view", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({ total: 0, parts: [] }) });
 /** How the log is read from Pi's entries: entries from `pagedFrom` on log a
  * long message in pages (spec §1); older ones as they were logged before
  * pages, so their messages keep their ids. Set at the first open that knows it. */
-const LogDoc = defineDoc<{ pagedFrom?: number }>({ kind: "cube.optchat.log", version: 1, scope: "session", initial: () => ({}) });
+const LogDoc = defineDoc<{ pagedFrom?: number }>({ kind: "cube.optchat.log", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({}) });
 /** The compactor's model calls run beside Pi, so Pi's `pi.usage` does not
  * see them: their usage by `provider/model`, one commit per reply, failed
  * replies included. `since` is when this store began counting; `earlier`
  * says its tree already had compactor-built nodes then, whose calls nobody
  * counted. */
 type CompactorUsage = { models: Record<string, JsonRepresentation<Usage>>; calls: Record<string, number>; since: number | null; earlier?: boolean };
-const CompactorUsageDoc = defineDoc<CompactorUsage>({ kind: "cube.optchat.usage", version: 1, scope: "session", initial: () => ({ models: {}, calls: {}, since: null }) });
+const CompactorUsageDoc = defineDoc<CompactorUsage>({ kind: "cube.optchat.usage", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({ models: {}, calls: {}, since: null }) });
 /** What the compactor may still spend on each node it has not built: its
  * answers left and the model (`provider/id`) that spent the last. A node
  * with none left is held; a built node's record goes with it. */
@@ -357,7 +357,7 @@ const CompactorUsageDoc = defineDoc<CompactorUsage>({ kind: "cube.optchat.usage"
 /** `interrupted`: its last answer was out at a stop (counted), so it is held
  * until a message of the user or another model asks again. */
 type Spend = { left: number; model: string; round?: JsonRepresentation<Round>; out?: { at: number }; interrupted?: true };
-const SpendDoc = defineDoc<{ nodes: Record<string, Spend> }>({ kind: "cube.optchat.spend", version: 1, scope: "session", initial: () => ({ nodes: {} }) });
+const SpendDoc = defineDoc<{ nodes: Record<string, Spend> }>({ kind: "cube.optchat.spend", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({ nodes: {} }) });
 /** Model calls a close cut off after its grace, by `provider/model`: what
  * they cost is unknown (their usage, if any came, is counted as it came),
  * and the reopened chat may send them again. `tools`: tool calls still
@@ -365,7 +365,7 @@ const SpendDoc = defineDoc<{ nodes: Record<string, Spend> }>({ kind: "cube.optch
  * on, it is not undone), and the reopened run executes them again, keyed. */
 /** `capped`: model calls cube's output guard stopped (optchat-output.ts); their provider reported no usage. */
 type Cut = { chat: Record<string, number>; compactor: Record<string, number>; tools?: Record<string, number>; capped?: { chat: Record<string, number>; compactor: Record<string, number> } };
-const CutDoc = defineDoc<Cut>({ kind: "cube.optchat.cut", version: 1, scope: "session", initial: () => ({ chat: {}, compactor: {} }) });
+const CutDoc = defineDoc<Cut>({ kind: "cube.optchat.cut", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({ chat: {}, compactor: {} }) });
 const TURN = "optchat.turn";
 const NODE_ENTRY = "optchat.node";
 
@@ -663,6 +663,8 @@ export class OptChat {
       steeringMode: "all",
       // Every turn is a fresh context; nothing grows to compact.
       compaction: { enabled: false },
+      // A task cut off at every open runs again, as before Pi 1.4 (pi-sends.ts).
+      restartLimit: RESTART_LIMIT,
     } }, context);
     void this.harness.closed.then(end => this.ended(end), () => {});
     // Before anything is scheduled: a chat request that was out at the last

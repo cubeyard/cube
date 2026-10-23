@@ -15,7 +15,7 @@ import { render } from "../src/claude-thread-events.ts";
 import { openStorage, readStorage } from "../src/durable-agent.ts";
 import { storedPiTranscript } from "../src/pi-thread-events.ts";
 import type { ThreadTranscript } from "../src/thread-events.ts";
-import { HISTORY_MAX, historyIndexed, pageOf, PI_SCHEMA_VERSION, readClaudeHistory, readPiHistory, type HistoryRequest } from "../src/thread-history.ts";
+import { HISTORY_MAX, historyIndexed, pageOf, PI_SCHEMA_VERSIONS, readClaudeHistory, readPiHistory, type HistoryRequest } from "../src/thread-history.ts";
 import { claudeStore, output, piStore } from "./history-store-fixture.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -40,7 +40,7 @@ async function piWhole(file: string, failure: string | null = null): Promise<Thr
 const files = (directory: string) => fs.readdirSync(directory).filter(name => !/-(shm|wal)$/.test(name) || (name.endsWith("-wal") && fs.statSync(path.join(directory, name)).size)).sort();
 
 try {
-  assert.equal(PI_SCHEMA_VERSION, CURRENT_SQLITE_SCHEMA_VERSION, "the page reader knows the pinned pi-durable schema: review it on an upgrade");
+  assert.deepEqual(PI_SCHEMA_VERSIONS, [1, CURRENT_SQLITE_SCHEMA_VERSION], "the page reader knows the pinned pi-durable schema and 1 (archived stores): review it on an upgrade");
 
   // Pi: a long thread written by a real Harness, with compaction.
   {
