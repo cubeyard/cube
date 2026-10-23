@@ -21,10 +21,15 @@
 //!   - /var/lib/cube, /etc/cube, the hook logs, shell histories, ssh host
 //!     keys, machine ids and the random seed
 //!
-//! Anything left that still holds a runner CA (its DER, or the start of its
-//! base64) or a marker line, and a Java keystore changed by the build while
-//! a runner CA was installed (keel cannot clean one yet), fails the
-//! publication: no layer is written.
+//! Anything left that still holds a marker line fails the publication: no
+//! layer is written. So does what still holds a runner CA (its DER, or the
+//! start of its base64), and a Java keystore changed by the build while a
+//! runner CA was installed (keel cannot clean one yet), unless the runner
+//! binds its templates to its CA (`setup::TEMPLATE_RUNNER_CA`): it records
+//! the CA's fingerprint with the template and refuses the template under
+//! another CA, so the layer may keep that CA's public certificate (in the
+//! Java keystore, say). Then the machine must never have had another CA
+//! (`runner_ca_changed`).
 use std::{
     fs,
     io::{self, Read, Write},
@@ -465,8 +470,9 @@ pub fn scrub(upper: &Path, machine: &Machine) -> io::Result<Vec<String>> {
 }
 
 /// The seal's check on what the scrub left: every file that still holds a
-/// runner CA or a marker line, and a Java keystore the build changed while
-/// a runner CA was installed. Empty: the layer may be published.
+/// runner CA of `cas` or a marker line, and a Java keystore the build
+/// changed while a CA of `cas` was installed. Empty: the layer may be
+/// published.
 pub fn seal_check(upper: &Path, cas: &[Vec<u8>]) -> io::Result<Vec<String>> {
     let needles = Needles::new(cas);
     let mut all = vec![];
@@ -490,6 +496,22 @@ pub fn seal_check(upper: &Path, cas: &[Vec<u8>]) -> io::Result<Vec<String>> {
 
 fn failed(reason: &str, message: impl AsRef<str>) -> Refusal {
     refuse(Code::FailedPrecondition, reason, message.as_ref())
+}
+
+/// The CAs the seal refuses in the layer: every CA a setup brought (`cas`),
+/// or none when the runner binds its templates to the CA this boot's setup
+/// brought (`bound`) and the machine never had another.
+pub fn sealed_cas(cas: &[Vec<u8>], bound: Option<&[Vec<u8>]>) -> Result<Vec<Vec<u8>>, Refusal> {
+    let Some(bound) = bound.filter(|bound| !bound.is_empty()) else {
+        return Ok(cas.to_vec());
+    };
+    if cas.iter().all(|ca| bound.contains(ca)) {
+        return Ok(vec![]);
+    }
+    Err(failed(
+        "runner_ca_changed",
+        "the machine had another runner CA before this one, which its layer may hold; build the template on a new machine",
+    ))
 }
 
 /// The outcome of this boot's publication, if there was one.
@@ -663,7 +685,14 @@ fn publish_inner(home: &str) -> Result<u64, Refusal> {
     for line in &changed {
         eprintln!("cube-agent: template: {line}");
     }
-    let left = seal_check(upper, &cas).map_err(io("checking the layer"))?;
+    let bound = fs::read(setup::BOUND_CA)
+        .ok()
+        .map(|pem| generated::pem_certificates(&pem));
+    let sealed = sealed_cas(&cas, bound.as_deref())?;
+    if bound.is_some() && sealed.is_empty() {
+        eprintln!("cube-agent: template: bound to the runner's CA; its certificate may stay");
+    }
+    let left = seal_check(upper, &sealed).map_err(io("checking the layer"))?;
     if !left.is_empty() {
         return Err(failed(
             "seal_failed",
@@ -1025,6 +1054,78 @@ mod tests {
             &format!("CA:\n{}\n", wrapped.join("\n")),
         );
         assert_eq!(seal_check(&upper, &cas).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn only_a_runner_that_binds_its_ca_and_only_one_ca_let_the_ca_stay() {
+        let (first, second) = (der(3), der(4));
+        // No binding (an earlier runner, a host runner): every CA is sealed.
+        let one = std::slice::from_ref(&first);
+        assert_eq!(sealed_cas(one, None).unwrap(), one);
+        assert_eq!(sealed_cas(one, Some(&[])).unwrap(), one);
+        // Bound to the CA this boot's setup brought, the only one it had.
+        let bound = [first.clone()];
+        assert!(sealed_cas(&bound, Some(&bound)).unwrap().is_empty());
+        assert!(sealed_cas(&[], Some(&bound)).unwrap().is_empty());
+        // The machine had another CA before (the runner's was replaced):
+        // the layer may hold that one, which nothing binds.
+        let refused = sealed_cas(&[first, second.clone()], Some(&[second])).unwrap_err();
+        assert_eq!(refused.reason, "runner_ca_changed");
+    }
+
+    #[test]
+    fn a_layer_bound_to_the_runner_s_ca_keeps_it_and_nothing_else_of_cube_s() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = der(3);
+        let (upper, lower) = build_machine(dir.path(), &runner);
+        // ca-certificates-java's hook after update-ca-certificates: the
+        // runner's CA inside the keystore, and in a project's own store.
+        let mut keystore = b"\xfe\xed\xfe\xed".to_vec();
+        keystore.extend_from_slice(&runner);
+        fs::create_dir_all(upper.join("etc/ssl/certs/java")).unwrap();
+        fs::write(upper.join(JAVA_KEYSTORE), &keystore).unwrap();
+        fs::write(upper.join("opt/app/store.p12"), &keystore).unwrap();
+        let cas = [runner.clone()];
+        let sealed = sealed_cas(&cas, Some(&cas)).unwrap();
+        let lowers = [lower];
+        let machine = Machine {
+            lowers: &lowers,
+            cas: &cas,
+            mount_points: &["usr/local/bin".into(), "usr/local/bin/cube".into()],
+            home: "/home/agent",
+        };
+        scrub(&upper, &machine).unwrap();
+        assert_eq!(seal_check(&upper, &sealed).unwrap(), Vec::<String>::new());
+        assert_eq!(fs::read(upper.join(JAVA_KEYSTORE)).unwrap(), keystore);
+        // Unbound, the same layer fails as before: both stores hold the
+        // CA, and the keystore was changed.
+        assert_eq!(seal_check(&upper, &cas).unwrap().len(), 3);
+        // cube's own things went as without a binding: placeholders, the
+        // ssh host key, the CA files keel writes, cube's blocks.
+        for gone in [
+            "etc/cube",
+            "home/agent/.cache/cube",
+            "etc/ssh/ssh_host_ed25519_key",
+            "etc/ssl/certs/cube-runner.pem",
+            CA_FILE,
+        ] {
+            assert!(
+                fs::symlink_metadata(upper.join(gone)).is_err(),
+                "{gone} is left"
+            );
+        }
+        let read = |rel: &str| fs::read_to_string(upper.join(rel)).unwrap();
+        assert_eq!(read("etc/environment"), "");
+        assert_eq!(read("etc/gitconfig"), "[user]\n\tname = p\n");
+        // A block of cube's the scrub cannot cut out still fails the seal.
+        write(
+            &upper,
+            "etc/profile.d/cube.sh",
+            &format!("  {BEGIN}\r\nGH_TOKEN=cube_ph_github_x\n"),
+        );
+        let left = seal_check(&upper, &sealed).unwrap();
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(left[0].contains("/etc/profile.d/cube.sh"), "{left:?}");
     }
 
     #[test]

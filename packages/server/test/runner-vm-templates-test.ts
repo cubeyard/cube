@@ -23,7 +23,7 @@
  * credential stream) is runner-vm-cubed-test.ts. Offline. */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, X509Certificate } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -37,12 +37,26 @@ import { registryCredentialRoute } from "../src/runner-credentials.ts";
 import { RunnerMachines } from "../src/runner-machines.ts";
 import { callTimeout, PUBLISH_TIMEOUT_MS, RunnerError, type RunnerSession } from "../src/runner-session.ts";
 import { currentMachineEpoch } from "../src/vm.ts";
-import { DEFAULT_TEMPLATE_TTL_MS, TEMPLATE_FORMAT, keelTemplateKey, keelTemplateParts, templateMeta } from "../src/vm-template.ts";
+import { DEFAULT_TEMPLATE_TTL_MS, TEMPLATE_FORMAT, keelTemplateKey, keelTemplateParts, runnerCaSha256, templateMeta } from "../src/vm-template.ts";
 import { LocalGuestTransport } from "./local-guest.ts";
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cube-vm-templates-")));
 const model = { provider: "faux", id: "faux" };
 const IMAGE = "c".repeat(64);
+/** A runner CA's certificate (public; its key was never kept). */
+const CA_PEM = `-----BEGIN CERTIFICATE-----
+MIIBrjCCAVWgAwIBAgIUKotndrRB02mN2ykL8iZ3VH0FwOQwCgYIKoZIzj0EAwIw
+LTENMAsGA1UECgwEY3ViZTEcMBoGA1UEAwwTY3ViZSBydW5uZXIgQ0EgdGVzdDAe
+Fw0yNjEwMjIxODIwMzRaFw0zNjEwMTkxODIwMzRaMC0xDTALBgNVBAoMBGN1YmUx
+HDAaBgNVBAMME2N1YmUgcnVubmVyIENBIHRlc3QwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAATcqGNVz3Ov4/y/yj5p3OjFohruW9JSpqFRuqeHZyjsnNC7YmzEZaSk
+N/oVrEuQNSXQewECnTLu+7MYmZPlt9/so1MwUTAdBgNVHQ4EFgQUazecd1ustpnZ
+pNYt+foJluiFzDswHwYDVR0jBBgwFoAUazecd1ustpnZpNYt+foJluiFzDswDwYD
+VR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNHADBEAiBfHr5jpOu7+1k68k688tvX
+vhahYA2UOjF/P1UtRqVUdwIgKDK7KnDx/H0mXbYbihMwQoVVIL5/uO9OILgo7s7P
+1eA=
+-----END CERTIFICATE-----
+`;
 const NODE = "node-vm1";
 const quiet = { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } } as never;
 
@@ -254,7 +268,21 @@ try {
   assert.notEqual(keelTemplateKey(onImage("1".repeat(64))), keelTemplateKey(onImage("2".repeat(64))), "another image, another key");
   assert.notEqual(keelTemplateParts(onImage("1".repeat(64))).image, keelTemplateParts(onImage("2".repeat(64))).image);
   assert.equal(keelTemplateParts(onImage("")).image, keelTemplateParts(keyInput).image);
-  console.log("ok: the keel key is its own format with image, the runner's image_id, platform, disk, repositories and pre-setup");
+  // The runner's CA (a template may hold it): another CA, another key and
+  // another "runnerCa" part; none, the key as before.
+  const caSha256 = runnerCaSha256(CA_PEM);
+  assert.equal(caSha256, createHash("sha256").update(new X509Certificate(CA_PEM).raw).digest("hex"), "the DER's sha256, as berth names its CA");
+  assert.equal(runnerCaSha256(""), "");
+  const underCa = (ca: string) => ({ ...keyInput, runner: { ...keyInput.runner, caSha256: ca } });
+  assert.equal(keelTemplateKey(underCa("")), key, "no CA: the key as before");
+  assert.notEqual(keelTemplateKey(underCa(caSha256)), key);
+  assert.notEqual(keelTemplateKey(underCa(caSha256)), keelTemplateKey(underCa("e".repeat(64))), "another CA, another key");
+  assert.equal(keelTemplateParts(keyInput).runnerCa, undefined);
+  assert.notEqual(keelTemplateParts(underCa(caSha256)).runnerCa, keelTemplateParts(underCa("e".repeat(64))).runnerCa);
+  const partsMeta = (parts: object) => templateMeta(JSON.stringify({ format: TEMPLATE_FORMAT, projectId: "p", setupBlob: "none", commit: null, parts }));
+  assert.ok(partsMeta(keelTemplateParts(keyInput))?.parts, "a template from before the CA part keeps its parts");
+  assert.ok(partsMeta(keelTemplateParts(underCa(caSha256)))?.parts);
+  console.log("ok: the keel key is its own format with image, the runner's image_id and CA, platform, disk, repositories and pre-setup");
 
   // A host runner: no lookup, no build, no template call.
   const onHost = newThread("p", "node-host1");
@@ -385,6 +413,7 @@ try {
   // The template is gone or refused before the machine is created: the base, with the reason.
   for (const [refusal, reason] of [[null, `template ${buildId} was removed before the machine was created`],
     [refuse("FAILED_PRECONDITION", "template_image_changed", "made on another image"), `the runner's image changed since template ${buildId} was prepared`],
+    [refuse("FAILED_PRECONDITION", "template_runner_ca_changed", "built under another CA"), `the runner's CA changed since template ${buildId} was prepared`],
     [refuse("FAILED_PRECONDITION", "template_removing", "removing"), `template ${buildId} was being removed when the machine was created`]] as const) {
     const thread = newThread("p");
     let saved: Template | undefined;
@@ -401,7 +430,7 @@ try {
     assert.deepEqual(registry.getThread(thread.id)!.vm!.preparation, { source: "fresh", reason });
     assert.deepEqual(created(thread).map(call => call.value.spec.source.case), ["templateId", "base"]);
   }
-  console.log("ok: a template removed, being removed or on another image when the machine is created: the base, with the reason");
+  console.log("ok: a template removed, being removed, on another image or under another runner CA when the machine is created: the base, with the reason");
 
   // invalidateTemplate: template_delete of that template.
   await vms.invalidateTemplate(registry.getThread(b.id)!, buildId);
@@ -493,6 +522,24 @@ try {
   assert.notEqual(registry.getThread(back.id)!.vm!.preparation!.templateId, secondTemplate.templateId);
   platformOf.imageId = "";
   console.log("ok: a template is keyed on the runner's image (Platform.image_id): after a change the old one is not picked, a new one is built");
+
+  // The runner gets a new CA: the template built under the old one (which
+  // it may hold, and berth would refuse) is not picked; a new one is built.
+  const runnerOf = vmSession.runner!;
+  runnerOf.caPem = CA_PEM;
+  const underFirst = newThread("p");
+  await vms.start(underFirst);
+  const firstCa = registry.getThread(underFirst.id)!.vm!.preparation!;
+  assert.equal(firstCa.source, "template", JSON.stringify(firstCa));
+  runnerOf.caPem = "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydGlmaWNhdGU=\n-----END CERTIFICATE-----\n";
+  const underSecond = newThread("p");
+  await vms.start(underSecond);
+  const secondCa = registry.getThread(underSecond.id)!.vm!.preparation!;
+  assert.match(step(underSecond, "lookup").detail!, /^the runner's CA changed since template [0-9a-f]{16}: building one$/);
+  assert.equal(secondCa.source, "template");
+  assert.notEqual(secondCa.templateId, firstCa.templateId, "never the template built under the other CA");
+  runnerOf.caPem = "";
+  console.log("ok: a template is keyed on the runner's CA: after a new CA the old one is not picked, a new one is built");
 
   // A build machine an earlier cubed left: deleted before the lookup, and at release.
   calls.length = 0;

@@ -217,7 +217,16 @@ cube-init (PID 1)
   line, as in cube's own source, it is no block of cube's), a runner CA's
   DER or the start of its base64 anywhere, and refuses (`seal_failed`, nothing written) when any is left,
   or when the build changed a Java keystore while a runner CA was installed
-  (keel cannot clean one yet). The base's `mkfs.erofs` writes the layer
+  (keel cannot clean one yet). When the runner binds its templates to its
+  CA (`template.runner_ca` in the setup's capabilities; berth records the
+  CA's fingerprint with the template and refuses it under another CA), the
+  CA this boot's setup brought (`/run/keel/template-ca.pem`) may stay where
+  the cleaning left it, a Java keystore say; a marker line still fails, and
+  a machine that ever had another CA refuses (`runner_ca_changed`). The
+  seal is no scanner for keys or tokens: it finds only cube's marker lines
+  and, without the binding, the runner's CA; with the binding a copy of
+  `/etc/cube` the build made (its `env` holds placeholders) is no longer
+  caught by the CA it holds, and travels. The base's `mkfs.erofs` writes the layer
   (lz4hc, owners, times and xattrs kept, so whiteouts and opaque
   directories stay overlay's); the agent answers `done` and refuses every
   operation and setup until the machine powers off. A repeated request

@@ -2332,7 +2332,10 @@ export declare type DaemonRequest = Message<"cube.runner.v4.DaemonRequest"> & {
      * runner's CA in any form, marker blocks, mount points, the agent
      * account, identity), checks it and writes it to vdd as one EROFS
      * layer, then answers `done`; the runner checks the superblock and keeps
-     * the disk as the template. The machine refuses everything afterwards
+     * the disk as the template. When the setup's capabilities name
+     * `template.runner_ca` (the runner binds the template to its CA), what
+     * still holds that CA's certificate after the cleaning (a Java
+     * keystore) may stay, if the machine never had another CA. The machine refuses everything afterwards
      * and is powered off; a repeated request gets the same outcome.
      *
      * @generated from field: cube.runner.v4.Empty template_publish = 5;

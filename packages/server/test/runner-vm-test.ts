@@ -33,11 +33,18 @@
  * stops, and a stopped machine refused. Then (B-8, V10) templates as layers:
  * a build machine's blank, sparse vdd, `template_publish` (READY, the layer
  * cut to size and read-only, the build machine deleted, asked again the
- * same), a machine from the template with the build's files but none of the
- * runner's CA or cube's blocks from the build, a write kept over a stop, the
- * template across a restart, refused on another image
- * (CUBE_TEST_BERTH_IMAGE_B, template_image_changed), and template_delete
- * (REMOVING, gone with its last machine). CUBE_TEST_BERTH_FSCK names an
+ * same), a machine from the template with the build's files but none of
+ * cube's blocks from the build and the runner's CA only where the build
+ * left it beyond the cleaning (a keystore stand-in: the template is bound
+ * to the CA), a write kept over a stop, the template across a restart,
+ * refused under a new runner CA (template_runner_ca_changed) and on another
+ * image (CUBE_TEST_BERTH_IMAGE_B, template_image_changed), and
+ * template_delete (REMOVING, gone with its last machine).
+ * CUBE_TEST_BERTH_JAVA=1 adds a real JDK: installed by a build machine's
+ * setup (apt, then update-ca-certificates), published, and Java's own
+ * HTTPS from a machine made from the template, both machines started with
+ * cubed's own public policy (`EgressPolicy.policyFor`). CUBE_TEST_KEEP=1
+ * keeps a failed run's directory. CUBE_TEST_BERTH_FSCK names an
  * fsck.erofs to check the layer with. And (B-9) `machine_diagnose`: one
  * bounded, redacted JSON document about a running, a paused and a stopped
  * machine (QEMU's path, version and argv as the process has them,
@@ -361,6 +368,7 @@ let runner = await start(firstArgs);
 const sessions: RunnerSession[] = [];
 /** V9's portal and the app's port, kept until the machine stops. */
 let v9: { target: DialPortal; port: number } | undefined;
+let passed = false;
 try {
   assert.match(runner.banner, /^qemu: \d+\.\d+\.\d+ .+ \(meets keel's floor; new machines get (pc-q35|virt)-\d+\.\d+\)$/m);
   // The image line, exactly as berth writes it: on cube's default image
@@ -1166,8 +1174,10 @@ try {
       const sourceSha = createHash("sha256").update(sourceLines).digest("hex");
 
       // The runner's real CA left where the scrub cannot cut it out, in four
-      // forms made in the guest from /etc/cube/ca.pem, beside cube's source:
-      // the seal refuses and names exactly the four; no template is made.
+      // forms made in the guest from /etc/cube/ca.pem, beside cube's source
+      // and a block of cube's the scrub cannot cut out (an indented marker
+      // line): the template would be bound to the CA, so the seal names
+      // only the block; no template is made.
       const leakRef = { owner: "thread-1", id: randomBytes(8).toString("hex") };
       await session.machine({ case: "machineCreate", value: { ref: leakRef, fence: fence10,
         spec: { source: { case: "base", value: true }, size: { vcpus: 2, memoryMib: 1024, diskGib: 2 }, build: true } } });
@@ -1181,6 +1191,7 @@ printf '%s\n' "$body" | fold -w 76 > app/leak.b64
 escaped=$(sudo awk '{printf "%s\\n", $0}' /etc/cube/ca.pem)
 printf '{"ca":"%s"}\n' "$escaped" > app/leak.json
 printf 'pub const CA: &str = "%s";\n' "$escaped" > app/leak.rs
+printf '  %s\r\nGH_TOKEN=cube_ph_github_x\n' '${markerText}' > app/block.txt
 sha256sum app/leak.der | cut -d' ' -f1; grep -c 'BEGIN CERTIFICATE' app/leak.json app/leak.rs; grep -c '^' app/leak.json app/leak.rs`, 120000);
       const caDer = Buffer.from(caPem.split("\n").filter(line => line && !line.startsWith("-----")).join(""), "base64");
       assert.equal(leakOut, `${createHash("sha256").update(caDer).digest("hex")}\napp/leak.json:1\napp/leak.rs:1\napp/leak.json:1\napp/leak.rs:1\n`,
@@ -1189,14 +1200,14 @@ sha256sum app/leak.der | cut -d' ' -f1; grep -c 'BEGIN CERTIFICATE' app/leak.jso
       await assert.rejects(session.call({ case: "templatePublish", value: { from: leakRef, fence: fence10, key: "v10-leaks", meta: "" } }, 600000),
         (error: unknown) => { sealed = String(error); return error instanceof RunnerError && error.code === "FAILED_PRECONDITION" && error.reason === "seal_failed"; });
       const named = [...sealed.matchAll(/\/workspace\/app\/[^ ;]+/g)].map(m => m[0]).sort();
-      assert.deepEqual(named, ["/workspace/app/leak.b64", "/workspace/app/leak.der", "/workspace/app/leak.json", "/workspace/app/leak.rs"], sealed);
-      assert.ok(!sealed.includes("source.rs"), sealed);
+      assert.deepEqual(named, ["/workspace/app/block.txt"], sealed);
+      assert.ok(!sealed.includes("source.rs") && !sealed.includes("leak."), sealed);
       const noLeakTemplate = await session.call({ case: "templateList", value: {} });
       assert.ok(noLeakTemplate.case === "templates" && noLeakTemplate.value.items.length === 0, show(noLeakTemplate));
       assert.ok(!fs.existsSync(path.join(directory, "templates", `${leakRef.id}.erofs`)));
       await stopVia(session, leakRef, epoch);
       await session.machine({ case: "machineDelete", value: { ref: leakRef, fence: fence10, retain: false } });
-      note(`V10: the runner's real CA as DER, wrapped base64, escaped PEM in JSON and in a Rust string, beside cube's source: seal_failed naming exactly those four, no template; the machine deleted`);
+      note(`V10: the runner's real CA as DER, wrapped base64, escaped PEM in JSON and in a Rust string, beside cube's source and an indented marker line: seal_failed naming only the marker line, no template; the machine deleted`);
 
       // A build machine: its template disk is vdd, blank, sparse, writable.
       const buildRef = { owner: "thread-1", id: randomBytes(8).toString("hex") };
@@ -1214,7 +1225,8 @@ sha256sum app/leak.der | cut -d' ' -f1; grep -c 'BEGIN CERTIFICATE' app/leak.jso
       const marker = randomBytes(8).toString("hex");
       const setupOut = await sh10(builder, "v10-setup", `set -e; mkdir -p app; printf ${marker} > app/built.txt; ${writeSource}; cp /etc/ssl/certs/ca-certificates.crt app/bundle-copy.pem
 grep -c 'cube: begin' app/bundle-copy.pem; grep -cF '${caLine}' app/bundle-copy.pem
-sudo mkdir -p /opt/v10; echo setup-done | sudo tee /opt/v10/setup.txt >/dev/null`, 120000);
+sudo mkdir -p /opt/v10 /etc/ssl/certs/java; echo setup-done | sudo tee /opt/v10/setup.txt >/dev/null
+{ printf '\\376\\355\\376\\355'; sudo sed '/-----/d' /etc/cube/ca.pem | tr -d '\\n' | base64 -d; } | sudo tee /etc/ssl/certs/java/cacerts >/dev/null`, 120000);
       assert.equal(setupOut, "1\n1\n", "before the publication the build machine has the runner's CA and cube's block, in a copy too");
 
       // template_publish: the agent cleans and writes the layer, berth keeps it.
@@ -1266,9 +1278,10 @@ sudo mkdir -p /opt/v10; echo setup-done | sudo tee /opt/v10/setup.txt >/dev/null
       const seen10 = await sh10(user, "v10-seen", `cat app/built.txt; echo; cat /opt/v10/setup.txt
 grep -c 'cube: begin' app/bundle-copy.pem || true; grep -cF '${caLine}' app/bundle-copy.pem || true
 grep -c 'cube: begin' /etc/ssl/certs/ca-certificates.crt; grep -cF '${caLine}' /etc/ssl/certs/ca-certificates.crt; grep -c '^agent:' /etc/passwd
-sha256sum app/source.rs | cut -d' ' -f1`);
-      assert.equal(seen10, `${marker}\nsetup-done\n0\n0\n1\n1\n1\n${sourceSha}\n`,
-        "the build's files are there, cube's source as it was; its copy of the bundle lost the runner's CA and cube's block; the machine has its own CA block once and one agent account");
+sha256sum app/source.rs /etc/ssl/certs/java/cacerts | cut -d' ' -f1`);
+      const keystoreSha = createHash("sha256").update(Buffer.concat([Buffer.from([0xfe, 0xed, 0xfe, 0xed]), caDer])).digest("hex");
+      assert.equal(seen10, `${marker}\nsetup-done\n0\n0\n1\n1\n1\n${sourceSha}\n${keystoreSha}\n`,
+        "the build's files are there, cube's source as it was; its copy of the bundle lost the runner's CA and cube's block; the keystore stand-in kept the runner's CA (bound); the machine has its own CA block once and one agent account");
       const token10 = randomBytes(8).toString("hex");
       await sh10(user, "v10-write", `printf ${token10} > app/after.txt`);
       const stopped10 = await stopVia(session, userRef, epoch);
@@ -1278,7 +1291,7 @@ sha256sum app/source.rs | cut -d' ' -f1`);
       assert.equal(await sh10(user, "v10-read", "cat app/after.txt; echo; cat app/built.txt"), `${token10}\n${marker}`);
       assert.equal(createHash("sha256").update(fs.readFileSync(layer)).digest("hex"), layerSha, "the template's layer never changes");
       await stopVia(session, userRef, epoch);
-      note(`V10: machine ${userRef.id} from the template: the build's files there (${marker}, /opt/v10), its bundle copy without the runner CA or a marker line, one CA block and one agent account of its own; a write kept over a controlled stop; the layer's sha256 unchanged`);
+      note(`V10: machine ${userRef.id} from the template: the build's files there (${marker}, /opt/v10), its bundle copy without the runner CA or a marker line, the keystore stand-in with it, one CA block and one agent account of its own; a write kept over a controlled stop; the layer's sha256 unchanged`);
 
       // A restart keeps the template; another image refuses it (B-8 D3).
       await stop(runner.child);
@@ -1289,6 +1302,29 @@ sha256sum app/source.rs | cut -d' ' -f1`);
       assert.ok((await session.hello()).runner?.templates.some(t => t.id === buildRef.id && t.state === Template_State.READY), "a template survives the runner's restart");
       const usersAfter = await session.call({ case: "templateList", value: {} });
       assert.ok(usersAfter.case === "templates" && usersAfter.value.items[0]!.users === 1, show(usersAfter));
+      // A new runner CA (its files moved aside, made again at the start):
+      // the template may hold the old one, so no machine is made from it.
+      // The old CA back: usable again.
+      const caAside = fs.mkdtempSync(path.join(root, "ca-aside-"));
+      await stop(runner.child);
+      for (const name of ["ca.key", "ca.pem"]) fs.renameSync(path.join(caDir, name), path.join(caAside, name));
+      runner = await start(["--listen", "127.0.0.1:0"]);
+      writeConfig(runner.address, runner.peer);
+      session = open();
+      const newCa = (await session.hello()).runner?.caPem ?? "";
+      assert.ok(newCa && newCa !== caPem, "the runner made a new CA");
+      assert.match(runner.banner, new RegExp(`^template ${buildRef.id}: built under runner CA [0-9a-f]{64}, not this one`, "m"));
+      let caRefused = "";
+      await assert.rejects(session.machine({ case: "machineCreate", value: { ref: { owner: "thread-1", id: randomBytes(8).toString("hex") }, fence: fence10,
+        spec: { source: { case: "templateId", value: buildRef.id } } } }),
+      (error: unknown) => { caRefused = String(error); return error instanceof RunnerError && error.code === "FAILED_PRECONDITION" && error.reason === "template_runner_ca_changed"; });
+      await stop(runner.child);
+      for (const name of ["ca.key", "ca.pem"]) fs.renameSync(path.join(caAside, name), path.join(caDir, name));
+      runner = await start(["--listen", "127.0.0.1:0"]);
+      writeConfig(runner.address, runner.peer);
+      session = open();
+      assert.equal((await session.hello()).runner?.caPem, caPem, "the old CA is back");
+      note(`V10: under a new runner CA a machine from the template was refused (${caRefused.slice(0, 160)}); with the old CA back it is the runner's again`);
       if (otherImage) {
         await stop(runner.child);
         runner = await start(["--listen", "127.0.0.1:0"], imageB);
@@ -1324,6 +1360,60 @@ sha256sum app/source.rs | cut -d' ' -f1`);
       assert.ok(none.case === "templates" && none.value.items.length === 0);
       await assert.rejects(session.call({ case: "templateDelete", value: { id: buildRef.id } }), (error: unknown) => error instanceof RunnerError && error.code === "NOT_FOUND");
       note("V10: template_delete: REMOVING with 1 user (a new machine from it refused: template_removing), gone (file and record) once that machine was deleted; again: NOT_FOUND");
+
+      // A real JDK (CUBE_TEST_BERTH_JAVA=1, the image's apt over the
+      // runner's egress): setup installs it and rebuilds the trust stores,
+      // so Java's keystore holds the runner's CA; the template is bound to
+      // it and published, and Java's own HTTPS works in a machine made from it.
+      if (env.CUBE_TEST_BERTH_JAVA === "1") {
+        // cubed's own policy for a thread without secrets (EgressPolicy.policyFor):
+        // public HTTP and HTTPS, the 15-minute lease; a start without one has no egress.
+        const javaPolicy = new EgressPolicy({ vms: { vm: () => null }, secrets: [] }).policyFor({});
+        assert.equal(javaPolicy.default, EgressPolicy_Default.ALLOW_PUBLIC_HTTP);
+        assert.deepEqual([javaPolicy.denyHosts, javaPolicy.rules], [[], []], "no credential rule, nothing widened");
+        const startJava = (ref: { owner: string; id: string }) =>
+          session.machine({ case: "machineStart", value: { ref, fence: fence10, boot: { documents, mac: "" }, policy: javaPolicy as never } });
+        // Both machines get it: apt and Java's HTTPS are refused by policy without it.
+        const publicEgress = async (ref: { owner: string; id: string }, key: string) => {
+          const reached = await sh10(workspace10(ref), key, "curl -s -o /dev/null -m 30 -w '%{http_code}' http://deb.debian.org/debian/dists/trixie/Release; echo; curl -s -o /dev/null -m 30 -w '%{http_code}' https://example.com/");
+          assert.equal(reached, "200\n200", `${key}: the Java leg's machine runs with cubed's public policy (deb.debian.org over HTTP, example.com over HTTPS)`);
+        };
+        const javaRef = { owner: "thread-1", id: randomBytes(8).toString("hex") };
+        const javaSize = { vcpus: 2, memoryMib: 2048, diskGib: 6 };
+        await session.machine({ case: "machineCreate", value: { ref: javaRef, fence: fence10,
+          spec: { source: { case: "base", value: true }, size: javaSize, build: true } } });
+        await startJava(javaRef);
+        await session.until(javaRef, machine => !!machine.status?.guest?.ready, 180000);
+        await publicEgress(javaRef, "v10-java-egress");
+        const fingerprint = createHash("sha256").update(caDer).digest("hex").toUpperCase().match(/../g)!.join(":");
+        const fetchJava = "public class Fetch { public static void main(String[] a) throws Exception { var c = java.net.http.HttpClient.newHttpClient(); "
+          + "System.out.println(c.send(java.net.http.HttpRequest.newBuilder(java.net.URI.create(a[0])).build(), java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode()); } }";
+        const javaCheck = `keytool -list -cacerts -storepass changeit 2>/dev/null | grep -c '${fingerprint}'; java app/Fetch.java https://example.com/`;
+        const javaSetup = await sh10(workspace10(javaRef), "v10-java-setup", `set -e
+sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends default-jdk-headless >/dev/null
+sudo update-ca-certificates >/dev/null 2>&1
+sudo apt-get clean
+mkdir -p app; printf '%s\\n' '${fetchJava}' > app/Fetch.java
+${javaCheck}`, 1500000);
+        assert.equal(javaSetup, "1\n200\n", "the build machine's Java trusts the runner's CA");
+        const javaTemplate = await session.call({ case: "templatePublish", value: { from: javaRef, fence: fence10, key: "v10-java", meta: "" } }, 600000);
+        assert.ok(javaTemplate.case === "template" && javaTemplate.value.state === Template_State.READY, show(javaTemplate));
+        const javaUserRef = { owner: "thread-1", id: randomBytes(8).toString("hex") };
+        await session.machine({ case: "machineCreate", value: { ref: javaUserRef, fence: fence10,
+          spec: { source: { case: "templateId", value: javaRef.id }, size: javaSize } } });
+        await startJava(javaUserRef);
+        await session.until(javaUserRef, machine => !!machine.status?.guest?.ready, 180000);
+        await publicEgress(javaUserRef, "v10-java-user-egress");
+        const javaSeen = await sh10(workspace10(javaUserRef), "v10-java-seen", javaCheck, 300000);
+        assert.equal(javaSeen, "1\n200\n", "a machine from the template: Java's keystore has the runner's CA and its HTTPS works");
+        await stopVia(session, javaUserRef, epoch);
+        await session.machine({ case: "machineDelete", value: { ref: javaUserRef, fence: fence10, retain: false } });
+        await session.call({ case: "templateDelete", value: { id: javaRef.id } });
+        note(`V10 Java: setup installed default-jdk-headless and ran update-ca-certificates (the keystore holds runner CA ${fingerprint.slice(0, 23)}...); template_publish READY; a machine from it: the keystore has the CA, java HttpClient https://example.com/ 200`);
+      } else {
+        note("V10 Java: NOT checked here: CUBE_TEST_BERTH_JAVA=1 (a real JDK from the image's apt) is unset");
+      }
     } finally {
       store10.close();
       fs.rmSync(leases10, { recursive: true, force: true });
@@ -1458,6 +1548,7 @@ sha256sum app/source.rs | cut -d' ' -f1`);
   } else if (guest.ready) {
     note("V10 cache: NOT checked natively: CUBE_TEST_BERTH_IMAGE_B (another image pinned by digest) is unset");
   }
+  passed = true;
   console.log(`ok: berth vm over protocol 4 (${accel}): floor, image, CA, hello, create, start, guest channel (session, setup, ${guest.ready ? "ready, Workspace contract, agent restart, network V5, credentials V6-V8, portal V9, templates V10" : "not ready: image lacks tools"}), guest streams, fencing, diagnosis (B-9), stop, restart and crash interrupt, pinned machine type and image, retained disk, discard, delete`);
 } finally {
   await v9?.target.portal.close();
@@ -1465,5 +1556,7 @@ sha256sum app/source.rs | cut -d' ' -f1`);
   await stop(runner.child);
   // Any QEMU this test's machines left.
   try { execFileSync("pkill", ["-KILL", "-f", directory], { stdio: "ignore" }); } catch { /* none left */ }
-  fs.rmSync(root, { recursive: true, force: true });
+  // CUBE_TEST_KEEP=1 keeps a failed run's root (berth's directory, logs, disks) for reading.
+  if (!passed && env.CUBE_TEST_KEEP === "1") console.error(`kept for reading: ${root}`);
+  else fs.rmSync(root, { recursive: true, force: true });
 }

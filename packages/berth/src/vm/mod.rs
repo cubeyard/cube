@@ -146,8 +146,10 @@ const MAX_BOOT_BYTES: usize = 256 * 1024;
 /// A guest request, at most: in one `req` frame its bytes are base64, and
 /// the frame must stay within MAX_FRAME_BYTES.
 const MAX_GUEST_REQUEST: u64 = 704 * 1024;
-/// What the runner uses of the agent (`MachineSetup.capabilities`).
-const AGENT_CAPABILITIES: [&str; 3] = ["machine_setup", "session", "abort"];
+/// What the runner uses of the agent (`MachineSetup.capabilities`);
+/// `template.runner_ca`: it binds every template it keeps to its CA
+/// (template.rs), so a build machine's layer may keep that CA.
+const AGENT_CAPABILITIES: [&str; 4] = ["machine_setup", "session", "abort", "template.runner_ca"];
 const DEFAULT_SIZE: Size = Size {
     vcpus: 2,
     memory_mib: 2048,
@@ -478,6 +480,12 @@ impl VmRunner {
                     "template {}: its layer {} is missing; a machine made from it does not start",
                     record.id,
                     layer.display()
+                );
+            }
+            if !record.usable_under(&ca.sha256) {
+                eprintln!(
+                    "template {}: built under runner CA {}, not this one; no machine is made from it",
+                    record.id, record.runner_ca_sha256
                 );
             }
         }
@@ -1372,6 +1380,18 @@ impl VmRunner {
                 ),
             ));
         }
+        // A new CA (its files removed and made again): the template may
+        // hold the old one, which this runner no longer stands behind.
+        if !record.usable_under(&self.ca.sha256) {
+            return Err(refuse(
+                Code::FailedPrecondition,
+                "template_runner_ca_changed",
+                &format!(
+                    "the template was built under runner CA {}; this runner's CA is {}",
+                    record.runner_ca_sha256, self.ca.sha256
+                ),
+            ));
+        }
         Ok(record.clone())
     }
 
@@ -1748,7 +1768,7 @@ impl VmRunner {
             .ok_or_else(|| internal("the build machine has no image"))?;
         let boot = entry.record.boot.as_ref();
         let mut record = template::TemplateRecord {
-            version: 1,
+            version: template::VERSION,
             id: id.to_owned(),
             owner: entry.record.owner.clone(),
             key: key.to_owned(),
@@ -1766,6 +1786,10 @@ impl VmRunner {
                 .map_or_else(|| self.keel.base_sha256.clone(), |b| b.base_sha256.clone()),
             fence_epoch: entry.record.fence_epoch,
             created_at: Timestamp::now(),
+            // The only CA the agent let stay: the one its setups brought
+            // (keel refuses a machine that had another, runner_ca_changed),
+            // and a runner's CA does not change while it runs.
+            runner_ca_sha256: self.ca.sha256.clone(),
         };
         template::adopt(&self.options.directory, &record, &disk).map_err(internal)?;
         // A failure from here on is finished or forgotten when the runner
