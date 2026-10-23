@@ -41,6 +41,12 @@ const DRAIN_MS = 5_000;
 /** How long the close waits for the commands still running. */
 const COMMANDS_MS = 2_000;
 const RUNNER_KEPT = "the release check was clean, but the runner kept the disk (a machine that did not stop in time or failed, or a host runner's directory)";
+/** What a reader of threads may use: only what reads cubed's own state,
+ * an agent already open, or a thread's store. None of it starts or wakes a
+ * machine, opens an agent or waits for an activation, so code given only a
+ * ThreadReader (OptChat's watcher, `threads`, `history`, the overview)
+ * cannot do any of that (docs/thread-lifecycle.md). */
+export type ThreadReader = Pick<Conversations, "live" | "storedHistory" | "agentOpen" | "error" | "down" | "waiting" | "starting" | "archivingNow" | "owner">;
 /** Archive refused: the thread's agent is running. Nothing is interrupted. */
 export class ThreadWorking extends Error {
   /** `waiting`: no turn runs, but the agent's background agents do. */
@@ -660,27 +666,39 @@ export class Conversations {
     });
   }
   /** The thread in the neutral event model; the same interface the SSE
-   * stream serves and the browser reads. */
+   * stream serves and the browser reads. Opens the agent (not the machine). */
   async events(id: string): Promise<ThreadEvents> {
     await this.settled(id);
     // A failed Harness cannot be read; a reader gets why the agent is down,
     // as it gets a failed activation's error.
     const down = this.downs.get(id);
     if (down) throw new Error(down);
-    if (this.isClaude(id)) {
-      const agent = await this.claudeAgent(id);
-      let events = this.claudeFeeds.get(agent);
-      if (!events) {
-        events = new ClaudeThreadEvents({ agent, owner: () => this.owner(id), failure: () => this.failures.get(id) ?? null });
-        this.claudeFeeds.set(agent, events);
-      }
-      return events;
-    }
-    const agent = await this.agent(id);
+    return this.isClaude(id) ? this.claudeFeed(id, await this.claudeAgent(id)) : this.piFeed(id, await this.agent(id));
+  }
+  /** The events of the thread's agent if it is open (or opening) in this
+   * process, else null: it never opens an agent, waits for no activation and
+   * starts nothing. A down agent's reader is told why, as by `events`. */
+  async live(id: string): Promise<ThreadEvents | null> {
+    const down = this.downs.get(id);
+    if (down) throw new Error(down);
+    const claude = await this.claudes.get(id)?.catch(() => null);
+    if (claude) return this.claudeFeed(id, claude);
+    const pi = await this.agents.get(id)?.catch(() => null);
+    return pi ? this.piFeed(id, pi) : null;
+  }
+  private piFeed(id: string, agent: Agent): ThreadEvents {
     let events = this.feeds.get(agent);
     if (!events) {
       events = new PiThreadEvents({ agent, owner: () => this.owner(id), failure: () => this.failures.get(id) ?? null });
       this.feeds.set(agent, events);
+    }
+    return events;
+  }
+  private claudeFeed(id: string, agent: ClaudeAgent): ThreadEvents {
+    let events = this.claudeFeeds.get(agent);
+    if (!events) {
+      events = new ClaudeThreadEvents({ agent, owner: () => this.owner(id), failure: () => this.failures.get(id) ?? null });
+      this.claudeFeeds.set(agent, events);
     }
     return events;
   }
