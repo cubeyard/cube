@@ -203,6 +203,8 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     await index.getByRole("button", { name: /memory/ }).tap();
     await page.locator("#chat-memory").waitFor();
     assert.equal(await index.evaluate(element => (element as HTMLDialogElement).open), false, "the index makes way for the memory");
+    // its close event gives focus back to the key, a task later: then type
+    await page.waitForFunction(() => document.activeElement?.classList.contains("work-key"));
     await openKeyboard(page, phone, 347);
     await page.waitForFunction(() => document.documentElement.dataset.keyboard === "open");
     assert.equal(await visible(page, "#chat-memory"), false, "typing, the memory steps aside");
