@@ -22,7 +22,7 @@ import { chromium, type Browser, type BrowserContext, type CDPSession, type Page
 const { values: args } = parseArgs({ options: {
   root: { type: "string" }, out: { type: "string" }, runs: { type: "string", default: "5" }, trace: { type: "boolean", default: false },
   chrome: { type: "string", default: "/usr/bin/google-chrome" }, port: { type: "string", default: "7799" }, only: { type: "string" },
-  headed: { type: "boolean", default: false }, tps: { type: "string", default: "60" }, profile: { type: "boolean", default: false },
+  headed: { type: "boolean", default: false }, tps: { type: "string", default: "60" }, profile: { type: "boolean", default: false }, scratch: { type: "string", default: path.join(os.tmpdir(), "cube-perf") },
 } });
 if (!args.root || !args.out) { console.error("usage: measure.ts --root <seeded root> --out <dir> [--runs N] [--trace]"); process.exit(2); }
 const REPO = path.resolve(import.meta.dirname, "../../../..");
@@ -35,7 +35,7 @@ const want = (name: string) => !only || only.has(name);
 const log = (...items: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...items);
 
 // ---- a fresh copy of the seeded root, served by its own process ----
-const scratch = path.join(os.tmpdir(), "pf", path.basename(path.resolve(args.root)));
+const scratch = path.join(path.resolve(args.scratch!), path.basename(path.resolve(args.root)));
 fs.rmSync(scratch, { recursive: true, force: true });
 fs.mkdirSync(path.dirname(scratch), { recursive: true });
 execFileSync("cp", ["-a", path.resolve(args.root), scratch]);
@@ -71,8 +71,17 @@ async function serverCpu(ms: number): Promise<number> {
   return ((ticks() - before) / 100) / (ms / 1000);
 }
 async function settle(): Promise<void> {
-  // Until the server is quiet (opening threads at start, a poll's work).
-  for (let k = 0; k < 30 && await serverCpu(1000) > 0.1; k++);
+  // Until the server answers promptly again: at start it opens every active
+  // thread and its machine (local guests: child processes the server's own
+  // CPU share does not show), and answers take up to seconds meanwhile.
+  // Ten quick answers of /api/state in a row (under 20 ms), at most 3 min.
+  const end = Date.now() + 180_000;
+  for (let quick = 0; quick < 10 && Date.now() < end;) {
+    const at = performance.now();
+    await get("/api/state");
+    quick = performance.now() - at < 20 ? quick + 1 : 0;
+    await delay(250);
+  }
 }
 const get = async (route: string) => { const response = await fetch(`${base}${route}`); return { status: response.status, text: await response.text() }; };
 const json = async (route: string) => JSON.parse((await get(route)).text);
@@ -85,8 +94,17 @@ const round = (value: number) => Math.round(value * 10) / 10;
 
 // ---- what the page records ----
 const INIT = () => {
-  const perf = { longtasks: [] as Array<{ start: number; duration: number }>, events: [] as Array<Record<string, unknown>>, loaf: [] as Array<Record<string, unknown>>, frames: [] as number[] };
+  const perf = { longtasks: [] as Array<{ start: number; duration: number }>, events: [] as Array<Record<string, unknown>>, loaf: [] as Array<Record<string, unknown>>, frames: [] as number[],
+    keys: [] as Array<{ start: number; ms: number }> };
   (window as unknown as { __perf: typeof perf }).__perf = perf;
+  // A keystroke's main-thread latency: from keydown to the task after the
+  // next animation frame (its handlers, style, layout and paint recording).
+  // Unlike Event Timing it does not wait for the compositor's presentation,
+  // which headless Chrome with software raster sometimes reports seconds late.
+  addEventListener("keydown", () => {
+    const start = performance.now();
+    requestAnimationFrame(() => { const channel = new MessageChannel(); channel.port1.onmessage = () => perf.keys.push({ start, ms: performance.now() - start }); channel.port2.postMessage(0); });
+  }, true);
   try { new PerformanceObserver(list => { for (const entry of list.getEntries()) perf.longtasks.push({ start: entry.startTime, duration: entry.duration }); }).observe({ type: "longtask", buffered: true }); } catch { /* unsupported */ }
   try {
     new PerformanceObserver(list => {
@@ -104,7 +122,7 @@ const INIT = () => {
     }).observe({ type: "long-animation-frame", buffered: true });
   } catch { /* unsupported */ }
 };
-type PagePerf = { longtasks: Array<{ start: number; duration: number }>; events: Array<{ name: string; start: number; duration: number; id: number; inputDelay: number; processing: number; presentation: number }>; loaf: Array<{ start: number; duration: number; blocking: number; render: number; styleLayout: number; scripts: unknown[] }> };
+type PagePerf = { keys: Array<{ start: number; ms: number }>; longtasks: Array<{ start: number; duration: number }>; events: Array<{ name: string; start: number; duration: number; id: number; inputDelay: number; processing: number; presentation: number }>; loaf: Array<{ start: number; duration: number; blocking: number; render: number; styleLayout: number; scripts: unknown[] }> };
 const now = (page: Page) => page.evaluate(() => performance.now());
 const pagePerf = (page: Page) => page.evaluate(() => (window as unknown as { __perf: PagePerf }).__perf) as Promise<PagePerf>;
 /** Long tasks and long frames between two page times. */
@@ -186,7 +204,9 @@ async function traced<T>(page: Page, name: string, run: () => Promise<T>): Promi
 try {
   await startServer();
   log("server", serverStart);
+  const settleStart = Date.now();
   await settle();
+  const settledMs = Date.now() - settleStart;
   const version = execFileSync(args.chrome!, ["--version"], { encoding: "utf8" }).trim();
   browser = await chromium.launch({ executablePath: args.chrome, headless: !args.headed });
   results.environment = {
@@ -196,7 +216,7 @@ try {
     note: "server and Chrome share this VM; no GPU (software raster); CPU not throttled",
   };
   results.scale = { name: manifest.scale, seed: manifest.seed, counts: manifest.counts, bytes: manifest.bytes };
-  results.serverStart = serverStart;
+  results.serverStart = { ...serverStart, quietAfterListenMs: settledMs };
   write();
 
   // What the routes cost on the server, without a browser: sequential, warm.
@@ -316,13 +336,9 @@ try {
     await page.keyboard.type("the runner answered and the gateway attached the machine, then the thread went on with its work as planned", { delay: 30 });
     await delay(300);
     const perf = await pagePerf(page);
-    const byInteraction = new Map<number, number>();
-    for (const event of perf.events) if (event.start >= from && event.id) byInteraction.set(event.id, Math.max(byInteraction.get(event.id) ?? 0, event.duration));
+    if (process.env.PERF_DEBUG) fs.writeFileSync(path.join(out, `typing-${label}.json`), JSON.stringify({ events: perf.events.filter(event => event.start >= from), keys: perf.keys.filter(key => key.start >= from) }));
     await composer.fill("");
-    void label;
-    // Every keystroke under the 16 ms threshold counts as 16 at most: report those above it as measured.
-    const keys = 104;
-    return [...byInteraction.values(), ...Array.from({ length: Math.max(0, keys - byInteraction.size) }, () => 16)];
+    return perf.keys.filter(key => key.start >= from).map(key => key.ms);
   }
   if (want("older")) {
     results.chatOlder = await scrollOlder("#/chat", chatLast, "chat", 25);
@@ -410,9 +426,7 @@ try {
       await page.keyboard.type("review the runner", { delay: 40 });
       await delay(300);
       const perf = await pagePerf(page);
-      const byInteraction = new Map<number, number>();
-      for (const event of perf.events) if (event.start >= from && event.id) byInteraction.set(event.id, Math.max(byInteraction.get(event.id) ?? 0, event.duration));
-      indexTyping.push(...byInteraction.values(), ...Array.from({ length: Math.max(0, 17 - byInteraction.size) }, () => 16));
+      indexTyping.push(...perf.keys.filter(key => key.start >= from).map(key => key.ms));
       await filterField.fill("");
       at = await now(page);
       await page.locator("dialog.chat-index a[href='#/threads']").first().tap();
