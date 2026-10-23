@@ -184,7 +184,7 @@ cube-init (PID 1)
   structure, not a byte search). Holding every certificate of the CA: `ok`,
   nothing written. Lacking it: a copy beside it (same owner and mode) gets
   the CA from the root's own `keytool`, as root in the workload root with
-  60 s per call (`-J-Xmx64m`; a stale certificate under cube's alias
+  20 s per call (`-J-Xmx64m`; a stale certificate under cube's alias
   `debian:cube-runner.pem`, ca-certificates-java's for the link, is deleted
   first), is read again and renamed over the keystore only if it holds the
   CA and every other certificate it had (`repaired`); otherwise the copy

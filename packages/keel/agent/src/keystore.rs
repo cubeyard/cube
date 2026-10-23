@@ -20,7 +20,7 @@
 //!    `keytool`: `skipped`.
 //! 4. A copy beside it (`.cacerts.cube-new`, same owner and mode) gets the
 //!    CA from the JDK's own `keytool`, run as root in the workload root with
-//!    a minute per call: a stale entry under cube's alias
+//!    20 s per call: a stale entry under cube's alias
 //!    (`debian:cube-runner.pem`, the alias ca-certificates-java gives
 //!    the link) is deleted first, then the CA is imported under it.
 //! 5. The copy is parsed again and kept only if it holds the CA and every
@@ -69,7 +69,9 @@ pub const RECORD: &str = "/run/keel/runner-ca.json";
 pub const NOTE: &str = "run/cube/runner-ca";
 /// The `status.guest.hooks` key.
 pub const HOOK: &str = "runner-ca";
-const TIMEOUT: Duration = Duration::from_secs(60);
+/// Per `keytool` call (it takes about a second): at most two calls for a
+/// runner's CA keep a setup well inside cubed's two minutes for `ready`.
+const TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_KEYSTORE_BYTES: u64 = 16 << 20;
 const MAX_OUTPUT: usize = 4096;
 
@@ -440,6 +442,11 @@ pub fn reconcile(root: &fs::File, ca: &str, keytool: &mut Keytool) -> Option<Out
         Err(error) => return Some(Outcome::Failed(format!("{shown}'s directory: {error}"))),
     };
     let copy_path = format!("/{}/{COPY}", parent.join("/"));
+    // The keystore's own name where it is (a link to it was followed).
+    let target_name = match c(components.last().map_or("cacerts", String::as_str)) {
+        Ok(name) => name,
+        Err(error) => return Some(Outcome::Failed(error.to_string())),
+    };
     let copy_name = match c(COPY) {
         Ok(name) => name,
         Err(error) => return Some(Outcome::Failed(error.to_string())),
@@ -447,6 +454,7 @@ pub fn reconcile(root: &fs::File, ca: &str, keytool: &mut Keytool) -> Option<Out
     let result = repair(
         &dir,
         &copy_name,
+        &target_name,
         &copy_path,
         &data,
         &meta,
@@ -479,6 +487,7 @@ pub fn reconcile(root: &fs::File, ca: &str, keytool: &mut Keytool) -> Option<Out
 fn repair(
     dir: &OwnedFd,
     copy_name: &std::ffi::CStr,
+    target: &std::ffi::CStr,
     copy_path: &str,
     data: &[u8],
     meta: &fs::Metadata,
@@ -595,12 +604,16 @@ fn repair(
             "keytool's copy lost {lost} of the keystore's certificates"
         ));
     }
+    // The keystore's owner and mode, whatever keytool wrote.
+    if unsafe { libc::fchown(copy.as_raw_fd(), meta.uid(), meta.gid()) } != 0
+        || unsafe { libc::fchmod(copy.as_raw_fd(), meta.mode() & 0o7777) } != 0
+    {
+        return Err(failed(
+            "the copy's owner and mode",
+            io::Error::last_os_error(),
+        ));
+    }
     copy.sync_all().map_err(|e| failed("the copy", e))?;
-    let target = c(&format!(
-        "{}",
-        Path::new(KEYSTORE).file_name().unwrap().to_string_lossy()
-    ))
-    .map_err(|e| failed("the keystore", e))?;
     if unsafe {
         libc::renameat(
             dir.as_raw_fd(),

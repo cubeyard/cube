@@ -324,7 +324,7 @@ fn a_repair_that_loses_roots_fails_or_stops_leaves_the_keystore_as_it_was() {
             }),
         ),
         (
-            "keytool -importcert took longer than 60 s",
+            "keytool -importcert took longer than 20 s",
             Box::new(|_, _| Ran {
                 status: None,
                 timed_out: true,
@@ -500,6 +500,34 @@ fn the_keystore_is_found_inside_the_root_through_its_links() {
             .file_type()
             .is_symlink(),
         "the link stays"
+    );
+
+    // The keystore itself a link (to another name): the file it names is
+    // replaced, the link stays.
+    let root = Root::new(&jks(2, &[("debian:root-a.pem", b"ROOT-A")], 0));
+    fs::create_dir_all(root.path().join("opt/jks")).unwrap();
+    fs::rename(root.keystore(), root.path().join("opt/jks/system.jks")).unwrap();
+    std::os::unix::fs::symlink("/opt/jks/system.jks", root.keystore()).unwrap();
+    let calls = RefCell::new(vec![]);
+    let outcome = reconcile(&root.file(), &pem(CA), &mut model(&root, &calls)).unwrap();
+    assert_eq!(outcome.word(), "repaired");
+    assert!(
+        fs::symlink_metadata(root.keystore())
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        kind(&fs::read(root.path().join("opt/jks/system.jks")).unwrap()),
+        Kind::Jks(vec![
+            ("debian:root-a.pem".into(), b"ROOT-A".to_vec()),
+            (ALIAS.into(), CA.to_vec())
+        ])
+    );
+    assert_eq!(
+        fs::read_dir(root.path().join("opt/jks")).unwrap().count(),
+        1,
+        "no file of another name"
     );
 }
 
