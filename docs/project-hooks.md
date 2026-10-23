@@ -192,11 +192,17 @@ needed for:
   `/etc/ssl/certs/cube-runner.pem` to the CA, so the keystore apt builds
   (`/etc/ssl/certs/java/cacerts`) holds it, and at boot it adds the CA to
   that keystore when it lacks it or holds a stale one under its alias,
-  keeping every other certificate. Its check is the outcome `runner-ca`
-  (`ok`, `skipped` or `failed`, the reason in
-  `~/.cache/cube/runner-ca.log`; a failure fails the resume step and
-  never the thread). Do not run `update-ca-certificates` or import the CA
-  into that keystore for cube.
+  keeping every other certificate. Its check is the outcome `runner-ca`,
+  shown after the hooks (`cube hooks`, `project_hooks`): `ok` (it trusts
+  the CA, or cube added it), `skipped` (updates turned off in
+  `/etc/default/cacerts`, or a keystore format cube does not read) or
+  `failed` (it lacks the CA and cube could not add it, or Java cannot load
+  it), the reason in `~/.cache/cube/runner-ca.log`; a failure fails the
+  resume step and never the thread. Do not run `update-ca-certificates`
+  or import the CA into that keystore for cube.
+- tools that look certificates up by directory alone (`-CApath`,
+  Python's `capath`): cube links `/etc/ssl/certs/<hash>.0` to the CA as
+  `openssl rehash` would.
 
 A JDK that keeps its own store is the project's: SDKMAN, a Temurin or
 other tarball, a Gradle or Maven toolchain download, an IDE's runtime

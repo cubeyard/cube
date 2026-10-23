@@ -13,6 +13,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
+import { describeProjectHooks } from "../src/project-hooks.ts";
 import { provisionScript, releaseCheckScript } from "../src/vm.ts";
 import { LocalMachines } from "./local-guest.ts";
 
@@ -258,6 +259,8 @@ try {
   assert.equal(caStep.detail, "runner-ca failed (exit 1)");
   assert.match(caStep.log ?? "", /keytool -importcert exited 1: boom/);
   assert.equal(fs.readFileSync(path.join(machines.guests.get(withHooks)!.root, "home", ".cache", "cube", "runner-ca.log"), "utf8"), `${caFailure}\n`);
+  // OptChat's project_hooks names it after the hooks.
+  assert.match(describeProjectHooks(app.registry, app.registry.getProject(empty.id)!), /pre-resume ok [0-9.]+ s, resume absent, runner-ca failed \(exit 1\)/);
   machines.reboot(app.registry.getThread(withHooks)!);
   caNote("repaired added the runner's CA to /etc/ssl/certs/java/cacerts; its 150 other certificates kept\n");
   await app.conversations.activate(withHooks);
@@ -265,6 +268,12 @@ try {
   assert.equal(caRepaired.hooks!["runner-ca"]?.status, "ok");
   assert.equal(caRepaired.steps!.filter(step => step.name === "resume").at(-1)!.state, "ok");
   assert.match(fs.readFileSync(path.join(machines.guests.get(withHooks)!.root, "home", ".cache", "cube", "runner-ca.log"), "utf8"), /^repaired added the runner's CA/);
+  // A boot without the check (no keystore any more): no runner-ca, nor an earlier boot's.
+  machines.reboot(app.registry.getThread(withHooks)!);
+  await app.conversations.activate(withHooks);
+  assert.equal(app.registry.getThread(withHooks)!.vm!.hooks!["runner-ca"], undefined);
+  assert.ok(!fs.existsSync(path.join(machines.guests.get(withHooks)!.root, "home", ".cache", "cube", "runner-ca.status")));
+  assert.doesNotMatch(describeProjectHooks(app.registry, app.registry.getProject(empty.id)!), /resume absent, runner-ca/);
 
   // The scripts quote what they are given.
   assert.match(provisionScript({ projectId: "p", projectRevision: 1, repositories: [{ url: "https://example.com/a'b.git", base: "main", baseOid: "a".repeat(40), checkoutName: "workspace" }] }),

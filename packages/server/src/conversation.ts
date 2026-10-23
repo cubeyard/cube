@@ -360,7 +360,9 @@ export class Conversations {
     const vm = this.thread(id).vm;
     if (!vm) return;
     const startup = vm.startup ?? { source: vm.preparation?.source ?? "fresh", totalMs: 0, phases: {} };
-    this.registry.updateThreadVm(id, { hooks: { ...vm.hooks, ...hooks }, startup: { ...startup, phases: { ...startup.phases, [phase]: Date.now() - since } } });
+    // runner-ca is this boot's (the resume script reports it when there is one).
+    const kept = phase === "resume" ? Object.fromEntries(Object.entries(vm.hooks ?? {}).filter(([name]) => name !== "runner-ca")) : vm.hooks;
+    this.registry.updateThreadVm(id, { hooks: { ...kept, ...hooks }, startup: { ...startup, phases: { ...startup.phases, [phase]: Date.now() - since } } });
     for (const [name, hook] of Object.entries(hooks)) if (hook.status === "failed") log.warn("hook failed", { thread: id, hook: name, exitCode: hook.exitCode ?? null });
   }
   async agent(id: string): Promise<Agent> {

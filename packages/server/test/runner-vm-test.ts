@@ -1275,8 +1275,8 @@ sudo mkdir -p /opt/v10 /etc/ssl/certs/java; echo setup-done | sudo tee /opt/v10/
       assert.ok(userExtents.at(-1)!.includes(layer), "the template is the topmost partition, read where it is");
       await session.machine({ case: "machineStart", value: { ref: userRef, fence: fence10, boot: { documents, mac: "" } } });
       const userReady = await session.until(userRef, machine => !!machine.status?.guest?.ready, 180000);
-      // The stand-in is no keystore keel can read: reported, left as it is (its sha256 below).
-      assert.equal(userReady.status?.guest?.hooks["runner-ca"], "skipped", show(userReady.status?.guest?.hooks));
+      // The stand-in is no keystore Java can load: reported failed, left as it is (its sha256 below).
+      assert.equal(userReady.status?.guest?.hooks["runner-ca"], "failed", show(userReady.status?.guest?.hooks));
       const user = workspace10(userRef);
       const seen10 = await sh10(user, "v10-seen", `cat app/built.txt; echo; cat /opt/v10/setup.txt
 grep -c 'cube: begin' app/bundle-copy.pem || true; grep -cF '${caLine}' app/bundle-copy.pem || true
@@ -1285,6 +1285,11 @@ sha256sum app/source.rs /etc/ssl/certs/java/cacerts | cut -d' ' -f1`);
       const keystoreSha = createHash("sha256").update(Buffer.concat([Buffer.from([0xfe, 0xed, 0xfe, 0xed]), caDer])).digest("hex");
       assert.equal(seen10, `${marker}\nsetup-done\n0\n0\n1\n1\n1\n${sourceSha}\n${keystoreSha}\n`,
         "the build's files are there, cube's source as it was; its copy of the bundle lost the runner's CA and cube's block; the keystore stand-in kept the runner's CA (bound); the machine has its own CA block once and one agent account");
+      // keel's links again in a machine from the template (the seal took the
+      // build's out): the -CApath one alone verifies the runner's CA.
+      assert.equal(await sh10(user, "v10-capath", `readlink /etc/ssl/certs/cube-runner.pem; readlink "/etc/ssl/certs/$(openssl x509 -hash -noout -in /etc/cube/ca.pem).0"
+openssl verify -no-CAfile -no-CAstore -CApath /etc/ssl/certs /etc/cube/ca.pem; cat /run/cube/runner-ca | cut -d' ' -f1`),
+      "/usr/local/share/ca-certificates/cube-runner.crt\ncube-runner.pem\n/etc/cube/ca.pem: OK\nfailed\n", "the links, -CApath alone, and the runner-ca note");
       const token10 = randomBytes(8).toString("hex");
       await sh10(user, "v10-write", `printf ${token10} > app/after.txt`);
       const stopped10 = await stopVia(session, userRef, epoch);
@@ -1399,6 +1404,12 @@ sha256sum app/source.rs /etc/ssl/certs/java/cacerts | cut -d' ' -f1`);
           spec: { source: { case: "base", value: true }, size: javaSize, build: true } } });
         await bootJava(javaRef, undefined); // no keystore yet: nothing checked
         await publicEgress(javaRef, "v10-java-egress");
+        // HTTPS through the runner trusted by -CApath alone (no bundle, no
+        // store): keel's <hash>.0 link, which update-ca-certificates no
+        // longer makes once keel's cube-runner.pem link is there.
+        const capathOnly = "echo | openssl s_client -connect example.com:443 -servername example.com -CApath /etc/ssl/certs -no-CAfile -no-CAstore -verify_return_error 2>&1 | grep -o 'Verify return code: 0 (ok)'";
+        assert.equal(await sh10(workspace10(javaRef), "v10-capath-https", `sudo update-ca-certificates >/dev/null 2>&1; ${capathOnly}`, 120000),
+          "Verify return code: 0 (ok)\n", "-CApath-only HTTPS, after a project's update-ca-certificates too");
         const fingerprint = createHash("sha256").update(caDer).digest("hex").toUpperCase().match(/../g)!.join(":");
         const fetchJava = "public class Fetch { public static void main(String[] a) throws Exception { var c = java.net.http.HttpClient.newHttpClient(); "
           + "System.out.println(c.send(java.net.http.HttpRequest.newBuilder(java.net.URI.create(a[0])).build(), java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode()); } }";
@@ -1422,6 +1433,7 @@ ${javaCheck}`, 1500000);
           spec: { source: { case: "templateId", value: javaRef.id }, size: javaSize } } });
         await bootJava(javaUserRef, "ok");
         await publicEgress(javaUserRef, "v10-java-user-egress");
+        assert.equal(await sh10(javaUser, "v10-java-user-capath", capathOnly, 120000), "Verify return code: 0 (ok)\n", "-CApath-only HTTPS in a machine from the template");
         assert.equal(await sh10(javaUser, "v10-java-seen", javaCheck, 300000), "1\n200\n200\n",
           "a machine from the template: Java's keystore has the runner's CA and its HTTPS works");
         const entries = Number(await sh10(javaUser, "v10-java-entries", `${listing} | grep -c trustedCertEntry`));
@@ -1461,7 +1473,7 @@ ${state}; ${pkix}`, 300000);
         await stopVia(session, javaUserRef, epoch);
         await session.machine({ case: "machineDelete", value: { ref: javaUserRef, fence: fence10, retain: false } });
         await session.call({ case: "templateDelete", value: { id: javaRef.id } });
-        note(`V10 Java: setup installed default-jdk-headless with apt only (keel's link /etc/ssl/certs/cube-runner.pem; the keystore holds runner CA ${fingerprint.slice(0, 23)}...); template_publish READY; a machine from it: runner-ca ok, java HttpClient https://example.com/ and https://services.gradle.org/versions/current 200; the CA taken out of the keystore: PKIX, repaired at the next boot (${entries} entries kept), the boot after unchanged; a stale CA under cube's alias: replaced at the next boot`);
+        note(`V10 Java: setup installed default-jdk-headless with apt only (keel's link /etc/ssl/certs/cube-runner.pem; the keystore holds runner CA ${fingerprint.slice(0, 23)}...); template_publish READY; a machine from it: runner-ca ok, java HttpClient https://example.com/ and https://services.gradle.org/versions/current 200; the CA taken out of the keystore: PKIX, repaired at the next boot (${entries} entries kept), the boot after unchanged; a stale CA under cube's alias: replaced at the next boot; HTTPS by -CApath alone (openssl s_client) in the build machine, after update-ca-certificates, and from the template`);
       } else {
         note("V10 Java: NOT checked here: CUBE_TEST_BERTH_JAVA=1 (a real JDK from the image's apt) is unset");
       }

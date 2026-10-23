@@ -256,10 +256,12 @@ runner.
   (`CUBED_TEMPLATE_TTL_HOURS`, 24 h by default). With such a cubed, run it
   with `CUBED_TEMPLATES=off` for that window. Machines already made from a
   template keep the old CA in their layer: keel replaces it in Debian's
-  Java keystore at their next boot (`runner-ca` repaired), but a tool with a
-  store of its own (a JDK from a tarball, say) stops trusting the runner's
-  HTTPS until the project's resume hook imports the new CA or the thread is
-  new.
+  Java keystore at the machine's next setup with the new CA (`runner-ca`
+  repaired; a running machine gets that setup when the runner starts again
+  and reconnects, while its workload runs, so a running JVM keeps the old
+  trust until it starts again), but a tool with a store of its own (a JDK
+  from a tarball, say) stops trusting the runner's HTTPS until the
+  project's resume hook imports the new CA or the thread is new.
 - **Suspend** (phase 7) is off unless `berth vm` starts with
   `--suspend-disk-margin-gib <GiB>`, which has no default: it is the free
   disk a runner keeps besides a machine's memory file (at least 1 GiB; the

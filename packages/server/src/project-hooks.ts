@@ -11,7 +11,7 @@ import { hookFileContent } from "./vm-seed.ts";
 export const HOOKS_SUPPORTED = `Supported hooks (the only two; nothing else is settable):
 - preSetup ("pre-setup"): runs once when a new thread machine is prepared, after the project's repositories are checked out and before the repository's own .agents/setup, which runs only if pre-setup succeeded. A machine made from a prepared template skips both (the template ran them), unless the pinned .agents/setup differs from the template's.
 - preResume ("pre-resume"): runs on every boot of a thread machine before the agent opens, before the repository's .agents/resume, which runs only if pre-resume succeeded.
-Each is one script of at most ${MAX_HOOK_BYTES} bytes, run as the guest user agent in /workspace with bash unless it starts with #!; output goes to ~/.cache/cube/<hook>.log in that machine. The order is fixed: the external hook, then the repository's, which runs only after the external one succeeded (or is absent). There is no per-hook timeout: the whole preparation (checkout and setup hooks) and the whole resume phase each have 30 minutes. A failing hook is recorded and never fails the thread. New threads use the hooks saved when they start; running threads keep theirs. A changed pre-setup means a new template. Hooks are not secret storage: every machine of the project can read them. A starting thread shows the running hook's log; print and time slow steps. A hook stopped for want of memory says so; the project's machine size (memory, processors) is set on the project page.`;
+Each is one script of at most ${MAX_HOOK_BYTES} bytes, run as the guest user agent in /workspace with bash unless it starts with #!; output goes to ~/.cache/cube/<hook>.log in that machine. The order is fixed: the external hook, then the repository's, which runs only after the external one succeeded (or is absent). There is no per-hook timeout: the whole preparation (checkout and setup hooks) and the whole resume phase each have 30 minutes. A failing hook is recorded and never fails the thread. New threads use the hooks saved when they start; running threads keep theirs. A changed pre-setup means a new template. Hooks are not secret storage: every machine of the project can read them. A starting thread shows the running hook's log; print and time slow steps. A hook stopped for want of memory says so; the project's machine size (memory, processors) is set on the project page. runner-ca, shown on machines with Java's system keystore, is no hook: cube's own check at each boot that Java trusts the runner's CA (cube adds it when it lacks it); failed means Java's HTTPS fails with PKIX there, the reason in ~/.cache/cube/runner-ca.log. Projects need no hook for that keystore, only for a JDK with a store of its own.`;
 
 /** At most this many threads' latest outcomes are shown. */
 export const HOOK_RESULTS_SHOWN = 8;
@@ -77,7 +77,9 @@ export function describeProjectHooks(registry: Registry, project: Project): stri
       const at = Math.max(0, ...Object.values(recorded).map(hook => hook.at));
       return `[${thread.id.slice(0, 8)}] ${safeText(thread.title ?? "untitled", 80)}${thread.archived ? " (archived)" : ""}: `
         + `${same(thread.allocation.hooks, hooks) ? "the saved hooks" : "earlier hooks"}; `
-        + `${Object.keys(recorded).length ? HOOK_NAMES.map(name => outcome(name, recorded[name])).join(", ") : "no outcome recorded yet"}`
+        + `${Object.keys(recorded).length ? [...HOOK_NAMES.map(name => outcome(name, recorded[name])),
+          // cube's own check of Java's keystore at boot, when the machine has one.
+          ...recorded["runner-ca"] ? [outcome("runner-ca", recorded["runner-ca"])] : []].join(", ") : "no outcome recorded yet"}`
         + (at ? `; last ${new Date(at).toISOString()}` : "");
     }),
     ...threads.length > HOOK_RESULTS_SHOWN ? [`(${threads.length - HOOK_RESULTS_SHOWN} older threads not shown)`] : [],
