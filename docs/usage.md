@@ -47,7 +47,8 @@ counted once, and a restart or a replayed task does not add it again.
 when the agent closes (archive, shutdown, a machine reboot) its last reading
 is kept. An archived thread's store is read again from a read-only snapshot
 (`readStorage` in durable-agent.ts, a private copy pi-durable opens: the retained
-original is never migrated or checkpointed; a store of another schema version
+original is never migrated or checkpointed, though pi-durable migrates the
+copy of a schema-1 store; a store of a newer schema version
 or over 64 MiB is refused and its last reading shown; a copy a crash left
 behind, `.read-*` in the thread directory, is not removed). A thread that is open but whose agent is not (its machine is
 starting or failed) shows its last reading (`read: "snapshot"`) or, if it never
