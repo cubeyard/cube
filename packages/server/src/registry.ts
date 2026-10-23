@@ -8,6 +8,7 @@ import type { NodeBinding, TrustedRunnerHealth } from "./runner-types.ts";
 import type { ThreadAgent } from "./thread-events.ts";
 import type { ThreadSkills } from "./skills.ts";
 import { newPlaceholder } from "./egress-policy.ts";
+import { newThreadIdentity, threadIdentity, type ThreadIdentity } from "./thread-names.ts";
 
 /** The registry schema; older registries are refused (fresh CUBED_STATE). */
 export const REGISTRY_SCHEMA = 102;
@@ -159,6 +160,10 @@ export interface Thread {
   /** Started on this runner by name: it never moves, and waits while the
    * runner is down. */
   pinned?: true;
+  /** The thread's name ("🦦 calm otter", thread-names.ts), chosen once at
+   * creation; never its title or id. The registry gives a thread created
+   * before names the one its id gives, without writing it. */
+  identity?: ThreadIdentity;
 }
 /** Where the thread's own machine stands on `thread.runnerId`:
  * `provisional`: no `vm.allocate` for it ever reached that runner, so the
@@ -626,18 +631,23 @@ export class Registry {
   runnerAudit(id: string): Array<{ action: string; at: number; evidence: unknown }> {
     return (this.db.prepare("SELECT action,at,evidence FROM runner_audit WHERE runner_id=? ORDER BY id").all(id) as Array<{ action: string; at: number; evidence: string }>).map(row => ({ ...row, evidence: JSON.parse(row.evidence) }));
   }
-  getThread(id: string): Thread | null { return this.parse(this.db.prepare("SELECT data FROM thread WHERE id=?").get(id)); }
-  listThreads(): Thread[] { return this.db.prepare("SELECT data FROM thread ORDER BY rowid DESC").all().map(row => this.parse<Thread>(row)!); }
+  /** A thread as read: one created before names gets the one its id gives. */
+  private parseThread(row: unknown): Thread | null {
+    const thread = this.parse<Thread>(row);
+    return thread && !thread.identity ? { ...thread, identity: threadIdentity(thread.id) } : thread;
+  }
+  getThread(id: string): Thread | null { return this.parseThread(this.db.prepare("SELECT data FROM thread WHERE id=?").get(id)); }
+  listThreads(): Thread[] { return this.db.prepare("SELECT data FROM thread ORDER BY rowid DESC").all().map(row => this.parseThread(row)!); }
   saveThread(thread: Thread): void {
     this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify(thread), thread.id);
   }
   /** The thread a VM belongs to. */
   threadByVm(vmId: string): Thread | null {
-    return this.parse(this.db.prepare("SELECT data FROM thread WHERE json_extract(data, '$.vm.vmId')=?").get(vmId));
+    return this.parseThread(this.db.prepare("SELECT data FROM thread WHERE json_extract(data, '$.vm.vmId')=?").get(vmId));
   }
   /** The thread whose unfinished template build machine this is. */
   threadByBuildVm(vmId: string): Thread | null {
-    return this.parse(this.db.prepare("SELECT data FROM thread WHERE json_extract(data, '$.vm.build.vmId')=?").get(vmId));
+    return this.parseThread(this.db.prepare("SELECT data FROM thread WHERE json_extract(data, '$.vm.build.vmId')=?").get(vmId));
   }
   /** Changes the thread's machine record (provisioning tries, retention). */
   updateThreadVm(threadId: string, patch: Partial<Pick<ThreadVm, "provisionAttempt" | "retain" | "retainReason" | "discarded" | "preparation" | "build" | "hooks" | "startup"
@@ -799,8 +809,13 @@ export class Registry {
       if (!load) throw new Error(this.runnerLoads().length
         ? "no free thread machine in the global runner pool (its berth vm runners) — archive an idle thread, enroll another berth vm, raise a runner's limit, or start the thread on a runner by name"
         : "no berth vm runner in the global runner pool: start the thread on a berth host by name, or enroll a berth vm");
-      const thread: Thread = { id: randomUUID(), projectId, runnerId: load.id, ...(options.runnerId !== undefined ? { pinned: true as const } : {}),
-        title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, agent, archived: false, createdAt: Date.now(),
+      const id = randomUUID();
+      // Named once, unlike every open thread (in this transaction, so two
+      // creations cannot take one name); never changed after.
+      const taken = new Set(this.db.prepare(`SELECT id, json_extract(data, '$.identity.name') AS name FROM thread WHERE ${OPEN_THREAD}`).all()
+        .map(row => row.name === null ? threadIdentity(String(row.id)).name : String(row.name)));
+      const thread: Thread = { id, projectId, runnerId: load.id, ...(options.runnerId !== undefined ? { pinned: true as const } : {}),
+        title: text.replace(/\s+/g, " ").slice(0, 80) || null, identity: newThreadIdentity(id, taken), model, agent, archived: false, createdAt: Date.now(),
         allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks },
           ...(project.machine && Object.keys(project.machine).length ? { machine: { ...project.machine } } : {}),
           ...(resolved?.skills ? { skills: resolved.skills } : {}) },

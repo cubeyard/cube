@@ -244,6 +244,14 @@ lowercase as written; nothing in the system uppercases.
 - **Headline** (700, 20px, −0.01em): the screen title ("threads"). One per screen.
 - **Title** (600, 14.5px): thread module titles and the inline rename input;
   truncates to one line. Untitled threads drop to weight 450 and `--ink-3`.
+- **Thread name** (`.thread-name`, the size of the line it sits in,
+  `--ink-2`): a thread's animal emoji and two lowercase words ("🦦 calm
+  otter"), chosen once when it is created (`thread-names.ts`, no model
+  asked). It sits beside the title, never in its place: first in a module's
+  meta line, a sidebar row's state line and a threads-panel card's mono line;
+  after the title in the thread's rail (on a phone the switch carries the
+  emoji and the details the name); before `thread <id>` on a report in the
+  chat; before the title in the tab. The emoji is `aria-hidden`.
 - **Body** (400, 15.5px/1.6): the transcript — agent prose, user messages,
   empty-state copy. Thinking text is 14px italic `--ink-3`.
 - **Key** (550, 13px, 0.01em): key cap labels ("new thread", "files").
@@ -284,7 +292,7 @@ thread controls wrap within the conversation's own rail.
 The thread sidebar groups active threads by project, with a small plus button
 beside each project name to start a thread in that project. It has no separate
 “all threads” heading or full-width create button. Project names appear once
-per group; thread rows carry the title and state.
+per group; thread rows carry the title, then the thread's name and state.
 
 The quiet `+ thread` action and each project's plus open the same native
 dialog, also used by the thread list, project detail and `n` shortcut. A
@@ -580,7 +588,7 @@ and running counts in tabular mono). The threads OptChat started sit under
 their project's name in mono, newest project first. Each is a hairline `--s4`
 card: a lamp (amber working, starting or waiting, red failed or machine
 error, unlit otherwise) beside the bold title, linked to the thread while it
-is open, and the short id with the thread's own state in muted mono (`turn
+is open, and its name, then the short id with the thread's own state in muted mono (`turn
 ended`, never `done`). An archived thread is a transparent card, its title
 muted and unlinked, its state `archived · <last run>`. Empty and loading
 states are one muted line, never a placeholder card. The foot says states come

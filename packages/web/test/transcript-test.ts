@@ -34,11 +34,13 @@ assert(summary.kind === "tool" && summary.summary.length === 160 && summary.inpu
 const report = transcriptRows({ events: [
   { type: "user-message", id: "1", text: "[abcdef12] done: PR #212", from: "abcdef12" },
   { type: "user-message", id: "2", text: "[abcdef12] typed by the user" },
+  { type: "user-message", id: "3", text: "[abcdef12] and again", from: "abcdef12", fromIdentity: { name: "calm otter", emoji: "🦦" } },
 ], status: status("idle") });
 assert.deepEqual(report, [
   { kind: "user", id: "1", text: "done: PR #212", from: "abcdef12" },
   { kind: "user", id: "2", text: "[abcdef12] typed by the user" },
-], "a thread's report is the thread's; the user's own text stays theirs");
+  { kind: "user", id: "3", text: "and again", from: "abcdef12", fromIdentity: { name: "calm otter", emoji: "🦦" } },
+], "a thread's report is the thread's, with its name; the user's own text stays theirs");
 
 // A strip the reader opened stays open while the run streams on: every frame
 // is a new row object, and a streamed call is renumbered once it is saved.

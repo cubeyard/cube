@@ -31,3 +31,4 @@ node packages/web/test/browser/settings-browser-test.ts
 node packages/web/test/browser/runners-browser-test.ts
 node packages/web/test/browser/skills-browser-test.ts
 node packages/web/test/browser/startup-browser-test.ts
+node packages/web/test/browser/thread-names-browser-test.ts

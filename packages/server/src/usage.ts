@@ -58,6 +58,8 @@ export interface SubjectUsage {
   subject: string;
   kind: "thread" | "optchat";
   title: string | null;
+  /** A thread's name (thread-names.ts); none for OptChat. */
+  identity?: import("./thread-names.ts").ThreadIdentity;
   projectId: string | null;
   agent: UsageSource | null;
   archived: boolean;

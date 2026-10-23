@@ -6,7 +6,9 @@
  * thread's own run or machine state, never a goal's: a turn that ended is
  * not work done, and an archived thread is not a goal met. For an archived
  * thread it is how its last run ended, when that was read. */
-export type ObservedThread = { id: string; title: string | null; project: { id: string; name: string }; state: string; archived: boolean };
+export type ObservedThread = { id: string; title: string | null; project: { id: string; name: string }; state: string; archived: boolean;
+  /** The thread's name (thread-names.ts). */
+  identity?: import("./thread-names.ts").ThreadIdentity };
 export type OverviewThread = ObservedThread & { spawned: number | null };
 /** The chat's threads, newest first: every open one and the newest
  * archived; `unknown`: threads it started that cubed no longer has. */

@@ -371,7 +371,7 @@ export class Artifacts {
     const project = artifact.projectId ? this.registry.getProject(artifact.projectId) : null;
     const thread = artifact.author.kind === "thread" ? this.registry.getThread(artifact.author.thread) : null;
     return { ...artifact, project: project ? { id: project.id, name: project.name } : null,
-      thread: thread ? { id: thread.id, title: thread.title, archived: thread.archived } : null };
+      thread: thread ? { id: thread.id, title: thread.title, identity: thread.identity, archived: thread.archived } : null };
   }
 }
 
