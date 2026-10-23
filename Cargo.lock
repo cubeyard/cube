@@ -516,6 +516,7 @@ dependencies = [
  "memchr",
  "rcgen",
  "serde_json",
+ "sha1_smol",
  "sha2",
  "tempfile",
  "tokio",

@@ -6,6 +6,7 @@
 //! machine holds one. Linux only: it runs in a keel guest.
 #![cfg(target_os = "linux")]
 pub mod agent;
+pub mod capath;
 pub mod channel;
 pub mod cli;
 pub mod clock;
