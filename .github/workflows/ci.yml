@@ -110,6 +110,8 @@ jobs:
         run: bash scripts/test-node-transport.sh
         env:
           CUBE_TEST_LAYER_TOOLS: required
+          # The runner image's JDK: keel's keystore repair against the real keytool.
+          CUBE_TEST_KEYTOOL: required
       # Last: root's build output stays in its own target directory.
       - name: cube-agent's root-only tests, as root
         run: |
@@ -117,4 +119,5 @@ jobs:
             "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" CUBE_AGENT_ROOT_TESTS=1 \
             cargo test --locked --offline -p cube-agent --lib --target-dir target/as-root -- \
             out_of_the_workspace_the_agent_account_acts hooks_are_read_as_the_caller \
-            whiteouts_and_opaque_directories_hide_lower_files
+            whiteouts_and_opaque_directories_hide_lower_files \
+            run_enters_the_workload_namespace_at_its_root
