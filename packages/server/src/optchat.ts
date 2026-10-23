@@ -515,6 +515,8 @@ export class OptChat {
   private compactorError: string | null = null;
   private readonly watchers = new Map<string, Promise<ThreadWatch | null>>();
   private readonly reported = new Map<string, string>();
+  /** Threads' names by id, read once (`threadName`). */
+  private readonly names = new Map<string, ThreadIdentity>();
   private readonly startReported = new Set<string>();
   /** When each thread's machine was first seen failing to start, until it starts. */
   private readonly startFailing = new Map<string, number>();
@@ -1166,10 +1168,19 @@ export class OptChat {
   }
 
   /** The short ids of the threads this chat started. */
-  /** The threads this chat started, by their short ids, with their names. */
-  async threadPrefixes(): Promise<Map<string, ThreadIdentity | undefined>> {
-    const ids = Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {});
-    return new Map(ids.map(id => [short(id), this.options.threads.identity?.(id)]));
+  /** The threads this chat started: their ids by their short ids. */
+  async threadPrefixes(): Promise<Map<string, string>> {
+    return new Map(Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {}).map(id => [short(id), id]));
+  }
+
+  /** A thread's name, read once: it never changes (thread-names.ts). */
+  threadName(id: string): ThreadIdentity | undefined {
+    let identity = this.names.get(id);
+    if (!identity) {
+      identity = this.options.threads.identity?.(id);
+      if (identity) this.names.set(id, identity);
+    }
+    return identity;
   }
 
   /** Messages accepted but not yet shown in the chat, oldest first. */
@@ -2058,9 +2069,11 @@ export class OptChatEvents implements ThreadEvents {
     // A report of a thread this chat started is marked as the thread's.
     const threads = await this.chat.threadPrefixes();
     const report = (text: string) => /^\[([0-9a-f]{8})\] /.exec(text)?.[1];
+    // Only a report's thread is looked up, not every thread the chat started.
     const marked = (from: string | undefined) => {
-      if (!from || !threads.has(from)) return {};
-      const identity = threads.get(from);
+      const id = from && threads.get(from);
+      if (!from || !id) return {};
+      const identity = this.chat.threadName(id);
       return identity ? { from, fromIdentity: identity } : { from };
     };
     const transcript = { ...input, events: input.events.map(event => event.type === "user-message" ? { ...event, ...marked(report(event.text)) } : event) };
