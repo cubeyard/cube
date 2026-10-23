@@ -471,16 +471,28 @@ what the release itself deletes (a clean machine's disk).
 
 ## Threads beside the chat
 
-The chat is an archive, not the way to find what is going on. The chat
-page's **threads** panel (beside the conversation on a desktop, folded above
-it on a phone) shows every thread this chat started. Nobody keeps it:
+The chat is an archive, not the way to find what is going on. Its page
+shows every thread this chat started twice over, each from the chat's own
+records: in the **margin**, a note beside the message whose spawn started
+it (on a phone and below 76rem, a line under that message), and in the
+**index** (the composer's work key, the wordmark, `/` or ctrl/⌘ k), the
+open ones listed failed first, then moving, then the rest. Nobody keeps
+either:
 
 - **Where it comes from.** The chat's own spawn records
   (`cube.optchat`'s `threads`, written by `spawn` in the call's commit). A
   thread started from the UI is not the chat's and is not shown; a thread
   the chat started needs no further step to appear.
-- **What it shows.** Grouped by project, newest first: each open thread with
-  its title and its own state as cubed records it when the panel reads
+- **Where a note stands.** At the row whose spawn result names the thread
+  (`[id] started in <project>…`), among the rows shown; an artifact's note at
+  the first row that wrote it (`artifact_write`/`artifact_edit`), linked it
+  (`#/a/<id>`) or brought its comments (`[artifact <id>]`). A link to an
+  artifact cube cannot show gets no note, and an artifact the chat never
+  named gets none (the index lists it). A thread the overview no longer has
+  is read from the thread list (archived) or says `not known to cube`; when
+  the overview cannot be read the notes say `state not read`.
+- **What it shows.** Each open thread with
+  its title and its own state as cubed records it when the page reads
   `GET /api/optchat/threads` (`working`, `turn ended`, `waiting on a
   background agent`, `failed`, `stopped`, `starting`, `waiting for a
   runner`, `machine error`, …). Archived threads are not listed, only
@@ -492,11 +504,12 @@ it on a phone) shows every thread this chat started. Nobody keeps it:
   machine waited for; one store slower than 2 s reads as `unknown`.
 - **What it does not say.** A turn that ended is not work done; an archived
   thread is not a goal met; nothing reads a pull request, merge, release or
-  install. The panel says so in its foot.
-- **Refresh.** On open and when the page becomes visible, every 5 s while
-  the chat works, once when a turn ends, and every 30 s while a shown thread
-  is starting or running. An idle page with no running thread does no
-  polling.
+  install. Only a failure is pinned (at the margin's top, while its note is
+  scrolled away); nothing is called "needs you".
+- **Refresh.** On open, when the page becomes visible and when the index
+  opens; every 5 s while the chat works, once when a turn ends, every 10 s
+  while a thread moves and every 30 s otherwise (with the artifacts). A
+  hidden page does no polling.
 
 OptChat's own `threads` tool lists the same threads with their state.
 
@@ -772,7 +785,7 @@ failure) nor recovery rounds send its request again; then archives it.
 
 ## Configuration
 
-- The chat's model is chosen on the chat strip (`GET/PATCH /api/optchat/model`);
+- The chat's model is chosen in the chat's index (`GET/PATCH /api/optchat/model`);
   a new chat starts on the host's preferred model.
 - The compactor's model is chosen under settings › chat memory
   (`#/settings/memory`), apart from the chat's, and offered in the first-run
@@ -819,7 +832,7 @@ saves with `PUT /api/settings/compactor {model: {provider, id} | null}`
 (400 for a malformed body, 422 for a model no connected provider offers);
 a save looks at the nodes held with their answers spent again, and at a
 node whose last answer was out during the save once that answer is in.
-The panel also lists the newest
+The index also lists the newest
 artifacts (`GET /api/artifacts`); comments on the chat's own artifacts reach
 it as messages starting `[artifact <id>]` through the same pending queue, as
 does the outcome of a merge the user confirmed on its artifact or on the

@@ -142,6 +142,17 @@ mechanical and small: 120ms state changes, 80ms key travel, 140ms settle-in
 entrances, a 300ms staggered lamp warm-up when the panel arrives, and a 1.2s
 lamp blink — all silenced under `prefers-reduced-motion`.
 
+**The sheet (OptChat, cube's home).** The user chose direction **A+ · ark
+med marg** for the chat: one quiet sheet on the reading field where the
+conversation has the screen, what it started or named stands in a margin
+beside the message that says so, and everything else is one step away in an
+index. The chat sheds the instrument's physical costume (decks, seams,
+rails, raised strips, labels) but keeps its tokens, lamps, type and one
+signal; the other pages keep the bench instrument until they move too. Its
+contract is the chat's surface brief
+(`packages/web/.impeccable/surfaces/packages-web-src-components-chatview-svelte.md`)
+and the Sheet components below.
+
 **Key Characteristics:**
 - Warm putty enclosure on a numbered five-step surface ramp; no surface outside it
 - One signal orange, theme-tuned, reserved for what the user can touch
@@ -311,15 +322,22 @@ at `40dvh`. The right workspace bay scrolls independently so expanding a long
 diff never moves the conversation. Spacing rhythm is in rem with recurring
 steps of 0.55 / 0.7–0.75 / 0.85–0.9 / 1.0 / 1.4 / 2.1.
 
+The chat is the exception: one sheet with no header row beyond the wordmark
+(the index key), the 47rem column and, at 76rem and wider, a 17rem margin
+3.25rem beside it; the column and margin are centred together and the
+composer keeps the column's line, its work key hanging before it. Below
+76rem the margin is not drawn and its thread notes sit under their messages.
+
 At the 40rem mobile breakpoint (and on a touch screen under 30rem tall, a
-phone on its side): the conversation keeps the screen. The destinations fold
-behind one menu key that names the current page; the chat and thread strips
-are one row of lamp, title and a `details` key, which opens the project,
-model, memory and archive key on the row beneath and folds again when the
-composer takes focus; the chat's threads panel starts folded. While the
-on-screen keyboard is up (`data-keyboard` on the root, from
-`lib/keyboard.ts`), the header, threads panel and memory step aside, and with
-under ~220px left the strip too. The busy lamp drops its label (the blinking
+phone on its side): the conversation keeps the screen. Elsewhere the
+destinations fold behind one menu key that names the current page; a
+thread's strip is one row of lamp, title and a `details` key, which opens the
+project, model and archive key on the row beneath and folds again when the
+composer takes focus. The chat has no strip: its model and memory are in the
+index, a bottom sheet on a phone. While the on-screen keyboard is up
+(`data-keyboard` on the root, from `lib/keyboard.ts`), the header, the
+chat's wordmark row and its memory step aside, and with under ~220px left a
+thread's strip too. The busy lamp drops its label (the blinking
 lamp alone carries "working"). On a phone the composer's attach and send keys
 are 2.25rem faces with a 2.75rem hit area; the textarea rises to 16px, and the
 form pads its bottom with `env(safe-area-inset-bottom)` except over a keyboard.
@@ -336,9 +354,8 @@ iOS Safari does not zoom on focus. Any new text input inherits this rule.
 
 Depth is physical, never atmospheric. A surface is raised (key shadow), sunk
 (well shadow), or flush on the ramp — there are no floating layers and no
-ambient glows. The only "elevation" in the classic sense, `--shadow-float`, is
-declared but unused: reserved for a true overlay (menu, dialog) that does not
-yet exist.
+ambient glows. The only "elevation" in the classic sense, `--shadow-float`,
+belongs to true overlays: the folded menu and the chat's index dialog.
 
 ### Shadow Vocabulary
 - **Key** (`--shadow-key`: `0 1px 0 rgba(255,255,255,0.7) inset, 0 1px 2px
@@ -378,8 +395,9 @@ dashed border in the system is the missing-image retry placeholder.
 
 Iconography is one authored stroke family in `Icon.svelte`: 24-box, 2px
 stroke, round caps and joins, drawn to match the cube wireframe glyph (the
-brand mark, drawn inline in the header and favicon). Eight icons ship: plus,
-send, pencil, trash, chevron, check, copy, file. No icon libraries, and no
+brand mark, drawn inline in the header and favicon). The set: plus, close,
+pencil, trash, chevron, file, refresh, arrow (up), down and index (three
+rules with dots, the chat's work key at rest). No icon libraries, and no
 unicode glyphs standing in for controls.
 
 ## Components
@@ -497,9 +515,10 @@ start opens the file picker (paste and drop attach too; never a worded
 "image" key), and the round signal send key at the end. Stop, while a run is
 on, is a worded key beside the field at the field's height. Enter sends; Shift+Enter inserts a new
 line. The keyboard hint lives in the field's tooltip and accessible description,
-not a permanent extra row. Model selection belongs in the conversation pane's top rail:
+not a permanent extra row. A thread's model selection belongs in its conversation pane's top rail
+(the chat's is in its index):
 the actual model id as a quiet text control, with providers grouped in the
-opened list. Toggles in a rail (the chat's `memory`, the now bay's fold) are
+opened list. Toggles in a rail (the now bay's fold) are
 quiet text controls too (`.strip-toggle`): the rail's 11px label type, no face,
 a hover wash, pressed in with a turned chevron while open. Rails beside each
 other share `--rail` height, padding and hairline, so they read as one band. Never substitute an effort label such as "high" for the model.
@@ -574,19 +593,50 @@ code scrolls inside its keyboard-focusable diff region. Opening an untracked
 text file reads it on demand and presents its complete contents as a new-file
 addition; binary and oversized files report why they cannot render.
 
-### Threads Panel
-The chat's right bay: a recessed `--s1` well with a `threads` head rail (open
-and running counts in tabular mono). The threads OptChat started sit under
-their project's name in mono, newest project first. Each is a hairline `--s4`
-card: a lamp (amber working, starting or waiting, red failed or machine
-error, unlit otherwise) beside the bold title, linked to the thread while it
-is open, and the short id with the thread's own state in muted mono (`turn
-ended`, never `done`). An archived thread is a transparent card, its title
-muted and unlinked, its state `archived · <last run>`. Empty and loading
-states are one muted line, never a placeholder card. The foot says states come
-from cube, archived is not done and merged is not released. Under 52rem the bay
-stacks above the conversation, capped at 38vh and foldable by a chevron rail
-toggle, so the composer always stays on screen.
+### The Sheet (OptChat)
+The chat's page is the reading field (`--s4`) from edge to edge: the
+wordmark row (a key that opens the index; the auth chip only on failure),
+the conversation, the composer. User messages are soft `--s3` faces with the
+well radius, no border or shadow, right-aligned; replies are plain prose; a
+thread's report is its words under its name (linked to the thread while it
+is open) and `· report`, set off by one `--line-2` hairline. No message
+carries a "you"/"agent" label; each keeps its accessible name. Tool lines
+are quiet: no face until opened. The chat's own tools speak in words —
+`started 3 threads · 1 not started`, `told <thread>`, `created <title> ·
+revision 1` — with the tool's mono name after; other tools keep their raw
+primary argument. The composer field takes the well radius and a soft
+1px-offset shadow; before it sits the **work key**: lamps and counts of the
+chat's threads that move (blinking amber) and that failed (red), else the
+index mark. Its accessible name says the counts in words.
+
+### The Margin
+At 76rem and wider, a 17rem margin beside the column, scrolling with it.
+One note per message that started threads (a spawn's result lines) or named
+an artifact (a write or edit result, a `#/a/` link in a reply, a comment
+message), each thread and artifact once, at its first row shown. A note is
+flush: a lamp (a file mark for an artifact), the 13px/600 title clamped to
+two lines, one 12px `--ink-3` line of state in cubed's words (`turn ended`,
+`machine failed` in `--bad`, `not known to cube`, `state not read`); a short
+`--line` hairline reaches toward its message. A press opens it in place on a
+hairline frame: short id, start time, the thread's newest report among the
+rows shown with the way to it, then `open thread` or `read` in signal ink.
+Four items per note, then `n more`. Notes go down past a taller one and up
+near the end; the opened one stays by its message; the margin never moves
+the conversation or lengthens the page. A failed thread whose note is
+scrolled away is pinned at the margin's top, with an arrow for the way back.
+Below 76rem the same thread notes are one-liners under their spawn, the
+state kept whole; artifacts stay links in the text.
+
+### The Index
+One dialog rising from the composer (a bottom sheet under 40rem), the
+system's floating surface: `--s4`, `--line-2` border, well radius,
+`--shadow-float`, a putty-washed backdrop. A filter field (16px on a phone),
+then the chat's threads (failed, moving, the rest; lamp, title, state ·
+project), archived and lost counts, the newest artifacts, the places
+(threads, artifacts, projects, settings) and the chat's model select and
+memory toggle. Opened by the work key, the wordmark, `/` outside a field and
+ctrl/⌘ k; the arrow keys walk its items, enter in the filter opens the first
+match, escape closes and gives focus back. Rows are 2.75rem on touch.
 
 ### Named Rules
 **The Actions-In-The-Module Rule.** A module's controls live inside it, on its
@@ -639,8 +689,8 @@ story — the command or the path — never raw JSON when a primary argument exi
   at OKLCH hue 87–95°. Audit: a new putty neutral within ~10° of hue 90.
 - **Don't** add pills (99px radii) or new circles; circles are lamps and the
   send key only.
-- **Don't** float anything: no drop-shadow overlays until a true overlay
-  surface exists to claim the reserved `--shadow-float`.
+- **Don't** float anything but a true overlay (the folded menu, the chat's
+  index): `--shadow-float` is theirs alone.
 - **Don't** light the reserved `--lamp-blue` without a genuine fifth
   structurally-distinct state; it ships unused.
 - **Don't** uppercase anything, anywhere.

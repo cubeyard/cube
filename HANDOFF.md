@@ -207,6 +207,24 @@ deleted; the wish finder's past spend in it is no longer in usage reports.
 Regression: `usage-test.ts` (only the chat and compactor call a model),
 `optchat-product-test.ts` (routes 404) and the browser panel scenario.
 
+## The chat as one sheet (A+ · ark med marg)
+
+The chat page is the user's chosen redesign A+: one sheet with no strip,
+rail, panel or labels; the threads panel is gone. What the chat started and
+named stands in a margin beside the message that says so (≥76rem; quiet
+lines under it below that), read from its own log (spawn result lines,
+artifact tool results, `#/a/` links, comment messages) and resolved against
+the overview, the thread list and the artifacts; nothing is inferred and
+nothing is kept by hand (`lib/provenance.ts`, `lib/margin-layout.ts`). The
+index (work key, wordmark, `/`, ctrl/⌘ k) holds the chat's threads,
+artifacts, the places, the chat's model and its memory. UI only: no route,
+API or tool changed. Contract: DESIGN.md "The Sheet", "The Margin", "The
+Index" and the chat's surface brief. Regression: `provenance-test.ts`,
+`chat-sheet-browser-test.ts` (scripted host, mocked data) and the margin
+check in `artifact-browser-test.ts` (real cubed, faux model). Open: thread
+names (#239) beside the titles once merged; no unread marking (cube has no
+seen state); the other pages still wear the bench instrument.
+
 ## Images in the chat
 
 The chat's composer takes pasted, dropped or picked images (PNG, JPEG, GIF,
