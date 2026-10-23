@@ -1154,7 +1154,10 @@ export declare type GuestInfo = Message<"cube.runner.v4.GuestInfo"> & {
   bootId: string;
 
   /**
-   * hook -> ok | failed:N | skipped | notrun | absent
+   * hook -> ok | failed:N | skipped | notrun | absent. keel adds
+   * `runner-ca` -> ok | repaired | skipped | failed: its check of Java's
+   * system keystore (/etc/ssl/certs/java/cacerts) and the runner's CA at
+   * this boot's setup; absent without that keystore.
    *
    * @generated from field: map<string, string> hooks = 9;
    */

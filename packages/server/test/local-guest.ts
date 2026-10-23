@@ -127,7 +127,8 @@ export class LocalMachines implements ThreadMachines {
     for (const [name, script] of [["pre-setup", thread.allocation.hooks?.preSetup], ["pre-resume", thread.allocation.hooks?.preResume]] as const) {
       if (script?.trim()) fs.writeFileSync(path.join(hooks, name), hookFileContent(script), { mode: 0o755 });
     }
-    fs.writeFileSync(path.join(guest.root, "env"), `CUBE_HOOKS=${hooks}\nCUBE_RUN=${path.join(guest.root, "run")}\nHOME=${path.join(guest.root, "home")}\n`);
+    // keel's note of Java's keystore is on the boot's tmpfs (/run/cube/runner-ca).
+    fs.writeFileSync(path.join(guest.root, "env"), `CUBE_HOOKS=${hooks}\nCUBE_RUN=${path.join(guest.root, "run")}\nCUBE_RUNNER_CA=${path.join(guest.root, "run", "runner-ca")}\nHOME=${path.join(guest.root, "home")}\n`);
     return { booted: fresh };
   }
   private readonly rebooted = new Set<string>();

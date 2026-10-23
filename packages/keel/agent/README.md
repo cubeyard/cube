@@ -161,7 +161,16 @@ cube-init (PID 1)
   `INVALID_ARGUMENT/bad_ca`) goes into the image's bundle as a block
   between `# cube: begin` and `# cube: end` lines, replaced on every setup,
   and into `/usr/local/share/ca-certificates/cube-runner.crt`, so
-  `update-ca-certificates` keeps it in the bundle it writes again;
+  `update-ca-certificates` keeps it in the bundle it writes again, with
+  the link `update-ca-certificates` would make to it,
+  `/etc/ssl/certs/cube-runner.pem` (Debian's ca-certificates-java builds
+  Java's keystore from those links, so a JDK installed later trusts the
+  CA), and the `-CApath` link `openssl rehash` would make to that,
+  `/etc/ssl/certs/<subject hash>.N` (`capath.rs`: OpenSSL's
+  `X509_NAME_hash` of the canonical subject, the first free `N`; with
+  keel's link in place `update-ca-certificates` adds nothing for the CA
+  and never rehashes for it). Only cube's own links go when a setup has no
+  CA, and a hash link of cube's under another hash (a rotated CA);
   `/etc/gitconfig` gets git's credential helper for github.com (the
   placeholder in `GH_TOKEN`) and `/etc/environment` the CA variables, each
   as such a block. `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`,
@@ -172,8 +181,34 @@ cube-init (PID 1)
   the machine is not ready ("the image lacks a place for …"). Every CA a
   setup brings is also kept in `state/runner-cas.pem` and every mount point
   the agent makes in `state/mount-points`, for template publishing. Not
-  done: the `-CApath` hash link, a Java keystore, and taking a replaced CA
-  out of a bundle `update-ca-certificates` wrote (a later follow-up).
+  done: taking a replaced CA out of a bundle `update-ca-certificates`
+  wrote (a later follow-up).
+- **Java's keystore** (`keystore.rs`), on the first setup of a boot
+  (before any command runs) and on a setup that brings another CA: when
+  the root has Debian's `/etc/ssl/certs/java/cacerts`, it is read as JKS
+  (its whole structure, not a byte search). Holding every certificate of
+  the CA: `ok`, nothing written. Lacking it: a copy beside it (same owner
+  and mode) gets the CA from the root's own `keytool`, as root in the
+  workload root and in a cgroup of its own (`/sys/fs/cgroup/cube-keystore`,
+  killed and removed after each call, so a process that left the process
+  group goes too), 20 s per call, its output waited for 2 s at most after
+  that (`-J-Xmx64m`; a stale certificate under cube's alias
+  `debian:cube-runner.pem`, ca-certificates-java's for the link, is deleted
+  first), is read again and renamed over the keystore only if it holds the
+  CA and every other certificate it had (`repaired`); otherwise the copy
+  goes and the keystore stays (`failed`). `skipped`, untouched: updates
+  turned off (`cacerts_updates` in `/etc/default/cacerts`), or PKCS#12,
+  JCEKS or another format keel does not read. `failed`, untouched: a
+  damaged JKS or an empty file, a `storepass` only a shell could read, no
+  `keytool`. Never fatal. The outcome is on the console, in
+  `/run/keel/runner-ca.json`, in `status.guest.hooks["runner-ca"]` and, one
+  line, in the workload's `/run/cube/runner-ca`, which cubed's resume
+  script reports as the outcome `runner-ca` and `cube hooks` shows after
+  the hooks. A setup with another CA (the runner's CA rotated while the
+  machine ran) repairs while the workload runs: a package manager writing
+  the keystore at that moment can lose its write or keel's, and a running
+  JVM keeps the trust it loaded until it starts again. A JDK with a store
+  of its own is not touched.
   The agent also sets `fs.protected_hardlinks` and `fs.protected_symlinks`.
 - **Hooks**: cubed runs them as commands (its preparation and resume
   scripts); the agent writes the project's two from the boot documents and
@@ -181,7 +216,9 @@ cube-init (PID 1)
   `~/.cache/cube/NAME.status` in `hello` and `status.guest.hooks`.
   `cube hooks [-n LINES] [--json]` is cube-guest's: the four hooks, their
   last outcomes and log tails, read inside the workload root with the
-  caller's own permissions (`hooks.rs`).
+  caller's own permissions (`hooks.rs`), then, on a machine with Java's
+  system keystore, `runner-ca` (source `cube`): keel's line, the outcome
+  the resume script recorded and its log.
 - **Clock** (`clock.rs`): every 500 ms the agent compares `CLOCK_REALTIME`
   with the host's PTP clock ("Virtio PTP", else "KVM virtual PTP", picked
   by `/sys/class/ptp/*/clock_name`) and steps it when they are 20 ms or more

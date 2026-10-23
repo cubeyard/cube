@@ -41,7 +41,9 @@ machine and the last LINES lines of its log (default 20, at most 200).
 
 Order: pre-setup, then .agents/setup (only if pre-setup succeeded), once
 when the machine is prepared; pre-resume, then .agents/resume, on every
-boot. All run as agent in /workspace. A thread cannot change the project's
+boot. On a machine with Java's system keystore, runner-ca follows: cube's
+own check at boot that the keystore trusts the runner's CA (added when it
+lacked it), not a hook. All run as agent in /workspace. A thread cannot change the project's
 hooks: the user changes them in cube's projects, or asks OptChat
 (project_hooks_write). New threads use the hooks saved when they start.
 ";
@@ -190,7 +192,7 @@ impl Hooks<'_> {
         let reader = self.reader.map(|a| (a.uid, a.gid, a.groups.clone()));
         self.read_as(|| {
             let root = fs::File::open(self.root)?;
-            Ok(HOOKS
+            let mut views: Vec<Value> = HOOKS
                 .iter()
                 .map(|(name, repository, log)| {
                     let script = self.script(name, *repository);
@@ -236,15 +238,48 @@ impl Hooks<'_> {
                     view["logTail"] = json!(tail_lines(Self::open(&root, &log_path), lines));
                     view
                 })
-                .collect())
+                .collect();
+            views.extend(self.runner_ca(&root, &logs, lines));
+            Ok(views)
         })?
     }
+
+    /// keel's check of Java's keystore at this boot's setup (keystore.rs),
+    /// after the hooks: its line in /run/cube/runner-ca, the outcome the
+    /// resume script recorded and its log. Left out when the machine has
+    /// neither (no Java keystore).
+    fn runner_ca(&self, root: &fs::File, logs: &str, lines: usize) -> Option<Value> {
+        let note = tail_lines(Self::open(root, RUNNER_CA_NOTE), 1);
+        let last = Self::last(root, logs, crate::keystore::HOOK);
+        if note.is_none() && last.is_none() {
+            return None;
+        }
+        let log_path = format!("{logs}/runner-ca.log");
+        Some(json!({
+            "name": crate::keystore::HOOK, "source": "cube", "path": RUNNER_CA_NOTE,
+            "present": note.is_some(), "check": note, "log": log_path,
+            "last": last.map_or(Value::Null, |last| json!({
+                "status": if last.exit_code.is_some() { "failed" } else { last.outcome.as_str() },
+                "exitCode": last.exit_code, "ms": last.ms, "endedAt": last.ended_at,
+            })),
+            "logTail": tail_lines(Self::open(root, &log_path), lines),
+        }))
+    }
 }
+
+/// keel's line of its keystore check, in the workload root.
+const RUNNER_CA_NOTE: &str = "/run/cube/runner-ca";
 
 /// cube-guest's `describe_hook`.
 pub fn describe(view: &Value) -> String {
     let path = view["path"].as_str().unwrap_or_default();
-    let script = if view["present"] == true {
+    let cube = view["source"] == "cube";
+    let script = if cube {
+        match view["check"].as_str() {
+            Some(check) => format!("{check} ({path})"),
+            None => format!("not checked at this boot ({path})"),
+        }
+    } else if view["present"] == true {
         format!(
             "{path}, {} bytes, sha256 {}",
             view["bytes"],
@@ -269,11 +304,18 @@ pub fn describe(view: &Value) -> String {
         )
     };
     let mut lines = vec![
-        format!(
-            "{} ({} hook): {script}",
-            view["name"].as_str().unwrap_or_default(),
-            view["source"].as_str().unwrap_or_default()
-        ),
+        if cube {
+            format!(
+                "{} (cube's check of Java's keystore at boot): {script}",
+                view["name"].as_str().unwrap_or_default()
+            )
+        } else {
+            format!(
+                "{} ({} hook): {script}",
+                view["name"].as_str().unwrap_or_default(),
+                view["source"].as_str().unwrap_or_default()
+            )
+        },
         format!("  last: {outcome}"),
     ];
     match view["logTail"].as_str() {
@@ -423,6 +465,32 @@ mod tests {
             describe(&resume),
             "resume (repository hook): none (/workspace/.agents/resume)\n  last: failed (exit 3), 0.0 s, 1970-01-01 00:00:00\n  log: none (/home/agent/.cache/cube/resume.log)"
         );
+        // No Java keystore check at this boot: no runner-ca.
+        assert_eq!(views.len(), 4);
+
+        // keel's check (/run/cube/runner-ca) and the outcome the resume
+        // script recorded: shown after the hooks.
+        fs::create_dir_all(root.join("run/cube")).unwrap();
+        let line = "failed /etc/ssl/certs/java/cacerts lacks the runner's CA and cube cannot add it: the machine has no keytool";
+        fs::write(root.join("run/cube/runner-ca"), format!("{line}\n")).unwrap();
+        fs::write(logs.join("runner-ca.status"), "failed:1 0 0\n").unwrap();
+        fs::write(logs.join("runner-ca.log"), format!("{line}\n")).unwrap();
+        let views = hooks.views(2).unwrap();
+        assert_eq!(views.len(), 5);
+        let ca = &views[4];
+        assert_eq!(
+            (ca["name"].as_str(), ca["source"].as_str()),
+            (Some("runner-ca"), Some("cube"))
+        );
+        assert_eq!(ca["last"]["status"], "failed");
+        assert_eq!(
+            describe(ca),
+            format!(
+                "runner-ca (cube's check of Java's keystore at boot): {line} (/run/cube/runner-ca)\n  last: failed (exit 1), 0.0 s, 1970-01-01 00:00:00\n  log /home/agent/.cache/cube/runner-ca.log, last lines:\n    {line}"
+            )
+        );
+        // GuestInfo's outcomes stay the four hooks' (keel adds its own word).
+        assert!(!hooks.outcomes().contains_key("runner-ca"));
     }
 
     /// Needs root (`sudo cargo test`; CI sets CUBE_AGENT_ROOT_TESTS): the

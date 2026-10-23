@@ -843,6 +843,9 @@ pub fn apply(setup: &proto::MachineSetup) -> Result<Applied, Refusal> {
         },
     }
     .map_err(|error| internal("setup", format!("{BOUND_CA}: {error}")))?;
+    // Java's system keystore and this CA, before any command runs
+    // (keystore.rs); never fatal: the machine serves without Java's trust.
+    crate::keystore::at_setup(Path::new(ROOT), Path::new(NAMESPACE), ca.as_deref());
     Ok(Applied {
         launch: Launch {
             workspace: PathBuf::from("/workspace"),

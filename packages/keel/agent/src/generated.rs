@@ -13,6 +13,13 @@
 //!   /usr/local/share/ca-certificates/cube-runner.crt
 //!                        the runner's CA, so update-ca-certificates keeps it
 //!                        in the bundle it writes again
+//!   /etc/ssl/certs/cube-runner.pem
+//!                        the link update-ca-certificates would make to it:
+//!                        ca-certificates-java builds Java's keystore from
+//!                        these links, so a JDK installed later trusts the CA
+//!   /etc/ssl/certs/<hash>.N
+//!                        the link to that one openssl rehash would make,
+//!                        for `-CApath` lookups (capath.rs)
 //!
 //! The binds are made once per boot, before the workload's mount namespace
 //! (a later mount would not reach it); the files behind them are written in
@@ -57,6 +64,12 @@ pub const BEGIN: &str = "# cube: begin (keel writes this block on every machine_
 const END: &str = "# cube: end";
 /// What update-ca-certificates adds to the bundle it writes.
 pub const CA_FILE: &str = "usr/local/share/ca-certificates/cube-runner.crt";
+/// Where update-ca-certificates links each certificate it trusts, and
+/// update-ca-certificates' name there for `CA_FILE`.
+const CERTS_DIR: &str = "etc/ssl/certs";
+pub const CA_LINK_NAME: &str = "cube-runner.pem";
+/// The link's target, as update-ca-certificates writes it.
+const CA_LINK_TARGET: &str = "/usr/local/share/ca-certificates/cube-runner.crt";
 /// The mount points this agent made in the root, one path a line.
 pub const MOUNT_POINTS: &str = "mount-points";
 /// Every CA a setup brought to this machine (PEM), for template publishing.
@@ -232,7 +245,7 @@ fn put_block(root: &fs::File, path: &str, block: Option<&str>, create: bool) -> 
 }
 
 /// Writes or removes a whole file of cube's in the root.
-fn put_file(root: &fs::File, path: &str, content: Option<&str>) -> io::Result<()> {
+pub(crate) fn put_file(root: &fs::File, path: &str, content: Option<&str>) -> io::Result<()> {
     let Some((components, dir, name)) = locate(root, path)? else {
         return Ok(());
     };
@@ -505,13 +518,23 @@ pub fn write_all(root: &Path, files: &Files) -> Result<(), Refusal> {
     if let Some(bundle) = bundle(root) {
         put_block(&root_dir, &bundle, files.ca, false).map_err(|error| internal(&bundle, error))?;
     }
-    if let Some(ca) = files.ca {
-        let has_dir = locate(&root_dir, CA_FILE).ok().flatten().is_some();
-        if has_dir {
-            put_file(&root_dir, CA_FILE, Some(ca)).map_err(|error| internal(CA_FILE, error))?;
+    let ca_file = match files.ca {
+        Some(ca) => {
+            let has_dir = locate(&root_dir, CA_FILE).ok().flatten().is_some();
+            if has_dir {
+                put_file(&root_dir, CA_FILE, Some(ca)).map_err(|error| internal(CA_FILE, error))?;
+            }
+            has_dir
         }
-    } else {
-        put_file(&root_dir, CA_FILE, None).map_err(|error| internal(CA_FILE, error))?;
+        None => {
+            put_file(&root_dir, CA_FILE, None).map_err(|error| internal(CA_FILE, error))?;
+            false
+        }
+    };
+    // Only Java's and `-CApath` trust depend on the links: a problem with
+    // them is said, not fatal.
+    if let Err(error) = put_ca_link(&root_dir, files.ca.filter(|_| ca_file)) {
+        eprintln!("cube-agent: /{CERTS_DIR}/{CA_LINK_NAME}: {error}");
     }
     put_block(&root_dir, "etc/gitconfig", Some(GITCONFIG), true)
         .map_err(|error| internal("/etc/gitconfig", error))?;
@@ -528,6 +551,95 @@ pub fn write_all(root: &Path, files: &Files) -> Result<(), Refusal> {
         true,
     )
     .map_err(|error| internal("/etc/environment", error))?;
+    Ok(())
+}
+
+/// The directory `path` of the root, resolved inside it and opened for the
+/// `*at` calls; None when the root has no such directory.
+pub(crate) fn open_dir(root: &fs::File, path: &str) -> io::Result<Option<OwnedFd>> {
+    let components = resolve_in_root(root, path)?;
+    match open_resolved(root, &components, libc::O_RDONLY | libc::O_DIRECTORY, 0) {
+        Ok(dir) => Ok(Some(dir)),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ENOTDIR) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// What the link `name` in `dir` points to; None when it is no link (or
+/// missing).
+fn link_target(dir: &OwnedFd, name: &std::ffi::CStr) -> Option<Vec<u8>> {
+    let mut target = vec![0u8; 4096];
+    let n = unsafe {
+        libc::readlinkat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            target.as_mut_ptr().cast(),
+            target.len(),
+        )
+    };
+    (n >= 0).then(|| target[..n as usize].to_vec())
+}
+
+/// `/etc/ssl/certs/cube-runner.pem` → `cube-runner.crt` while the CA file
+/// is in place (`ca`), as update-ca-certificates links it: Debian's
+/// ca-certificates-java builds Java's keystore from the `*.pem` links in
+/// /etc/ssl/certs that lead to the CA directories, so a JDK installed after
+/// this setup trusts the runner's CA without a project's hook. And the
+/// `<hash>.N` link to it that `openssl rehash` would make (capath.rs): with
+/// keel's link in place, update-ca-certificates adds nothing for the CA and
+/// so never rehashes for it. Without the CA only cube's own links go.
+/// Replaced atomically; never through a link on the way (the directory is
+/// resolved inside the root).
+fn put_ca_link(root: &fs::File, ca: Option<&str>) -> io::Result<()> {
+    let Some(dir) = open_dir(root, CERTS_DIR)? else {
+        return Ok(());
+    };
+    let name = c(CA_LINK_NAME)?;
+    let have = link_target(&dir, &name);
+    if ca.is_none() {
+        if have.as_deref() == Some(CA_LINK_TARGET.as_bytes()) {
+            check_errno(unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) })?;
+        }
+        return crate::capath::put_hash_link(&dir, None);
+    }
+    if have.as_deref() != Some(CA_LINK_TARGET.as_bytes()) {
+        let temporary = c(&format!(".{CA_LINK_NAME}.tmp-{}", std::process::id()))?;
+        unsafe { libc::unlinkat(dir.as_raw_fd(), temporary.as_ptr(), 0) };
+        let target = c(CA_LINK_TARGET)?;
+        check_errno(unsafe {
+            libc::symlinkat(target.as_ptr(), dir.as_raw_fd(), temporary.as_ptr())
+        })?;
+        let renamed = check_errno(unsafe {
+            libc::renameat(
+                dir.as_raw_fd(),
+                temporary.as_ptr(),
+                dir.as_raw_fd(),
+                name.as_ptr(),
+            )
+        });
+        if renamed.is_err() {
+            unsafe { libc::unlinkat(dir.as_raw_fd(), temporary.as_ptr(), 0) };
+        }
+        renamed?;
+    }
+    // `openssl rehash` links a file of one certificate only.
+    let certificates = pem_certificates(ca.unwrap_or_default().as_bytes());
+    let hash = match certificates.as_slice() {
+        [one] => crate::capath::subject_hash(one),
+        _ => None,
+    };
+    crate::capath::put_hash_link(&dir, hash.as_deref())
+}
+
+fn check_errno(result: libc::c_int) -> io::Result<()> {
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 
@@ -556,7 +668,7 @@ fn decode(body: &str) -> Option<Vec<u8>> {
 
 /// The PEM certificates in `data`: each one's DER and its lines, from BEGIN
 /// to END as they are in `data`. One that does not decode is left out.
-fn pem_blocks(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+pub(crate) fn pem_blocks(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut out = vec![];
     let mut current: Option<(String, Vec<u8>)> = None;
     for line in data.split_inclusive(|&b| b == b'\n') {
@@ -773,6 +885,81 @@ mod tests {
         assert!(!root.join("etc/sudoers.d").exists());
         assert!(mount_point(&file, "etc/cube", true).unwrap().is_some());
         assert!(root.join("etc/cube").is_dir());
+    }
+
+    #[test]
+    fn the_ca_link_is_update_ca_certificates_own_and_stays_in_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let link = root.join(CERTS_DIR).join(CA_LINK_NAME);
+        let file = fs::File::open(root).unwrap();
+        // No /etc/ssl/certs: nothing made.
+        put_ca_link(&file, Some(PEM)).unwrap();
+        assert!(!root.join(CERTS_DIR).exists());
+
+        fs::create_dir_all(root.join(CERTS_DIR)).unwrap();
+        put_ca_link(&file, Some(PEM)).unwrap();
+        assert_eq!(
+            fs::read_link(&link).unwrap().to_str(),
+            Some("/usr/local/share/ca-certificates/cube-runner.crt"),
+            "the target update-ca-certificates writes (absolute)"
+        );
+        let inode =
+            |p: &Path| std::os::unix::fs::MetadataExt::ino(&fs::symlink_metadata(p).unwrap());
+        let first = inode(&link);
+        put_ca_link(&file, Some(PEM)).unwrap();
+        assert_eq!(inode(&link), first, "a right link is not touched");
+        // Another link or a file under cube's name is replaced, as
+        // update-ca-certificates' `ln -sf` replaces it.
+        fs::remove_file(&link).unwrap();
+        fs::write(&link, "stale").unwrap();
+        put_ca_link(&file, Some(PEM)).unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_dir(root.join(CERTS_DIR)).unwrap().count(),
+            1,
+            "no temporary link left"
+        );
+        // A real CA also gets openssl rehash's link for -CApath.
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut params = rcgen::CertificateParams::default();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "cube runner CA test");
+        let real = params.self_signed(&key).unwrap();
+        put_ca_link(&file, Some(&real.pem())).unwrap();
+        let hashed = root.join(CERTS_DIR).join(format!(
+            "{}.0",
+            crate::capath::subject_hash(real.der()).unwrap()
+        ));
+        assert_eq!(
+            fs::read_link(&hashed).unwrap().to_str(),
+            Some("cube-runner.pem")
+        );
+        // Without the CA only cube's own links go.
+        put_ca_link(&file, None).unwrap();
+        assert!(fs::symlink_metadata(&hashed).is_err());
+        assert!(fs::symlink_metadata(&link).is_err());
+        std::os::unix::fs::symlink("/elsewhere.crt", &link).unwrap();
+        put_ca_link(&file, None).unwrap();
+        assert_eq!(
+            fs::read_link(&link).unwrap().to_str(),
+            Some("/elsewhere.crt")
+        );
+        fs::remove_file(&link).unwrap();
+
+        // /etc/ssl/certs as an absolute link names the root's directory,
+        // never this host's.
+        fs::remove_dir(root.join(CERTS_DIR)).unwrap();
+        fs::create_dir_all(root.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink("/elsewhere", root.join(CERTS_DIR)).unwrap();
+        put_ca_link(&file, Some(PEM)).unwrap();
+        assert!(fs::symlink_metadata(root.join("elsewhere").join(CA_LINK_NAME)).is_ok());
     }
 
     #[test]

@@ -762,12 +762,18 @@ be cut out, mount points, the agent account, identity) and writes it as one
 EROFS layer, which berth checks and keeps, read-only, while it deletes the
 build machine. The layer may keep the runner's public CA where the build put
 it beyond that (a Java keystore): berth binds the template to that CA's
-sha256 and refuses it under another CA (`template_runner_ca_changed`). Anything else deletes
+sha256 and refuses it under another CA (`template_runner_ca_changed`).
+Anything else deletes
 the build machine and the thread starts fresh (a build that failed is not
 retried for the same key, machine size and primary commit on that runner for
 an hour; another size or a new commit builds at once; the backoff is in
 cubed's memory, so a restart forgets it). Toolchains, package caches and the
 prepared checkout stay; that is the point.
+keel links `/etc/ssl/certs/cube-runner.pem` (and its `-CApath` hash link) to
+the CA on every setup, so a JDK the setup installs with apt trusts it, and on
+each boot adds the CA to Debian's Java keystore when that lacks it (a template
+from before the link, an image's JDK, a rotated CA), keeping every other
+certificate; the outcome is `runner-ca` among the thread's hooks.
 
 Isolation: no agent ever runs in a build machine; every machine writes only
 its own writable disk and gets its own id, placeholder, hostname and

@@ -253,7 +253,14 @@ export function provisionScript(allocation: WorkspaceAllocation): string { retur
  * `.agents/resume` (only if pre-resume succeeded). Once per machine boot,
  * before the agent uses the machine: a marker on a tmpfs records that this
  * boot resumed, and a lock keeps a second try from running beside a first
- * one that a cubed restart left running. */
+ * one that a cubed restart left running. First it reports keel's check of
+ * Java's system keystore at this boot's setup (keel/agent `keystore.rs`,
+ * one line in /run/cube/runner-ca, there only when the machine has the
+ * keystore) as the outcome `runner-ca`: `ok` (it holds the runner's CA, or
+ * keel added it), `skipped` (left alone on purpose, or a format keel does
+ * not read) or `failed` (it lacks the CA and keel could not add it), the
+ * line in ~/.cache/cube/runner-ca.log; without the line an earlier boot's
+ * outcome goes. */
 export function resumeScript(): string {
   return [
     "set -u",
@@ -263,6 +270,17 @@ export function resumeScript(): string {
     "exec 9>\"$run/resume.lock\"",
     "command -v flock >/dev/null 2>&1 && flock 9",
     "if [ -e \"$run/resumed\" ]; then echo \"cube-resume already\"; exit 0; fi",
+    "note=\"${CUBE_RUNNER_CA:-/run/cube/runner-ca}\"",
+    "if [ -r \"$note\" ] && IFS=' ' read -r ca_outcome ca_detail <\"$note\"; then",
+    "  printf '%s %s\\n' \"$ca_outcome\" \"$ca_detail\" >\"$logs/runner-ca.log\" 2>/dev/null",
+    "  case \"$ca_outcome\" in",
+    "    ok|repaired) outcome runner-ca ok 0 ;;",
+    "    skipped) outcome runner-ca skipped 0 ;;",
+    "    *) outcome runner-ca failed:1 0; echo \"runner-ca failed (exit 1); see $logs/runner-ca.log\"; printf '%s\\n' \"$ca_detail\" ;;",
+    "  esac",
+    // No keystore at this boot: an earlier boot's outcome is not this one's.
+    "else rm -f \"$logs/runner-ca.status\" \"$logs/runner-ca.log\"",
+    "fi",
     "if hook pre-resume \"$hooks/pre-resume\" pre-resume.log; then hook resume .agents/resume resume.log",
     "else outcome resume notrun 0; fi",
     ": >\"$run/resumed\"",

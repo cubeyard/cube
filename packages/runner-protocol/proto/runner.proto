@@ -422,7 +422,10 @@ message GuestInfo {
   string os = 6;
   string kernel = 7;
   string boot_id = 8;
-  // hook -> ok | failed:N | skipped | notrun | absent
+  // hook -> ok | failed:N | skipped | notrun | absent. keel adds
+  // `runner-ca` -> ok | repaired | skipped | failed: its check of Java's
+  // system keystore (/etc/ssl/certs/java/cacerts) and the runner's CA at
+  // this boot's setup; absent without that keystore.
   map<string, string> hooks = 9;
   string template_seal = 10;
   google.protobuf.Timestamp since = 11;
