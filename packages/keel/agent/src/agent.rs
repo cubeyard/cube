@@ -328,7 +328,7 @@ impl Agent {
     /// (from ~/.cache/cube in the workload root); nothing before a setup.
     fn hooks(&self) -> std::collections::BTreeMap<String, String> {
         let account = self.services().and_then(|services| services.account());
-        match account {
+        let mut hooks = match account {
             Some(account) if setup::is_mounted(setup::ROOT) => crate::hooks::Hooks {
                 root: Path::new(setup::ROOT),
                 account: &account,
@@ -336,7 +336,12 @@ impl Agent {
             }
             .outcomes(),
             _ => Default::default(),
+        };
+        // Not a hook: keel's check of Java's keystore at this boot's setup.
+        if let Some(outcome) = crate::keystore::recorded() {
+            hooks.insert(crate::keystore::HOOK.to_string(), outcome);
         }
+        hooks
     }
 
     pub fn info(&self) -> proto::GuestInfo {

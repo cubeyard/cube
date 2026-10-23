@@ -15,6 +15,7 @@ pub mod files;
 pub mod generated;
 pub mod hooks;
 pub mod journal;
+pub mod keystore;
 pub mod ops;
 pub mod paths;
 pub mod services;
