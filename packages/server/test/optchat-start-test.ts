@@ -10,7 +10,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
-import { OptChat, type OptThreads } from "../src/optchat.ts";
+import { OptChat, ThreadFailure, type OptThreads } from "../src/optchat.ts";
 import type { ThreadEvents, ThreadTranscript } from "../src/thread-events.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -19,6 +19,7 @@ const LATE = "1a7e0000-0000-4000-8000-000000000001";
 const STUCK = "57ac0000-0000-4000-8000-000000000002";
 const LEAVING = "1ea40000-0000-4000-8000-000000000003";
 const FLAKY = "f1a40000-0000-4000-8000-000000000004";
+const AGAIN = "a9a10000-0000-4000-8000-000000000005";
 const done: ThreadTranscript = { agent: "pi", owner: "pi", status: { state: "completed", run: "run-1", error: null },
   events: [{ type: "user-message", id: "1", text: "task" }, { type: "assistant-text", id: "2", text: "all tests pass", reasoning: false, final: true }] };
 const events: ThreadEvents = {
@@ -106,6 +107,32 @@ try {
       assert.match(report!, /^\[57ac0000\] failed to start for \d+ s; cubed keeps retrying: workspace allocation failed: ssh: the guest is unreachable$/);
       assert.deepEqual(await sent(optchat, `report:${LEAVING}:start`), [], "an archive under way is not a failure");
       assert.ok(!(await optchat.pending()).some(item => item.text.includes("being archived")));
+    } finally { await optchat.close(); }
+  }
+  // Each episode of failures (a wake failing, then later another) is
+  // reported once, by its episode; one cubed gave up on does not say it
+  // keeps retrying.
+  {
+    let phase = 1, calls = 0;
+    const optchat = await chat("again", [AGAIN], async () => {
+      calls++;
+      if (phase === 1) throw new ThreadFailure("INTERNAL: the snapshot could not be restored", "1000", true, true);
+      if (phase === 2) return brief;
+      throw new ThreadFailure("INTERNAL: the snapshot could not be restored; cube stopped retrying after 8 tries in a row, a message to the thread tries once more", "2000", false, true);
+    }, 100);
+    try {
+      await until(async () => (await sent(optchat, `report:${AGAIN}:failure:1000`)).length > 0, "the first episode is reported");
+      phase = 2;
+      const started = calls;
+      await until(async () => calls > started + 3, "it wakes");
+      phase = 3;
+      await until(async () => (await sent(optchat, `report:${AGAIN}:failure:2000`)).length > 0, "the second episode is reported");
+      const tries = calls;
+      await until(async () => calls > tries + 5, "watched again");
+      const first = await sent(optchat, `report:${AGAIN}:failure:1000`), second = await sent(optchat, `report:${AGAIN}:failure:2000`);
+      assert.deepEqual([first.length, second.length], [1, 1], "each episode once");
+      assert.match(first[0]!, /^\[a9a10000\] its machine failed to wake for \d+ s; cubed keeps retrying: INTERNAL: the snapshot could not be restored$/);
+      assert.match(second[0]!, /^\[a9a10000\] its machine failed to wake for \d+ s: INTERNAL: the snapshot could not be restored; cube stopped retrying after 8 tries in a row, a message to the thread tries once more$/);
     } finally { await optchat.close(); }
   }
   // Failures that never last the grace, each ended by a start, are never

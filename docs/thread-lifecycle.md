@@ -117,9 +117,11 @@ no wake.
   runner (R5), a runner fuller than the registry knows (R6); a failing
   start's 8 tries, its stop across restarts and a message's one more try
   (R7); a failing release retried until it succeeds (R8); a replayed
-  message (R9); a failing wake (R10); a run's guest calls on a full
-  runner wait once, not once each (R11); a runner that does not answer
-  (R12, R12b, R12c).
+  message (R9); a failing wake (R10), which OptChat's reads and watcher
+  report as failed (R13), also after a restart, one episode of failed
+  tries in a row at a time (R13b); a run's guest calls on a full runner
+  wait once, not once each (R11); a runner that does not answer (R12,
+  R12b, R12c).
 - `packages/server/test/lifecycle-model-test.ts`: seeded random runs of
   creates (some whose machine can never be made), messages and their
   replays, reads, idle and recovery rounds, restarts (with wakes cut short)

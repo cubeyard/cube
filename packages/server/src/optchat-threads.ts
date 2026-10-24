@@ -4,10 +4,11 @@
 import { agents, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { releaseUnfinished, ThreadWorking, type Conversations, type ThreadReader } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
-import { THREAD_NOTE, type ObservedThread, type OptThreads } from "./optchat.ts";
+import { THREAD_NOTE, ThreadFailure, type ObservedThread, type OptThreads } from "./optchat.ts";
 import { describeProjectHooks, findProject, writeProjectHooks } from "./project-hooks.ts";
 import { threadAgent, type Project, type Registry, type ResolvedRepositories, type Thread } from "./registry.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
+import { retriesExhausted } from "./thread-recovery.ts";
 
 /** How long the overview waits for one thread's stored state. */
 const OBSERVE_MS = 2000;
@@ -127,7 +128,10 @@ export function readThreads(options: { registry: Registry; conversations: Thread
    * stored run that did not finish). Reading the thread in the
    * UI does not wake it; listing it reads what cubed stored. */
   const dormant = (thread: Thread | null) => !!thread && !thread.archived && !!thread.vm?.suspension;
-  const sleepText = (thread: Thread) => thread.vm?.suspension?.state === "waking"
+  // A wake that failed is said, whatever the suspension still records: the
+  // machine sleeps, and the thread's agent cannot go on until it wakes.
+  const sleepText = (thread: Thread) => conversations.error(thread.id) ? `its machine is suspended and waking it failed: ${conversations.error(thread.id)}`
+    : thread.vm?.suspension?.state === "waking"
     ? `its machine is being woken${thread.vm.suspension.waiting ? ` (${thread.vm.suspension.waiting})` : ""}` : "its machine is suspended (idle; it wakes when told)";
   return {
     async describe(ids) {
@@ -162,7 +166,7 @@ export function readThreads(options: { registry: Registry; conversations: Thread
         // An archived thread's last run is read only when asked: its store is closed.
         let run = thread.archived ? (options?.archivedRuns ? null : "archived") : conversations.archivingNow(id) ? "being archived"
           : conversations.starting(id) ? "starting" : conversations.waiting(id) && !conversations.agentOpen(id) ? "waiting for a runner"
-          : conversations.error(id) && !conversations.agentOpen(id) ? "machine error"
+          : conversations.error(id) && (!conversations.agentOpen(id) || dormant(thread)) ? "machine error"
           : thread.workspaceState === "failed" ? "machine failed" : null;
         if (!run) {
           let timer: ReturnType<typeof setTimeout> | undefined;
@@ -219,12 +223,18 @@ export function readThreads(options: { registry: Registry; conversations: Thread
       // again next round.
       if (!conversations.agentOpen(id)) {
         // A wait for a runner counts as a start not made yet: reported once
-        // it lasts. A sleeping machine's wait for a slot is not one.
-        const failure = dormant(registry.getThread(id)) ? null : conversations.error(id) ?? conversations.waiting(id);
+        // it lasts. A sleeping machine's wait for a slot is not one; a wake
+        // that failed is.
+        const thread = registry.getThread(id);
+        const failure = dormant(thread) ? conversations.error(id) : conversations.error(id) ?? conversations.waiting(id);
         if (!failure) return "stored";
         const now = gone();
         if (now !== false) return now;
-        throw new Error(failure);
+        // A sleeping machine's wake fails again and again over a thread's
+        // life: its counted tries (`retry`) are one episode until a try
+        // succeeds. A start's failure keeps the one report it always had.
+        const since = dormant(thread) && conversations.error(id) && thread?.retry?.since;
+        throw new ThreadFailure(failure, since ? String(since) : null, !thread || !retriesExhausted(thread), dormant(thread));
       }
       try { return await conversations.live(id) ?? "stored"; }
       catch (error) {
