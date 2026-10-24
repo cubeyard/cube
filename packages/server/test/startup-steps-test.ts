@@ -37,8 +37,7 @@ app.registry.enrollRunner({ nodeId: "node-steps", environmentId: 1, threadId: "r
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
 const address = app.server.address();
 assert(address && typeof address === "object");
-const port = address.port;
-const base = `http://127.0.0.1:${port}`;
+let base = `http://127.0.0.1:${address.port}`;
 const send = async (route: string, body?: unknown, method = body === undefined ? "GET" : "POST") => {
   const response = await fetch(`${base}${route}`, { method, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }) });
   return { status: response.status, json: await response.json() as any };
@@ -130,9 +129,13 @@ try {
   });
   const guestRoot = machines.guest({ id: thread.id } as never).root;
   fs.rmSync(path.join(guestRoot, "go"));
+  // A new port for each cubed: fetch's pooled connection to the one closed
+  // may not have seen its end yet, and a request on it fails ("other side
+  // closed"). Pools are kept by origin, so a new port never reuses it.
   const restart = async () => {
     app = await createCubed({ state: path.join(root, "state"), models, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null });
-    await new Promise<void>(resolve => app.server.listen(port, "127.0.0.1", resolve));
+    await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
+    base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
   };
   await restart();
   const again = await until(steps, list => list.some(step => step.name === "prepare" && step.attempt === 4 && step.state === "running"), "the next try runs");
