@@ -406,8 +406,9 @@ through a read-only connection inside one read transaction: a consistent
 snapshot with no copy, a WAL read that never waits for a write transaction
 (it may wait briefly for a checkpoint or a recovery).
 The store is never created, migrated, checkpointed or locked for writing; a Pi
-store of another pi-durable schema version than the one the reader knows is
-refused, and there is no size bound. A read-only connection to a store closed
+store of a pi-durable schema version the reader does not know (it knows 1
+and 2: entries are the same in both, and an archived thread's store stays
+at 1) is refused, and there is no size bound. A read-only connection to a store closed
 cleanly can recreate its empty `-wal` and `-shm` files; nothing is written to
 them. Pages are numbered from the first message, so cubed keeps, per store
 (the last 32 read), an index of how many messages each stored row shows (and
@@ -674,7 +675,13 @@ without changing Pi:
   `optchat-<uuid>` for the chat and `optchat-<uuid>-compact` for the
   compactor, fixed for the store. Codex already sends `store: false` with the
   reasoning items' encrypted content. Requests share the view's prefix, so
-  OpenAI's prefix cache serves them.
+  OpenAI's prefix cache serves them. Since pi-ai 1.4.0, a model it flags
+  with `supportsAdditionalTools` and `supportsMidConvoSystemMessages` (the
+  platform's GPT-5.4+ and GPT-6, Codex) gets its tools as an
+  `additional_tools` item at the head of the input instead of the top-level
+  `tools`: the prefix is that item, the system prompt, then the view. It is
+  the same on every turn; the upgrade changed it once, so each cache was
+  written again once (`optchat-cache-test.ts`, `optchat-gpt6-test.ts`).
 - **Explicit breakpoints (OpenAI platform, GPT-5.6+).** For a model pi-ai
   flags with `supportsExplicitPromptCacheMode`, the last whole view block
   carries `prompt_cache_breakpoint: {mode: "explicit"}`, and a compactor
@@ -703,7 +710,7 @@ without changing Pi:
   not sent again.
 - **GPT-6 on the platform (R-1).** For a model pi-ai flags
   `supportsMidConvoEffort` (gpt-6-sol, gpt-6.1-sol, gpt-6-luna, gpt-6-astra)
-  with an `sk-` key, pi-ai 1.3.0 fixes `reasoning.effort` at `medium` and
+  with an `sk-` key, pi-ai 1.4.0 fixes `reasoning.effort` at `medium` and
   sends the thinking level as a trailing `configuration_update` input item,
   so a level change alters only that last item. OptChat adds `all_turns`
   beside them, its own `prompt_cache_key` and the view's breakpoint; a
@@ -881,8 +888,9 @@ artifact of a thread it started.
   Codex CLI sends none and pi-ai flags no Codex or Azure model, so there the
   chat relies on prefix caching and a stable `prompt_cache_key`.
 - **`reasoning.context` on models before GPT-5.6.** Not sent to `gpt-5.5`
-  and older (Codex `gpt-5.5`, `gpt-5.3-codex-spark`; the platform's
-  `gpt-5.5` and older): whether they take it is unverified offline. Their
+  and older (a Codex model configured under such an id, since pi-ai 1.4.0
+  lists none; the platform's `gpt-5.5` and older): whether they take it is
+  unverified offline. Their
   default is `current_turn`, so a message steered into a tool round on such
   a model may read less of the round from the cache than in uniichat (not
   measured). Enabling it needs one authorized live check per API (a short

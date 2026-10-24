@@ -224,7 +224,7 @@ sandboxing headers as OptChat's images; the browser never names a workspace
 path. Agent prose that names, as a markdown image, a path the thread read as
 an image shows that stored image; any other image target stays a link or text.
 Claude Code's transcript shows the workspace's host directory as `/workspace`
-in its prose too. Cube wraps Pi's `read` (pi-durable 1.3.0, which reads through the
+in its prose too. Cube wraps Pi's `read` (pi-durable 1.4.0, which reads through the
 environment's `openBinaryReader`; WorkspaceEnv serves one whole read) to intercept image
 bytes before UTF-8 decoding. PNG, JPEG, GIF and WebP are delivered as typed
 image parts, only when the calling task's selected model advertises image

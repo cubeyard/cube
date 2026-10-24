@@ -288,8 +288,13 @@ for (const lines of [9, 100, 500]) {
   assert.equal(captured.body.prompt_cache_key, "optchat-test", "the chat's cache key");
   assert.equal(captured.headers.get("session-id"), "optchat-test");
   assert.match(String(captured.body.instructions), /You are OptChat\./, "the system prompt is Codex's instructions");
-  const input = captured.body.input as Array<{ role?: string; content?: Array<{ text?: string }> }>;
-  assert.equal(input[0]!.content!.slice(0, 126).map(part => part.text).join(""), big, "the view leads the input, so turns share its prefix");
+  const input = captured.body.input as Array<{ type?: string; role?: string; content?: Array<{ text?: string }> }>;
+  // pi-ai ≥1.4.0 declares Codex's tools in an additional_tools item at the
+  // head of the input, not in the top-level list; the view comes next.
+  assert.deepEqual(input.slice(0, 1).map(item => item.type), ["additional_tools"], "the tools lead the input");
+  assert.equal(captured.body.tools, undefined, "none in the top-level list");
+  assert.equal(input[1]!.role, "user");
+  assert.equal(input[1]!.content!.slice(0, 126).map(part => part.text).join(""), big, "the view comes right after them, so turns share its prefix");
   assert.equal(captured.body.store, false);
   assert.ok(!JSON.stringify(captured.body).includes("cache_control"));
 
@@ -300,7 +305,7 @@ for (const lines of [9, 100, 500]) {
   const order: string[] = [];
   const streams: Array<ReadableStreamDefaultController<Uint8Array>> = [];
   respond = captured => {
-    const input = (captured.body.input as Array<{ content?: Array<{ text?: string }> }>)[0]!.content!;
+    const input = (captured.body.input as Array<{ role?: string; content?: Array<{ text?: string }> }>).find(item => item.role === "user")!.content!;
     order.push(`fetch ${input.length}`);
     return new Response(new ReadableStream<Uint8Array>({ start: controller => { streams.push(controller); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
   };
@@ -370,7 +375,7 @@ for (const lines of [9, 100, 500]) {
     assert.deepEqual(frames, ["response.create"], "the session's socket was used once and kept");
     // A writer of the waiter's prefix, on its own session and on SSE, that never begins.
     respond = captured => {
-      order.push(`fetch ${(captured.body.input as Array<{ content?: unknown[] }>)[0]!.content!.length}`);
+      order.push(`fetch ${(captured.body.input as Array<{ role?: string; content?: unknown[] }>).find(item => item.role === "user")!.content!.length}`);
       return new Response(new ReadableStream<Uint8Array>({ start: controller => { streams.push(controller); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
     };
     const lead = ws.completeSimple(model, { messages: request(render(100, 8)) }, { ...options, sessionId: "optchat-ws-lead" });
@@ -400,7 +405,11 @@ for (const lines of [9, 100, 500]) {
   // reasoning.context all_turns only for 5.6 and later (the SDK's default
   // there); gpt-5.5 and older are not sent it (no live check yet).
   const codexBody = async (id: string) => {
-    const pick = models.getModels("openai-codex").find(candidate => candidate.id === id)!;
+    // pi-ai 1.4.0 dropped Codex's gpt-5.5 from its catalog (ChatGPT
+    // accounts are refused it); a model configured under that id still
+    // takes this path, so it is the catalog's 5.6 under the older id.
+    const catalog = models.getModels("openai-codex");
+    const pick = catalog.find(candidate => candidate.id === id) ?? { ...catalog.find(candidate => candidate.id === "gpt-5.6-sol")!, id };
     const options = { apiKey: `x.${claim}.y`, transport: "sse" as const, maxRetries: 0, reasoning: "high" as const };
     await cachedModels(direct, () => "optchat-test").completeSimple(pick, { messages: request(big) }, options);
     const wrapped = bodies.pop()!.body;
@@ -481,7 +490,7 @@ for (const lines of [9, 100, 500]) {
   const flagged = (model: typeof sol) => (model.compat as { supportsExplicitPromptCacheMode?: boolean } | undefined)?.supportsExplicitPromptCacheMode === true;
   assert.ok(flagged(sol) && !flagged(five) && !flagged(azure), "pi-ai flags the platform's 5.6+ only");
   type Part = { type: string; text?: string; prompt_cache_breakpoint?: unknown };
-  type Input = Array<{ role?: string; content?: Part[] }>;
+  type Input = Array<{ type?: string; role?: string; content?: Part[] }>;
   const breakpoints = (body: Record<string, unknown>) => (body.input as Input).flatMap((item, at) => (Array.isArray(item.content) ? item.content : []).flatMap((part, k) => part.prompt_cache_breakpoint ? [`${at}:${k}`] : []));
   const send = async (models: Models, model: typeof sol, messages: Message[], options: object = {}) => {
     await models.completeSimple(model, { messages }, { maxRetries: 0, reasoning: "high", sessionId: "optchat-test", ...options });
@@ -491,11 +500,15 @@ for (const lines of [9, 100, 500]) {
   const compact = cachedModels(platform, () => "optchat-test", { task: false });
 
   const turn = await send(chat, sol, request(render(500)));
-  assert.deepEqual(breakpoints(turn), ["1:124"], "gpt-5.6-sol turn: one breakpoint, the last whole view block");
+  // pi-ai ≥1.4.0: the tools in an additional_tools item at the head, then
+  // the system prompt, then the view (item 2).
+  assert.deepEqual((turn.input as Input).map(item => item.type ?? item.role), ["additional_tools", "developer", "user"], "tools, system prompt, view");
+  assert.equal(turn.tools, undefined, "no top-level tools");
+  assert.deepEqual(breakpoints(turn), ["2:124"], "gpt-5.6-sol turn: one breakpoint, the last whole view block");
   assert.equal(turn.prompt_cache_options, undefined, "a turn keeps the implicit breakpoint at its end");
   assert.deepEqual(turn.reasoning, { effort: "high", summary: "auto", context: "all_turns" });
   const compaction = await send(compact, sol, request(render(500)));
-  assert.deepEqual(breakpoints(compaction), ["1:124"]);
+  assert.deepEqual(breakpoints(compaction), ["2:124"]);
   assert.deepEqual(compaction.prompt_cache_options, { mode: "explicit" }, "the compactor's task gets no implicit breakpoint");
   const tiny = await send(compact, sol, request(small(3)));
   assert.deepEqual(breakpoints(tiny), [], "a view under one whole block has no breakpoint");
@@ -528,12 +541,16 @@ for (const lines of [9, 100, 500]) {
   }
   const keyed = await registry({ type: "api_key", key: "sk-stored" });
   const keyedTurn = await send(cachedModels(keyed, () => "optchat-test"), sol, request(render(500)));
-  assert.deepEqual(breakpoints(keyedTurn), ["1:124"], "a stored sk- key keeps the breakpoint");
+  assert.deepEqual(breakpoints(keyedTurn), ["2:124"], "a stored sk- key keeps the breakpoint");
   const keyedCompaction = await send(cachedModels(keyed, () => "optchat-test", { task: false }), sol, request(render(500)));
-  assert.deepEqual([breakpoints(keyedCompaction), keyedCompaction.prompt_cache_options], [["1:124"], { mode: "explicit" }], "and the compactor's explicit mode");
+  assert.deepEqual([breakpoints(keyedCompaction), keyedCompaction.prompt_cache_options], [["2:124"], { mode: "explicit" }], "and the compactor's explicit mode");
   // Consecutive turns: the marked prefix is byte for byte the same, and a
   // longer view marks its own block within the lookback.
-  const prefix = (body: Record<string, unknown>, upto: number) => JSON.stringify([(body.input as Input)[0], (body.input as Input)[1]!.content!.slice(0, upto).map(part => ({ ...part, prompt_cache_breakpoint: undefined }))]);
+  // Everything before the view (the tools and the system prompt), then the view's first blocks.
+  const prefix = (body: Record<string, unknown>, upto: number) => {
+    const input = body.input as Input, at = input.findIndex(item => item.role === "user");
+    return JSON.stringify([...input.slice(0, at), input[at]!.content!.slice(0, upto).map(part => ({ ...part, prompt_cache_breakpoint: undefined }))]);
+  };
   for (const k of [1, 4, 40, 80]) {
     const next = await send(chat, sol, request(render(500 + k)));
     const at = Number(breakpoints(next)[0]!.split(":")[1]);
@@ -554,7 +571,7 @@ for (const lines of [9, 100, 500]) {
   const order: string[] = [];
   const streams: Array<ReadableStreamDefaultController<Uint8Array>> = [];
   respond = captured => {
-    order.push(`fetch ${(captured.body.input as Input)[1]!.content!.length}`);
+    order.push(`fetch ${(captured.body.input as Input).find(item => item.role === "user")!.content!.length}`);
     return new Response(new ReadableStream<Uint8Array>({ start: controller => { streams.push(controller); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
   };
   const a = compact.completeSimple(sol, { messages: request(render(100, 8)) }, { maxRetries: 0 });

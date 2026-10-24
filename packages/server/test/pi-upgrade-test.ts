@@ -1,16 +1,19 @@
-/** What cube relies on in pi-durable 1.3.0, pinned so a later Pi upgrade
- * that changes it fails here first: the SQLite schema (still version 1, so
- * no one-way migration), documents without `checkpointWhen`, a throwing
- * `beforeRequest` (reported and skipped: the request still goes out), a
- * hook held until a close aborts it (nothing sent, sent once after reopen),
- * a real storage failure (it ends the Harness: no send, no paid retry in
- * the same process; the reopened Harness sends again, so nothing is
- * exactly-once), a stop (never sent again), and the provider session id
- * (Pi's per conversation; OptChat's own keys win; a thread agent releases
- * Pi's on close). And what cube builds on it: a hook fails closed by
- * aborting its own generation before it throws (OptChat's beforeRequest),
- * Pi's reports reach cubed's log redacted, and a thread agent whose Session
- * failed is down at once, its provider sessions released, with no retry.
+/** What cube relies on in pi-durable 1.4.0, pinned so a later Pi upgrade
+ * that changes it fails here first: the SQLite schema (2: a store of
+ * schema 1 is migrated one way on open, and cube's read-only readers take
+ * both without migrating the original), documents with `checkpointWhen:
+ * () => false` (1.3.0's default, now required), a throwing `beforeRequest`
+ * (reported and skipped: the request still goes out), a hook held until a
+ * close aborts it (nothing sent, sent once after reopen), a real storage
+ * failure (it ends the Harness: no send, no paid retry in the same process;
+ * the reopened Harness sends again, so nothing is exactly-once), a stop
+ * (never sent again), and the provider session id (Pi's per conversation;
+ * OptChat's own keys win; a thread agent releases Pi's on close). And what
+ * cube builds on it: a hook fails closed by aborting its own generation
+ * before it throws (OptChat's beforeRequest), Pi's reports reach cubed's
+ * log redacted, with their type, and a thread agent whose Session failed is
+ * down at once, its provider sessions released, with no retry. Pi's
+ * crash-loop guard is in pi-restart-test.ts.
  * Offline: faux model, local guest, disposable state. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -21,9 +24,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, registerSessionResourceCleanup, type Message } from "@earendil-works/pi-ai";
 import { createRegistry, defineDoc, defineExtension, GenerationTask, Harness, hook, ROOT_CONVERSATION_ID, type Conversation } from "@earendil-works/pi-durable";
-import { CURRENT_SQLITE_SCHEMA_VERSION, type SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
+import { CURRENT_SQLITE_SCHEMA_VERSION, SQLITE_MIGRATIONS, type SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openAgent, openStorage, readStorage } from "../src/durable-agent.ts";
 import { reportText } from "../src/pi-report.ts";
+import { readPiHistory } from "../src/thread-history.ts";
 import { cachedModels } from "../src/optchat-cache.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
@@ -139,32 +143,92 @@ try {
   }
 
   {
-    // The schema: Pi 1.3.0 still writes SQLite schema 1, as 1.0.1 did, so
-    // opening an older store migrates nothing and an older cubed can open
-    // a newer one. A Pi with schema 2 (upstream main) migrates one way:
-    // upgrading to it needs a backup and a rollback plan first.
-    assert.equal(CURRENT_SQLITE_SCHEMA_VERSION, 1, "Pi's SQLite schema moved: its migration is one-way; plan backup and rollback before this upgrade");
-    const { harness } = await open();
-    await harness.close(context);
-    const database = new DatabaseSync(file, { readOnly: true });
-    try { assert.deepEqual({ ...database.prepare("SELECT version FROM durable_schema WHERE singleton = 1").get() }, { version: 1 }); }
-    finally { database.close(); }
-    assert.equal(await readStorage(file, async () => "read"), "read", "cube's read-only snapshot takes the store");
-    console.log("ok: Pi 1.3.0 keeps SQLite schema 1; nothing is migrated on open");
+    // The schema: Pi 1.4.0 writes SQLite schema 2, which adds the `sleeping`
+    // task status by rebuilding the task table; entries and documents are
+    // as in 1, which 1.0.1 to 1.3.0 wrote. Opening a schema-1 store migrates
+    // it one way, in one transaction: 1.3.0 refuses it after that ("Durable
+    // SQLite schema version 2 is newer than supported version 1"), so a
+    // cubed rolled back past this upgrade cannot open its Pi stores.
+    assert.equal(CURRENT_SQLITE_SCHEMA_VERSION, 2, "Pi's SQLite schema moved again: review the one-way migration, the readers and rollback before this upgrade");
+    // A schema-1 store as 1.3.0 left it: a conversation with a turn, then
+    // its task table rebuilt with migration 1's own statements (no task
+    // sleeps in it). Its schema is checked against a store migration 1 alone
+    // builds.
+    const v1 = path.join(root, "v1.sqlite");
+    {
+      const storage = await openStorage(v1);
+      const harness = await Harness.open(storage, { models, registry: createRegistry() }, context);
+      const conversation = await harness.root(context, { agent: { model } });
+      harness.resume();
+      assert.equal((await turn(conversation, "s1")).status, "done");
+      await harness.close(context);
+      const migration1 = SQLITE_MIGRATIONS[0]!.statements;
+      const db = new DatabaseSync(v1);
+      try {
+        db.exec("BEGIN; ALTER TABLE tasks RENAME TO tasks_v2;");
+        for (const index of db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'tasks_v2' AND sql IS NOT NULL").all() as Array<{ name: string }>) db.exec(`DROP INDEX ${index.name}`);
+        for (const statement of migration1.filter(sql => /^CREATE (TABLE|INDEX) \S+ ON tasks\b|^CREATE TABLE tasks\b/.test(sql.replace(/\s+/g, " ").trim()))) db.exec(statement);
+        db.exec("INSERT INTO tasks SELECT * FROM tasks_v2; DROP TABLE tasks_v2; UPDATE durable_schema SET version = 1; COMMIT;");
+      } finally { db.close(); }
+      const fresh = new DatabaseSync(":memory:");
+      fresh.exec("CREATE TABLE durable_schema (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), version INTEGER NOT NULL CHECK (version >= 0)) STRICT");
+      for (const statement of migration1) fresh.exec(statement);
+      const ddl = (database: DatabaseSync) => (database.prepare("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").all() as Array<{ sql: string }>).map(row => ({ ...row, sql: row.sql.replace(/\s+/g, "") }));
+      const built = new DatabaseSync(v1, { readOnly: true });
+      try { assert.deepEqual(ddl(built), ddl(fresh), "the schema-1 store has migration 1's schema exactly"); }
+      finally { built.close(); fresh.close(); }
+    }
+    const version = (file: string) => {
+      const database = new DatabaseSync(file, { readOnly: true });
+      try { return (database.prepare("SELECT version FROM durable_schema WHERE singleton = 1").get() as { version: number }).version; }
+      finally { database.close(); }
+    };
+    // cube's read-only readers take it and leave it as it was: the history
+    // pages (an archived thread's store is never migrated) and the usage
+    // snapshot, whose private copy pi-durable migrates.
+    const bytes = fs.readFileSync(v1);
+    const page = await readPiHistory(v1, null, null, {});
+    assert.ok(page && JSON.stringify(page).includes("reply to s1"), "the history reader pages a schema-1 store");
+    const conversations = async (storage: SqliteStorage) => (await storage.scanConversations({}, 16, undefined, context)).items.length;
+    assert.equal(await readStorage(v1, conversations), 1, "the usage snapshot reads a schema-1 store");
+    assert.deepEqual(fs.readFileSync(v1), bytes, "and neither changes it");
+    assert.equal(version(v1), 1);
+    // The Harness's open migrates it and the conversation goes on.
+    {
+      const storage = await openStorage(v1);
+      const harness = await Harness.open(storage, { models, registry: createRegistry() }, context);
+      const conversation = (await harness.conversation(ROOT_CONVERSATION_ID, context))!;
+      harness.resume();
+      assert.equal((await turn(conversation, "s2")).status, "done", "a migrated store's conversation goes on");
+      assert.deepEqual((await answers(conversation)).slice(-2), ["reply to s1", "reply to s2"]);
+      await harness.close(context);
+    }
+    assert.equal(version(v1), 2, "opening migrates it to 2");
+    assert.ok(JSON.stringify(await readPiHistory(v1, null, null, {})).includes("reply to s2"), "the history reader pages schema 2");
+    assert.equal(await readStorage(v1, conversations), 1, "so does the usage snapshot");
+    // A newer schema than this Pi knows is refused by both readers.
+    const v3 = path.join(root, "v3.sqlite");
+    fs.copyFileSync(v1, v3);
+    { const database = new DatabaseSync(v3); database.exec("UPDATE durable_schema SET version = 3"); database.close(); }
+    await assert.rejects(readPiHistory(v3, null, null, {}), /schema version 3/);
+    await assert.rejects(readStorage(v3, async () => "read"), /schema version 3/);
+    sends.length = 0;
+    console.log("ok: Pi 1.4.0 migrates a schema-1 store to 2 on open; cube's readers take 1 and 2 without migrating, and refuse 3");
   }
 
   {
-    // checkpointWhen is optional in 1.3.0 (upstream main requires it on
-    // every defineDoc): cube's documents have none and keep working.
-    const Doc = defineDoc<{ n: number }>({ kind: "cube.test.counter", version: 1, scope: "session", initial: () => ({ n: 0 }) });
+    // checkpointWhen is required since 1.4.0. Cube's documents say
+    // `() => false`, 1.3.0's default when it was absent: every change a
+    // delta, never a base.
+    const Doc = defineDoc<{ n: number }>({ kind: "cube.test.counter", version: 1, scope: "session", checkpointWhen: () => false, initial: () => ({ n: 0 }) });
     let { harness } = await open();
     await harness.commit(async tx => { (await tx.doc(Doc)).n += 41; return undefined; }, context);
     await harness.commit(async tx => { (await tx.doc(Doc)).n += 1; return undefined; }, context);
     await harness.close(context);
     ({ harness } = await open());
-    assert.equal((await harness.snapshot(Doc, context))?.n, 42, "a document without checkpointWhen commits and reads back after a reopen");
+    assert.equal((await harness.snapshot(Doc, context))?.n, 42, "a document with checkpointWhen () => false commits and reads back after a reopen");
     await harness.close(context);
-    console.log("ok: documents without checkpointWhen commit and survive a reopen");
+    console.log("ok: documents with checkpointWhen () => false commit and survive a reopen");
   }
 
   let session: string | undefined;
@@ -367,6 +431,7 @@ try {
       const report = lines.find(line => line.startsWith("warn pi pi reported an error"));
       assert.ok(report, "the hook's throw is logged");
       assert.match(report, /thread=thread /);
+      assert.match(report, / report=extension_error /, "with what Pi says it is about");
       assert.ok(!report.includes(SECRET) && !report.includes("abcdefghijklmnop") && !report.includes("stack="), "redacted, without a stack");
       throwing = false;
       assert.equal(agent.failure(), null);
