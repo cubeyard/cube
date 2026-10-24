@@ -133,7 +133,7 @@ try {
   await page.locator(".sheet-margin .note-title", { hasText: "post-merge review" }).waitFor({ timeout: 30_000 });
   assert.equal(await page.locator(".sheet-margin .note-title", { hasText: "machine notes" }).count(), 0, "no note for an artifact the chat did not name");
   await shoot(page, "01-chat-desktop");
-  await page.locator(".composer .work-key").click();
+  await page.locator(".sheet-bar .name-key").click();
   await page.locator(".chat-index .index-row", { hasText: "machine notes" }).waitFor({ timeout: 30_000 });
   await shoot(page, "01-chat-index");
   await page.keyboard.press("Escape");

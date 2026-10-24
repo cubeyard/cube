@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { place } from "../src/lib/margin-layout.ts";
 import { chatToolLine, excerpt, latestReports, mentionsOf, indexThreads, resolveArtifact, resolveThread, spawnLines } from "../src/lib/provenance.ts";
 import { transcriptRows } from "../src/lib/transcript.ts";
-import { failing, moving, stateText, workCounts } from "../src/lib/work-state.ts";
+import { failing, moving, stateText } from "../src/lib/work-state.ts";
 import type { ArtifactListItem, OverviewThread, ThreadEvent, ThreadSummary } from "../src/lib/types.ts";
 import { artifacts, chatEvents, ID, overview, threads } from "./browser/chat-sheet-data.ts";
 
@@ -87,7 +87,6 @@ assert.equal(excerpt("a".repeat(300), 10), `${"a".repeat(9)}…`);
 assert.equal(stateText("completed"), "turn ended");
 assert.ok(moving("waiting for a runner") && moving("starting") && !moving("completed"));
 assert.ok(failing("machine failed") && failing("machine error") && failing("failed") && !failing("stopped"));
-assert.deepEqual(workCounts(seen), { running: 1, failed: 1, open: 3 });
 // only the chat's own write tool counts as writing an artifact
 assert.deepEqual(mentionsOf(transcriptRows({ events: [
   { type: "tool-call", id: "1", callId: "e", name: "artifact_edit", input: {}, final: true },

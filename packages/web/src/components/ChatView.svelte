@@ -6,7 +6,6 @@
   import type { TranscriptRow } from "../lib/transcript.ts";
   import type { ArtifactListItem, ThreadModels, ThreadSummary } from "../lib/types.ts";
   import { ChatWork } from "../lib/work.svelte.ts";
-  import { workCounts } from "../lib/work-state.ts";
   import AuthBadge from "./AuthBadge.svelte";
   import ChatIndex from "./ChatIndex.svelte";
   import ChatMargin from "./ChatMargin.svelte";
@@ -65,9 +64,6 @@
     .map((group) => [group.row, { ...group, artifacts: [] }])));
   const reports = $derived(latestReports(rows));
   const unread = $derived(work.overview ? null : work.error);
-  const counts = $derived(workCounts(work.overview?.threads ?? []));
-  const keyLabel = $derived(["index: threads, artifacts and settings",
-    ...(counts.running ? [`${counts.running} running`] : []), ...(counts.failed ? [`${counts.failed} failed`] : [])].join(" · "));
   let open = $state<string | null>(null);
 
   const titleOf = (short: string) => resolveThread({ short, project: null, title: null }, known).title;
@@ -218,7 +214,7 @@
   {#if modelState}
     <Conversation base={CHAT_BASE} steer sheet model={selectedModel} {changingModel} bind:busy onRows={(shown) => (rows = shown)}
       images={modelState.images ?? { supported: false, reason: "this host does not take images in the chat" }}
-      placeholder="message optchat" {toolLine} {reportLabel} {after} margin={wide ? margin : undefined} composerStart={workKey}
+      placeholder="message optchat" {toolLine} {reportLabel} {after} margin={wide ? margin : undefined}
       empty={{ title: "one chat, every thread", hint: "Say what you want done: the chat starts threads in your projects, follows their reports and remembers everything you said. A thread needs a project; add one under projects." }} />
   {:else}
     <p class="conversation-empty">{modelError ? "connect a model provider to start the chat" : "opening the chat…"}</p>
@@ -249,16 +245,6 @@
 
 {#snippet margin()}
   <ChatMargin {groups} {open} onToggle={(key) => (open = key)} {reports} onJump={jump} {unread} />
-{/snippet}
-
-{#snippet workKey()}
-  <button type="button" class="work-key" aria-haspopup="dialog" aria-label={keyLabel} aria-keyshortcuts="/ Control+K Meta+K"
-    title="{keyLabel} · / or ctrl k" onclick={(event) => void index?.show({ touch: tapped(event) })}>
-    <Icon name="index" size={16} />
-    <!-- the one count that matters most, in words: what failed, else what runs -->
-    {#if counts.failed}<span class="work-count failure">{counts.failed} failed</span>
-    {:else if counts.running}<span class="work-count">{counts.running} running</span>{/if}
-  </button>
 {/snippet}
 
 {#snippet chatSettings()}

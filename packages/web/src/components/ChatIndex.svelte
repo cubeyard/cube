@@ -10,8 +10,8 @@
   // The index: everything the chat is not, one step away and gone again.
   // The chat's threads (failed, then moving, then the rest, each in cubed's
   // own words), the newest artifacts, the places (threads, artifacts,
-  // projects, settings) and the chat's own model and memory. It rises from
-  // the composer's work key, or `/` and ctrl/⌘ k; a filter narrows it, the
+  // projects, settings) and the chat's own model and memory. The wordmark
+  // opens it, as do `/` and ctrl/⌘ k; a filter narrows it, the
   // arrow keys walk it, enter opens, escape closes and focus goes back.
   let { work, settings }: { work: ChatWork; settings: Snippet } = $props();
 

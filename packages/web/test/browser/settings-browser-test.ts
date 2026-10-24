@@ -30,7 +30,7 @@ async function memoryPage(url: string, viewport: { width: number; height: number
   const opened = await page(viewport);
   await opened.goto(`${url}/#/chat`);
   await opened.locator(".composer textarea").waitFor();
-  await opened.locator(".composer .work-key").click();
+  await opened.locator(".sheet-bar .name-key").click();
   await opened.locator(".chat-index .index-places a", { hasText: "settings" }).click();
   await opened.waitForURL(/#\/settings\/providers$/);
   await opened.locator("h1", { hasText: "model providers" }).waitFor();

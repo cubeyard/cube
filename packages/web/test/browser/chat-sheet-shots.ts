@@ -45,8 +45,8 @@ for (const dark of [false, true]) for (const size of sizes) {
     await page.screenshot({ path: path.join(out, `chat-note-${tag}.png`) });
     await note.first().click();
   }
-  if (await page.locator(".work-key").count()) {
-    if (size.touch) await page.locator(".work-key").tap(); else await page.locator(".work-key").click();
+  if (await page.locator(".sheet-bar .name-key").count()) {
+    if (size.touch) await page.locator(".sheet-bar .name-key").tap(); else await page.locator(".sheet-bar .name-key").click();
     await pause(page);
     await page.screenshot({ path: path.join(out, `chat-index-${tag}.png`) });
   }

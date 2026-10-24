@@ -154,7 +154,9 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       assert.ok(bar.height <= 50, `one quiet row: ${bar.height}`);
       const transcript = await box(page, ".transcript");
       assert.ok(transcript.height >= phone.height * 0.65, `the conversation has the screen: ${transcript.height}`);
-      for (const key of [".sheet-bar .name-key", ".composer .work-key", ".composer .attach-key", ".composer .send-key"]) await assertHitArea(page, key);
+      for (const key of [".sheet-bar .name-key", ".composer .attach-key", ".composer .send-key"]) await assertHitArea(page, key);
+      assert.equal(await page.locator(".composer-row > *").count(), 1, "nothing beside the field: no key or count before it");
+      assert.ok(Math.abs((await box(page, ".composer-field")).left - (await box(page, ".transcript-column")).left) <= 0.5, "the field keeps the column's line");
       await assertNoSideways(page);
       await shoot(page, engine, `chat-${tag}`);
     });
@@ -186,8 +188,8 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
   }
 
   const phone = { width: 375, height: 667 };
-  await scenario(browser, engine, "the work key raises the index over the whole screen: threads, places, model and memory at a fingertip", phone, "chat", async (page, host) => {
-    await page.locator(".composer .work-key").tap();
+  await scenario(browser, engine, "the wordmark raises the index over the whole screen: threads, places, model and memory at a fingertip", phone, "chat", async (page, host) => {
+    await page.locator(".sheet-bar .name-key").tap();
     const index = page.locator(".chat-index");
     await index.locator(".index-row").first().waitFor();
     await settle(page);
@@ -207,7 +209,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     await page.locator("#chat-memory").waitFor();
     assert.equal(await index.evaluate(element => (element as HTMLDialogElement).open), false, "the index makes way for the memory");
     // its close event gives focus back to the key, a task later: then type
-    await page.waitForFunction(() => document.activeElement?.classList.contains("work-key"));
+    await page.waitForFunction(() => document.activeElement?.classList.contains("name-key"));
     await settle(page);
     await openKeyboard(page, phone, 347);
     const typing = await page.waitForFunction(() => document.documentElement.dataset.keyboard === "open", undefined, { timeout: 10_000 }).then(() => null, async () =>
@@ -298,7 +300,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.ok((await box(page, ".sheet-bar")).height <= 50, "one quiet row");
     assert.equal((await box(page, ".composer .send-key")).height, 36, "a phone on its side has a phone's keys");
     await assertHitArea(page, ".composer .send-key");
-    await assertHitArea(page, ".composer .work-key");
+    await assertHitArea(page, ".sheet-bar .name-key");
     await assertNoSideways(page);
     await shoot(page, engine, "chat-landscape-667x375");
     await openKeyboard(page, { width: 667, height: 375 }, 175);
@@ -322,7 +324,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       // enough threads that the results outgrow the room the keyboard leaves
       host.overview = { threads: Array.from({ length: 14 }, (_, n) => ({ id: `t${n}`, title: n === 3 ? "fix the flaky artifact test" : `thread number ${n} about the gateway`, state: n % 3 ? "completed" : "working",
         project: { id: "p1", name: "cube" }, archived: false, spawned: null })), archived: { shown: 0, total: 0 }, unknown: 0 };
-      await page.locator(".composer .work-key").tap();
+      await page.locator(".sheet-bar .name-key").tap();
       const index = page.locator(".chat-index");
       await index.locator(".index-row").nth(13).waitFor({ state: "attached" });
       const filter = index.locator("input[type=search]");
@@ -356,7 +358,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       // closing gives focus back to the key that opened it
       await page.locator(".chat-index .index-close").tap();
       await index.waitFor({ state: "hidden" });
-      await page.waitForFunction(() => document.activeElement?.classList.contains("work-key"));
+      await page.waitForFunction(() => document.activeElement?.classList.contains("name-key"));
       if (ios) await page.evaluate(() => (window.visualViewport as unknown as { set: (h: null) => void }).set(null));
       else await page.setViewportSize({ width: phone.width, height: phone.height });
       await settle(page);
@@ -393,10 +395,10 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     await page.evaluate(() => { location.hash = "#/threads"; });
     await page.locator("main h1").waitFor();
     await page.evaluate(() => { location.hash = "#/chat"; });
-    await page.locator(".composer .work-key").waitFor();
+    await page.locator(".sheet-bar .name-key").waitFor();
     for (const leave of ["back", "route"] as const) {
       const before = new Set(await listeners());
-      await page.locator(".composer .work-key").tap();
+      await page.locator(".sheet-bar .name-key").tap();
       await page.locator(".chat-index .index-row").first().waitFor();
       const opened = (await listeners()).filter(item => !before.has(item));
       assert.equal(opened.length, 3, `the open index follows the viewport: ${opened.join(" ")}`);
@@ -407,12 +409,12 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       assert.equal(await page.locator(".chat-index").count(), 0, "the index went with the chat");
       const left = (await listeners()).filter(item => opened.includes(item));
       assert.deepEqual(left, [], `after ${leave === "back" ? "going back" : "a route change"} none of the index's listeners is left`);
-      if (leave === "back") { await page.goForward(); await page.locator(".composer .work-key").waitFor(); }
+      if (leave === "back") { await page.goForward(); await page.locator(".sheet-bar .name-key").waitFor(); }
     }
   });
 
   await scenario(browser, engine, "the index's model choice is no keyboard", phone, "chat", async page => {
-    await page.locator(".composer .work-key").tap();
+    await page.locator(".sheet-bar .name-key").tap();
     await page.locator(".chat-index select[aria-label=model]").focus();
     await page.setViewportSize({ width: 375, height: 347 });
     await settle(page);

@@ -1508,8 +1508,8 @@ select.compose-input {
   /* 16px keeps iOS from zooming into the field */
   .composer textarea { font-size: 16px; }
   .composer .attach-key { border-radius: 50%; }
-  .composer :is(.attach-key, .send-key, .work-key), .nav-menu-key, .strip-details-key, .mobile-thread-switch, .name-key { position: relative; }
-  .composer :is(.attach-key, .send-key, .work-key)::after, .nav-menu-key::after, .strip-details-key::after, .mobile-thread-switch::after, .name-key::after {
+  .composer :is(.attach-key, .send-key), .nav-menu-key, .strip-details-key, .mobile-thread-switch, .name-key { position: relative; }
+  .composer :is(.attach-key, .send-key)::after, .nav-menu-key::after, .strip-details-key::after, .mobile-thread-switch::after, .name-key::after {
     content: ""; position: absolute;
     inset: min(0px, calc((100% - 2.75rem) / 2)) min(0px, calc((100% - 2.75rem) / 2));
   }
@@ -1595,23 +1595,12 @@ a.report-name:hover { color: var(--signal); text-decoration: underline; text-und
 .tool-said { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: 13px; }
 .tool-strip code.tool-name { font-weight: 400; color: var(--ink-3); font-size: 11px; }
 
-/* the composer: one round field on the sheet, the work key before it */
+/* the composer: one round field on the sheet */
 .chat-sheet .composer { border-top: 0; box-shadow: none; padding-bottom: max(0.85rem, env(safe-area-inset-bottom)); }
 .chat-sheet .composer-field { border-radius: var(--r-well); box-shadow: 0 1px 3px rgba(38, 32, 18, 0.08); }
 .chat-sheet .composer-field:has(textarea:focus) { box-shadow: 0 0 0 1px var(--signal); }
 .chat-sheet .composer .attach-key { border-color: transparent; background: transparent; box-shadow: none; }
 .chat-sheet .composer .attach-key:hover:not(:disabled) { background: var(--s3); }
-.work-key {
-  flex: none; position: relative; align-self: flex-end;
-  height: calc(var(--composer-key) + 2 * var(--composer-pad) + 2px); min-width: calc(var(--composer-key) + 2 * var(--composer-pad) + 2px);
-  display: inline-flex; align-items: center; justify-content: center; gap: 0.55rem; padding: 0 0.55rem;
-  border: 1px solid transparent; border-radius: var(--r-well); background: transparent;
-  color: var(--ink-2); font: 550 12.5px/1 var(--font-ui); font-variant-numeric: tabular-nums;
-  transition: background 120ms ease, border-color 120ms ease;
-}
-.work-key:hover { background: var(--s3); border-color: var(--line); color: var(--ink); }
-.work-count { white-space: nowrap; }
-.work-count.failure { color: var(--bad); }
 
 /* the margin: as wide as a note needs, a short hairline toward its message */
 .transcript-page { position: relative; display: flex; justify-content: center; min-height: 100%; }
@@ -1627,9 +1616,6 @@ a.report-name:hover { color: var(--signal); text-decoration: underline; text-und
   width: min(18rem, calc(50% - var(--col) / 2 - var(--margin-gap) + var(--pane-gutter) - 0.75rem));
   overflow-x: visible; overflow-y: clip; overflow-clip-margin: 4px;
 }
-/* with a margin the composer keeps the column's line, the work key hanging before it */
-.conversation.has-margin .composer-row { position: relative; }
-.conversation.has-margin .work-key { position: absolute; right: calc(100% + 0.45rem); bottom: 0; }
 .margin-notes { position: absolute; inset: 0; }
 .margin-note { position: absolute; left: 0; right: 0; visibility: hidden; transition: top 120ms ease; }
 .margin-note.placed { visibility: visible; }
