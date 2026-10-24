@@ -99,7 +99,7 @@ try {
   assert.deepEqual((await first.json()).threads, threads);
   const same = await fetch(`${base}/api/threads?includeArchived=1`, { headers: { "if-none-match": etag } });
   assert.deepEqual([same.status, await same.text()], [304, ""]);
-  app.registry.saveThread({ ...app.registry.getThread(threads[0].id)!, title: "renamed" });
+  app.registry.renameThread(threads[0].id, "renamed");
   const changed = await fetch(`${base}/api/threads?includeArchived=1`, { headers: { "if-none-match": etag } });
   assert.equal(changed.status, 200);
   assert.equal((await changed.json()).threads[0].title, "renamed");

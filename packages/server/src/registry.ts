@@ -8,6 +8,7 @@ import type { NodeBinding, TrustedRunnerHealth } from "./runner-types.ts";
 import type { ThreadAgent } from "./thread-events.ts";
 import type { ThreadSkills } from "./skills.ts";
 import { newPlaceholder } from "./egress-policy.ts";
+import { HOLDS_SLOT_SQL, nextSleep, type MachineSleep, type SleepEvent } from "./machine-sleep.ts";
 
 /** The registry schema; older registries are refused (fresh CUBED_STATE). */
 export const REGISTRY_SCHEMA = 102;
@@ -200,20 +201,15 @@ export interface ThreadVm {
    * most `MAX_STARTUP_STEPS`): what the thread shows while it starts and
    * afterwards, failed tries included. */
   steps?: StartupStep[];
-  /** The machine is suspended on its runner (S-7a, P7-5): saved to a file,
-   * no QEMU, holding no slot (B7-2). `waking`: cubed resumes it; `waiting`
-   * says why it has not yet (a full runner). Cleared once it runs again. */
-  suspension?: { state: "suspended" | "waking"; at: number; memoryBytes?: number; waiting?: string };
+  /** The machine's sleep on its runner (machine-sleep.ts); written only by
+   * `Registry.applySleep`. Cleared once it runs again. */
+  suspension?: MachineSleep;
   /** The newest thing the user should know about the machine (B7-5: it
    * started again from its disk because its snapshot could not be used). */
   notice?: { text: string; at: number };
 }
-/** Open threads whose machine holds one of its runner's slots: not a
- * suspended one (B7-2: it frees its slot; waking it needs one again), nor
- * one waiting for a free slot. One being woken holds it already: its QEMU
- * may be starting, and no other placement may count on that slot. */
-const HOLDS_SLOT = `(json_extract(data, '$.vm.suspension') IS NULL
-  OR (json_extract(data, '$.vm.suspension.state') = 'waking' AND json_extract(data, '$.vm.suspension.waiting') IS NULL))`;
+/** Open threads whose machine holds one of its runner's slots (`holdsSlot`). */
+const HOLDS_SLOT = HOLDS_SLOT_SQL;
 /** At most this many startup steps are kept per thread. */
 export const MAX_STARTUP_STEPS = 40;
 /** At most this much of a failed hook's log is kept on its step. */
@@ -635,8 +631,18 @@ export class Registry {
   }
   getThread(id: string): Thread | null { return this.parse(this.db.prepare("SELECT data FROM thread WHERE id=?").get(id)); }
   listThreads(): Thread[] { return this.db.prepare("SELECT data FROM thread ORDER BY rowid DESC").all().map(row => this.parse<Thread>(row)!); }
-  saveThread(thread: Thread): void {
-    this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify(thread), thread.id);
+  /** Renames the thread, in one IMMEDIATE transaction that changes only its
+   * title; with `from`, only while the title is still `from` (spawn's
+   * default, unless the user renamed it since). True when it was written. */
+  renameThread(threadId: string, title: string | null, from?: string | null): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const thread = this.getThread(threadId);
+      const renamed = !!thread && (from === undefined || thread.title === from);
+      if (renamed) this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, title }), threadId);
+      this.db.exec("COMMIT");
+      return renamed;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   /** The thread a VM belongs to. */
   threadByVm(vmId: string): Thread | null {
@@ -646,9 +652,9 @@ export class Registry {
   threadByBuildVm(vmId: string): Thread | null {
     return this.parse(this.db.prepare("SELECT data FROM thread WHERE json_extract(data, '$.vm.build.vmId')=?").get(vmId));
   }
-  /** Changes the thread's machine record (provisioning tries, retention). */
-  updateThreadVm(threadId: string, patch: Partial<Pick<ThreadVm, "provisionAttempt" | "retain" | "retainReason" | "discarded" | "preparation" | "build" | "hooks" | "startup"
-    | "suspension" | "notice">>): Thread {
+  /** Changes the thread's machine record (provisioning tries, retention);
+   * its sleep changes only by `applySleep`. */
+  updateThreadVm(threadId: string, patch: Partial<Pick<ThreadVm, "provisionAttempt" | "retain" | "retainReason" | "discarded" | "preparation" | "build" | "hooks" | "startup">>): Thread {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const thread = this.getThread(threadId);
@@ -658,33 +664,40 @@ export class Registry {
       for (const key of Object.keys(patch) as Array<keyof typeof patch>) if (patch[key] === undefined) delete vm[key];
       const updated = { ...thread, vm };
       this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify(updated), threadId);
-      // A suspended machine frees its slot; a woken one takes it again.
-      if ("suspension" in patch) this.syncRunner(thread.runnerId);
       this.db.exec("COMMIT");
       return updated;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
-  /** Reserves the thread's slot for a wake of its suspended machine, in one
-   * IMMEDIATE transaction as `createThread`'s: with a slot free on its
-   * runner (counting every other open thread that holds one, a new thread
-   * whose machine does not exist yet included) it becomes `waking` and holds
-   * the slot; otherwise `waking` + `waiting` (holding none) and the runner is
-   * not asked. True when the slot is reserved. */
-  beginWake(threadId: string, waiting: string): boolean {
+  /** Applies what happened to the thread's machine to its sleep
+   * (machine-sleep.ts), in one IMMEDIATE transaction: the only writer of
+   * `vm.suspension`. A suspended machine frees its slot and a woken one
+   * takes it again, so the runner's summary follows in the same transaction.
+   * `wakeAsked` reserves the slot as `createThread` does: with a slot free
+   * on its runner (counting every other open thread that holds one, a new
+   * thread whose machine does not exist yet included) it becomes `waking`
+   * and holds it; otherwise `waking` + `waiting`, holding none, and the
+   * runner is not asked. The sleep it wrote. */
+  applySleep(threadId: string, event: SleepEvent, now = Date.now()): MachineSleep | undefined {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const thread = this.getThread(threadId);
-      if (!thread?.vm || thread.archived) throw new Error("thread not found");
-      const runner = this.getRunner(thread.runnerId);
-      if (!runner) throw new Error("thread runner allocation is missing");
-      const row = this.db.prepare(`SELECT count(*) AS active FROM thread WHERE runner_id=? AND id<>? AND ${OPEN_THREAD} AND ${HOLDS_SLOT}`).get(thread.runnerId, threadId);
-      const admitted = Number(row!.active) < runnerSlots(runner);
-      const { waiting: _, ...sleep } = thread.vm.suspension ?? { state: "suspended" as const, at: Date.now() };
-      const suspension: NonNullable<ThreadVm["suspension"]> = { ...sleep, state: "waking", ...admitted ? {} : { waiting } };
-      this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, vm: { ...thread.vm, suspension } }), threadId);
+      if (!thread?.vm) throw new Error("thread has no machine");
+      let slotFree = false;
+      if (event.type === "wakeAsked") {
+        if (thread.archived) throw new Error("thread not found");
+        const runner = this.getRunner(thread.runnerId);
+        if (!runner) throw new Error("thread runner allocation is missing");
+        const row = this.db.prepare(`SELECT count(*) AS active FROM thread WHERE runner_id=? AND id<>? AND ${OPEN_THREAD} AND ${HOLDS_SLOT}`).get(thread.runnerId, threadId);
+        slotFree = Number(row!.active) < runnerSlots(runner);
+      }
+      const sleep = nextSleep(thread.vm.suspension, event, { now, slotFree });
+      const { suspension: _, ...vm } = thread.vm;
+      const notice = event.type === "resumed" ? event.notice : vm.notice;
+      if (notice) vm.notice = notice; else delete vm.notice;
+      this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, vm: sleep ? { ...vm, suspension: sleep } : vm }), threadId);
       this.syncRunner(thread.runnerId);
       this.db.exec("COMMIT");
-      return admitted;
+      return sleep;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   /** Begins a startup step of the thread's machine (`vm.steps`); a step of

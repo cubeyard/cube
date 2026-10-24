@@ -26,6 +26,7 @@ import type { Duplex } from "node:stream";
 import { guestServices, SERVICE_NAME, type GuestPortal, type GuestService } from "./vm-workspace.ts";
 import type { ThreadMachines } from "./vm.ts";
 import type { Registry, Thread } from "./registry.ts";
+import { slotWait } from "./machine-sleep.ts";
 import { createLogger, type Logger } from "./log.ts";
 
 export const DEFAULT_PORTAL_PORT = 7780;
@@ -207,7 +208,7 @@ export class Portal {
       const woken = this.options.machines.wake(thread).then(() => true, () => false);
       const waited = await Promise.race([woken, new Promise<false>(resolve => setTimeout(() => resolve(false), WAKE_WAIT_MS).unref())]);
       if (!waited) {
-        const waiting = this.options.registry.getThread(thread.id)?.vm?.suspension?.waiting;
+        const waiting = slotWait(this.options.registry.getThread(thread.id)?.vm?.suspension);
         throw new Refusal(503, `this thread's machine was suspended and is waking${waiting ? `: ${waiting}` : ""}; try again shortly`);
       }
     }

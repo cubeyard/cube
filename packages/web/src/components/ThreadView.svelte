@@ -11,7 +11,7 @@
   import { CLAUDE_DURABILITY, isClaude, providerLabel } from "../lib/agent.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
   import type { Command } from "../lib/command.ts";
-  import { composerWaiting, machineLabel, machineNotice, sleepState, stateLabel } from "../lib/thread-state.ts";
+  import { composerWaiting, machineLabel, machineNotice, sleepState, slotReason, stateLabel } from "../lib/thread-state.ts";
   import { startupShown } from "../lib/startup.ts";
   import type {
     SubjectUsage,
@@ -250,8 +250,8 @@
         <span class="strip-machine" class:error={machineLabel(summary)?.failed} title={machineLabel(summary)?.title}>{machineLabel(summary)?.text}</span>
       {/if}
       {#if stateLabel(summary)}
-        <span class="strip-state" class:error={summary.state === "error"} class:attention={sleepState(summary)} title={summary.vm?.suspension?.waiting ?? undefined}>{stateLabel(summary)}</span>
-        {#if summary.vm?.suspension?.waiting}<span class="strip-state strip-reason">{summary.vm.suspension.waiting}</span>{/if}
+        <span class="strip-state" class:error={summary.state === "error"} class:attention={sleepState(summary)} title={slotReason(summary) ?? undefined}>{stateLabel(summary)}</span>
+        {#if slotReason(summary)}<span class="strip-state strip-reason">{slotReason(summary)}</span>{/if}
       {/if}
       {#if machineNotice(summary)}
         <span class="strip-state strip-notice attention">{machineNotice(summary)}</span>

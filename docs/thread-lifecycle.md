@@ -7,7 +7,7 @@ changes one names its owner here; a test that checks one is listed under
 | Lifecycle | Truth | cubed keeps | Owner of the transitions |
 |---|---|---|---|
 | Thread | the registry (`workspaceState`, `archived`) | persisted | `Conversations` (`ensureWorkspace`, `archive`, `release`) |
-| Machine | the runner's phase | `vm.suspension`, `vm.placement` (a mirror and a slot reservation) | `RunnerMachines` |
+| Machine | the runner's phase | `vm.suspension`, `vm.placement` (a mirror and a slot reservation) | `RunnerMachines`; the sleep's transitions are `machine-sleep.ts`, written only by `Registry.applySleep` |
 | Agent | this process (`agents`, `claudes`, `downs`) | nothing; runs are in the agent's own store | `Conversations` |
 | Report | OptChat's Pi store, by request id `report:<thread>:<run>` | persisted | `OptChat` |
 
@@ -35,8 +35,27 @@ running, suspended ─archive─▶ released (deleted, or retained with a reason
 
 cubed records only `suspension` (`suspended`, `waking`, `waking` +
 `waiting`); running, starting and suspending live in this process.
-`waking` without `waiting` holds a slot (`HOLDS_SLOT`). It is a
-reservation, taken like a new thread's (`Registry.beginWake`, in one
+`RunnerMachines` reports what happened as one `SleepEvent`, and
+`nextSleep` (`machine-sleep.ts`) is the whole table of what follows:
+
+| event | from any sleep, or none | holds a slot |
+|---|---|---|
+| `suspended` (the runner saved it) | `suspended`, at that time | no |
+| `wakeAsked` (a start resumes it) | `waking`, or `waking` + `waiting` with no slot free | without `waiting` |
+| `slotTaken` (the runner was full after all) | `waking` + `waiting` | no |
+| `wakeDropped` (nothing goes on with the wake) | `suspended`, as saved | no |
+| `running`, `resumed` (with its notice) | none: it runs | yes |
+
+`Registry.applySleep` is the only writer: it applies the event in one
+IMMEDIATE transaction with the runner's summary, so a sleep cannot be
+written in a combination the table lacks (`suspended` with `waiting`), or
+without its slot counted. Its notice changes only with `resumed`. No other
+registry write sets either: `updateThreadVm` takes neither, and none writes
+a whole row from a caller's copy (a title changes by `renameThread`, which
+reads the row in its own transaction). `holdsSlot` is the slot rule, and
+`HOLDS_SLOT_SQL` the same rule for the registry's counts
+(machine-sleep-test, lifecycle-model-test I11). `waking` without `waiting` holds a slot. It is a
+reservation, taken like a new thread's (`wakeAsked`, in one
 IMMEDIATE transaction that counts every other open thread holding a slot on
 the runner): with none free the thread is `waking` + `waiting` and the runner
 is not asked, so a wake never takes the slot of a thread whose machine is
@@ -125,9 +144,15 @@ no wake.
 - `packages/server/test/lifecycle-model-test.ts`: seeded random runs of
   creates (some whose machine can never be made), messages and their
   replays, reads, idle and recovery rounds, restarts (with wakes cut short)
-  and archives, checking I1–I6, I8 and I9 after every step (I4
+  and archives, checking I1–I6, I8, I9 and I11 after every step (I4
   as: the runner holds no more than the registry counts, the registry no
-  more than the slots).
+  more than the slots; I11: the registry's SQL count is `holdsSlot`'s).
+- `packages/server/test/machine-sleep-test.ts`: every `SleepEvent` from
+  every sleep against the table above, the SQL slot rule against
+  `holdsSlot` and the runner's summary through a real Registry, the
+  persisted shape both ways, that a rename keeps a sleep written after its
+  caller read the row, and (typecheck) that neither `updateThreadVm` nor a
+  whole-row write can set a sleep or its notice.
 - Both run over `lifecycle-fixture.ts`: the real Registry and the thread
   runtime createCubed builds (`thread-runtime.ts`: RunnerMachines,
   Conversations and the wake between them), a stand-in `berth vm` with

@@ -17,6 +17,8 @@
  *   I8  a machine whose create keeps failing is asked for at most 8 times;
  *   I9  an archive answers within seconds, also for a sleeping machine on a
  *       full runner;
+ *   I11 the slots the registry counts (its SQL) are the threads `holdsSlot`
+ *       says hold one (machine-sleep.ts);
  *   G   no guest call reaches a machine that does not run;
  *
  * and at the end, every message request id is in its thread's store once.
@@ -118,7 +120,7 @@ for (const seed of seeds) {
     async restart() {
       // Sometimes cubed stops in the middle of a wake.
       const cut = rng.next() < 0.5 ? rng.pick(open().filter(t => t.vm?.suspension?.state === "suspended")) : undefined;
-      if (cut) registry.updateThreadVm(cut.id, { suspension: { ...cut.vm!.suspension!, state: "waking" } });
+      if (cut) registry.applySleep(cut.id, { type: "wakeAsked", waiting: "a wake a restart cuts short" });
       await cubed.close();
       const asleep = open().filter(t => t.vm?.suspension);
       const demand = new Set<string>();
@@ -159,6 +161,8 @@ for (const seed of seeds) {
       const name = choose();
       await actions[name]!();
       assert.deepEqual(berth.violations, [], `G after ${name}`);
+      const counted = registry.runnerSlots();
+      assert.equal(counted.total - counted.free, held(), `I11 after ${name}: the registry's count is holdsSlot's`);
       assert.ok(berth.holding() <= held() && held() <= berth.slots, `I4 after ${name}: the runner holds ${berth.holding()}, the registry counts ${held()}, of ${berth.slots} slots`);
       for (const vm of broken) assert.ok(berth.asked("machineCreate", vm) <= START_TRIES, `I8: ${vm}'s create was asked for ${berth.asked("machineCreate", vm)} times`);
       for (const [vm, at] of archivedAt) {
@@ -173,7 +177,7 @@ for (const seed of seeds) {
       db.close();
       assert.equal(n, 1, `${tell.requestId} is in its thread's store once`);
     }
-    console.log(`ok: lifecycle model seed ${seed}: ${steps} steps (${trace.filter(line => line.startsWith("restart")).length} restarts, ${tells.length} messages, ${archivedAt.size} archives, ${berth.starts()} starts on the runner); I1–I6, I8, I9 and G held`);
+    console.log(`ok: lifecycle model seed ${seed}: ${steps} steps (${trace.filter(line => line.startsWith("restart")).length} restarts, ${tells.length} messages, ${archivedAt.size} archives, ${berth.starts()} starts on the runner); I1–I6, I8, I9, I11 and G held`);
   } catch (error) {
     console.error(`seed ${seed} trace:\n  ${trace.join("\n  ")}`);
     throw error;

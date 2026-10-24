@@ -107,14 +107,14 @@ try {
       await state.filter({ hasText: text }).waitFor({ timeout: 15_000 });
       assert.ok(await state.filter({ hasText: text }).isVisible(), `"${text}" is in print (${size}, details closed)`);
     };
-    host.sleep(thread, { suspension: { state: "suspended", at: Date.now() } });
+    host.sleep(thread, { type: "suspended", at: Date.now() });
     await seen("suspended");
     assert.equal(await page.locator(".lamp, .blink").count(), 0, "no lamp: the state is in words");
     assert.equal(await composer.isEnabled(), true);
     assert.equal(await composer.getAttribute("placeholder"), "message this thread", "a message wakes it");
     await shot(page, `${size}-5-suspended`);
     const waiting = "waiting for a free slot on runner node-browser: the machine is suspended and resumes once one frees";
-    host.sleep(thread, { suspension: { state: "waking", at: Date.now(), waiting } });
+    host.sleep(thread, { type: "wakeAsked", waiting }, { type: "slotTaken", waiting });
     await seen("waiting for a free slot");
     assert.equal(await state.filter({ hasText: "waiting for a free slot" }).getAttribute("title"), waiting);
     await page.locator(`.composer textarea[placeholder="waiting for a free slot…"]`).waitFor({ timeout: 15_000 });
@@ -127,11 +127,11 @@ try {
       await page.locator(".strip-details-key").click();
     }
     const notice = "restarted after an update; running commands were interrupted";
-    host.sleep(thread, { notice: { text: notice, at: Date.now() } });
+    host.sleep(thread, { type: "resumed", notice: { text: notice, at: Date.now() } });
     await strip.locator(".strip-notice", { hasText: notice }).waitFor({ timeout: 15_000 });
     assert.ok(await strip.locator(".strip-notice").isVisible(), `the notice is in print (${size}, details closed)`);
     await shot(page, `${size}-8-notice`);
-    host.sleep(thread, {});
+    host.sleep(thread, { type: "resumed", notice: null });
     await strip.locator(".strip-notice").waitFor({ state: "detached", timeout: 15_000 });
     await page.close();
     await host.archive(thread);

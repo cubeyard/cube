@@ -114,7 +114,7 @@ async function open(machines: CountedMachines) {
       const text = claude ? `run while [ ! -e ${claudeGate} ]; do sleep 0.05; done\nsay claude held done` : task.task;
       const thread = app.registry.threadByRequest("p", requestId)
         ?? app.registry.createThread("p", requestId, claude ? claudeModel : piModel, text, claude ? "claude-code" : "pi", undefined, { runnerId: runnerOf[task.task]! });
-      if (thread.title !== task.task) app.registry.saveThread({ ...thread, title: task.task });
+      app.registry.renameThread(thread.id, task.task);
       void app.conversations.activate(thread.id);
       return { id: thread.id, title: task.task };
     },
@@ -153,13 +153,13 @@ try {
   // The live feed names the run as the store does: the report's request id
   // (report:<thread>:<run>) is one id for both.
   for (const id of [H, C]) assert.equal((await app.conversations.history(id)).status.run, await settledRun(id), "live and stored run ids agree");
-  for (const id of [Q, H, C]) app.registry.updateThreadVm(id, { suspension: { state: "suspended", at: Date.now() } });
+  for (const id of [Q, H, C]) app.registry.applySleep(id, { type: "suspended", at: Date.now() });
 } finally { await app.close(); }
 assert.deepEqual([Q, H, C].map(id => reportsOf(id).length), [1, 0, 0], "before the restart only Q reported");
 
 const after = new CountedMachines(machinesRoot);
 ({ app, chat } = await open(after));
-after.onResume = id => { app.registry.updateThreadVm(id, { suspension: undefined }); };
+after.onResume = id => { app.registry.applySleep(id, { type: "running" }); };
 const threads = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [piModel], runners: () => ({ runners: [] }) as never,
   latestCommits: async () => ({}) as never });
 try {
