@@ -124,7 +124,13 @@ offline suites split by `CUBE_TEST_SHARD=K/4`), `browser` and
 `node-transport (linux)` (`scripts/test-node-transport.sh`: the Rust crates
 and the runner tests; the jobs keep the name of the protocol-3 package they
 once tested, which the release gate looks for). A new push to a pull request
-cancels its older run.
+cancels its older run. `browser` runs in Playwright's image for the
+Playwright `packages/web` pins, by digest: Chromium, WebKit and their system
+libraries come with it, so the job installs no browser (installing them with
+apt-get stalled on Ubuntu's mirror past the timeout). A Playwright upgrade
+moves the image in `ci.yml` with it (tag and digest: `docker buildx imagetools
+inspect mcr.microsoft.com/playwright:v<version>-noble`); `scripts/ci-test.ts`
+fails until it does.
 `platforms.yml` runs `node-transport (macos)` and the `homebrew` formula check
 on every push to `main`, on pull requests that touch Rust, berth's scripts,
 the Homebrew generator or CI itself, and by hand (`gh workflow run platforms.yml

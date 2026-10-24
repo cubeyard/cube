@@ -93,10 +93,28 @@ export type NoteThread = {
 /** What the margin shows beside one row. */
 export type NoteGroup = { row: string; threads: NoteThread[]; artifacts: ArtifactListItem[]; unstarted: Unstarted[] };
 
-export function resolveThread(ref: Pick<ThreadRef, "short" | "project" | "title">, overview: ThreadOverview | null, threads: readonly ThreadSummary[], listed: boolean): NoteThread {
-  const seen = overview?.threads.find(thread => thread.id.startsWith(ref.short));
+/** The threads notes resolve against, by the first 8 characters of their
+ * ids (a spawn line's and a report's short id), first match kept: one
+ * lookup per note instead of a walk through every thread. */
+export type ThreadIndex = {
+  overview: ThreadOverview | null; threads: readonly ThreadSummary[]; listed: boolean;
+  seen: Map<string, ThreadOverview["threads"][number]>; records: Map<string, ThreadSummary>;
+};
+export function indexThreads(overview: ThreadOverview | null, threads: readonly ThreadSummary[], listed: boolean): ThreadIndex {
+  const byShort = <T extends { id: string }>(items: readonly T[]) => {
+    const map = new Map<string, T>();
+    for (const item of items) if (!map.has(item.id.slice(0, 8))) map.set(item.id.slice(0, 8), item);
+    return map;
+  };
+  return { overview, threads, listed, seen: byShort(overview?.threads ?? []), records: byShort(threads) };
+}
+
+export function resolveThread(ref: Pick<ThreadRef, "short" | "project" | "title">, index: ThreadIndex): NoteThread {
+  const { overview, threads, listed } = index;
+  const short8 = ref.short.length === 8;
+  const seen = short8 ? index.seen.get(ref.short) : overview?.threads.find(thread => thread.id.startsWith(ref.short));
   if (seen) return { short: ref.short, id: seen.id, title: seen.title, project: seen.project.name, state: seen.state, archived: seen.archived, known: "overview", spawned: seen.spawned };
-  const record = threads.find(thread => thread.id.startsWith(ref.short));
+  const record = short8 ? index.records.get(ref.short) : threads.find(thread => thread.id.startsWith(ref.short));
   if (record) return { short: ref.short, id: record.id, title: record.title, project: record.project.name, state: record.archived ? "archived" : null, archived: record.archived, known: "list", spawned: null };
   const gone = listed && !!overview && overview.unknown > 0;
   return { short: ref.short, id: null, title: ref.title, project: ref.project, state: null, archived: false, known: gone ? "none" : "pending", spawned: null };

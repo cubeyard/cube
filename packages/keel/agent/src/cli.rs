@@ -169,6 +169,11 @@ fn serve(services: &Services, stream: UnixStream, account: Option<u32>) {
     };
     let uid = peer_uid(&stream);
     if !uid.is_some_and(|uid| uid == 0 || Some(uid) == account) {
+        // Its request is read first (for a second at most): a refusal sent
+        // and closed before the client has written it breaks its pipe, and
+        // the client sees that instead of the refusal.
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+        let _ = BufReader::new((&stream).take(MAX_REQUEST_BYTES)).read_line(&mut String::new());
         out.err("cube: only the agent account and root may use cube service\n");
         out.exit(1);
         return;

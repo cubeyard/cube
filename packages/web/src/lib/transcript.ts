@@ -119,3 +119,22 @@ function describeInput(input: unknown): { summary: string; input: string | null 
   const summary = firstLine.length > SUMMARY_CHARS ? `${firstLine.slice(0, SUMMARY_CHARS - 1)}…` : firstLine;
   return { summary, input: full && summary !== text ? text : null };
 }
+
+/** `next`, with each row that equals the row of the same id in `previous`
+ * replaced by that row: a frame or a page then changes only the rows that
+ * changed, and the view leaves every other row (its markdown and markup)
+ * as it is. Rows are plain JSON-like values. */
+export function keepRows(previous: ReadonlyMap<string, TranscriptRow>, next: TranscriptRow[]): TranscriptRow[] {
+  return next.map(row => {
+    const kept = previous.get(row.id);
+    return kept && same(kept, row) ? kept : row;
+  });
+}
+
+function same(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null || Array.isArray(a) !== Array.isArray(b)) return false;
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every(key => Object.hasOwn(b, key) && same((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]));
+}

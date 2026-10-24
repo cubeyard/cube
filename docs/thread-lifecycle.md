@@ -55,7 +55,7 @@ phase, `suspended` or running. It is not continued.
 |---|---|
 | a new thread (UI, OptChat `spawn`) | yes, once (`activate`) |
 | a message (UI prompt, OptChat `tell`, an artifact comment) | a new one wakes a sleeping machine, and gives a thread whose start failed one more try; a replayed one (a request id the agent already has) wakes nothing |
-| a guest call of the agent's run, a portal connection | yes (`awake` → `wake`) |
+| a guest call of the agent's run, a portal connection | yes (`awake` → `wake`); on a full runner it waits for a slot up to 30 min, once: after that wait gave up, later calls try once and fail at once until the machine runs or a new message asks again (`renewWake`) |
 | an archive's release check | only with a slot free now (`wakeNow`); otherwise the disk is kept unchecked at once, with the reason |
 | the recovery loop (`Conversations.boot`, every 30 s) | only by `recoveryStep` (thread-recovery.ts) |
 | any read: the thread list, history, stream, model, steps, startup log, diagnostics, OptChat's watcher, `threads`, `history` | never |
@@ -67,6 +67,13 @@ phase, `suspended` or running. It is not continued.
   next waits 30 s, doubling to 30 min; a success clears the count;
 - a release left unfinished: the release, only, for as long as it fails
   (an obligation, never given up);
+- the start of a thread not ready yet whose VM runner does not answer
+  waits: the thread says so. After 30 min of that (counted in this
+  process, so a restart counts again) each try is a failed one, with the
+  pauses and the limit below. A ready thread (checked, or reopened after a
+  restart) and a thread on a host runner wait as long as it takes, and a
+  wait for a slot on a full runner is not bounded: a slot frees when work
+  ends;
 - after 8 failed starts in a row (about an hour) the loop stops starting
   the thread; it shows as an error saying so, also after a restart, and a
   new message tries once more;
@@ -112,7 +119,9 @@ no wake.
   (R7); a failing release retried until it succeeds (R8); a replayed
   message (R9); a failing wake (R10), which OptChat's reads and watcher
   report as failed (R13), also after a restart, one episode of failed
-  tries in a row at a time (R13b).
+  tries in a row at a time (R13b); a run's guest calls on a full runner
+  wait once, not once each (R11); a runner that does not answer (R12,
+  R12b, R12c).
 - `packages/server/test/lifecycle-model-test.ts`: seeded random runs of
   creates (some whose machine can never be made), messages and their
   replays, reads, idle and recovery rounds, restarts (with wakes cut short)

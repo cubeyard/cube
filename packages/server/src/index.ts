@@ -3,7 +3,7 @@ import net, { type AddressInfo } from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
@@ -471,9 +471,19 @@ export async function createCubed(options: {
     return { machineDefaults: { vcpus: sizes.vcpus, memoryMiB: sizes.memoryMiB },
       machineLimits: limits.length ? { maxVcpus: Math.max(...limits.map(limit => limit.maxVcpus)), maxMemoryMiB: Math.max(...limits.map(limit => limit.maxMemoryMiB)) } : null };
   };
-  const projectView = (project: Project, pool = poolView()) => ({ ...project, ...pool, ...machineView(),
-    threadCount: registry.listThreads().filter(thread => thread.projectId === project.id && !thread.archived).length,
-    retainedThreadCount: registry.listThreads().filter(thread => thread.projectId === project.id).length });
+  const projectView = (project: Project, pool = poolView(), counts = threadCounts()) => ({ ...project, ...pool, ...machineView(),
+    ...counts.get(project.id) ?? { threadCount: 0, retainedThreadCount: 0 } });
+  /** Each project's threads, counted in one read of them all. */
+  const threadCounts = () => {
+    const counts = new Map<string, { threadCount: number; retainedThreadCount: number }>();
+    for (const thread of registry.listThreads()) {
+      const count = counts.get(thread.projectId) ?? { threadCount: 0, retainedThreadCount: 0 };
+      count.retainedThreadCount++;
+      if (!thread.archived) count.threadCount++;
+      counts.set(thread.projectId, count);
+    }
+    return counts;
+  };
   async function check(project: Project) {
     for (const repository of project.repositories) {
       try {
@@ -628,7 +638,7 @@ export async function createCubed(options: {
       if (parts[0] === "api" && parts[1] === "projects") {
         const id = parts[2];
         if (parts.length > 4 || (parts[3] && !(parts[3] === "check" && method === "POST"))) return json({ error: "not found" }, 404);
-        if (!id && method === "GET") { const pool = poolView(); return json({ projects: registry.listProjects().map(project => projectView(project, pool)) }); }
+        if (!id && method === "GET") { const pool = poolView(), counts = threadCounts(); return json({ projects: registry.listProjects().map(project => projectView(project, pool, counts)) }); }
         if ((!id && method === "POST") || (id && method === "PUT")) {
           const previous = id ? registry.getProject(id) : null;
           if (id && !previous) return json({ error: "project not found" }, 404);
@@ -770,7 +780,14 @@ export async function createCubed(options: {
       if (parts[0] === "api" && parts[1] === "threads") {
         const id = parts[2];
         if (parts.length > 4 && parts[3] !== "workspace" && !(parts[3] === "media" && parts.length === 5)) return json({ error: "not found" }, 404);
-        if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...listed(thread), state: threadState(thread.id), error: conversations.error(thread.id) ?? conversations.down(thread.id), waiting: conversations.waiting(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
+        if (!id && method === "GET") {
+          const names = new Map(registry.listProjects().map(project => [project.id, project.name]));
+          const list = JSON.stringify({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...listed(thread), state: threadState(thread.id), error: conversations.error(thread.id) ?? conversations.down(thread.id), waiting: conversations.waiting(thread.id), project: { id: thread.projectId, name: names.get(thread.projectId)! } })) });
+          // The UI polls this: a list it already has is a 304 without a body.
+          const etag = `"${createHash("sha1").update(list).digest("base64url")}"`;
+          response.writeHead(request.headers["if-none-match"] === etag ? 304 : 200, { "content-type": "application/json", "cache-control": "no-store", etag });
+          return response.end(request.headers["if-none-match"] === etag ? undefined : list);
+        }
         if (!id && method === "POST") {
           const model = await selection(body.model);
           const projectId = text("projectId");
