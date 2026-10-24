@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { place } from "../lib/margin-layout.ts";
+  import { byValue, place } from "../lib/margin-layout.ts";
   import { failing, stateText } from "../lib/work-state.ts";
   import type { NoteGroup, NoteThread } from "../lib/provenance.ts";
   import Icon from "./Icon.svelte";
@@ -35,11 +35,14 @@
 
   const anchorOf = (row: string) => aside?.parentElement?.querySelector<HTMLElement>(`[data-anchor="${CSS.escape(row)}"]`) ?? null;
   const noteOf = (row: string) => aside?.querySelector<HTMLElement>(`.margin-notes > [data-note="${CSS.escape(row)}"]`) ?? null;
+  /** noteOf for every row at once (and anchors below): one pass over the DOM, not one per note. */
+  const allNotes = () => byValue(aside, ".margin-notes > [data-note]", "data-note");
 
   function layout(): void {
     if (!aside) return;
     const base = aside.offsetTop;
-    const placed = groups.map(group => ({ group, anchor: anchorOf(group.row), note: noteOf(group.row) }));
+    const anchors = byValue(aside.parentElement, "[data-anchor]", "data-anchor"), notesShown = allNotes();
+    const placed = groups.map(group => ({ group, anchor: anchors.get(group.row) ?? null, note: notesShown.get(group.row) ?? null }));
     const notes = placed.map(({ anchor, note }) => ({ anchor: anchor ? anchor.offsetTop - base : 0, height: note?.offsetHeight ?? 0 }));
     const result = place(notes, { gap: GAP, limit: aside.clientHeight, hold: held >= 0 ? held : null });
     const next: Record<string, number> = {};
@@ -61,10 +64,11 @@
     if (!scroller) return;
     const view = scroller.getBoundingClientRect();
     const next: Pin[] = [];
+    const notesShown = allNotes();
     for (const group of groups) {
       const failed = group.threads.filter(thread => thread.state && failing(thread.state) && !thread.archived);
       if (!failed.length) continue;
-      const box = noteOf(group.row)?.getBoundingClientRect();
+      const box = notesShown.get(group.row)?.getBoundingClientRect();
       if (!box) continue;
       const direction = box.bottom < view.top + 8 ? "up" : box.top > view.bottom - 8 ? "down" : null;
       if (direction) for (const thread of failed) next.push({ row: group.row, thread, direction });

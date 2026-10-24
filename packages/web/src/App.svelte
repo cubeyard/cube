@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import ProjectList from "./components/ProjectList.svelte";
   import ProjectView from "./components/ProjectView.svelte";
   import ThreadList from "./components/ThreadList.svelte";
@@ -51,7 +51,7 @@
   // The plain "no answer" case needs no detail line; anything else (a 500
   // from /api/state, say) prints what the host said.
   let loadUnreachable = $state(true);
-  let threads = $state<ThreadSummary[]>([]);
+  let threads = $state.raw<ThreadSummary[]>([]);
   let threadsLoaded = $state(false);
   const activeThreads = $derived(threads.filter((thread) => !thread.archived));
   let newThreadDialog = $state<NewThreadDialog>();
@@ -104,7 +104,8 @@
     try {
       const fresh = await fetchThreads(true);
       if (!threadPolls.accept(ticket)) return;
-      threads = fresh;
+      // An unchanged list (a 304) is the same array: nothing to redo.
+      if (fresh !== threads) threads = fresh;
       threadsLoaded = true;
       failedPolls = 0;
       if (threadId && fresh.find((thread) => thread.id === threadId)?.archived) {
@@ -239,7 +240,9 @@
     <ArtifactList />
   {:else if threadId && threadsLoaded}
     {#key threadId}
-      <ThreadView {threadId} threads={activeThreads} {command} onConsume={consume} {onNewThread} />
+      <!-- The id as a plain value: the view is made again for another id, and
+           its signals read from it otherwise outlived it (2 800 nodes a visit). -->
+      <ThreadView threadId={untrack(() => threadId!)} threads={activeThreads} {command} onConsume={consume} {onNewThread} />
     {/key}
   {:else if threadId}
     <p class="loading">loading threads…</p>

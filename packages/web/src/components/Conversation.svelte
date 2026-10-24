@@ -5,7 +5,7 @@
   import { ACCEPT, MEDIA_LIMITS, pastedImages, prepareImage } from "../lib/images.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
   import { echo, echoRows, unanswered, unlogged, type Echo } from "../lib/outbox.ts";
-  import { picturePath, toolOpen, transcriptRows, type ToolState, type TranscriptRow } from "../lib/transcript.ts";
+  import { keepRows, picturePath, toolOpen, transcriptRows, type ToolState, type TranscriptRow } from "../lib/transcript.ts";
   import { rowKey } from "../lib/provenance.ts";
   import { uid } from "../lib/uid.ts";
   import type { MessageImage, ModelSelection, ThreadStatus, ThreadTranscript } from "../lib/types.ts";
@@ -51,10 +51,10 @@
   // The neutral thread event model is the only input; no agent shapes here.
   const events = $derived(threadEvents(base));
   /** The window of the newest events the stream keeps current. */
-  let transcript = $state<Pick<ThreadTranscript, "events" | "status" | "start">>({ events: [], status: { state: "idle", run: null, error: null } });
+  let transcript = $state.raw<Pick<ThreadTranscript, "events" | "status" | "start">>({ events: [], status: { state: "idle", run: null, error: null } });
   /** The events before the window, read a page at a time as the reader
    * scrolls up; they end where the window starts. */
-  let earlier = $state<TranscriptPage>({ start: 0, events: [] });
+  let earlier = $state.raw<TranscriptPage>({ start: 0, events: [] });
   /** The index of the first event shown; above it there is more to read. */
   const first = $derived(earlier.events.length ? earlier.start : transcript.start ?? 0);
   let loadingEarlier = $state(false);
@@ -65,7 +65,13 @@
    * while a message waits, so a page read meanwhile cannot answer one. */
   let echoes = $state<Echo[]>([]);
   const outgoing = $derived(unanswered(transcript, echoes));
-  const rows = $derived([...transcriptRows({ events: [...earlier.events, ...transcript.events], status: transcript.status }), ...echoRows(outgoing)]);
+  /** The rows last shown by id: a frame keeps the ones it did not change. */
+  let shownRows = new Map<string, TranscriptRow>();
+  const rows = $derived.by(() => {
+    const next = keepRows(shownRows, [...transcriptRows({ events: [...earlier.events, ...transcript.events], status: transcript.status }), ...echoRows(outgoing)]);
+    shownRows = new Map(next.map(row => [row.id, row]));
+    return next;
+  });
   const status = $derived<ThreadStatus>(transcript.status);
   $effect(() => { onRows?.(rows); });
   let prompt = $state("");

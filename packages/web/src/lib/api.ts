@@ -88,19 +88,25 @@ function fallbackMessage(status: number): string {
  * message for every method — a 409 "still setting up" must read as that,
  * not as a status code. */
 async function request<T>(path: string, method = "GET", body?: unknown): Promise<T> {
-  let res: Response;
+  return answer<T>(await exchange(path, method, body), method, path);
+}
+
+async function exchange(path: string, method = "GET", body?: unknown, headers: Record<string, string> = {}): Promise<Response> {
   if (body === undefined && ["POST", "PUT", "PATCH"].includes(method)) body = {};
   try {
-    res = await fetch(path, {
+    return await fetch(path, {
       method,
       ...(body === undefined
-        ? {}
-        : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+        ? { headers }
+        : { headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) }),
     });
   } catch (e) {
     console.debug(`${method} ${path} -> no response`, e);
     throw new ApiError("can't reach the host — it may be starting or restarting", 0);
   }
+}
+
+async function answer<T>(res: Response, method: string, path: string): Promise<T> {
   if (res.ok) return res.json();
   let message: string | null = null;
   try {
@@ -132,10 +138,19 @@ export const disconnectGithub = () =>
 
 // The UI speaks the thread-first product API.
 
-export const fetchThreads = (includeArchived = false) =>
-  request<{ threads: ThreadSummary[] }>(`/api/threads${includeArchived ? "?includeArchived=1" : ""}`).then(
-    (r) => r.threads,
-  );
+/** The last thread list read, by query, with its ETag. The list is polled;
+ * one cubed has not changed since is a 304, and the same array comes back. */
+const threadLists = new Map<string, { etag: string; threads: ThreadSummary[] }>();
+export async function fetchThreads(includeArchived = false): Promise<ThreadSummary[]> {
+  const path = `/api/threads${includeArchived ? "?includeArchived=1" : ""}`;
+  const last = threadLists.get(path);
+  const res = await exchange(path, "GET", undefined, last ? { "if-none-match": last.etag } : {});
+  if (res.status === 304 && last) return last.threads;
+  const { threads } = await answer<{ threads: ThreadSummary[] }>(res, "GET", path);
+  const etag = res.headers.get("etag");
+  if (etag) threadLists.set(path, { etag, threads }); else threadLists.delete(path);
+  return threads;
+}
 
 export const discardThreadMachine = (id: string) =>
   request<{ ok: true }>(`/api/threads/${encodeURIComponent(id)}/discard`, "POST", {});

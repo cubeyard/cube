@@ -37,3 +37,14 @@ export function place(notes: readonly Placed[], options: { gap?: number; limit?:
   else for (let i = 1; i < n; i++) if (top[i]! < top[i - 1]! + notes[i - 1]!.height + gap) { down(i); break; }
   return top;
 }
+
+/** The elements under `root` that match `selector`, by their `attribute`'s
+ * value; the first of a value in document order, as querySelector finds it. */
+export function byValue(root: Element | null | undefined, selector: string, attribute: string): Map<string, HTMLElement> {
+  const found = new Map<string, HTMLElement>();
+  for (const element of root?.querySelectorAll<HTMLElement>(selector) ?? []) {
+    const value = element.getAttribute(attribute)!;
+    if (!found.has(value)) found.set(value, element);
+  }
+  return found;
+}

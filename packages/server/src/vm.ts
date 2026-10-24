@@ -57,6 +57,9 @@ export interface ThreadMachines {
   /** A `waking` no one in this process owns (a restart cut the wake short):
    * the runner's own phase is recorded instead, and nothing is started. */
   settleWake?(thread: Thread): Promise<void>;
+  /** A new message asks for the machine: its run's first guest call waits
+   * for a slot the whole time again, even if an earlier run's wait gave up. */
+  renewWake?(thread: Thread): void;
   /** Read-only evidence about the thread's machine (vm-diagnostics.ts);
    * never starts, stops or attaches it. */
   diagnose?(thread: Thread): Promise<MachineEvidence>;
