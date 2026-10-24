@@ -28,7 +28,11 @@
  *   R9  a replayed message to a sleeping thread wakes nothing; a new one
  *       wakes it once.
  *   R10 a wake that keeps failing hard leaves no `waking` holding a slot:
- *       not after the starts stopped, not after a restart. */
+ *       not after the starts stopped, not after a restart.
+ *   R12 a new thread on a runner that does not answer waits 30 min, then
+ *       each try counts as a failed start (pauses, the limit of 8, an error
+ *       that says why); a new message tries once more. A wait for a slot on
+ *       a full runner is not bounded (R6). */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -246,6 +250,9 @@ try {
     assert.match(cubed.conversations.waiting(d.id) ?? "", /waiting for a free slot on runner node-life/);
     assert.equal(cubed.conversations.error(d.id), null);
     assert.equal(fresh(d.id).vm?.steps?.find(step => step.name === "boot")?.state, "interrupted", "its boot step says it was interrupted, not failed");
+    clock.now += 31 * 60_000;
+    await cubed.conversations.recover();
+    assert.deepEqual([cubed.conversations.error(d.id), fresh(d.id).retry], [null, undefined], "a wait for a slot is not bounded like a runner that does not answer (R12)");
     berth.slots = 1;
     await cubed.conversations.recover();
     assert.equal(fresh(d.id).workspaceState, "available", "it starts once the runner has room");
@@ -349,6 +356,42 @@ try {
     assert.deepEqual([fresh(w.id).vm?.suspension?.state, life.held()], ["suspended", 0], "also after a restart");
     console.log("ok: R10 a wake that keeps failing leaves no waking holding a slot, after the starts stopped and after a restart");
     assert.deepEqual(berth.violations, []);
+  } finally {
+    await cubed.close().catch(() => {});
+    berth.stopAll();
+  }
+}
+// ---------------------------------------------------------------- R12
+{
+  const down = lifecycle(path.join(root, "down"), { slots: 2 });
+  const { berth, clock, fresh } = down;
+  const cubed = down.start();
+  const round = async (minutes: number) => { clock.now += minutes * 60_000; await cubed.conversations.boot(); };
+  try {
+    berth.down = true;
+    const a = down.thread();
+    await cubed.conversations.activate(a.id);
+    assert.match(cubed.conversations.waiting(a.id) ?? "", /waiting for runner node-life: it does not answer/);
+    assert.equal(cubed.conversations.error(a.id), null, "at first it waits");
+    await round(29);
+    assert.equal(cubed.conversations.error(a.id), null, "29 min: still waiting");
+    assert.equal(fresh(a.id).retry, undefined);
+    await round(2);
+    assert.match(cubed.conversations.error(a.id) ?? "", /runner node-life has not answered for 30 min/, "past 30 min the wait is a failed start");
+    assert.equal(cubed.conversations.waiting(a.id), null);
+    assert.equal(fresh(a.id).retry?.failures, 1);
+    for (let i = 0; i < 40; i++) await round(10);
+    assert.equal(fresh(a.id).retry?.failures, 8, "tried 8 times, then no more");
+    assert.match(cubed.conversations.error(a.id) ?? "", /cube stopped retrying after 8 tries in a row, a message to the thread tries once more/);
+    const asked = berth.events.length;
+    berth.down = false;
+    await round(60);
+    assert.equal(berth.events.length, asked, "the loop does not try again on its own");
+    // The machine starts; its first message (the thread's task) runs first, as in R7.
+    await assert.rejects(cubed.conversations.submit(a.id, "go", "tell-a"), /already working/);
+    assert.equal(fresh(a.id).workspaceState, "available", "a message tries once more and the runner answers");
+    assert.equal(cubed.conversations.error(a.id), null);
+    console.log("ok: R12 a new thread on a runner that does not answer waits 30 min, then fails its tries (8, with pauses) saying why; a message tries again");
   } finally {
     await cubed.close().catch(() => {});
     berth.stopAll();
