@@ -444,5 +444,11 @@ in cubed:
 `berth host` with cubed and the real cube-gateway; with KVM or HVF and the
 `CUBE_TEST_BERTH_*` paths also `berth vm` with keel machines, cubed on it,
 suspend, and `init-local` (skipped loudly otherwise;
-`CUBE_TEST_BERTH_VM=required` makes that a failure; DEVELOPING.md). A
-release also needs the native gates on a Linux/KVM and a macOS/HVF host.
+`CUBE_TEST_BERTH_VM=required` makes that a failure; DEVELOPING.md). For a
+release, assess its delta since the evidence already held and reuse what
+still applies: a host-independent release needs no new native runs. Run a
+native gate only for a concrete VM, OS, filesystem or host integration risk
+in that delta, on the host where it lives, and on both Linux/KVM and
+macOS/HVF only with a separately stated cross-platform reason (AGENTS.md).
+The automated release checks in CI and signing (DEVELOPING.md) are
+unchanged.
