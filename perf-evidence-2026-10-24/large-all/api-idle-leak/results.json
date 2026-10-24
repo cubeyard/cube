@@ -1,0 +1,717 @@
+{
+  "environment": {
+    "commit": "58fc033742800a7116ade39788a1fbed9ac0c23b",
+    "seededCommit": "ca0678117bbd381cc5408444ac63cc801f229a6c",
+    "chrome": "Google Chrome 156.0.8078.47",
+    "browserVersion": "156.0.8078.47",
+    "headless": true,
+    "node": "v26.8.1",
+    "cpus": 2,
+    "cpuModel": "Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz",
+    "memGiB": 3.8,
+    "kernel": "7.2.9",
+    "runs": 3,
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "phone": {
+      "width": 390,
+      "height": 844
+    },
+    "note": "server and Chrome share this VM; no GPU (software raster); CPU not throttled"
+  },
+  "scale": {
+    "name": "large",
+    "seed": 20261023,
+    "counts": {
+      "projects": 12,
+      "threads": 480,
+      "archived": 422,
+      "active": 58,
+      "chatUserTurnsSent": 3031,
+      "chatUserBytesSent": 1178280,
+      "chatEvents": 10414,
+      "chatEventsByType": {
+        "user-message": 3836,
+        "assistant-text": 3660,
+        "tool-call": 1459,
+        "tool-result": 1459
+      },
+      "chatReports": 780,
+      "chatTranscriptBytes": 14364228,
+      "longThread": "c6bb1c52-ffda-4e20-b1c7-9268979738a1",
+      "longThreadEvents": 4267,
+      "longThreadBytes": 5713253,
+      "artifacts": 189,
+      "threadArtifacts": 49,
+      "revisions": 958,
+      "comments": 128,
+      "commentBatchesSent": 25
+    },
+    "bytes": {
+      "state": 279925115,
+      "registry": 1515520,
+      "optchat": 173801472,
+      "artifacts": 3952640,
+      "threads": 99532800,
+      "usage": 765952
+    }
+  },
+  "serverStart": {
+    "ready": "http://127.0.0.1:7799",
+    "openMs": 3816,
+    "listenMs": 6784,
+    "pid": 23863,
+    "quietAfterListenMs": 28903
+  },
+  "api": {
+    "/api/state": {
+      "status": 200,
+      "kib": 0.1,
+      "n": 8,
+      "median": 1.9,
+      "min": 0.8,
+      "max": 2.3,
+      "p90": 2.3
+    },
+    "/api/threads?includeArchived=1": {
+      "status": 200,
+      "kib": 825.6,
+      "n": 8,
+      "median": 36.7,
+      "min": 30.2,
+      "max": 50.8,
+      "p90": 50.8
+    },
+    "/api/threads": {
+      "status": 200,
+      "kib": 102.2,
+      "n": 8,
+      "median": 10.1,
+      "min": 9.5,
+      "max": 13.9,
+      "p90": 13.9
+    },
+    "/api/projects": {
+      "status": 200,
+      "kib": 53.4,
+      "n": 8,
+      "median": 9.8,
+      "min": 9.4,
+      "max": 12.2,
+      "p90": 12.2
+    },
+    "/api/optchat/threads": {
+      "status": 200,
+      "kib": 16.7,
+      "n": 8,
+      "median": 48.5,
+      "min": 46.8,
+      "max": 55.1,
+      "p90": 55.1
+    },
+    "/api/artifacts": {
+      "status": 200,
+      "kib": 69.1,
+      "n": 8,
+      "median": 10.3,
+      "min": 8.9,
+      "max": 11.3,
+      "p90": 11.3
+    },
+    "/api/optchat/model": {
+      "status": 200,
+      "kib": 0.1,
+      "n": 8,
+      "median": 1.8,
+      "min": 0.6,
+      "max": 2.1,
+      "p90": 2.1
+    },
+    "/api/optchat/view": {
+      "status": 200,
+      "kib": 75.9,
+      "n": 8,
+      "median": 2.4,
+      "min": 2.3,
+      "max": 2.7,
+      "p90": 2.7
+    },
+    "/api/optchat/history?tail=120": {
+      "status": 200,
+      "kib": 190.6,
+      "n": 8,
+      "median": 6.8,
+      "min": 3.1,
+      "max": 73.2,
+      "p90": 73.2
+    },
+    "/api/optchat/history?before=10294&limit=120": {
+      "status": 200,
+      "kib": 189.5,
+      "n": 8,
+      "median": 4.1,
+      "min": 3.8,
+      "max": 4.5,
+      "p90": 4.5
+    },
+    "/api/optchat/history": {
+      "status": 200,
+      "kib": 14027.6,
+      "n": 8,
+      "median": 94.1,
+      "min": 70,
+      "max": 141.5,
+      "p90": 141.5
+    },
+    "/api/threads/:long/history?tail=120": {
+      "status": 200,
+      "kib": 145.6,
+      "n": 8,
+      "median": 2.4,
+      "min": 1.2,
+      "max": 2.8,
+      "p90": 2.8
+    },
+    "/api/threads/:long/history": {
+      "status": 200,
+      "kib": 5579.3,
+      "n": 8,
+      "median": 21.3,
+      "min": 14.7,
+      "max": 34.4,
+      "p90": 34.4
+    },
+    "/api/artifacts/:busiest": {
+      "status": 200,
+      "kib": 9.6,
+      "n": 8,
+      "median": 2.5,
+      "min": 1.1,
+      "max": 3.5,
+      "p90": 3.5
+    },
+    "/api/usage": {
+      "status": 200,
+      "kib": 457.8,
+      "n": 8,
+      "median": 492.6,
+      "min": 464.9,
+      "max": 545.9,
+      "p90": 545.9
+    },
+    "/api/runners": {
+      "status": 200,
+      "kib": 3.6,
+      "n": 8,
+      "median": 2,
+      "min": 1.9,
+      "max": 9.9,
+      "p90": 9.9
+    }
+  },
+  "idle": {
+    "#/chat": {
+      "seconds": 30,
+      "taskMs": 31.5,
+      "scriptMs": 10.8,
+      "layoutMs": 0,
+      "styleMs": 0,
+      "layouts": 0,
+      "styles": 0,
+      "heapMB": 6.4,
+      "nodes": 8778,
+      "listeners": 54,
+      "main": {
+        "longTasks": 0,
+        "longTaskMs": 0,
+        "maxLongTaskMs": 0,
+        "tbtMs": 0,
+        "longFrames": 0,
+        "worstFrames": []
+      },
+      "serverCpuShare": 0.017,
+      "server": {
+        "/api/threads?includeArchived=N": {
+          "n": 10,
+          "headersMsMedian": 30.2,
+          "headersMsMax": 44.2,
+          "kib": 0
+        },
+        "/api/state": {
+          "n": 1,
+          "headersMsMedian": 0.5,
+          "headersMsMax": 0.5,
+          "kib": 0.1
+        },
+        "/api/optchat/threads": {
+          "n": 1,
+          "headersMsMedian": 52.4,
+          "headersMsMax": 52.4,
+          "kib": 16.7
+        },
+        "/api/artifacts": {
+          "n": 1,
+          "headersMsMedian": 10.9,
+          "headersMsMax": 10.9,
+          "kib": 69.1
+        }
+      }
+    },
+    "#/threads": {
+      "seconds": 30,
+      "taskMs": 31,
+      "scriptMs": 8.8,
+      "layoutMs": 0,
+      "styleMs": 0,
+      "layouts": 0,
+      "styles": 0,
+      "heapMB": 3.3,
+      "nodes": 2692,
+      "listeners": 92,
+      "main": {
+        "longTasks": 0,
+        "longTaskMs": 0,
+        "maxLongTaskMs": 0,
+        "tbtMs": 0,
+        "longFrames": 0,
+        "worstFrames": []
+      },
+      "serverCpuShare": 0.016,
+      "server": {
+        "/api/threads?includeArchived=N": {
+          "n": 10,
+          "headersMsMedian": 28.5,
+          "headersMsMax": 51.3,
+          "kib": 0
+        },
+        "/api/projects": {
+          "n": 10,
+          "headersMsMedian": 8.2,
+          "headersMsMax": 13.3,
+          "kib": 534.2
+        },
+        "/api/state": {
+          "n": 1,
+          "headersMsMedian": 0.3,
+          "headersMsMax": 0.3,
+          "kib": 0.1
+        }
+      }
+    },
+    "#/t/:long": {
+      "seconds": 30,
+      "taskMs": 21.7,
+      "scriptMs": 3.8,
+      "layoutMs": 0,
+      "styleMs": 0,
+      "layouts": 0,
+      "styles": 0,
+      "heapMB": 4,
+      "nodes": 3940,
+      "listeners": 73,
+      "main": {
+        "longTasks": 0,
+        "longTaskMs": 0,
+        "maxLongTaskMs": 0,
+        "tbtMs": 0,
+        "longFrames": 0,
+        "worstFrames": []
+      },
+      "serverCpuShare": 0.018000000000000002,
+      "server": {
+        "/api/threads?includeArchived=N": {
+          "n": 10,
+          "headersMsMedian": 28.4,
+          "headersMsMax": 43.9,
+          "kib": 0
+        },
+        "/api/state": {
+          "n": 1,
+          "headersMsMedian": 0.4,
+          "headersMsMax": 0.4,
+          "kib": 0.1
+        }
+      }
+    },
+    "#/artifacts": {
+      "seconds": 30,
+      "taskMs": 37.5,
+      "scriptMs": 16.2,
+      "layoutMs": 2.4,
+      "styleMs": 0,
+      "layouts": 3,
+      "styles": 0,
+      "heapMB": 4.9,
+      "nodes": 1495,
+      "listeners": 34,
+      "main": {
+        "longTasks": 0,
+        "longTaskMs": 0,
+        "maxLongTaskMs": 0,
+        "tbtMs": 0,
+        "longFrames": 0,
+        "worstFrames": []
+      },
+      "serverCpuShare": 0.02,
+      "server": {
+        "/api/threads?includeArchived=N": {
+          "n": 10,
+          "headersMsMedian": 31.2,
+          "headersMsMax": 50.6,
+          "kib": 0
+        },
+        "/api/artifacts": {
+          "n": 3,
+          "headersMsMedian": 9.7,
+          "headersMsMax": 10.2,
+          "kib": 207.4
+        },
+        "/api/state": {
+          "n": 1,
+          "headersMsMedian": 0.3,
+          "headersMsMax": 0.3,
+          "kib": 0.1
+        }
+      }
+    }
+  },
+  "leak": {
+    "routes": [
+      "#/threads",
+      "#/t/:id",
+      "#/artifacts",
+      "#/a/:id",
+      "#/projects",
+      "#/chat"
+    ],
+    "rounds": [
+      {
+        "round": 0,
+        "heapMB": 5.5,
+        "nodes": 8778,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 1,
+        "heapMB": 5.9,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 2,
+        "heapMB": 6.4,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 3,
+        "heapMB": 6.1,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 4,
+        "heapMB": 6.6,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 5,
+        "heapMB": 6.3,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 6,
+        "heapMB": 6.4,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 7,
+        "heapMB": 6.4,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 8,
+        "heapMB": 6.8,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 9,
+        "heapMB": 6.7,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 10,
+        "heapMB": 7,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 11,
+        "heapMB": 6.7,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 12,
+        "heapMB": 6.7,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 13,
+        "heapMB": 6.7,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 14,
+        "heapMB": 7.1,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      },
+      {
+        "round": 15,
+        "heapMB": 6.8,
+        "nodes": 9287,
+        "listeners": 54,
+        "documents": 2
+      }
+    ],
+    "byRoute": {
+      "#/threads": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": 19.1,
+        "detached": {
+          "n": 78,
+          "top": [
+            [
+              "option.",
+              6
+            ],
+            [
+              "li.",
+              4
+            ],
+            [
+              "span.sr-only",
+              4
+            ],
+            [
+              "p.conversation-empty",
+              3
+            ],
+            [
+              "p.loading",
+              3
+            ],
+            [
+              "div.",
+              3
+            ],
+            [
+              "template.",
+              3
+            ],
+            [
+              "span.",
+              2
+            ]
+          ]
+        }
+      },
+      "#/t/:id": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": 3.1,
+        "detached": {
+          "n": 78,
+          "top": [
+            [
+              "option.",
+              6
+            ],
+            [
+              "li.",
+              4
+            ],
+            [
+              "span.sr-only",
+              4
+            ],
+            [
+              "p.conversation-empty",
+              3
+            ],
+            [
+              "p.loading",
+              3
+            ],
+            [
+              "div.",
+              3
+            ],
+            [
+              "template.",
+              3
+            ],
+            [
+              "p.index-quiet",
+              2
+            ]
+          ]
+        }
+      },
+      "#/artifacts": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": 8.1,
+        "detached": {
+          "n": 78,
+          "top": [
+            [
+              "option.",
+              6
+            ],
+            [
+              "li.",
+              4
+            ],
+            [
+              "span.sr-only",
+              4
+            ],
+            [
+              "p.loading",
+              3
+            ],
+            [
+              "p.conversation-empty",
+              3
+            ],
+            [
+              "div.",
+              3
+            ],
+            [
+              "template.",
+              3
+            ],
+            [
+              "span.",
+              2
+            ]
+          ]
+        }
+      },
+      "#/a/:id": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": 7.1,
+        "detached": {
+          "n": 77,
+          "top": [
+            [
+              "option.",
+              6
+            ],
+            [
+              "span.sr-only",
+              4
+            ],
+            [
+              "li.",
+              4
+            ],
+            [
+              "div.",
+              3
+            ],
+            [
+              "template.",
+              3
+            ],
+            [
+              "p.loading",
+              3
+            ],
+            [
+              "span.message-label",
+              2
+            ],
+            [
+              "a.",
+              2
+            ]
+          ]
+        }
+      },
+      "#/projects": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": 10.7,
+        "detached": {
+          "n": 77,
+          "top": [
+            [
+              "option.",
+              6
+            ],
+            [
+              "span.sr-only",
+              4
+            ],
+            [
+              "li.",
+              4
+            ],
+            [
+              "div.",
+              3
+            ],
+            [
+              "template.",
+              3
+            ],
+            [
+              "p.loading",
+              3
+            ],
+            [
+              "p.conversation-empty",
+              2
+            ],
+            [
+              "optgroup.",
+              2
+            ]
+          ]
+        }
+      }
+    }
+  },
+  "pageErrors": []
+}

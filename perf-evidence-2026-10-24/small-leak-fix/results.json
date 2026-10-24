@@ -1,0 +1,405 @@
+{
+  "environment": {
+    "commit": "ca0678117bbd381cc5408444ac63cc801f229a6c",
+    "seededCommit": "ca0678117bbd381cc5408444ac63cc801f229a6c",
+    "chrome": "Google Chrome 156.0.8078.47",
+    "browserVersion": "156.0.8078.47",
+    "headless": true,
+    "node": "v26.8.1",
+    "cpus": 2,
+    "cpuModel": "Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz",
+    "memGiB": 3.8,
+    "kernel": "7.2.9",
+    "runs": 5,
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "phone": {
+      "width": 390,
+      "height": 844
+    },
+    "note": "server and Chrome share this VM; no GPU (software raster); CPU not throttled"
+  },
+  "scale": {
+    "name": "small",
+    "seed": 20261023,
+    "counts": {
+      "projects": 2,
+      "threads": 12,
+      "archived": 8,
+      "active": 4,
+      "chatUserTurnsSent": 60,
+      "chatUserBytesSent": 29581,
+      "chatEvents": 209,
+      "chatEventsByType": {
+        "user-message": 83,
+        "assistant-text": 78,
+        "tool-call": 24,
+        "tool-result": 24
+      },
+      "chatReports": 22,
+      "chatTranscriptBytes": 202391,
+      "longThread": "88f4728c-4569-4482-8f39-579a3665a357",
+      "longThreadEvents": 136,
+      "longThreadBytes": 210011,
+      "artifacts": 5,
+      "threadArtifacts": 0,
+      "revisions": 10,
+      "comments": 6,
+      "commentBatchesSent": 1
+    },
+    "bytes": {
+      "state": 5523699,
+      "registry": 102400,
+      "optchat": 2777088,
+      "artifacts": 131072,
+      "threads": 2428928,
+      "usage": 24576
+    }
+  },
+  "serverStart": {
+    "ready": "http://127.0.0.1:7799",
+    "openMs": 116,
+    "listenMs": 371,
+    "pid": 20489,
+    "quietAfterListenMs": 4892
+  },
+  "leak": {
+    "routes": [
+      "#/threads",
+      "#/t/:id",
+      "#/artifacts",
+      "#/a/:id",
+      "#/projects",
+      "#/chat"
+    ],
+    "rounds": [
+      {
+        "round": 0,
+        "heapMB": 4,
+        "nodes": 5530,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 1,
+        "heapMB": 4.6,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 2,
+        "heapMB": 4.7,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 3,
+        "heapMB": 4.8,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 4,
+        "heapMB": 4.9,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 5,
+        "heapMB": 5.1,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 6,
+        "heapMB": 5.1,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 7,
+        "heapMB": 5.2,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 8,
+        "heapMB": 5.2,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 9,
+        "heapMB": 5.4,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 10,
+        "heapMB": 5.4,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 11,
+        "heapMB": 5.4,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 12,
+        "heapMB": 5.5,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 13,
+        "heapMB": 5.5,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 14,
+        "heapMB": 5.5,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 15,
+        "heapMB": 5.5,
+        "nodes": 6039,
+        "listeners": 61,
+        "documents": 2
+      }
+    ],
+    "byRoute": {
+      "#/threads": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": 7.3,
+        "detached": {
+          "n": 84,
+          "top": [
+            [
+              "template.",
+              8
+            ],
+            [
+              "option.",
+              6
+            ],
+            [
+              "li.",
+              4
+            ],
+            [
+              "span.sr-only",
+              4
+            ],
+            [
+              "p.conversation-empty",
+              3
+            ],
+            [
+              "div.",
+              3
+            ],
+            [
+              "p.loading",
+              3
+            ],
+            [
+              "p.index-quiet",
+              2
+            ]
+          ]
+        }
+      },
+      "#/t/:id": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": 10.9,
+        "detached": {
+          "n": 84,
+          "top": [
+            [
+              "template.",
+              8
+            ],
+            [
+              "option.",
+              6
+            ],
+            [
+              "span.sr-only",
+              4
+            ],
+            [
+              "li.",
+              4
+            ],
+            [
+              "p.conversation-empty",
+              3
+            ],
+            [
+              "div.",
+              3
+            ],
+            [
+              "p.loading",
+              3
+            ],
+            [
+              "article.",
+              2
+            ]
+          ]
+        }
+      },
+      "#/artifacts": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": 16.9,
+        "detached": {
+          "n": 84,
+          "top": [
+            [
+              "template.",
+              8
+            ],
+            [
+              "option.",
+              6
+            ],
+            [
+              "li.",
+              4
+            ],
+            [
+              "span.sr-only",
+              4
+            ],
+            [
+              "p.conversation-empty",
+              3
+            ],
+            [
+              "div.",
+              3
+            ],
+            [
+              "p.loading",
+              3
+            ],
+            [
+              "p.index-quiet",
+              2
+            ]
+          ]
+        }
+      },
+      "#/a/:id": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": 28.2,
+        "detached": {
+          "n": 84,
+          "top": [
+            [
+              "template.",
+              8
+            ],
+            [
+              "option.",
+              6
+            ],
+            [
+              "span.sr-only",
+              4
+            ],
+            [
+              "li.",
+              4
+            ],
+            [
+              "p.conversation-empty",
+              3
+            ],
+            [
+              "p.loading",
+              3
+            ],
+            [
+              "div.",
+              3
+            ],
+            [
+              "p.index-quiet",
+              2
+            ]
+          ]
+        }
+      },
+      "#/projects": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": -9.1,
+        "detached": {
+          "n": 84,
+          "top": [
+            [
+              "template.",
+              8
+            ],
+            [
+              "option.",
+              6
+            ],
+            [
+              "span.sr-only",
+              4
+            ],
+            [
+              "li.",
+              4
+            ],
+            [
+              "p.loading",
+              3
+            ],
+            [
+              "p.conversation-empty",
+              3
+            ],
+            [
+              "div.",
+              3
+            ],
+            [
+              "p.index-quiet",
+              2
+            ]
+          ]
+        }
+      }
+    }
+  },
+  "pageErrors": []
+}

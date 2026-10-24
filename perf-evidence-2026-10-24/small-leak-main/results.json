@@ -1,0 +1,405 @@
+{
+  "environment": {
+    "commit": "ca0678117bbd381cc5408444ac63cc801f229a6c",
+    "seededCommit": "ca0678117bbd381cc5408444ac63cc801f229a6c",
+    "chrome": "Google Chrome 156.0.8078.47",
+    "browserVersion": "156.0.8078.47",
+    "headless": true,
+    "node": "v26.8.1",
+    "cpus": 2,
+    "cpuModel": "Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz",
+    "memGiB": 3.8,
+    "kernel": "7.2.9",
+    "runs": 5,
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "phone": {
+      "width": 390,
+      "height": 844
+    },
+    "note": "server and Chrome share this VM; no GPU (software raster); CPU not throttled"
+  },
+  "scale": {
+    "name": "small",
+    "seed": 20261023,
+    "counts": {
+      "projects": 2,
+      "threads": 12,
+      "archived": 8,
+      "active": 4,
+      "chatUserTurnsSent": 60,
+      "chatUserBytesSent": 29581,
+      "chatEvents": 209,
+      "chatEventsByType": {
+        "user-message": 83,
+        "assistant-text": 78,
+        "tool-call": 24,
+        "tool-result": 24
+      },
+      "chatReports": 22,
+      "chatTranscriptBytes": 202391,
+      "longThread": "88f4728c-4569-4482-8f39-579a3665a357",
+      "longThreadEvents": 136,
+      "longThreadBytes": 210011,
+      "artifacts": 5,
+      "threadArtifacts": 0,
+      "revisions": 10,
+      "comments": 6,
+      "commentBatchesSent": 1
+    },
+    "bytes": {
+      "state": 5523699,
+      "registry": 102400,
+      "optchat": 2777088,
+      "artifacts": 131072,
+      "threads": 2428928,
+      "usage": 24576
+    }
+  },
+  "serverStart": {
+    "ready": "http://127.0.0.1:7799",
+    "openMs": 109,
+    "listenMs": 363,
+    "pid": 14774,
+    "quietAfterListenMs": 4602
+  },
+  "leak": {
+    "routes": [
+      "#/threads",
+      "#/t/:id",
+      "#/artifacts",
+      "#/a/:id",
+      "#/projects",
+      "#/chat"
+    ],
+    "rounds": [
+      {
+        "round": 0,
+        "heapMB": 4,
+        "nodes": 5530,
+        "listeners": 61,
+        "documents": 2
+      },
+      {
+        "round": 1,
+        "heapMB": 5,
+        "nodes": 8899,
+        "listeners": 102,
+        "documents": 2
+      },
+      {
+        "round": 2,
+        "heapMB": 5.4,
+        "nodes": 11759,
+        "listeners": 143,
+        "documents": 2
+      },
+      {
+        "round": 3,
+        "heapMB": 5.8,
+        "nodes": 14619,
+        "listeners": 184,
+        "documents": 2
+      },
+      {
+        "round": 4,
+        "heapMB": 6.4,
+        "nodes": 17479,
+        "listeners": 225,
+        "documents": 2
+      },
+      {
+        "round": 5,
+        "heapMB": 6.9,
+        "nodes": 20339,
+        "listeners": 266,
+        "documents": 2
+      },
+      {
+        "round": 6,
+        "heapMB": 7.3,
+        "nodes": 23199,
+        "listeners": 307,
+        "documents": 2
+      },
+      {
+        "round": 7,
+        "heapMB": 8,
+        "nodes": 26059,
+        "listeners": 348,
+        "documents": 2
+      },
+      {
+        "round": 8,
+        "heapMB": 8.2,
+        "nodes": 28919,
+        "listeners": 389,
+        "documents": 2
+      },
+      {
+        "round": 9,
+        "heapMB": 8.7,
+        "nodes": 31779,
+        "listeners": 430,
+        "documents": 2
+      },
+      {
+        "round": 10,
+        "heapMB": 9.1,
+        "nodes": 34639,
+        "listeners": 471,
+        "documents": 2
+      },
+      {
+        "round": 11,
+        "heapMB": 9.6,
+        "nodes": 37499,
+        "listeners": 512,
+        "documents": 2
+      },
+      {
+        "round": 12,
+        "heapMB": 10.2,
+        "nodes": 40359,
+        "listeners": 553,
+        "documents": 2
+      },
+      {
+        "round": 13,
+        "heapMB": 10.4,
+        "nodes": 43219,
+        "listeners": 594,
+        "documents": 2
+      },
+      {
+        "round": 14,
+        "heapMB": 10.8,
+        "nodes": 46079,
+        "listeners": 635,
+        "documents": 2
+      },
+      {
+        "round": 15,
+        "heapMB": 11.2,
+        "nodes": 48939,
+        "listeners": 676,
+        "documents": 2
+      }
+    ],
+    "byRoute": {
+      "#/threads": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": 6.9,
+        "detached": {
+          "n": 3656,
+          "top": [
+            [
+              "article.conversation-message",
+              781
+            ],
+            [
+              "div.message-copy",
+              655
+            ],
+            [
+              "details.tool-strip",
+              511
+            ],
+            [
+              "summary.",
+              510
+            ],
+            [
+              "span.sr-only",
+              98
+            ],
+            [
+              "a.",
+              77
+            ],
+            [
+              "a.thread-sidebar-row",
+              60
+            ],
+            [
+              "span.thread-sidebar-title",
+              60
+            ]
+          ]
+        }
+      },
+      "#/t/:id": {
+        "nodesPerCycle": 2860,
+        "listenersPerCycle": 41,
+        "heapKBPerCycle": 410.8,
+        "detached": {
+          "n": 6283,
+          "top": [
+            [
+              "article.conversation-message",
+              1197
+            ],
+            [
+              "div.message-copy",
+              1027
+            ],
+            [
+              "details.tool-strip",
+              783
+            ],
+            [
+              "summary.",
+              782
+            ],
+            [
+              "span.sr-only",
+              226
+            ],
+            [
+              "span.message-label",
+              216
+            ],
+            [
+              "p.",
+              142
+            ],
+            [
+              "code.",
+              141
+            ]
+          ]
+        }
+      },
+      "#/artifacts": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": 18,
+        "detached": {
+          "n": 6283,
+          "top": [
+            [
+              "article.conversation-message",
+              1197
+            ],
+            [
+              "div.message-copy",
+              1027
+            ],
+            [
+              "details.tool-strip",
+              783
+            ],
+            [
+              "summary.",
+              782
+            ],
+            [
+              "span.sr-only",
+              226
+            ],
+            [
+              "span.message-label",
+              216
+            ],
+            [
+              "p.",
+              142
+            ],
+            [
+              "pre.",
+              141
+            ]
+          ]
+        }
+      },
+      "#/a/:id": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": 11.3,
+        "detached": {
+          "n": 6283,
+          "top": [
+            [
+              "article.conversation-message",
+              1197
+            ],
+            [
+              "div.message-copy",
+              1027
+            ],
+            [
+              "details.tool-strip",
+              783
+            ],
+            [
+              "summary.",
+              782
+            ],
+            [
+              "span.sr-only",
+              226
+            ],
+            [
+              "span.message-label",
+              216
+            ],
+            [
+              "p.",
+              142
+            ],
+            [
+              "pre.",
+              141
+            ]
+          ]
+        }
+      },
+      "#/projects": {
+        "nodesPerCycle": 0,
+        "listenersPerCycle": 0,
+        "heapKBPerCycle": 12.2,
+        "detached": {
+          "n": 6282,
+          "top": [
+            [
+              "article.conversation-message",
+              1197
+            ],
+            [
+              "div.message-copy",
+              1027
+            ],
+            [
+              "details.tool-strip",
+              783
+            ],
+            [
+              "summary.",
+              782
+            ],
+            [
+              "span.sr-only",
+              226
+            ],
+            [
+              "span.message-label",
+              216
+            ],
+            [
+              "p.",
+              142
+            ],
+            [
+              "code.",
+              141
+            ]
+          ]
+        }
+      }
+    }
+  },
+  "pageErrors": []
+}

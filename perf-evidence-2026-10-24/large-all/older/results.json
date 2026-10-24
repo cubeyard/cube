@@ -1,0 +1,659 @@
+{
+  "environment": {
+    "commit": "58fc033742800a7116ade39788a1fbed9ac0c23b",
+    "seededCommit": "ca0678117bbd381cc5408444ac63cc801f229a6c",
+    "chrome": "Google Chrome 156.0.8078.47",
+    "browserVersion": "156.0.8078.47",
+    "headless": true,
+    "node": "v26.8.1",
+    "cpus": 2,
+    "cpuModel": "Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz",
+    "memGiB": 3.8,
+    "kernel": "7.2.9",
+    "runs": 3,
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "phone": {
+      "width": 390,
+      "height": 844
+    },
+    "note": "server and Chrome share this VM; no GPU (software raster); CPU not throttled"
+  },
+  "scale": {
+    "name": "large",
+    "seed": 20261023,
+    "counts": {
+      "projects": 12,
+      "threads": 480,
+      "archived": 422,
+      "active": 58,
+      "chatUserTurnsSent": 3031,
+      "chatUserBytesSent": 1178280,
+      "chatEvents": 10414,
+      "chatEventsByType": {
+        "user-message": 3836,
+        "assistant-text": 3660,
+        "tool-call": 1459,
+        "tool-result": 1459
+      },
+      "chatReports": 780,
+      "chatTranscriptBytes": 14364228,
+      "longThread": "c6bb1c52-ffda-4e20-b1c7-9268979738a1",
+      "longThreadEvents": 4267,
+      "longThreadBytes": 5713253,
+      "artifacts": 189,
+      "threadArtifacts": 49,
+      "revisions": 958,
+      "comments": 128,
+      "commentBatchesSent": 25
+    },
+    "bytes": {
+      "state": 279925115,
+      "registry": 1515520,
+      "optchat": 173801472,
+      "artifacts": 3952640,
+      "threads": 99532800,
+      "usage": 765952
+    }
+  },
+  "serverStart": {
+    "ready": "http://127.0.0.1:7799",
+    "openMs": 3277,
+    "listenMs": 6118,
+    "pid": 22837,
+    "quietAfterListenMs": 29949
+  },
+  "chatOlder": {
+    "pageMs": {
+      "n": 75,
+      "median": 176.8,
+      "min": 111.1,
+      "max": 292.9,
+      "p90": 246.8
+    },
+    "typingFirstWindow": {
+      "n": 318,
+      "median": 4.1,
+      "min": 2.7,
+      "max": 18.4,
+      "p90": 15
+    },
+    "typingAfterOlder": {
+      "n": 318,
+      "median": 19.6,
+      "min": 17.9,
+      "max": 63.2,
+      "p90": 27.9
+    },
+    "runs": [
+      {
+        "run": 0,
+        "steps": [
+          {
+            "ms": 123.5,
+            "rows": 220
+          },
+          {
+            "ms": 115.9,
+            "rows": 328
+          },
+          {
+            "ms": 111.1,
+            "rows": 435
+          },
+          {
+            "ms": 126.5,
+            "rows": 538
+          },
+          {
+            "ms": 135.9,
+            "rows": 649
+          },
+          {
+            "ms": 137.3,
+            "rows": 757
+          },
+          {
+            "ms": 150.6,
+            "rows": 862
+          },
+          {
+            "ms": 190.9,
+            "rows": 964
+          },
+          {
+            "ms": 163.1,
+            "rows": 1070
+          },
+          {
+            "ms": 153.9,
+            "rows": 1173
+          },
+          {
+            "ms": 161.9,
+            "rows": 1278
+          },
+          {
+            "ms": 172.9,
+            "rows": 1380
+          },
+          {
+            "ms": 152.2,
+            "rows": 1483
+          },
+          {
+            "ms": 186,
+            "rows": 1588
+          },
+          {
+            "ms": 178.7,
+            "rows": 1691
+          },
+          {
+            "ms": 190.6,
+            "rows": 1794
+          },
+          {
+            "ms": 178.8,
+            "rows": 1898
+          },
+          {
+            "ms": 231.6,
+            "rows": 2002
+          },
+          {
+            "ms": 227.9,
+            "rows": 2106
+          },
+          {
+            "ms": 205.1,
+            "rows": 2211
+          },
+          {
+            "ms": 219.1,
+            "rows": 2313
+          },
+          {
+            "ms": 273.7,
+            "rows": 2417
+          },
+          {
+            "ms": 242,
+            "rows": 2519
+          },
+          {
+            "ms": 243.5,
+            "rows": 2623
+          },
+          {
+            "ms": 253.3,
+            "rows": 2727
+          }
+        ],
+        "total": {
+          "ms": 6843.9,
+          "taskMs": 6181.9,
+          "scriptMs": 1268.4,
+          "layoutMs": 980.4,
+          "styleMs": 413.1,
+          "layouts": 200,
+          "styles": 227,
+          "heapMB": 57.6,
+          "nodes": 139508,
+          "listeners": 485
+        },
+        "main": {
+          "longTasks": 47,
+          "longTaskMs": 3170,
+          "maxLongTaskMs": 102,
+          "tbtMs": 820,
+          "longFrames": 31,
+          "worstFrames": [
+            {
+              "ms": 171,
+              "styleLayoutMs": 13.6,
+              "scripts": [
+                {
+                  "d": 76,
+                  "forced": 45,
+                  "invoker": "Response.json.then",
+                  "fn": "",
+                  "src": "index-CHvhSBdO.js"
+                },
+                {
+                  "d": 18,
+                  "forced": 0,
+                  "invoker": "FrameRequestCallback",
+                  "fn": "",
+                  "src": "index-CHvhSBdO.js"
+                }
+              ]
+            },
+            {
+              "ms": 159.6,
+              "styleLayoutMs": 12.5,
+              "scripts": [
+                {
+                  "d": 74,
+                  "forced": 39,
+                  "invoker": "Response.json.then",
+                  "fn": "",
+                  "src": "index-CHvhSBdO.js"
+                },
+                {
+                  "d": 15,
+                  "forced": 0,
+                  "invoker": "FrameRequestCallback",
+                  "fn": "",
+                  "src": "index-CHvhSBdO.js"
+                }
+              ]
+            }
+          ]
+        },
+        "server": {
+          "/api/optchat/history?before=N&limit=N": {
+            "n": 25,
+            "headersMsMedian": 2.2,
+            "headersMsMax": 3.6,
+            "kib": 4890.6
+          },
+          "/api/threads?includeArchived=N": {
+            "n": 4,
+            "headersMsMedian": 45.2,
+            "headersMsMax": 56.5,
+            "kib": 0
+          }
+        },
+        "scrollFrames": {
+          "n": 61,
+          "medianMs": 16.7,
+          "p95Ms": 16.7,
+          "over50": 0
+        }
+      },
+      {
+        "run": 1,
+        "steps": [
+          {
+            "ms": 140.9,
+            "rows": 220
+          },
+          {
+            "ms": 126.5,
+            "rows": 328
+          },
+          {
+            "ms": 119,
+            "rows": 435
+          },
+          {
+            "ms": 121,
+            "rows": 538
+          },
+          {
+            "ms": 176.8,
+            "rows": 649
+          },
+          {
+            "ms": 128.2,
+            "rows": 757
+          },
+          {
+            "ms": 140,
+            "rows": 862
+          },
+          {
+            "ms": 123.1,
+            "rows": 964
+          },
+          {
+            "ms": 158,
+            "rows": 1070
+          },
+          {
+            "ms": 147.8,
+            "rows": 1173
+          },
+          {
+            "ms": 165.3,
+            "rows": 1278
+          },
+          {
+            "ms": 233.5,
+            "rows": 1380
+          },
+          {
+            "ms": 165.1,
+            "rows": 1483
+          },
+          {
+            "ms": 175.8,
+            "rows": 1588
+          },
+          {
+            "ms": 184.6,
+            "rows": 1691
+          },
+          {
+            "ms": 191.6,
+            "rows": 1794
+          },
+          {
+            "ms": 187.4,
+            "rows": 1898
+          },
+          {
+            "ms": 208.1,
+            "rows": 2002
+          },
+          {
+            "ms": 213.2,
+            "rows": 2106
+          },
+          {
+            "ms": 217.7,
+            "rows": 2211
+          },
+          {
+            "ms": 249.8,
+            "rows": 2313
+          },
+          {
+            "ms": 292.9,
+            "rows": 2417
+          },
+          {
+            "ms": 244.1,
+            "rows": 2519
+          },
+          {
+            "ms": 231.4,
+            "rows": 2623
+          },
+          {
+            "ms": 261.7,
+            "rows": 2727
+          }
+        ],
+        "total": {
+          "ms": 6890.5,
+          "taskMs": 6388.1,
+          "scriptMs": 1272.1,
+          "layoutMs": 1006,
+          "styleMs": 434.6,
+          "layouts": 199,
+          "styles": 227,
+          "heapMB": 52.2,
+          "nodes": 138522,
+          "listeners": 485
+        },
+        "main": {
+          "longTasks": 47,
+          "longTaskMs": 3232,
+          "maxLongTaskMs": 111,
+          "tbtMs": 882,
+          "longFrames": 30,
+          "worstFrames": [
+            {
+              "ms": 194.1,
+              "styleLayoutMs": 13.5,
+              "scripts": [
+                {
+                  "d": 89,
+                  "forced": 51,
+                  "invoker": "Response.json.then",
+                  "fn": "",
+                  "src": "index-CHvhSBdO.js"
+                },
+                {
+                  "d": 16,
+                  "forced": 0,
+                  "invoker": "FrameRequestCallback",
+                  "fn": "",
+                  "src": "index-CHvhSBdO.js"
+                },
+                {
+                  "d": 5,
+                  "forced": 5,
+                  "invoker": "FrameRequestCallback",
+                  "fn": "",
+                  "src": "index-CHvhSBdO.js"
+                }
+              ]
+            },
+            {
+              "ms": 169.3,
+              "styleLayoutMs": 13.8,
+              "scripts": [
+                {
+                  "d": 74,
+                  "forced": 43,
+                  "invoker": "Response.json.then",
+                  "fn": "",
+                  "src": "index-CHvhSBdO.js"
+                },
+                {
+                  "d": 17,
+                  "forced": 0,
+                  "invoker": "FrameRequestCallback",
+                  "fn": "",
+                  "src": "index-CHvhSBdO.js"
+                }
+              ]
+            }
+          ]
+        },
+        "server": {
+          "/api/optchat/history?before=N&limit=N": {
+            "n": 25,
+            "headersMsMedian": 1.7,
+            "headersMsMax": 5,
+            "kib": 4890.6
+          },
+          "/api/threads?includeArchived=N": {
+            "n": 4,
+            "headersMsMedian": 33.3,
+            "headersMsMax": 38.1,
+            "kib": 0
+          }
+        },
+        "scrollFrames": {
+          "n": 59,
+          "medianMs": 16.7,
+          "p95Ms": 16.8,
+          "over50": 0
+        }
+      },
+      {
+        "run": 2,
+        "steps": [
+          {
+            "ms": 117.6,
+            "rows": 220
+          },
+          {
+            "ms": 119.3,
+            "rows": 328
+          },
+          {
+            "ms": 137.1,
+            "rows": 435
+          },
+          {
+            "ms": 122.7,
+            "rows": 538
+          },
+          {
+            "ms": 176,
+            "rows": 649
+          },
+          {
+            "ms": 143.2,
+            "rows": 757
+          },
+          {
+            "ms": 129,
+            "rows": 862
+          },
+          {
+            "ms": 117.4,
+            "rows": 964
+          },
+          {
+            "ms": 148.2,
+            "rows": 1070
+          },
+          {
+            "ms": 135.8,
+            "rows": 1173
+          },
+          {
+            "ms": 142.9,
+            "rows": 1278
+          },
+          {
+            "ms": 146.7,
+            "rows": 1380
+          },
+          {
+            "ms": 184.5,
+            "rows": 1483
+          },
+          {
+            "ms": 162.9,
+            "rows": 1588
+          },
+          {
+            "ms": 177.3,
+            "rows": 1691
+          },
+          {
+            "ms": 199.7,
+            "rows": 1794
+          },
+          {
+            "ms": 225.9,
+            "rows": 1898
+          },
+          {
+            "ms": 218.1,
+            "rows": 2002
+          },
+          {
+            "ms": 215.8,
+            "rows": 2106
+          },
+          {
+            "ms": 228.8,
+            "rows": 2211
+          },
+          {
+            "ms": 224.5,
+            "rows": 2313
+          },
+          {
+            "ms": 234.1,
+            "rows": 2417
+          },
+          {
+            "ms": 246.8,
+            "rows": 2519
+          },
+          {
+            "ms": 249,
+            "rows": 2623
+          },
+          {
+            "ms": 271.8,
+            "rows": 2727
+          }
+        ],
+        "total": {
+          "ms": 6782.2,
+          "taskMs": 6287.6,
+          "scriptMs": 1271.3,
+          "layoutMs": 1009.7,
+          "styleMs": 425.3,
+          "layouts": 192,
+          "styles": 221,
+          "heapMB": 62.5,
+          "nodes": 137595,
+          "listeners": 485
+        },
+        "main": {
+          "longTasks": 47,
+          "longTaskMs": 3237,
+          "maxLongTaskMs": 133,
+          "tbtMs": 887,
+          "longFrames": 30,
+          "worstFrames": [
+            {
+              "ms": 199.7,
+              "styleLayoutMs": 22.6,
+              "scripts": [
+                {
+                  "d": 87,
+                  "forced": 53,
+                  "invoker": "Response.json.then",
+                  "fn": "",
+                  "src": "index-CHvhSBdO.js"
+                },
+                {
+                  "d": 23,
+                  "forced": 0,
+                  "invoker": "FrameRequestCallback",
+                  "fn": "",
+                  "src": "index-CHvhSBdO.js"
+                }
+              ]
+            },
+            {
+              "ms": 165.5,
+              "styleLayoutMs": 13.9,
+              "scripts": [
+                {
+                  "d": 70,
+                  "forced": 42,
+                  "invoker": "Response.json.then",
+                  "fn": "",
+                  "src": "index-CHvhSBdO.js"
+                },
+                {
+                  "d": 17,
+                  "forced": 0,
+                  "invoker": "FrameRequestCallback",
+                  "fn": "",
+                  "src": "index-CHvhSBdO.js"
+                }
+              ]
+            }
+          ]
+        },
+        "server": {
+          "/api/optchat/history?before=N&limit=N": {
+            "n": 25,
+            "headersMsMedian": 1.8,
+            "headersMsMax": 4.4,
+            "kib": 4890.6
+          },
+          "/api/threads?includeArchived=N": {
+            "n": 4,
+            "headersMsMedian": 37.4,
+            "headersMsMax": 37.6,
+            "kib": 0
+          }
+        },
+        "scrollFrames": {
+          "n": 61,
+          "medianMs": 16.7,
+          "p95Ms": 16.7,
+          "over50": 0
+        }
+      }
+    ]
+  },
+  "pageErrors": []
+}

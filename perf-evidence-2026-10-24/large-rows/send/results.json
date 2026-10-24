@@ -1,0 +1,495 @@
+{
+  "environment": {
+    "commit": "ca0678117bbd381cc5408444ac63cc801f229a6c",
+    "seededCommit": "ca0678117bbd381cc5408444ac63cc801f229a6c",
+    "chrome": "Google Chrome 156.0.8078.47",
+    "browserVersion": "156.0.8078.47",
+    "headless": true,
+    "node": "v26.8.1",
+    "cpus": 2,
+    "cpuModel": "Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz",
+    "memGiB": 3.8,
+    "kernel": "7.2.9",
+    "runs": 3,
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "phone": {
+      "width": 390,
+      "height": 844
+    },
+    "note": "server and Chrome share this VM; no GPU (software raster); CPU not throttled"
+  },
+  "scale": {
+    "name": "large",
+    "seed": 20261023,
+    "counts": {
+      "projects": 12,
+      "threads": 480,
+      "archived": 422,
+      "active": 58,
+      "chatUserTurnsSent": 3031,
+      "chatUserBytesSent": 1178280,
+      "chatEvents": 10414,
+      "chatEventsByType": {
+        "user-message": 3836,
+        "assistant-text": 3660,
+        "tool-call": 1459,
+        "tool-result": 1459
+      },
+      "chatReports": 780,
+      "chatTranscriptBytes": 14364228,
+      "longThread": "c6bb1c52-ffda-4e20-b1c7-9268979738a1",
+      "longThreadEvents": 4267,
+      "longThreadBytes": 5713253,
+      "artifacts": 189,
+      "threadArtifacts": 49,
+      "revisions": 958,
+      "comments": 128,
+      "commentBatchesSent": 25
+    },
+    "bytes": {
+      "state": 279925115,
+      "registry": 1515520,
+      "optchat": 173801472,
+      "artifacts": 3952640,
+      "threads": 99532800,
+      "usage": 765952
+    }
+  },
+  "serverStart": {
+    "ready": "http://127.0.0.1:7799",
+    "openMs": 3029,
+    "listenMs": 5934,
+    "pid": 28290,
+    "quietAfterListenMs": 28961
+  },
+  "send": [
+    {
+      "olderPages": 0,
+      "run": 0,
+      "rows": 112,
+      "echoMs": 32.2,
+      "turnMs": 6781.7,
+      "taskMs": 551.7,
+      "scriptMs": 233.6,
+      "layoutMs": 38,
+      "styleMs": 5.9,
+      "layouts": 50,
+      "styles": 50,
+      "heapMB": 10,
+      "nodes": 8958,
+      "listeners": 67,
+      "main": {
+        "longTasks": 0,
+        "longTaskMs": 0,
+        "maxLongTaskMs": 0,
+        "tbtMs": 0,
+        "longFrames": 0,
+        "worstFrames": []
+      },
+      "server": {
+        "/api/optchat/prompt": {
+          "n": 1,
+          "headersMsMedian": 19.6,
+          "headersMsMax": 19.6,
+          "kib": 0
+        },
+        "/api/optchat/history?from=N": {
+          "n": 1,
+          "headersMsMedian": 2,
+          "headersMsMax": 2,
+          "kib": 190.7
+        },
+        "/api/threads?includeArchived=N": {
+          "n": 2,
+          "headersMsMedian": 33.8,
+          "headersMsMax": 33.8,
+          "kib": 1651.2
+        },
+        "/api/optchat/threads": {
+          "n": 1,
+          "headersMsMedian": 55.3,
+          "headersMsMax": 55.3,
+          "kib": 16.7
+        },
+        "/api/artifacts": {
+          "n": 1,
+          "headersMsMedian": 11,
+          "headersMsMax": 11,
+          "kib": 69.1
+        },
+        "/api/optchat/view": {
+          "n": 1,
+          "headersMsMedian": 5.6,
+          "headersMsMax": 5.6,
+          "kib": 76
+        }
+      }
+    },
+    {
+      "olderPages": 0,
+      "run": 1,
+      "rows": 111,
+      "echoMs": 24.8,
+      "turnMs": 7780.4,
+      "taskMs": 645.1,
+      "scriptMs": 278.8,
+      "layoutMs": 45.4,
+      "styleMs": 6.3,
+      "layouts": 58,
+      "styles": 58,
+      "heapMB": 19.8,
+      "nodes": 9188,
+      "listeners": 66,
+      "main": {
+        "longTasks": 0,
+        "longTaskMs": 0,
+        "maxLongTaskMs": 0,
+        "tbtMs": 0,
+        "longFrames": 0,
+        "worstFrames": []
+      },
+      "server": {
+        "/api/optchat/prompt": {
+          "n": 1,
+          "headersMsMedian": 15.6,
+          "headersMsMax": 15.6,
+          "kib": 0
+        },
+        "/api/optchat/history?from=N": {
+          "n": 1,
+          "headersMsMedian": 1.8,
+          "headersMsMax": 1.8,
+          "kib": 185.5
+        },
+        "/api/threads?includeArchived=N": {
+          "n": 3,
+          "headersMsMedian": 33.9,
+          "headersMsMax": 34,
+          "kib": 2476.9
+        },
+        "/api/optchat/threads": {
+          "n": 1,
+          "headersMsMedian": 54.6,
+          "headersMsMax": 54.6,
+          "kib": 16.7
+        },
+        "/api/artifacts": {
+          "n": 1,
+          "headersMsMedian": 10,
+          "headersMsMax": 10,
+          "kib": 69.1
+        },
+        "/api/optchat/view": {
+          "n": 1,
+          "headersMsMedian": 0.8,
+          "headersMsMax": 0.8,
+          "kib": 76.2
+        }
+      }
+    },
+    {
+      "olderPages": 0,
+      "run": 2,
+      "rows": 113,
+      "echoMs": 22.9,
+      "turnMs": 3074,
+      "taskMs": 265.2,
+      "scriptMs": 117,
+      "layoutMs": 15,
+      "styleMs": 3.1,
+      "layouts": 23,
+      "styles": 23,
+      "heapMB": 25.2,
+      "nodes": 10465,
+      "listeners": 68,
+      "main": {
+        "longTasks": 0,
+        "longTaskMs": 0,
+        "maxLongTaskMs": 0,
+        "tbtMs": 0,
+        "longFrames": 0,
+        "worstFrames": []
+      },
+      "server": {
+        "/api/optchat/prompt": {
+          "n": 1,
+          "headersMsMedian": 16.8,
+          "headersMsMax": 16.8,
+          "kib": 0
+        },
+        "/api/optchat/history?from=N": {
+          "n": 1,
+          "headersMsMedian": 1.9,
+          "headersMsMax": 1.9,
+          "kib": 187.3
+        },
+        "/api/threads?includeArchived=N": {
+          "n": 1,
+          "headersMsMedian": 32.6,
+          "headersMsMax": 32.6,
+          "kib": 825.6
+        }
+      }
+    },
+    {
+      "olderPages": 10,
+      "run": 0,
+      "rows": 1170,
+      "echoMs": 90.1,
+      "turnMs": 3521.3,
+      "taskMs": 1028,
+      "scriptMs": 510.5,
+      "layoutMs": 107.8,
+      "styleMs": 9.6,
+      "layouts": 25,
+      "styles": 25,
+      "heapMB": 43.8,
+      "nodes": 71241,
+      "listeners": 227,
+      "main": {
+        "longTasks": 2,
+        "longTaskMs": 139,
+        "maxLongTaskMs": 75,
+        "tbtMs": 39,
+        "longFrames": 3,
+        "worstFrames": [
+          {
+            "ms": 78.5,
+            "styleLayoutMs": 0.1,
+            "scripts": [
+              {
+                "d": 75,
+                "forced": 0,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-DzT9sWYK.js"
+              }
+            ]
+          },
+          {
+            "ms": 73.9,
+            "styleLayoutMs": 6.4,
+            "scripts": [
+              {
+                "d": 63,
+                "forced": 10,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-DzT9sWYK.js"
+              }
+            ]
+          }
+        ]
+      },
+      "server": {
+        "/api/threads?includeArchived=N": {
+          "n": 2,
+          "headersMsMedian": 40.6,
+          "headersMsMax": 40.6,
+          "kib": 1651.2
+        },
+        "/api/optchat/prompt": {
+          "n": 1,
+          "headersMsMedian": 12.2,
+          "headersMsMax": 12.2,
+          "kib": 0
+        },
+        "/api/optchat/history?from=N": {
+          "n": 1,
+          "headersMsMedian": 3.1,
+          "headersMsMax": 3.1,
+          "kib": 184.3
+        },
+        "/api/optchat/threads": {
+          "n": 1,
+          "headersMsMedian": 47.1,
+          "headersMsMax": 47.1,
+          "kib": 16.7
+        },
+        "/api/artifacts": {
+          "n": 1,
+          "headersMsMedian": 10.3,
+          "headersMsMax": 10.3,
+          "kib": 69.1
+        },
+        "/api/optchat/view": {
+          "n": 1,
+          "headersMsMedian": 1.1,
+          "headersMsMax": 1.1,
+          "kib": 76.5
+        }
+      }
+    },
+    {
+      "olderPages": 10,
+      "run": 1,
+      "rows": 1172,
+      "echoMs": 99.3,
+      "turnMs": 1635,
+      "taskMs": 502.3,
+      "scriptMs": 253.6,
+      "layoutMs": 47.5,
+      "styleMs": 6.3,
+      "layouts": 12,
+      "styles": 12,
+      "heapMB": 44.8,
+      "nodes": 70325,
+      "listeners": 227,
+      "main": {
+        "longTasks": 1,
+        "longTaskMs": 70,
+        "maxLongTaskMs": 70,
+        "tbtMs": 20,
+        "longFrames": 2,
+        "worstFrames": [
+          {
+            "ms": 81.2,
+            "styleLayoutMs": 6.1,
+            "scripts": [
+              {
+                "d": 69,
+                "forced": 9,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-DzT9sWYK.js"
+              }
+            ]
+          },
+          {
+            "ms": 75.6,
+            "styleLayoutMs": 6.5,
+            "scripts": [
+              {
+                "d": 36,
+                "forced": 0,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-DzT9sWYK.js"
+              },
+              {
+                "d": 27,
+                "forced": 6,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-DzT9sWYK.js"
+              }
+            ]
+          }
+        ]
+      },
+      "server": {
+        "/api/threads?includeArchived=N": {
+          "n": 1,
+          "headersMsMedian": 46.1,
+          "headersMsMax": 46.1,
+          "kib": 825.6
+        },
+        "/api/optchat/prompt": {
+          "n": 1,
+          "headersMsMedian": 9.2,
+          "headersMsMax": 9.2,
+          "kib": 0
+        },
+        "/api/optchat/history?from=N": {
+          "n": 1,
+          "headersMsMedian": 1.7,
+          "headersMsMax": 1.7,
+          "kib": 184.1
+        }
+      }
+    },
+    {
+      "olderPages": 10,
+      "run": 2,
+      "rows": 1174,
+      "echoMs": 118.2,
+      "turnMs": 2586,
+      "taskMs": 755.1,
+      "scriptMs": 387.7,
+      "layoutMs": 78.3,
+      "styleMs": 6.9,
+      "layouts": 19,
+      "styles": 19,
+      "heapMB": 44.3,
+      "nodes": 70445,
+      "listeners": 227,
+      "main": {
+        "longTasks": 1,
+        "longTaskMs": 110,
+        "maxLongTaskMs": 110,
+        "tbtMs": 60,
+        "longFrames": 2,
+        "worstFrames": [
+          {
+            "ms": 120.1,
+            "styleLayoutMs": 7.1,
+            "scripts": [
+              {
+                "d": 105,
+                "forced": 10,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-DzT9sWYK.js"
+              }
+            ]
+          },
+          {
+            "ms": 54.3,
+            "styleLayoutMs": 13.6,
+            "scripts": [
+              {
+                "d": 33,
+                "forced": 9,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-DzT9sWYK.js"
+              }
+            ]
+          }
+        ]
+      },
+      "server": {
+        "/api/threads?includeArchived=N": {
+          "n": 1,
+          "headersMsMedian": 43.6,
+          "headersMsMax": 43.6,
+          "kib": 825.6
+        },
+        "/api/optchat/prompt": {
+          "n": 1,
+          "headersMsMedian": 15.4,
+          "headersMsMax": 15.4,
+          "kib": 0
+        },
+        "/api/optchat/history?from=N": {
+          "n": 1,
+          "headersMsMedian": 1.3,
+          "headersMsMax": 1.3,
+          "kib": 182.9
+        },
+        "/api/optchat/threads": {
+          "n": 1,
+          "headersMsMedian": 48.3,
+          "headersMsMax": 48.3,
+          "kib": 16.7
+        },
+        "/api/artifacts": {
+          "n": 1,
+          "headersMsMedian": 9.1,
+          "headersMsMax": 9.1,
+          "kib": 69.1
+        },
+        "/api/optchat/view": {
+          "n": 1,
+          "headersMsMedian": 0.9,
+          "headersMsMax": 0.9,
+          "kib": 77
+        }
+      }
+    }
+  ],
+  "pageErrors": []
+}

@@ -1,0 +1,571 @@
+{
+  "environment": {
+    "commit": "ca0678117bbd381cc5408444ac63cc801f229a6c",
+    "seededCommit": "ca0678117bbd381cc5408444ac63cc801f229a6c",
+    "chrome": "Google Chrome 156.0.8078.47",
+    "browserVersion": "156.0.8078.47",
+    "headless": true,
+    "node": "v26.8.1",
+    "cpus": 2,
+    "cpuModel": "Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz",
+    "memGiB": 3.8,
+    "kernel": "7.2.9",
+    "runs": 3,
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "phone": {
+      "width": 390,
+      "height": 844
+    },
+    "note": "server and Chrome share this VM; no GPU (software raster); CPU not throttled"
+  },
+  "scale": {
+    "name": "large",
+    "seed": 20261023,
+    "counts": {
+      "projects": 12,
+      "threads": 480,
+      "archived": 422,
+      "active": 58,
+      "chatUserTurnsSent": 3031,
+      "chatUserBytesSent": 1178280,
+      "chatEvents": 10414,
+      "chatEventsByType": {
+        "user-message": 3836,
+        "assistant-text": 3660,
+        "tool-call": 1459,
+        "tool-result": 1459
+      },
+      "chatReports": 780,
+      "chatTranscriptBytes": 14364228,
+      "longThread": "c6bb1c52-ffda-4e20-b1c7-9268979738a1",
+      "longThreadEvents": 4267,
+      "longThreadBytes": 5713253,
+      "artifacts": 189,
+      "threadArtifacts": 49,
+      "revisions": 958,
+      "comments": 128,
+      "commentBatchesSent": 25
+    },
+    "bytes": {
+      "state": 279925115,
+      "registry": 1515520,
+      "optchat": 173801472,
+      "artifacts": 3952640,
+      "threads": 99532800,
+      "usage": 765952
+    }
+  },
+  "serverStart": {
+    "ready": "http://127.0.0.1:7799",
+    "openMs": 3308,
+    "listenMs": 6206,
+    "pid": 19498,
+    "quietAfterListenMs": 29508
+  },
+  "send": [
+    {
+      "olderPages": 0,
+      "run": 0,
+      "rows": 112,
+      "echoMs": 40.5,
+      "turnMs": 6808.3,
+      "taskMs": 955.5,
+      "scriptMs": 621.2,
+      "layoutMs": 37.8,
+      "styleMs": 5.9,
+      "layouts": 50,
+      "styles": 50,
+      "heapMB": 17.1,
+      "nodes": 8967,
+      "listeners": 67,
+      "main": {
+        "longTasks": 1,
+        "longTaskMs": 62,
+        "maxLongTaskMs": 62,
+        "tbtMs": 12,
+        "longFrames": 1,
+        "worstFrames": [
+          {
+            "ms": 104.4,
+            "styleLayoutMs": 0.9,
+            "scripts": [
+              {
+                "d": 61,
+                "forced": 1,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              },
+              {
+                "d": 39,
+                "forced": 0,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              }
+            ]
+          }
+        ]
+      },
+      "server": {
+        "/api/optchat/prompt": {
+          "n": 1,
+          "headersMsMedian": 36,
+          "headersMsMax": 36,
+          "kib": 0
+        },
+        "/api/optchat/history?from=N": {
+          "n": 1,
+          "headersMsMedian": 1.5,
+          "headersMsMax": 1.5,
+          "kib": 190.7
+        },
+        "/api/threads?includeArchived=N": {
+          "n": 2,
+          "headersMsMedian": 34.1,
+          "headersMsMax": 34.1,
+          "kib": 1651.2
+        },
+        "/api/optchat/threads": {
+          "n": 1,
+          "headersMsMedian": 50.8,
+          "headersMsMax": 50.8,
+          "kib": 16.7
+        },
+        "/api/artifacts": {
+          "n": 1,
+          "headersMsMedian": 10,
+          "headersMsMax": 10,
+          "kib": 69.1
+        },
+        "/api/optchat/view": {
+          "n": 1,
+          "headersMsMedian": 0.9,
+          "headersMsMax": 0.9,
+          "kib": 76
+        }
+      }
+    },
+    {
+      "olderPages": 0,
+      "run": 1,
+      "rows": 111,
+      "echoMs": 38.3,
+      "turnMs": 7736.1,
+      "taskMs": 1061,
+      "scriptMs": 699.8,
+      "layoutMs": 43,
+      "styleMs": 6.2,
+      "layouts": 58,
+      "styles": 58,
+      "heapMB": 23.2,
+      "nodes": 9211,
+      "listeners": 66,
+      "main": {
+        "longTasks": 2,
+        "longTaskMs": 128,
+        "maxLongTaskMs": 78,
+        "tbtMs": 28,
+        "longFrames": 2,
+        "worstFrames": [
+          {
+            "ms": 82.6,
+            "styleLayoutMs": 1.4,
+            "scripts": [
+              {
+                "d": 50,
+                "forced": 0,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              },
+              {
+                "d": 27,
+                "forced": 1,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              }
+            ]
+          },
+          {
+            "ms": 81,
+            "styleLayoutMs": 0.8,
+            "scripts": [
+              {
+                "d": 77,
+                "forced": 2,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              }
+            ]
+          }
+        ]
+      },
+      "server": {
+        "/api/optchat/prompt": {
+          "n": 1,
+          "headersMsMedian": 8.9,
+          "headersMsMax": 8.9,
+          "kib": 0
+        },
+        "/api/optchat/history?from=N": {
+          "n": 1,
+          "headersMsMedian": 9.4,
+          "headersMsMax": 9.4,
+          "kib": 185.5
+        },
+        "/api/threads?includeArchived=N": {
+          "n": 3,
+          "headersMsMedian": 32.2,
+          "headersMsMax": 32.3,
+          "kib": 2476.9
+        },
+        "/api/optchat/threads": {
+          "n": 1,
+          "headersMsMedian": 49.3,
+          "headersMsMax": 49.3,
+          "kib": 16.7
+        },
+        "/api/artifacts": {
+          "n": 1,
+          "headersMsMedian": 8.6,
+          "headersMsMax": 8.6,
+          "kib": 69.1
+        },
+        "/api/optchat/view": {
+          "n": 1,
+          "headersMsMedian": 0.7,
+          "headersMsMax": 0.7,
+          "kib": 76.2
+        }
+      }
+    },
+    {
+      "olderPages": 0,
+      "run": 2,
+      "rows": 113,
+      "echoMs": 41.9,
+      "turnMs": 3226.2,
+      "taskMs": 504.1,
+      "scriptMs": 349.1,
+      "layoutMs": 16.3,
+      "styleMs": 3.4,
+      "layouts": 24,
+      "styles": 24,
+      "heapMB": 16.7,
+      "nodes": 9055,
+      "listeners": 67,
+      "main": {
+        "longTasks": 1,
+        "longTaskMs": 77,
+        "maxLongTaskMs": 77,
+        "tbtMs": 27,
+        "longFrames": 2,
+        "worstFrames": [
+          {
+            "ms": 80.3,
+            "styleLayoutMs": 1.1,
+            "scripts": [
+              {
+                "d": 75,
+                "forced": 3,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              }
+            ]
+          },
+          {
+            "ms": 71.4,
+            "styleLayoutMs": 1.1,
+            "scripts": [
+              {
+                "d": 43,
+                "forced": 0,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              },
+              {
+                "d": 24,
+                "forced": 1,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              }
+            ]
+          }
+        ]
+      },
+      "server": {
+        "/api/optchat/prompt": {
+          "n": 1,
+          "headersMsMedian": 13.5,
+          "headersMsMax": 13.5,
+          "kib": 0
+        },
+        "/api/optchat/history?from=N": {
+          "n": 1,
+          "headersMsMedian": 3.2,
+          "headersMsMax": 3.2,
+          "kib": 187.3
+        },
+        "/api/threads?includeArchived=N": {
+          "n": 1,
+          "headersMsMedian": 32.4,
+          "headersMsMax": 32.4,
+          "kib": 825.6
+        }
+      }
+    },
+    {
+      "olderPages": 10,
+      "run": 0,
+      "rows": 1170,
+      "echoMs": 224.9,
+      "turnMs": 3653.4,
+      "taskMs": 2814.8,
+      "scriptMs": 2469.1,
+      "layoutMs": 111.2,
+      "styleMs": 10.2,
+      "layouts": 25,
+      "styles": 25,
+      "heapMB": 81,
+      "nodes": 70857,
+      "listeners": 227,
+      "main": {
+        "longTasks": 16,
+        "longTaskMs": 2613,
+        "maxLongTaskMs": 658,
+        "tbtMs": 1813,
+        "longFrames": 14,
+        "worstFrames": [
+          {
+            "ms": 669.5,
+            "styleLayoutMs": 6.2,
+            "scripts": [
+              {
+                "d": 653,
+                "forced": 10,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              }
+            ]
+          },
+          {
+            "ms": 424.9,
+            "styleLayoutMs": 6.6,
+            "scripts": [
+              {
+                "d": 413,
+                "forced": 23,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              }
+            ]
+          }
+        ]
+      },
+      "server": {
+        "/api/optchat/prompt": {
+          "n": 1,
+          "headersMsMedian": 11.4,
+          "headersMsMax": 11.4,
+          "kib": 0
+        },
+        "/api/optchat/history?from=N": {
+          "n": 1,
+          "headersMsMedian": 1.5,
+          "headersMsMax": 1.5,
+          "kib": 184.3
+        },
+        "/api/optchat/threads": {
+          "n": 2,
+          "headersMsMedian": 57.8,
+          "headersMsMax": 57.8,
+          "kib": 33.4
+        },
+        "/api/artifacts": {
+          "n": 1,
+          "headersMsMedian": 8.5,
+          "headersMsMax": 8.5,
+          "kib": 69.1
+        },
+        "/api/optchat/view": {
+          "n": 1,
+          "headersMsMedian": 0.6,
+          "headersMsMax": 0.6,
+          "kib": 76.5
+        },
+        "/api/threads?includeArchived=N": {
+          "n": 1,
+          "headersMsMedian": 37.2,
+          "headersMsMax": 37.2,
+          "kib": 825.6
+        }
+      }
+    },
+    {
+      "olderPages": 10,
+      "run": 1,
+      "rows": 1172,
+      "echoMs": 238.9,
+      "turnMs": 1912.3,
+      "taskMs": 1454.3,
+      "scriptMs": 1298.3,
+      "layoutMs": 41.7,
+      "styleMs": 6.4,
+      "layouts": 11,
+      "styles": 11,
+      "heapMB": 90.5,
+      "nodes": 73290,
+      "listeners": 227,
+      "main": {
+        "longTasks": 6,
+        "longTaskMs": 1399,
+        "maxLongTaskMs": 626,
+        "tbtMs": 1099,
+        "longFrames": 6,
+        "worstFrames": [
+          {
+            "ms": 636.4,
+            "styleLayoutMs": 5.9,
+            "scripts": [
+              {
+                "d": 621,
+                "forced": 10,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              }
+            ]
+          },
+          {
+            "ms": 323.6,
+            "styleLayoutMs": 6.2,
+            "scripts": [
+              {
+                "d": 312,
+                "forced": 17,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              }
+            ]
+          }
+        ]
+      },
+      "server": {
+        "/api/optchat/prompt": {
+          "n": 1,
+          "headersMsMedian": 14.5,
+          "headersMsMax": 14.5,
+          "kib": 0
+        },
+        "/api/optchat/history?from=N": {
+          "n": 1,
+          "headersMsMedian": 1.2,
+          "headersMsMax": 1.2,
+          "kib": 184.1
+        }
+      }
+    },
+    {
+      "olderPages": 10,
+      "run": 2,
+      "rows": 1174,
+      "echoMs": 256.1,
+      "turnMs": 2863.8,
+      "taskMs": 2259.8,
+      "scriptMs": 1969.6,
+      "layoutMs": 84.1,
+      "styleMs": 7.3,
+      "layouts": 19,
+      "styles": 19,
+      "heapMB": 40.5,
+      "nodes": 70350,
+      "listeners": 227,
+      "main": {
+        "longTasks": 12,
+        "longTaskMs": 2072,
+        "maxLongTaskMs": 605,
+        "tbtMs": 1472,
+        "longFrames": 10,
+        "worstFrames": [
+          {
+            "ms": 616.2,
+            "styleLayoutMs": 6.5,
+            "scripts": [
+              {
+                "d": 600,
+                "forced": 10,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              }
+            ]
+          },
+          {
+            "ms": 325.7,
+            "styleLayoutMs": 6.5,
+            "scripts": [
+              {
+                "d": 313,
+                "forced": 17,
+                "invoker": "ReadableStreamDefaultReader.read.then",
+                "fn": "",
+                "src": "index-BmjhRc5Z.js"
+              }
+            ]
+          }
+        ]
+      },
+      "server": {
+        "/api/optchat/prompt": {
+          "n": 1,
+          "headersMsMedian": 13.6,
+          "headersMsMax": 13.6,
+          "kib": 0
+        },
+        "/api/optchat/history?from=N": {
+          "n": 1,
+          "headersMsMedian": 2.2,
+          "headersMsMax": 2.2,
+          "kib": 182.9
+        },
+        "/api/optchat/threads": {
+          "n": 1,
+          "headersMsMedian": 64.4,
+          "headersMsMax": 64.4,
+          "kib": 16.7
+        },
+        "/api/artifacts": {
+          "n": 1,
+          "headersMsMedian": 14.2,
+          "headersMsMax": 14.2,
+          "kib": 69.1
+        },
+        "/api/optchat/view": {
+          "n": 1,
+          "headersMsMedian": 6.7,
+          "headersMsMax": 6.7,
+          "kib": 77
+        },
+        "/api/threads?includeArchived=N": {
+          "n": 1,
+          "headersMsMedian": 34.1,
+          "headersMsMax": 34.1,
+          "kib": 825.6
+        }
+      }
+    }
+  ],
+  "pageErrors": []
+}

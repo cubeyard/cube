@@ -1,0 +1,50 @@
+{
+  "scale": "small",
+  "seed": 20261023,
+  "commit": "ca0678117bbd381cc5408444ac63cc801f229a6c",
+  "parameters": {
+    "projects": 2,
+    "threads": 12,
+    "archived": 0.5,
+    "chatTurns": 60,
+    "artifacts": 6,
+    "revisions": 3,
+    "longThread": 10,
+    "batch": 4
+  },
+  "seconds": 129,
+  "modelCalls": 348,
+  "counts": {
+    "projects": 2,
+    "threads": 12,
+    "archived": 8,
+    "active": 4,
+    "chatUserTurnsSent": 60,
+    "chatUserBytesSent": 29581,
+    "chatEvents": 209,
+    "chatEventsByType": {
+      "user-message": 83,
+      "assistant-text": 78,
+      "tool-call": 24,
+      "tool-result": 24
+    },
+    "chatReports": 22,
+    "chatTranscriptBytes": 202391,
+    "longThread": "88f4728c-4569-4482-8f39-579a3665a357",
+    "longThreadEvents": 136,
+    "longThreadBytes": 210011,
+    "artifacts": 5,
+    "threadArtifacts": 0,
+    "revisions": 10,
+    "comments": 6,
+    "commentBatchesSent": 1
+  },
+  "bytes": {
+    "state": 5523699,
+    "registry": 102400,
+    "optchat": 2777088,
+    "artifacts": 131072,
+    "threads": 2428928,
+    "usage": 24576
+  }
+}
