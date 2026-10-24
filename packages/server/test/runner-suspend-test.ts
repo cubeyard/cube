@@ -230,6 +230,8 @@ const fake = {
   suspendMs: 0,
   /** `machine_start` on a suspended machine: refused with capacity this many more times. */
   full: 0,
+  /** `machine_start` on a suspended machine answers after this long. */
+  startMs: 0,
   /** `machine_start` on a suspended machine: the snapshot is dropped. */
   drop: false,
   /** `get` answers (by operation id) for guest streams. */
@@ -279,6 +281,7 @@ async function answerCall(stream: BiStream, verb: ReturnType<typeof fromJsonStri
       if (!known) return refuse(Code.NOT_FOUND, "machine", "no such machine");
       if (known.status?.phase === MachineStatus_Phase.RUNNING) return reply({ case: "machine", value: known });
       if (known.status?.phase === MachineStatus_Phase.SUSPENDED) {
+        await delay(fake.startMs);
         if (fake.full > 0) { fake.full--; return refuse(Code.RESOURCE_EXHAUSTED, "capacity", "the runner hosts as many machines as it may; the machine stays suspended"); }
         const dropped = fake.drop;
         fake.drop = false;
@@ -422,13 +425,20 @@ try {
   await delay(IDLE * 2);
   assert.equal(await vms.suspendIfIdle(fresh(thread), idle), true);
   fake.full = 3;
+  // While a try is with the runner the slot is reserved (waking, no
+  // waiting); each refusal says it waits.
+  fake.startMs = 100;
   const woken = vms.guest(fresh(thread)).call("hello", {});
-  await delay(80);
+  for (const deadline = Date.now() + 5000; !fresh(thread).vm!.suspension?.waiting;) {
+    assert.ok(Date.now() < deadline, "a refused try says the wake waits");
+    await delay(10);
+  }
   assert.equal(fresh(thread).vm!.suspension?.state, "waking");
   assert.match(fresh(thread).vm!.suspension?.waiting ?? "", /^waiting for a free slot on runner node-vm-suspend/);
   await woken;
   assert.equal(fake.full, 0);
   assert.equal(fresh(thread).vm!.suspension, undefined, "resumed once a slot was free");
+  fake.startMs = 0;
   console.log("ok: with the runner full the wake waits (the thread says it waits for a free slot) and resumes once it can");
 
   // A call that comes during a suspend waits for it, then wakes the machine.
