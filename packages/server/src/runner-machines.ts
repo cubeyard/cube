@@ -466,7 +466,7 @@ export class RunnerMachines implements ThreadMachines {
     if (!(error instanceof RunnerError && error.code === "UNAVAILABLE")) return error;
     return new RunnerWait(`waiting for runner ${node}: it does not answer; this thread was `
       + `${thread.pinned ? "started on it by name" : "placed on it"} and stays there`
-      + (this.onVm(thread) ? "" : " (a host runner runs only while someone runs berth host)"), { cause: error });
+      + (this.onVm(thread) ? "" : " (a host runner runs only while someone runs berth host)"), { cause: error, unanswered: true });
   }
 
   private async boot(thread: Thread, options: StartOptions): Promise<MachineStart> {

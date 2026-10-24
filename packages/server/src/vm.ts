@@ -150,7 +150,10 @@ export function currentMachineEpoch(directory: string): number {
  * it now, or the runner that has (or may have) it does not answer. Not a
  * failure of the thread; cubed's recovery loop tries again. */
 export class RunnerWait extends Error {
-  constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "RunnerWait"; }
+  /** The runner does not answer (rather than being full): a start waits for
+   * it only so long (Conversations, RUNNER_WAIT_MS). */
+  readonly unanswered: boolean;
+  constructor(message: string, options?: ErrorOptions & { unanswered?: boolean }) { super(message, options); this.name = "RunnerWait"; this.unanswered = !!options?.unanswered; }
 }
 /** An error as a runner observation records it. */
 export function errorText(error: unknown): string {
