@@ -3,7 +3,8 @@
 OptChat is the user's one endless chat with cube, at `#/chat` (the UI's home).
 It is an interface, not a worker: it has no machine and no code, file or shell
 tools. It starts threads in projects (`spawn`), gives a thread that has reported
-more to do (`tell`), lists its threads (`threads`) and what it can start
+more to do (`tell`), lists its threads that are not archived (`threads`),
+searches its archived ones (`archived_threads`), lists what it can start
 (`projects`), reports the runners as cubed last heard from them (`runners`,
 read-only; see docs/runner-operations.md, "Observing runners"), reads one of
 its threads (`history`), diagnoses the machine of one that does not start
@@ -176,7 +177,7 @@ finishes in cubed). So every tool is read-only or keyed (`TOOL_REPLAY`):
 
 | tool | a second run |
 | --- | --- |
-| `zoom` `date` `projects` `runners` `threads` `history` `diagnose` `usage` `project_hooks` `artifact_read` | reads again |
+| `zoom` `date` `projects` `runners` `threads` `archived_threads` `history` `diagnose` `usage` `project_hooks` `artifact_read` | reads again |
 | `spawn` | `optchat:<call>:<task>`: the registry's creation table finds the same thread |
 | `tell` | `optchat:<call>`: Pi's submissions and Claude Code's table take it once; counted once against the tells |
 | `archive` | the call's task: its stored lines (see "Archiving") |
@@ -532,8 +533,8 @@ either:
   runner`, `machine error`, …). Archived threads are not listed, only
   counted (`3 archived not shown`), as are threads cubed no longer has; a
   thread archived while the page is open leaves the list on the next read.
-  Archiving keeps what it kept before, and OptChat's `threads` and `history`
-  tools still read archived threads. States are read like
+  Archiving keeps what it kept before; OptChat's `archived_threads` and
+  `history` tools still read archived threads. States are read like
   `history`: the stored run state, no agent opened, no lease taken, no
   machine waited for; one store slower than 2 s reads as `unknown`.
 - **What it does not say.** A turn that ended is not work done; an archived
@@ -545,7 +546,28 @@ either:
   while a thread moves and every 30 s otherwise (with the artifacts). A
   hidden page does no polling.
 
-OptChat's own `threads` tool lists the same threads with their state.
+OptChat's own `threads` tool lists the same open threads with their state.
+
+## Listing threads
+
+`threads` lists the threads the chat started that are not archived:
+working, turn ended, waiting, failed or with a machine starting, asleep or
+in error, newest spawn first. Archived threads are left out and only
+counted (`60 archived threads not listed; archived_threads searches
+them`): a long history of archived threads would bury the open ones, and an
+open thread holds a machine, so this list stays short.
+
+`archived_threads(query?, offset?, limit?)` searches the archived ones,
+newest spawn first: `query` is a case-insensitive part of a thread's id,
+title or project; a page holds `limit` matches (20 by default, at most 50)
+and its first line says which and where the next page starts
+(`archived threads 1-20 of 60, newest first; next: offset 20`). It reads
+only cubed's registry, never an archived thread's store. `history(id)` reads
+any of them, archived or not.
+
+Both list only threads in the chat's own record (`cube.optchat`'s
+`threads`); threads started in the UI or elsewhere are never listed. The UI
+(`GET /api/threads`, the overview) and the archive itself are unchanged.
 
 ## Images
 
@@ -943,7 +965,9 @@ artifact of a thread it started.
 - The transcript endpoint reads the whole history again at every new turn,
   and the run status scans every submission on each SSE frame. A long chat
   makes the transcript slow; the model's side does not grow.
-- The `threads` tool reads each thread's transcript to give its run state.
+- The `threads` tool reads each open thread's transcript to give its run
+  state; `archived_threads` filters the chat's archived threads in memory,
+  one registry read per thread the chat ever started.
 - `history`'s first read of a store after cubed starts (or after the store
   falls out of the last 32) parses every row once to number the messages; on
   a store of hundreds of MiB that takes a few hundred milliseconds, in slices.

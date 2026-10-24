@@ -4,7 +4,7 @@
 import { agents, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { releaseUnfinished, ThreadWorking, type Conversations, type ThreadReader } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
-import { THREAD_NOTE, ThreadFailure, type ObservedThread, type OptThreads } from "./optchat.ts";
+import { ARCHIVED_MAX, ARCHIVED_PAGE, THREAD_NOTE, ThreadFailure, type ObservedThread, type OptThreads } from "./optchat.ts";
 import { describeProjectHooks, findProject, writeProjectHooks } from "./project-hooks.ts";
 import { threadAgent, type Project, type Registry, type ResolvedRepositories, type Thread } from "./registry.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
@@ -134,14 +134,31 @@ export function readThreads(options: { registry: Registry; conversations: Thread
     : thread.vm?.suspension?.state === "waking"
     ? `its machine is being woken${thread.vm.suspension.waiting ? ` (${thread.vm.suspension.waiting})` : ""}` : "its machine is suspended (idle; it wakes when told)";
   return {
-    async describe(ids) {
+    async describe(ids, request) {
+      const known = ids.map(id => registry.getThread(id)).filter(thread => thread !== null);
+      const projectOf = (thread: Thread) => registry.getProject(thread.projectId)?.name ?? thread.projectId;
+      // Archived threads are searched apart: their history grows without
+      // bound and would bury the open ones. Their stores stay closed here.
+      if (request?.archived) {
+        const query = request.query?.trim().toLowerCase() ?? "";
+        const matches = known.filter(thread => thread.archived && (!query
+          || [thread.id, thread.title ?? "", projectOf(thread)].some(field => field.toLowerCase().includes(query))));
+        const offset = Math.max(0, request.offset ?? 0);
+        const limit = Math.min(Math.max(1, request.limit ?? ARCHIVED_PAGE), ARCHIVED_MAX);
+        const page = matches.slice(offset, offset + limit);
+        const what = `archived threads${query ? ` matching "${request.query!.trim()}"` : ""}`;
+        if (!page.length) return matches.length ? `no ${what} from ${offset + 1} on; there are ${matches.length}` : `no ${what}`;
+        const more = offset + page.length < matches.length ? `; next: offset ${offset + page.length}` : "";
+        return [`${what} ${offset + 1}-${offset + page.length} of ${matches.length}, newest first${more}`,
+          ...page.map(thread => `[${thread.id.slice(0, 8)}] ${projectOf(thread)} · ${thread.title ?? "untitled"} · archived`)].join("\n");
+      }
       const lines: string[] = [];
-      for (const id of ids) {
-        const thread = registry.getThread(id);
-        if (!thread) continue;
-        const project = registry.getProject(thread.projectId)?.name ?? thread.projectId;
+      for (const thread of known) {
+        if (thread.archived) continue;
+        const id = thread.id;
+        const project = projectOf(thread);
         let run = "";
-        if (!thread.archived && !conversations.starting(id) && (!(conversations.error(id) || conversations.waiting(id)) || conversations.agentOpen(id))) {
+        if (!conversations.starting(id) && (!(conversations.error(id) || conversations.waiting(id)) || conversations.agentOpen(id))) {
           try {
             // A listing reads: the live run from an agent already open, else
             // the stored one. It never opens an agent (which takes the
@@ -151,8 +168,11 @@ export function readThreads(options: { registry: Registry; conversations: Thread
             if (status) run = `, ${status.state}${status.waiting?.length && status.state !== "working" ? `, waiting on ${agents(status.waiting)}` : ""}`;
           } catch { /* the state says enough */ }
         }
-        lines.push(`[${id.slice(0, 8)}] ${project} · ${thread.title ?? "untitled"} · ${thread.archived ? "archived" : dormant(thread) ? sleepText(thread) : state(id)}${run}`);
+        lines.push(`[${id.slice(0, 8)}] ${project} · ${thread.title ?? "untitled"} · ${dormant(thread) ? sleepText(thread) : state(id)}${run}`);
       }
+      const archived = known.filter(thread => thread.archived).length;
+      if (archived && !lines.length) lines.push("no threads that are not archived");
+      if (archived) lines.push(`${archived} archived ${archived === 1 ? "thread" : "threads"} not listed; archived_threads searches them`);
       return lines.join("\n") || "no threads";
     },
     async observe(ids, options) {

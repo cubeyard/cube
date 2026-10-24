@@ -112,6 +112,7 @@ try {
     projects: { args: {} },
     runners: { args: {} },
     threads: { args: {} },
+    archived_threads: { args: { query: "one", limit: 5 } },
     history: { args: { id: THREAD.slice(0, 8) } },
     diagnose: { args: { id: THREAD.slice(0, 8) } },
     usage: { args: {} },
