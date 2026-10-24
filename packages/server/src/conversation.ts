@@ -31,6 +31,9 @@ const log = createLogger("threads");
 const INITIAL_REQUEST = "cube:initial";
 /** How long an idle round waits for the recovery loop's check of a machine. */
 const CHECK_WAIT_MS = 60_000;
+/** How long a start waits on a runner that does not answer before each try
+ * counts as a failed one (as long as a guest call waits for a wake). */
+const RUNNER_WAIT_MS = 30 * 60_000;
 /** Why a disk the release check let go is kept all the same. */
 /** The threads' part of cubed's close (Conversations.close). */
 export const THREADS_CLOSE_MS = 9_000;
@@ -113,6 +116,8 @@ export class Conversations {
    * start failed its one more try: a delivery retried under the same id
    * (an artifact comment, OptChat's replay) does not start it again. */
   private readonly retried = new Set<string>();
+  /** Since when a start of the thread has found its runner not answering. */
+  private readonly unansweredSince = new Map<string, number>();
   /** Told a Pi agent's usage just before the agent closes (usage-service.ts):
    * until it opens again, nothing else may read its store. */
   onUsage: ((id: string, state: UsageState) => void) | null = null;
@@ -210,15 +215,33 @@ export class Conversations {
         else await this.agent(id);
         this.failures.delete(id);
         this.waits.delete(id);
+        this.unansweredSince.delete(id);
         if (this.registry.getThread(id)?.retry) this.registry.clearFailures(id);
       } catch (error) {
         // An archive that ended is not this thread's failure.
         if (error instanceof ThreadArchiving || this.registry.getThread(id)?.archived !== false) return;
         const message = error instanceof Error ? error.message : String(error);
-        if (error instanceof RunnerWait) {
+        // The start of a thread not ready yet waits on a VM runner that does
+        // not answer for RUNNER_WAIT_MS; after that each try is a failed
+        // one, with the recovery loop's pause and limit. A ready thread
+        // (checked, or opened again after a restart) waits as long as it takes.
+        const unanswered = error instanceof RunnerWait && error.unanswered && !this.checks.has(id)
+          && this.registry.getThread(id)?.workspaceState !== "available";
+        if (!unanswered) this.unansweredSince.delete(id);
+        else if (!this.unansweredSince.has(id)) this.unansweredSince.set(id, this.now());
+        const waited = unanswered ? this.now() - this.unansweredSince.get(id)! : 0;
+        if (error instanceof RunnerWait && waited < RUNNER_WAIT_MS) {
           if (this.waits.get(id) !== message) log.info("waiting for a runner", { thread: id, reason: message });
           this.waits.set(id, message);
           this.failures.delete(id);
+          return;
+        }
+        if (waited) {
+          this.waits.delete(id);
+          const failure = `${message.replace(/^waiting for runner (\S+): it does not answer/, "runner $1 has not answered for " + Math.round(RUNNER_WAIT_MS / 60_000) + " min")}`;
+          if (this.failures.get(id) !== failure) log.warn("activation failed", { thread: id, error: failure });
+          this.failures.set(id, failure);
+          this.countFailure(id, failure);
           return;
         }
         this.waits.delete(id);
@@ -852,6 +875,7 @@ export class Conversations {
       this.failures.delete(id);
       this.downs.delete(id);
       this.waits.delete(id);
+      this.unansweredSince.delete(id);
       return released;
     } catch (error) {
       const message = `workspace release failed: ${error instanceof Error ? error.message : String(error)}`;
