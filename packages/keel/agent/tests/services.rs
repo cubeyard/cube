@@ -613,4 +613,16 @@ fn only_the_agent_account_and_root_are_served() {
     let (code, _, err) = cube_at(&other, "/workspace", &["service", "list"]);
     assert_eq!(code, 1);
     assert!(err.contains("only the agent account and root"), "{err}");
+    // A client slow to write its request still writes it whole and reads
+    // the refusal, not a broken pipe (CI's flake: the refusal came first).
+    let mut stream = UnixStream::connect(&other).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    stream
+        .write_all(b"{\"argv\":[\"service\",\"list\"],\"cwd\":\"/\"}\n")
+        .unwrap();
+    let refusal = std::io::read_to_string(stream).unwrap();
+    assert!(
+        refusal.contains("only the agent account and root"),
+        "{refusal}"
+    );
 }
