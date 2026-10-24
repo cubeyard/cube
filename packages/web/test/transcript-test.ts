@@ -1,6 +1,6 @@
 /** The web transcript reads only the neutral thread event model. */
 import assert from "node:assert/strict";
-import { picturePath, toolOpen, transcriptRows } from "../src/lib/transcript.ts";
+import { keepRows, picturePath, toolOpen, transcriptRows, type TranscriptRow } from "../src/lib/transcript.ts";
 import type { ThreadEvent, ThreadStatus } from "../src/lib/types.ts";
 
 const status = (state: ThreadStatus["state"]): ThreadStatus => ({ state, run: null, error: null });
@@ -90,4 +90,14 @@ assert.equal(picturePath("/workspace//x%20y.png"), "/workspace/x y.png");
 assert.equal(picturePath("https://example.com/a.png"), null);
 assert.equal(picturePath("//example.com/a.png"), null);
 assert.equal(picturePath("data:image/png;base64,AAAA"), null);
-console.log("ok: transcript rows pair calls with results, group agent text, summarize tool input, mark thread reports, keep the reader's folded and unfolded strips, and carry tool images and the pictures prose names");
+// A frame that changes one row keeps every other row as the same object.
+const frame = (output: string) => transcriptRows({ events: [...events.slice(0, 8), { ...events[8]!, output }, ...events.slice(9)] as ThreadEvent[], status: status("working") });
+const first = frame("partial");
+const kept = new Map(first.map(row => [row.id, row]));
+const second = keepRows(kept, frame("partial and more"));
+assert.deepEqual(second, frame("partial and more"), "the rows are the new frame's");
+assert.deepEqual(second.map((row, i) => row === first[i]), [true, true, true, true, true, false, true, true], "only the changed row is new");
+const withImage = (id: string): TranscriptRow => ({ kind: "user", id: "1", text: "hi", images: [{ id, mimeType: "image/png" }] });
+const replaced = withImage("b");
+assert.equal(keepRows(new Map([["1", withImage("a")]]), [replaced])[0], replaced, "a changed image is the new row's");
+console.log("ok: transcript rows keep unchanged rows across frames, pair calls with results, group agent text, summarize tool input, mark thread reports, keep the reader's folded and unfolded strips, and carry tool images and the pictures prose names");

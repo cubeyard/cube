@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { CHAT_BASE, errorText, fetchChatModels, fetchChatView, setChatModel } from "../lib/api.ts";
   import { providerLabel } from "../lib/agent.ts";
-  import { chatToolLine, latestReports, mentionsOf, resolveArtifact, resolveThread, rowKey, type NoteGroup } from "../lib/provenance.ts";
+  import { chatToolLine, indexThreads, latestReports, mentionsOf, resolveArtifact, resolveThread, rowKey, type NoteGroup } from "../lib/provenance.ts";
   import type { TranscriptRow } from "../lib/transcript.ts";
   import type { ArtifactListItem, ThreadModels, ThreadSummary } from "../lib/types.ts";
   import { ChatWork } from "../lib/work.svelte.ts";
@@ -50,14 +50,16 @@
   let wide = $state(matchMedia(WIDE).matches);
 
   // What the rows shown say they started and named, as cube knows it now.
-  let rows = $state<TranscriptRow[]>([]);
+  let rows = $state.raw<TranscriptRow[]>([]);
+  const known = $derived(indexThreads(work.overview, threads, threadsLoaded));
   const groups = $derived<NoteGroup[]>(mentionsOf(rows).map((mention) => ({
     row: mention.row,
-    threads: mention.threads.map((thread) => resolveThread(thread, work.overview, threads, threadsLoaded)),
+    threads: mention.threads.map((thread) => resolveThread(thread, known)),
     // An artifact cube cannot show (a link to one that is not there) gets no note.
     artifacts: mention.artifacts.map((key) => resolveArtifact(key, work.artifacts)).filter((item): item is ArtifactListItem => !!item),
     unstarted: mention.unstarted,
   })).filter((group) => group.threads.length || group.artifacts.length || group.unstarted.length));
+  const groupOf = $derived(new Map(groups.map((group) => [group.row, group])));
   // Inline, an artifact is already a link in the text it is named in: no note twice.
   const inline = $derived(new Map(groups.filter((group) => group.threads.length || group.unstarted.length)
     .map((group) => [group.row, { ...group, artifacts: [] }])));
@@ -68,7 +70,7 @@
     ...(counts.running ? [`${counts.running} running`] : []), ...(counts.failed ? [`${counts.failed} failed`] : [])].join(" · "));
   let open = $state<string | null>(null);
 
-  const titleOf = (short: string) => resolveThread({ short, project: null, title: null }, work.overview, threads, threadsLoaded).title;
+  const titleOf = (short: string) => resolveThread({ short, project: null, title: null }, known).title;
   const toolLine = (row: Extract<TranscriptRow, { kind: "tool" }>) => chatToolLine(row, titleOf);
 
   /** What a message's note in the margin holds, for its skip key. */
@@ -225,7 +227,7 @@
 <ChatIndex bind:this={index} {work} settings={chatSettings} />
 
 {#snippet reportLabel(from: string)}
-  {@const thread = resolveThread({ short: from, project: null, title: null }, work.overview, threads, threadsLoaded)}
+  {@const thread = resolveThread({ short: from, project: null, title: null }, known)}
   {#if thread.id && !thread.archived}<a class="report-name" href="#/t/{thread.id}">{thread.title ?? `[${from}]`}</a>
   {:else}<span class="report-name">{thread.title ?? `[${from}]`}</span>{/if}<span class="report-kind">· report</span>
 {/snippet}
@@ -238,7 +240,7 @@
     <!-- The margin comes after the whole conversation in reading and tab
          order: this key, shown only while focused, takes a keyboard or a
          screen reader from the message to its note and takes no room. -->
-    {@const group = groups.find((item) => item.row === rowKey(row))}
+    {@const group = groupOf.get(rowKey(row))}
     {#if group}
       <div class="note-skip-holder"><button type="button" class="note-skip" onclick={() => toNote(group.row)}>{skipText(group)}</button></div>
     {/if}
