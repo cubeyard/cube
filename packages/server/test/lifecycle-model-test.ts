@@ -132,7 +132,7 @@ for (const seed of seeds) {
       }
       for (const t of open()) {
         const sleep = fresh(t.id).vm?.suspension;
-        assert.ok(!(sleep?.state === "waking" && !sleep.waiting && !cubed.machines.wakeInFlight(fresh(t.id))), `I5: ${t.id.slice(0, 8)} has no waking without an owner`);
+        assert.ok(!(sleep?.state === "waking" && !sleep.waiting && !cubed.machines.wakeInFlight?.(fresh(t.id))), `I5: ${t.id.slice(0, 8)} has no waking without an owner`);
       }
       trace.push(`restart${cut ? ` (wake of ${cut.id.slice(0, 8)} cut short)` : ""}`);
       await quiet();

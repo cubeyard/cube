@@ -1,6 +1,7 @@
 /** Test only: a cubed's thread lifecycle over a stand-in `berth vm` (a
- * RunnerSession in this process) with the real Registry, RunnerMachines and
- * Conversations, Pi on a faux model, and each machine's guest the real guest
+ * RunnerSession in this process) with the real Registry and the thread
+ * runtime createCubed builds (thread-runtime.ts: its machines, its
+ * Conversations and their wake), Pi on a faux model, and each machine's guest the real guest
  * helper under a temporary root (local-guest.ts). The stand-in keeps berth's
  * slot rules (`holding_slots`: every machine that is not suspended or
  * retained; `capacity` on create and on resuming a suspended one) and
@@ -13,11 +14,12 @@ import path from "node:path";
 import { create } from "@bufbuild/protobuf";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { MachineSchema, MachineStatus_Phase as Phase, Runner_Kind, type Machine } from "../src/gen/runner_pb.js";
-import { Conversations } from "../src/conversation.ts";
+import type { Conversations } from "../src/conversation.ts";
 import { GuestTransportError, type GuestTransport } from "../src/guest-transport.ts";
 import { Registry, type Project, type Thread } from "../src/registry.ts";
-import { RunnerMachines } from "../src/runner-machines.ts";
 import { RunnerError, type MachineRef, type RunnerSession } from "../src/runner-session.ts";
+import { threadRuntime } from "../src/thread-runtime.ts";
+import type { ThreadMachines } from "../src/vm.ts";
 import { LocalGuestTransport } from "./local-guest.ts";
 
 export { Phase };
@@ -171,7 +173,7 @@ function sessionOf(berth: FakeBerth): RunnerSession {
 export const project: Project = { id: "p", name: "life", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] };
 
 /** A cubed process over a state directory: a new one is a restart. */
-export interface Cubed { conversations: Conversations; machines: RunnerMachines; close(): Promise<void> }
+export interface Cubed { conversations: Conversations; machines: ThreadMachines; close(): Promise<void> }
 
 export function lifecycle(root: string, options: { slots: number; idleMs?: number; wakeWaitMs?: number; kind?: "vm" | "host" }) {
   const faux = fauxProvider({ tokensPerSecond: 1_000_000 });
@@ -186,11 +188,11 @@ export function lifecycle(root: string, options: { slots: number; idleMs?: numbe
   const berth = new FakeBerth(path.join(root, "runner"), options.slots);
   const clock = { now: Date.now() };
   const policy = { policyFor: () => ({}) };
-  const start = (): Cubed => {
-    const machines = new RunnerMachines({ registry, threads: path.join(root, "threads"), session: () => berth.session(), policy, log: quiet,
-      templates: { enabled: false, ttlMs: 0 }, idleMs: options.idleMs ?? 60_000, now: () => clock.now, wakeRetryMs: 50, wakeWaitMs: options.wakeWaitMs ?? 600 });
-    const conversations = new Conversations({ registry, directory: path.join(root, "threads"), models, machines, now: () => clock.now });
-    machines.onWake = thread => conversations.activate(thread.id);
+  /** A cubed over the state; `wakeWaitMs` for this one only. */
+  const start = (restart: { wakeWaitMs?: number } = {}): Cubed => {
+    const { machines, conversations } = threadRuntime({ registry, threads: path.join(root, "threads"), models, now: () => clock.now,
+      runner: { session: () => berth.session(), policy, log: quiet, templates: { enabled: false, ttlMs: 0 }, idleMs: options.idleMs ?? 60_000,
+        wakeRetryMs: 50, wakeWaitMs: restart.wakeWaitMs ?? options.wakeWaitMs ?? 600 } });
     return { conversations, machines, close: () => conversations.close(2000) };
   };
   let requests = 0;

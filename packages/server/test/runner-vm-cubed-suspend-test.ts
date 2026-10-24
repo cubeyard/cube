@@ -275,7 +275,7 @@ faux.setResponses(Array.from({ length: 1000 }, () => async (request: { messages:
 }));
 const models = createModels();
 models.setProvider(faux.provider);
-const app = await createCubed({ state, models, claude: null, gateway: gatewayBin, skillSource: null, suspendIdleMs: IDLE_MS,
+const app = await createCubed({ state, models, claude: null, gateway: gatewayBin, skillSource: null, runner: { idleMs: IDLE_MS },
   secrets: [{ name: "github", hosts: ["github.com", "api.github.com"], value: async () => token }],
   portal: portalSettings({ CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_DOMAIN: "localhost", CUBED_PORTAL_PORT: String(portalPort) }) });
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));

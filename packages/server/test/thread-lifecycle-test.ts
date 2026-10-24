@@ -150,9 +150,8 @@ try {
   // A message comes while the runner does not answer: the agent takes it
   // (its run waits on its first guest call), then cubed stops.
   await cubed.close();
-  cubed = life.start();
+  cubed = life.start({ wakeWaitMs: 60_000 });
   berth.down = true;
-  cubed.machines["options"].wakeWaitMs = 60_000;
   await cubed.conversations.submit(b.id, "go on", "tell-b-1");
   await until("b's run waits for its machine", async () => (await stored(cubed, b.id))?.state === "working");
   await cubed.close();

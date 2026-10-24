@@ -11,16 +11,16 @@ import type { Models } from "@earendil-works/pi-ai";
 import { GitService, normalizeRepoUrl } from "@cube/git";
 import { NO_HOOKS, projectHooks, projectMachine, Registry, threadAgent, type Project, type ResolvedRepositories, type Runner, type Thread } from "./registry.ts";
 import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
-import { Conversations, THREADS_CLOSE_MS } from "./conversation.ts";
+import { THREADS_CLOSE_MS } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
 import type { TrustedRunnerHealth } from "./runner-types.ts";
 import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
 import { GatewaySupervisor, locateGateway } from "./gateway.ts";
 import { errorText, machineFor, vmSizes, type ThreadMachines } from "./vm.ts";
-import { RunnerMachines } from "./runner-machines.ts";
 import { registryCredentialRoute } from "./runner-credentials.ts";
 import { closeRunnerSessions, routeCredentials } from "./runner-session.ts";
-import { ProtocolMachines, runnerHealth as protocolRunnerHealth, runnerProtocol } from "./runner-select.ts";
+import { runnerHealth as protocolRunnerHealth, runnerProtocol } from "./runner-select.ts";
+import { threadRuntime, type RunnerSeams } from "./thread-runtime.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
@@ -248,9 +248,12 @@ export async function createCubed(options: {
   claude?: readonly string[] | null;
   /** Claude Code process tuning, for tests. */
   claudeOptions?: { idleMs?: number; stopGraceMs?: number };
-  /** Tests: how long a protocol-4 machine must be idle before the recovery
-   * loop suspends it (default IDLE_MS, 5 min; runner-vm-cubed-suspend-test). */
-  suspendIdleMs?: number;
+  /** Tests: RunnerMachines' seams: the runner session (a stand-in berth),
+   * how long a machine must be idle before the recovery loop suspends it
+   * (default IDLE_MS, 5 min; runner-vm-cubed-suspend-test), a wake's waits. */
+  runner?: RunnerSeams;
+  /** Tests: the clock of the threads' idle times and retry pauses. */
+  now?: () => number;
   /** Thread machines; default: each thread on its runner's protocol
    * (protocol 4: `berth vm` and `berth host`; protocol 3 is refused).
    * Offline tests pass local guests, or a factory given the registry. */
@@ -287,10 +290,8 @@ export async function createCubed(options: {
   const egress = await serveEgress(path.join(run, "egress.sock"), policy);
   let gateway: GatewaySupervisor | null = null;
   const threadsDirectory = path.join(options.state, "threads");
-  let machines = typeof options.machines === "function" ? options.machines(registry, threadsDirectory) : options.machines;
-  /** Protocol-4 machines, whose suspended machines wake through the conversation. */
-  let p4: RunnerMachines | null = null;
-  if (!machines) {
+  const given = typeof options.machines === "function" ? options.machines(registry, threadsDirectory) : options.machines;
+  if (!given) {
     const credential = path.join(run, "credential.sock");
     gateway = new GatewaySupervisor({ decide: path.join(run, "egress.sock"), credential, extraArgs: gatewayTestArgs(process.env),
       ...(options.gateway === undefined ? {} : { binary: options.gateway }) });
@@ -298,13 +299,11 @@ export async function createCubed(options: {
     // Protocol-4 runners' credential streams go to the gateway's proxy.
     const supervised = gateway;
     routeCredentials(registryCredentialRoute({ registry, threads: threadsDirectory, socket: () => supervised.running ? credential : null }));
-    // Each thread on its runner's protocol (runner-select.ts).
-    p4 = new RunnerMachines({ registry, threads: threadsDirectory, policy, idleMs: options.suspendIdleMs });
-    machines = new ProtocolMachines({ registry, p4 });
   }
   let portal: Portal | null = null;
   let artifacts: Artifacts | null = null;
-  const conversations = new Conversations({ registry, directory: path.join(options.state, "threads"), models, machines, claude: claudeCommand ? {
+  const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, ...given ? { machines: given } : {}, ...options.now ? { now: options.now } : {},
+    runner: { policy, ...options.runner }, claude: claudeCommand ? {
     command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
   } : null, portal: thread => portal!.guest(thread),
   // A Pi thread writes and reads its own artifacts; a body may come from a workspace file.
@@ -313,9 +312,6 @@ export async function createCubed(options: {
     tools: artifactTools({ artifacts: artifacts!, author: { kind: "thread", thread: thread.id }, agent: "pi", key,
       readable: async () => [{ kind: "thread", thread: thread.id }], readFile: file => readFile(file, ARTIFACT_LIMITS.body) }),
   }) });
-  // A suspended machine wakes by the thread's activation: a start, and the
-  // resume hooks when its runner started it from its disk (P7-5).
-  if (p4) p4.onWake = thread => conversations.activate(thread.id);
   portal = new Portal({ settings: options.portal === undefined ? portalSettings() : options.portal, directory: path.join(options.state, "portal"),
     registry, machines, archiving: id => conversations.archivingNow(id) });
   const git = new GitService(path.join(options.state, "repositories"));

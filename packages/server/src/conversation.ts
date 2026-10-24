@@ -66,6 +66,10 @@ export class ThreadArchiving extends Error {
   constructor() { super("thread is being archived"); this.name = "ThreadArchiving"; }
 }
 export { releaseUnfinished };
+export interface ConversationsOptions {
+  registry: Registry; directory: string; models: Models; machines: ThreadMachines; claude?: ClaudeRuntime | null; now?: () => number;
+  portal?: (thread: Thread) => GuestPortal; hostTools?: (thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"];
+}
 export class Conversations {
   private readonly registry: Registry;
   private readonly directory: string;
@@ -125,8 +129,7 @@ export class Conversations {
    * until it opens again, nothing else may read its store. */
   onUsage: ((id: string, state: UsageState) => void) | null = null;
   /** `claude` is null when this host has no Claude Code to start. */
-  constructor(options: { registry: Registry; directory: string; models: Models; machines: ThreadMachines; claude?: ClaudeRuntime | null; now?: () => number;
-    portal?: (thread: Thread) => GuestPortal; hostTools?: (thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"] }) {
+  constructor(options: ConversationsOptions) {
     this.registry = options.registry; this.directory = options.directory; this.models = options.models;
     this.hostTools = options.hostTools ?? null;
     this.machines = options.machines; this.claude = options.claude ?? null;
