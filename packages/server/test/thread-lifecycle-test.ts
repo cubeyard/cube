@@ -31,12 +31,15 @@
  *       not after the starts stopped, not after a restart.
  *   R13 OptChat's reads of that thread say its wake failed (threads,
  *       the overview) and its watcher reports it; an idle sleeping thread
- *       reads as before. */
+ *       reads as before.
+ *   R13b a failed wake not yet given up reads as failed after a restart
+ *       too, and its failures in a row are one episode (`retry.since`). */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Thread } from "../src/registry.ts";
+import { ThreadFailure } from "../src/optchat.ts";
 import { readThreads } from "../src/optchat-threads.ts";
 import { recoveryStep } from "../src/thread-recovery.ts";
 import { lifecycle, Phase, until, type Cubed } from "./lifecycle-fixture.ts";
@@ -368,6 +371,33 @@ try {
     assert.equal((await reader.observe!([sleeper.id])).get(sleeper.id)?.state, "completed");
     assert.equal(await reader.events(sleeper.id).then(() => "no failure", (error: Error) => error.message), "no failure", "an idle sleeping thread is no failure");
     console.log("ok: R13 OptChat's threads, overview and watcher say a sleeping thread's wake failed; an idle sleeping thread reads as before");
+
+    // ---------------------------------------------------------------- R13b
+    const once = life.thread();
+    await cubed.conversations.activate(once.id);
+    await done(once.id);
+    clock.now += 40 * 60_000;
+    for (let round = 0; round < 3; round++) await cubed.conversations.suspendIdle();
+    berth.failResumes.set(vmOf(once.id), "the snapshot could not be restored");
+    await cubed.conversations.submit(once.id, "more", "tell-once").catch(() => {});
+    assert.equal(fresh(once.id).retry?.failures, 1, "one failed wake, cube still retries");
+    const episode = fresh(once.id).retry?.since;
+    assert.equal(episode, fresh(once.id).retry?.at, "the episode is its first failed try");
+    const failure = async (r: typeof reader) => (await r.events(once.id).then(() => null, (error: unknown) => error)) as ThreadFailure | null;
+    const before = await failure(reader);
+    assert.deepEqual([before instanceof ThreadFailure, before?.episode, before?.retrying, before?.waking], [true, String(episode), true, true]);
+    await cubed.close();
+    cubed = life.start();
+    const restarted = readThreads({ registry, conversations: cubed.conversations });
+    assert.match(await restarted.describe([once.id]), /its machine is suspended and waking it failed: .*the snapshot could not be restored/, "after a restart too");
+    assert.equal((await restarted.observe!([once.id])).get(once.id)?.state, "machine error");
+    const after = await failure(restarted);
+    assert.deepEqual([after?.message, after?.episode, after?.retrying], [before?.message, String(episode), true], "the same failure, the same episode");
+    clock.now += 60_000;
+    await cubed.conversations.recover();
+    assert.deepEqual([fresh(once.id).retry?.failures, fresh(once.id).retry?.since], [2, episode], "its stored run tries the wake again: one episode");
+    berth.failResumes.delete(vmOf(once.id));
+    console.log("ok: R13b a failed wake not yet given up reads as failed after a restart too, as one episode of failures in a row");
     assert.deepEqual(berth.violations, []);
   } finally {
     await cubed.close().catch(() => {});
