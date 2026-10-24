@@ -22,8 +22,8 @@ if [ -n "${CI:-}" ]; then
   else
     pnpm --filter @cube/web exec playwright install --with-deps chromium webkit
   fi
-  if ! has_browsers webkit; then
-    echo "FAIL: WebKit for Playwright is missing in CI" >&2
+  if ! has_browsers chromium webkit; then
+    echo "FAIL: Chromium or WebKit for Playwright is missing in CI" >&2
     exit 1
   fi
 fi
