@@ -22,6 +22,7 @@ import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWork
   type ThreadMachines } from "./vm.ts";
 import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
+import { threadCondition, type ThreadCondition } from "./thread-condition.ts";
 import { needsDemand, recoveryStep, releaseUnfinished, retriesExhausted, START_TRIES } from "./thread-recovery.ts";
 import type { ModelSelection } from "./models.ts";
 
@@ -49,7 +50,7 @@ const RUNNER_KEPT = "the release check was clean, but the runner kept the disk (
  * machine, opens an agent or waits for an activation, so code given only a
  * ThreadReader (OptChat's watcher, `threads`, `history`, the overview)
  * cannot do any of that (docs/thread-lifecycle.md). */
-export type ThreadReader = Pick<Conversations, "live" | "storedHistory" | "agentOpen" | "error" | "down" | "waiting" | "starting" | "archivingNow" | "owner">;
+export type ThreadReader = Pick<Conversations, "live" | "storedHistory" | "agentOpen" | "condition" | "owner">;
 /** Archive refused: the thread's agent is running. Nothing is interrupted. */
 export class ThreadWorking extends Error {
   /** `waiting`: no turn runs, but the agent's background agents do. */
@@ -65,7 +66,6 @@ export class ThreadWorking extends Error {
 export class ThreadArchiving extends Error {
   constructor() { super("thread is being archived"); this.name = "ThreadArchiving"; }
 }
-export { releaseUnfinished };
 export interface ConversationsOptions {
   registry: Registry; directory: string; models: Models; machines: ThreadMachines; claude?: ClaudeRuntime | null; now?: () => number;
   portal?: (thread: Thread) => GuestPortal; hostTools?: (thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"];
@@ -200,6 +200,12 @@ export class Conversations {
   starting(id: string): boolean { return this.activations.has(id) && !this.checks.has(id); }
   /** Whether an archive of the thread is under way (or deciding). */
   archivingNow(id: string): boolean { return this.archiveHolds.has(id); }
+  /** The thread's condition, which every reader renders (thread-condition.ts). */
+  condition(thread: Thread): ThreadCondition {
+    const id = thread.id;
+    return threadCondition(thread, { archiving: this.archivingNow(id), starting: this.starting(id), agentOpen: this.agentOpen(id),
+      error: this.error(id), down: this.down(id), waiting: this.waiting(id) });
+  }
   /** Boots the thread's machine, provisions it once and opens its agent.
    * Concurrent calls share one activation. */
   activate(id: string): Promise<void> {

@@ -31,7 +31,7 @@ const faux = fauxProvider({ tokensPerSecond: 100_000 });
 const models = createModels();
 models.setProvider(faux.provider);
 const model = { provider: faux.getModel().provider, id: faux.getModel().id };
-const READER = ["live", "storedHistory", "agentOpen", "error", "down", "waiting", "starting", "archivingNow", "owner"];
+const READER = ["live", "storedHistory", "agentOpen", "condition", "owner"];
 
 // ------------------------------------------------ 1. a reader can only read
 {

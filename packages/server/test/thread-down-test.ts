@@ -90,6 +90,11 @@ try {
   const record = (await adapter.history(id))!;
   assert.equal(record.failure, down, "OptChat's thread record shows it");
   assert.equal(record.transcript?.status.error, down, "with its stored transcript");
+  // Every reader says the same: the row, `threads`, `history` and the overview.
+  const title = app.registry.getThread(id)!.title;
+  assert.equal(await adapter.describe([id]), `[${id.slice(0, 8)}] empty · ${title} · error: ${down}`, "OptChat's threads says it is down");
+  assert.equal(record.machine, `error: ${down}`);
+  assert.equal((await adapter.observe!([id])).get(id)?.state, "agent error", "the overview says it failed");
 
   // Before its machine boots again (its failed Harness still cached), every
   // caller is told why, not Pi's "close and reopen it", and nothing is sent.
@@ -126,6 +131,8 @@ try {
   row = await listed(id);
   assert.equal(row.state, "error");
   assert.equal(row.error, down);
+  assert.equal(await adapter.describe([id]), `[${id.slice(0, 8)}] empty · ${title} · error: ${down}`);
+  assert.equal((await adapter.observe!([id])).get(id)?.state, "agent error");
   // Nor does a recovery round, or a second reboot.
   await conversations.boot();
   machines.reboot(app.registry.getThread(id)!);

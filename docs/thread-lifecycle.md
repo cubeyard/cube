@@ -126,7 +126,41 @@ no wake.
   loop, plus once per new message; a release is retried until it succeeds.
 - I9 An archive answers within seconds; it never waits for a slot.
 
+- I10 Every reader of a thread says the same failure, state and wait.
+
 `RunnerMachines.start` refuses an archived thread, whoever asks.
+
+## Reading a thread
+
+A reader does not rank a thread's facts itself. `threadCondition`
+(thread-condition.ts) is the one ranking, over the row and what this process
+knows (`Conversations.condition`: an archive, an activation, an open
+agent, the last try's failure, a down agent, a wait for a runner):
+
+```text
+archived ▸ archiving (an archive, or an unfinished release) ▸ down ▸ starting
+  ▸ failed (no agent goes on, or a wake failed) ▸ ready (agent open)
+  ▸ waiting (for a runner) ▸ new ▸ ready
+```
+
+A failure is the last try's in this process, or else the row's
+(`workspaceState` `failed`, which outlives a restart). `starting`, `failed`,
+`waiting` and `ready` carry the machine's sleep. Each
+reader renders the condition with an exhaustive switch:
+
+| condition | API row (`threadRow`) | `threads`, `history` | overview | watcher, agent closed |
+|---|---|---|---|---|
+| archiving | `ready`, or `error` with its failure | being archived | being archived | `archiving` |
+| down | `error` | error: … | agent error | a failure |
+| failed | `error` | error: …, or "waking it failed: …" | machine error | a failure |
+| starting | `starting`, or `error` after a failed try | starting its machine … | starting | a failure, if a try failed |
+| waiting | `starting` | starting its machine, … | waiting for a runner | a failure, unless it sleeps |
+| ready | `ready`, or `error` after a later check | ready …, or its sleep | its stored run | its stored run |
+| new | `ready` | not started | not started | its stored run |
+
+`ThreadReader` holds `condition`, not the facts it ranks, so code given a
+reader cannot rank them again. The web labels the row's `state` with the
+machine's sleep (packages/web/src/lib/thread-state.ts).
 
 ## Tests
 
@@ -144,9 +178,16 @@ no wake.
 - `packages/server/test/lifecycle-model-test.ts`: seeded random runs of
   creates (some whose machine can never be made), messages and their
   replays, reads, idle and recovery rounds, restarts (with wakes cut short)
-  and archives, checking I1–I6, I8, I9 and I11 after every step (I4
+  and archives, checking I1–I6 and I8–I11 after every step (I4
   as: the runner holds no more than the registry counts, the registry no
-  more than the slots; I11: the registry's SQL count is `holdsSlot`'s).
+  more than the slots; I10: the row, `threads`, `history` and the overview
+  of each thread whose condition holds still while read; I11: the
+  registry's SQL count is `holdsSlot`'s).
+- `packages/server/test/thread-condition-test.ts`: every kind of
+  condition, in the literal words of each reader (the API's row, `threads`,
+  `history`, the overview and the watcher), with the cases where they
+  disagreed before; `thread-down-test.ts` the same for a down agent through
+  createCubed.
 - `packages/server/test/machine-sleep-test.ts`: every `SleepEvent` from
   every sleep against the table above, the SQL slot rule against
   `holdsSlot` and the runner's summary through a real Registry, the

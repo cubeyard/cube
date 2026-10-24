@@ -33,6 +33,7 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Me
 import { Conversations } from "../src/conversation.ts";
 import { OptChat } from "../src/optchat.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
+import { threadCondition } from "../src/thread-condition.ts";
 import type { Registry, Thread } from "../src/registry.ts";
 import type { ThreadEvents, ThreadStatus, ThreadTranscript } from "../src/thread-events.ts";
 import type { HistoryPage } from "../src/thread-history.ts";
@@ -194,7 +195,8 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
   const conversations = {
     activate: async (id: string) => { activated.push(id); open.add(id); },
     agentOpen: (id: string) => open.has(id),
-    archivingNow: () => false, error: () => null, waiting: () => null, starting: () => false, owner: () => null, down: () => null,
+    condition: (thread: Thread) => threadCondition(thread, { archiving: false, starting: false, agentOpen: open.has(thread.id), error: null, down: null, waiting: null }),
+    owner: () => null,
     storedHistory: async (id: string) => page(id),
     history: async (id: string) => transcriptOf(id),
     submit: async (id: string, text: string) => { submitted.push(`${id}:${text}`); },

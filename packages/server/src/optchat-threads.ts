@@ -2,12 +2,14 @@
  * from the UI, on a runner from the global pool (or the runner the user
  * named: the only way onto a host runner), with its own machine. */
 import { agents, CLAUDE_PROVIDER } from "./claude-agent.ts";
-import { releaseUnfinished, ThreadWorking, type Conversations, type ThreadReader } from "./conversation.ts";
+import { ThreadWorking, type Conversations, type ThreadReader } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
 import { ARCHIVED_MAX, ARCHIVED_PAGE, THREAD_NOTE, ThreadFailure, type ObservedThread, type OptThreads } from "./optchat.ts";
 import { describeProjectHooks, findProject, writeProjectHooks } from "./project-hooks.ts";
 import { threadAgent, type Project, type Registry, type ResolvedRepositories, type Thread } from "./registry.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
+import type { MachineSleep } from "./machine-sleep.ts";
+import { failureOf, type ThreadCondition } from "./thread-condition.ts";
 import { retriesExhausted } from "./thread-recovery.ts";
 
 /** How long the overview waits for one thread's stored state. */
@@ -111,29 +113,8 @@ const disk = (vm: Thread["vm"]) => !vm ? "no machine disk" : vm.discarded ? "mac
  * ThreadReader, they cannot start or wake a machine, open an agent or wait
  * for an activation: they read cubed's own state, an agent already open, or
  * the thread's store. */
-export function readThreads(options: { registry: Registry; conversations: ThreadReader }): Pick<OptThreads, "describe" | "observe" | "history" | "events"> {
+export function readThreads(options: { registry: Registry; conversations: ThreadReader }): Required<Pick<OptThreads, "describe" | "observe" | "history" | "events">> {
   const { registry, conversations } = options;
-  // A failure is the last try's: cubed's recovery loop tries again, and an
-  // agent still open on the machine goes on with its run.
-  const state = (id: string) => {
-    const error = conversations.error(id);
-    const waiting = conversations.waiting(id);
-    if (conversations.archivingNow(id)) return "being archived";
-    if (waiting && !error) return conversations.agentOpen(id) ? `ready (its runner does not answer now: ${waiting})` : `starting its machine, ${waiting}`;
-    if (!error) return conversations.starting(id) ? "starting its machine" : "ready";
-    if (conversations.starting(id)) return `starting its machine again (the last try failed: ${error})`;
-    return conversations.agentOpen(id) ? `ready (a later check of its machine failed: ${error})` : `error: ${error}`;
-  };
-  /** A machine that is suspended, or being woken (by a message, a portal
-   * connection, an archive's check of its disk, or the recovery loop for a
-   * stored run that did not finish). Reading the thread in the
-   * UI does not wake it; listing it reads what cubed stored. */
-  const dormant = (thread: Thread | null) => !!thread && !thread.archived && !!thread.vm?.suspension;
-  // A wake that failed is said, whatever the suspension still records: the
-  // machine sleeps, and the thread's agent cannot go on until it wakes.
-  const sleepText = (thread: Thread) => conversations.error(thread.id) ? `its machine is suspended and waking it failed: ${conversations.error(thread.id)}`
-    : thread.vm?.suspension?.state === "waking"
-    ? `its machine is being woken${thread.vm.suspension.waiting ? ` (${thread.vm.suspension.waiting})` : ""}` : "its machine is suspended (idle; it wakes when told)";
   return {
     async describe(ids, request) {
       const known = ids.map(id => registry.getThread(id)).filter(thread => thread !== null);
@@ -158,8 +139,9 @@ export function readThreads(options: { registry: Registry; conversations: Thread
         if (thread.archived) continue;
         const id = thread.id;
         const project = projectOf(thread);
+        const condition = conversations.condition(thread);
         let run = "";
-        if (!conversations.starting(id) && (!(conversations.error(id) || conversations.waiting(id)) || conversations.agentOpen(id))) {
+        if (condition.kind === "ready" || condition.kind === "new") {
           try {
             // A listing reads: the live run from an agent already open, else
             // the stored one. It never opens an agent (which takes the
@@ -169,7 +151,7 @@ export function readThreads(options: { registry: Registry; conversations: Thread
             if (status) run = `, ${status.state}${status.waiting?.length && status.state !== "working" ? `, waiting on ${agents(status.waiting)}` : ""}`;
           } catch { /* the state says enough */ }
         }
-        lines.push(`[${id.slice(0, 8)}] ${project} · ${thread.title ?? "untitled"} · ${dormant(thread) ? sleepText(thread) : state(id)}${run}`);
+        lines.push(`[${id.slice(0, 8)}] ${project} · ${thread.title ?? "untitled"} · ${conditionText(condition)}${run}`);
       }
       const archived = known.filter(thread => thread.archived).length;
       if (archived && !lines.length) lines.push("no threads that are not archived");
@@ -185,10 +167,7 @@ export function readThreads(options: { registry: Registry; conversations: Thread
         if (!thread) return null;
         const project = { id: thread.projectId, name: registry.getProject(thread.projectId)?.name ?? thread.projectId };
         // An archived thread's last run is read only when asked: its store is closed.
-        let run = thread.archived ? (options?.archivedRuns ? null : "archived") : conversations.archivingNow(id) ? "being archived"
-          : conversations.starting(id) ? "starting" : conversations.waiting(id) && !conversations.agentOpen(id) ? "waiting for a runner"
-          : conversations.error(id) && (!conversations.agentOpen(id) || dormant(thread)) ? "machine error"
-          : thread.workspaceState === "failed" ? "machine failed" : null;
+        let run = thread.archived ? (options?.archivedRuns ? null : "archived") : observedText(conversations.condition(thread));
         if (!run) {
           let timer: ReturnType<typeof setTimeout> | undefined;
           try {
@@ -209,6 +188,7 @@ export function readThreads(options: { registry: Registry; conversations: Thread
       const thread = registry.getThread(id);
       if (!thread) return null;
       const vm = thread.vm;
+      const condition = conversations.condition(thread);
       // An archived thread's workspace state stays "releasing"; only its failure says more.
       const facts = [
         ...(!thread.archived || thread.workspaceState === "failed" ? [`workspace ${thread.workspaceState}${thread.workspaceError ? `: ${thread.workspaceError}` : ""}`] : []),
@@ -218,10 +198,7 @@ export function readThreads(options: { registry: Registry; conversations: Thread
       ];
       const record = {
         project: registry.getProject(thread.projectId)?.name ?? thread.projectId, title: thread.title, archived: thread.archived,
-        machine: thread.archived ? null : (conversations.error(id) || conversations.waiting(id) || conversations.starting(id) || thread.workspaceState === "available") ? state(id)
-          : thread.workspaceState === "allocating" ? "not started" : thread.workspaceState,
-        facts, agentOpen: conversations.agentOpen(id),
-        failure: conversations.error(id) ?? conversations.down(id) ?? (thread.workspaceState === "failed" ? thread.workspaceError : null),
+        machine: thread.archived ? null : conditionText(condition), facts, agentOpen: conversations.agentOpen(id), failure: failureOf(condition),
       };
       try { return { ...record, transcript: await conversations.storedHistory(id, request), unreadable: null }; }
       catch (error) { return { ...record, transcript: null, unreadable: error instanceof Error ? error.message : String(error) }; }
@@ -231,7 +208,8 @@ export function readThreads(options: { registry: Registry; conversations: Thread
       // failure to start; the archive tool answers for it.
       const gone = () => {
         const thread = registry.getThread(id);
-        return !thread || thread.archived ? null : conversations.archivingNow(id) || releaseUnfinished(thread) ? "archiving" as const : false;
+        const kind = thread ? conversations.condition(thread).kind : "archived";
+        return kind === "archived" ? null : kind === "archiving" ? "archiving" as const : false;
       };
       const left = gone();
       if (left !== false) return left;
@@ -243,19 +221,18 @@ export function readThreads(options: { registry: Registry; conversations: Thread
       // machine found; without, the watcher reads the stored run and looks
       // again next round.
       if (!conversations.agentOpen(id)) {
-        // A wait for a runner counts as a start not made yet: reported once
-        // it lasts. A sleeping machine's wait for a slot is not one; a wake
-        // that failed is.
         const thread = registry.getThread(id);
-        const failure = dormant(thread) ? conversations.error(id) : conversations.error(id) ?? conversations.waiting(id);
-        if (!failure) return "stored";
+        const condition = thread && conversations.condition(thread);
+        const failure = condition && startFailure(condition);
+        if (!thread || !condition || !failure) return "stored";
         const now = gone();
         if (now !== false) return now;
         // A sleeping machine's wake fails again and again over a thread's
         // life: its counted tries (`retry`) are one episode until a try
         // succeeds. A start's failure keeps the one report it always had.
-        const since = dormant(thread) && conversations.error(id) && thread?.retry?.since;
-        throw new ThreadFailure(failure, since ? String(since) : null, !thread || !retriesExhausted(thread), dormant(thread));
+        const sleep = sleepOf(condition);
+        const since = sleep && failureOf(condition) && thread.retry?.since;
+        throw new ThreadFailure(failure, since ? String(since) : null, !retriesExhausted(thread), !!sleep);
       }
       try { return await conversations.live(id) ?? "stored"; }
       catch (error) {
@@ -265,4 +242,60 @@ export function readThreads(options: { registry: Registry; conversations: Thread
       }
     },
   };
+}
+
+const sleepOf = (condition: ThreadCondition): MachineSleep | null => "sleep" in condition ? condition.sleep : null;
+
+/** A machine that is suspended, or being woken (by a message, a portal
+ * connection, an archive's check of its disk, or the recovery loop for a
+ * stored run that did not finish). Reading the thread does not wake it. A
+ * wake that failed is said, whatever the sleep still records: the machine
+ * sleeps, and the thread's agent cannot go on until it wakes. */
+const sleepText = (sleep: MachineSleep, failure: string | null) => failure ? `its machine is suspended and waking it failed: ${failure}`
+  : sleep.state === "waking" ? `its machine is being woken${sleep.waiting ? ` (${sleep.waiting})` : ""}` : "its machine is suspended (idle; it wakes when told)";
+
+/** The condition in `threads` and `history`. A failure is the last try's:
+ * cubed's recovery loop tries again, and an agent still open on the
+ * machine goes on with its run. */
+function conditionText(condition: ThreadCondition): string {
+  switch (condition.kind) {
+    case "archived": return "archived";
+    case "archiving": return condition.failure ? `being archived (the last try failed: ${condition.failure})` : "being archived";
+    case "down": return `error: ${condition.failure}`;
+    case "failed": return condition.sleep ? sleepText(condition.sleep, condition.failure) : `error: ${condition.failure}`;
+    case "starting": return condition.sleep ? sleepText(condition.sleep, condition.failure)
+      : condition.failure ? `starting its machine again (the last try failed: ${condition.failure})`
+      : condition.waiting ? `starting its machine, ${condition.waiting}` : "starting its machine";
+    case "waiting": return condition.sleep ? sleepText(condition.sleep, null) : `starting its machine, ${condition.waiting}`;
+    case "ready": return condition.sleep ? sleepText(condition.sleep, condition.failure)
+      : condition.failure ? `ready (a later check of its machine failed: ${condition.failure})`
+      : condition.waiting ? `ready (its runner does not answer now: ${condition.waiting})` : "ready";
+    case "new": return "not started";
+  }
+}
+
+/** The condition in the overview, or null: its stored run says more. */
+function observedText(condition: ThreadCondition): string | null {
+  switch (condition.kind) {
+    case "archived": return "archived";
+    case "archiving": return "being archived";
+    case "down": return "agent error";
+    case "failed": return "machine error";
+    case "starting": return "starting";
+    case "waiting": return "waiting for a runner";
+    case "ready": case "new": return null;
+  }
+}
+
+/** What the watcher reports as a start that failed, for a thread whose
+ * agent is not open. A wait for a runner counts as a start not made yet:
+ * reported once it lasts. A sleeping machine's wait for a slot is not one;
+ * a wake that failed is. */
+function startFailure(condition: ThreadCondition): string | null {
+  switch (condition.kind) {
+    case "down": case "failed": return condition.failure;
+    case "starting": return condition.failure ?? (condition.sleep ? null : condition.waiting);
+    case "waiting": return condition.sleep ? null : condition.waiting;
+    case "archived": case "archiving": case "ready": case "new": return null;
+  }
 }
