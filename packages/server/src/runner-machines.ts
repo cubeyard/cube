@@ -36,10 +36,14 @@
  * of disk, a failed save) keeps the machine running.
  *
  * A thread whose runner was enrolled with protocol 3 (runner-select.ts
- * `retiredRunner`) is never contacted: its start, guest calls, diagnosis
- * and discard are refused with PROTOCOL_3_RETIRED, its release succeeds at
- * once and counts the disk of a machine that was allocated as kept, and
- * any other way to its runner fails closed in `session`. */
+ * `retiredRunner`) is never contacted. `start`, `guest`, `release`,
+ * `discard`, `diagnose`, `startupLog`, `invalidateTemplate`, `suspended`
+ * and `settleWake` check it first: a start, guest call, diagnosis or
+ * discard is refused with PROTOCOL_3_RETIRED, a release succeeds at once
+ * and counts the disk of a machine that was allocated as kept, the rest
+ * answer as for a machine that never ran. Every other path to its runner
+ * fails closed in `session`. protocol3-port-test.ts pins both, member by
+ * member. */
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -215,8 +219,10 @@ export class RunnerMachines implements ThreadMachines {
     this.activity = new MachineActivity(options.now);
   }
 
-  /** The thread's runner is one cubed never contacts (runner-select.ts). */
-  private retired(thread: Thread): boolean { return retiredRunner(this.options.registry.runner(thread.id)); }
+  /** The thread's runner is one cubed never contacts (runner-select.ts).
+   * Protected only so protocol3-port-test.ts can model a member that
+   * forgot to ask, which `session` must still refuse. */
+  protected retired(thread: Thread): boolean { return retiredRunner(this.options.registry.runner(thread.id)); }
   private session(thread: Thread): RunnerSession {
     const admission = this.options.registry.runner(thread.id);
     if (!admission) throw new Error("thread runner allocation is missing");
@@ -265,7 +271,7 @@ export class RunnerMachines implements ThreadMachines {
   touch(thread: Thread): void { this.activity.touch(thread.id); }
 
   /** Whether the thread's machine is suspended (or waking). */
-  suspended(thread: Thread): boolean { return !!this.options.registry.getThread(thread.id)?.vm?.suspension; }
+  suspended(thread: Thread): boolean { return !this.retired(thread) && !!this.options.registry.getThread(thread.id)?.vm?.suspension; }
 
   /** Before a guest call or a dial: a suspend under way ends first, and a
    * suspended machine is woken. */
@@ -338,6 +344,7 @@ export class RunnerMachines implements ThreadMachines {
    * the next recovery round checks it like any running machine. A runner
    * that does not answer leaves it for the next round. */
   async settleWake(thread: Thread): Promise<void> {
+    if (this.retired(thread)) return;
     const id = thread.id;
     if (this.wakeInFlight(thread)) return;
     const current = this.options.registry.getThread(id);

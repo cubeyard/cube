@@ -23,6 +23,7 @@ OFFLINE_TESTS=(
   packages/server/test/berth-banner-test.ts
   packages/server/test/gateway-pids-test.ts
   packages/server/test/protocol3-history-test.ts
+  packages/server/test/protocol3-port-test.ts
   packages/server/test/runner-probe-test.ts
   packages/server/test/runner-observe-test.ts
   packages/server/test/api-test.ts
