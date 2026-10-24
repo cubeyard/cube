@@ -631,8 +631,18 @@ export class Registry {
   }
   getThread(id: string): Thread | null { return this.parse(this.db.prepare("SELECT data FROM thread WHERE id=?").get(id)); }
   listThreads(): Thread[] { return this.db.prepare("SELECT data FROM thread ORDER BY rowid DESC").all().map(row => this.parse<Thread>(row)!); }
-  saveThread(thread: Thread): void {
-    this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify(thread), thread.id);
+  /** Renames the thread, in one IMMEDIATE transaction that changes only its
+   * title; with `from`, only while the title is still `from` (spawn's
+   * default, unless the user renamed it since). True when it was written. */
+  renameThread(threadId: string, title: string | null, from?: string | null): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const thread = this.getThread(threadId);
+      const renamed = !!thread && (from === undefined || thread.title === from);
+      if (renamed) this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, title }), threadId);
+      this.db.exec("COMMIT");
+      return renamed;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   /** The thread a VM belongs to. */
   threadByVm(vmId: string): Thread | null {
@@ -644,8 +654,7 @@ export class Registry {
   }
   /** Changes the thread's machine record (provisioning tries, retention);
    * its sleep changes only by `applySleep`. */
-  updateThreadVm(threadId: string, patch: Partial<Pick<ThreadVm, "provisionAttempt" | "retain" | "retainReason" | "discarded" | "preparation" | "build" | "hooks" | "startup"
-    | "notice">>): Thread {
+  updateThreadVm(threadId: string, patch: Partial<Pick<ThreadVm, "provisionAttempt" | "retain" | "retainReason" | "discarded" | "preparation" | "build" | "hooks" | "startup">>): Thread {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const thread = this.getThread(threadId);

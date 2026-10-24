@@ -77,7 +77,8 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         commits, runnerId === undefined ? {} : { runnerId });
       // The title comes from the task alone, unless the user renamed it since.
       const title = task.task.replace(/\s+/g, " ").slice(0, 80) || null;
-      if (thread.title === text.replace(/\s+/g, " ").slice(0, 80) && thread.title !== title) registry.saveThread(thread = { ...thread, title });
+      const spawned = text.replace(/\s+/g, " ").slice(0, 80);
+      if (title !== spawned && registry.renameThread(thread.id, title, spawned)) thread = { ...thread, title };
       void conversations.activate(thread.id);
       return { id: thread.id, title: thread.title ?? "untitled" };
     },

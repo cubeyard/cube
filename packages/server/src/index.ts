@@ -828,7 +828,7 @@ export async function createCubed(options: {
           return json(result.body, result.status);
         }
         if (!parts[3] && method === "DELETE") return json({ ok: true, ...await conversations.archive(id) });
-        if (!parts[3] && method === "PATCH") { registry.saveThread({ ...thread, title: text("title").slice(0, 200) }); return json({ ok: true }); }
+        if (!parts[3] && method === "PATCH") { registry.renameThread(id, text("title").slice(0, 200)); return json({ ok: true }); }
         if (parts[3] === "history" && method === "GET") return json(windowed(await conversations.history(id), url.searchParams));
         // `cube service` services in the thread's machine; never starts it.
         if (parts[3] === "services" && parts.length === 4 && method === "GET") {

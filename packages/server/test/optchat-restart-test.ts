@@ -114,7 +114,7 @@ async function open(machines: CountedMachines) {
       const text = claude ? `run while [ ! -e ${claudeGate} ]; do sleep 0.05; done\nsay claude held done` : task.task;
       const thread = app.registry.threadByRequest("p", requestId)
         ?? app.registry.createThread("p", requestId, claude ? claudeModel : piModel, text, claude ? "claude-code" : "pi", undefined, { runnerId: runnerOf[task.task]! });
-      if (thread.title !== task.task) app.registry.saveThread({ ...thread, title: task.task });
+      app.registry.renameThread(thread.id, task.task);
       void app.conversations.activate(thread.id);
       return { id: thread.id, title: task.task };
     },

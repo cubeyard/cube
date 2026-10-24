@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
@@ -261,11 +262,12 @@ try {
   assert.equal(machines.attempts.get(stuck), startsBefore, "a release to finish is never a start");
   assert.equal(conversations.error(stuck), "workspace release failed: the runner is unreachable");
   // The recovery loop waits 30 s after a failed try (thread-recovery.ts): let it pass.
-  const failed = app.registry.getThread(stuck)!;
-  assert.equal(failed.retry?.failures, 1, "the failed release is counted");
+  assert.equal(app.registry.getThread(stuck)!.retry?.failures, 1, "the failed release is counted");
   await conversations.boot();
   assert.equal(app.registry.getThread(stuck)!.archived, false, "not retried before its pause");
-  app.registry.saveThread({ ...failed, retry: { ...failed.retry!, at: failed.retry!.at - 30_000 } });
+  const sqlite = new DatabaseSync(path.join(state, "registry.sqlite"));
+  sqlite.prepare("UPDATE thread SET data=json_set(data,'$.retry.at',json_extract(data,'$.retry.at')-30000) WHERE id=?").run(stuck);
+  sqlite.close();
   await conversations.boot();
   assert.equal(app.registry.getThread(stuck)!.archived, true, "the recovery round finishes the release");
   assert.equal(conversations.error(stuck), null);

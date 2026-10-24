@@ -31,12 +31,12 @@ try {
   assert.match(thread.vm?.vmId ?? "", /^[0-9a-f]{16}$/, "a thread gets its machine's id at creation");
   assert.match(thread.vm?.placeholders.github ?? "", /^cube_ph_github_[A-Za-z0-9]{22}$/);
   assert.equal(registry.threadByVm(thread.vm!.vmId)?.id, thread.id);
-  assert.equal(registry.updateThreadVm(thread.id, { provisionAttempt: 2 }).vm?.provisionAttempt, 2);
-  registry.saveThread(thread);
+  const updated = registry.updateThreadVm(thread.id, { provisionAttempt: 2 });
+  assert.equal(updated.vm?.provisionAttempt, 2);
   assert.equal(registry.availableRunners().length, 0);
   assert.throws(() => registry.createThread("other", "racing-project", model, "race"), /no free thread machine/);
   registry.close(); registry = new Registry(filename);
-  assert.deepEqual(registry.createThread("project", "request", model, "one"), thread);
+  assert.deepEqual(registry.createThread("project", "request", model, "one"), updated);
   assert.throws(() => registry.createThread("project", "request", model, "two"), /conflicts/);
   assert.equal(registry.initialPrompt(thread.id), "one");
   const base = { remote: "https://github.com/example/project.git", ref: "refs/heads/develop", oid: "a".repeat(40) };

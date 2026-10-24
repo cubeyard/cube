@@ -9,7 +9,10 @@
  *   T3  `wakeAsked` reserves a slot only when one is free, as a new thread's
  *       placement does, and refuses an archived thread;
  *   T4  rows keep the shape older cubeds wrote and read, both ways;
- *   T5  `updateThreadVm` cannot write a sleep (a compile error). */
+ *   T5  no other registry write can set a sleep or its notice (a compile
+ *       error): `updateThreadVm` takes neither, and no whole-row write exists;
+ *   T6  a rename changes only the title, so it keeps a sleep written after
+ *       its caller read the row, and the runner's summary. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -113,6 +116,20 @@ assert.equal(registry.runnerSlots().free, 0);
 assert.throws(() => registry.createThread(project.id, "d", model, "hello"), /no free thread machine/, "and no placement counts on a's slot");
 console.log("ok: T3 a wake reserves a slot only when one is free");
 
+// ---------------------------------------------------------------- T6
+const read = registry.getThread(b)!;
+registry.applySleep(b, events.suspended, NOW);
+const slots = registry.runnerSlots();
+assert.equal(registry.renameThread(b, "renamed"), true);
+assert.deepEqual([registry.getThread(b)!.title, sleepOf(b)], ["renamed", { state: "suspended", at: 9, memoryBytes: 128 }],
+  "a rename after a stale read keeps the sleep written since");
+assert.equal(read.vm?.suspension, undefined, "the caller's read was from before the sleep");
+assert.deepEqual(registry.runnerSlots(), slots, "and the slots it frees");
+assert.equal(registry.renameThread(b, "spawned", "hello"), false, "renamed since: the default title is not written");
+assert.equal(registry.getThread(b)!.title, "renamed");
+assert.equal(registry.renameThread("missing", "x"), false);
+console.log("ok: T6 a rename changes only the title");
+
 // ---------------------------------------------------------------- T4
 registry.applySleep(b, { type: "suspended", at: 7, memoryBytes: 32 }, NOW);
 registry.close();
@@ -134,9 +151,13 @@ console.log("ok: T4 rows keep the shape older cubeds write and read");
 export function onlyApplySleepWritesASleep(r: Registry) {
   // @ts-expect-error the sleep changes only by applySleep
   r.updateThreadVm("t", { suspension: { state: "suspended", at: 1 } });
+  // @ts-expect-error the notice changes only with a `resumed` event
+  r.updateThreadVm("t", { notice: { text: "restarted", at: 1 } });
+  // @ts-expect-error no write of a whole row, whose sleep would be the caller's
+  r.saveThread(r.getThread("t")!);
   // @ts-expect-error a suspended machine waits for nothing
   const contradiction: MachineSleep = { state: "suspended", at: 1, waiting: WAIT };
   return contradiction;
 }
-console.log("ok: T5 updateThreadVm cannot write a sleep, and a suspended sleep cannot wait (typecheck)");
+console.log("ok: T5 only applySleep writes a sleep or its notice, and a suspended sleep cannot wait (typecheck)");
 fs.rmSync(root, { recursive: true, force: true });

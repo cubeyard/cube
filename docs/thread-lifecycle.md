@@ -49,7 +49,10 @@ cubed records only `suspension` (`suspended`, `waking`, `waking` +
 `Registry.applySleep` is the only writer: it applies the event in one
 IMMEDIATE transaction with the runner's summary, so a sleep cannot be
 written in a combination the table lacks (`suspended` with `waiting`), or
-without its slot counted. `holdsSlot` is the slot rule, and
+without its slot counted. Its notice changes only with `resumed`. No other
+registry write sets either: `updateThreadVm` takes neither, and none writes
+a whole row from a caller's copy (a title changes by `renameThread`, which
+reads the row in its own transaction). `holdsSlot` is the slot rule, and
 `HOLDS_SLOT_SQL` the same rule for the registry's counts
 (machine-sleep-test, lifecycle-model-test I11). `waking` without `waiting` holds a slot. It is a
 reservation, taken like a new thread's (`wakeAsked`, in one
@@ -147,8 +150,9 @@ no wake.
 - `packages/server/test/machine-sleep-test.ts`: every `SleepEvent` from
   every sleep against the table above, the SQL slot rule against
   `holdsSlot` and the runner's summary through a real Registry, the
-  persisted shape both ways, and (typecheck) that `updateThreadVm` cannot
-  write a sleep.
+  persisted shape both ways, that a rename keeps a sleep written after its
+  caller read the row, and (typecheck) that neither `updateThreadVm` nor a
+  whole-row write can set a sleep or its notice.
 - Both run over `lifecycle-fixture.ts`: the real Registry and the thread
   runtime createCubed builds (`thread-runtime.ts`: RunnerMachines,
   Conversations and the wake between them), a stand-in `berth vm` with
