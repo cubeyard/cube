@@ -51,7 +51,7 @@
   // The plain "no answer" case needs no detail line; anything else (a 500
   // from /api/state, say) prints what the host said.
   let loadUnreachable = $state(true);
-  let threads = $state<ThreadSummary[]>([]);
+  let threads = $state.raw<ThreadSummary[]>([]);
   let threadsLoaded = $state(false);
   const activeThreads = $derived(threads.filter((thread) => !thread.archived));
   let newThreadDialog = $state<NewThreadDialog>();
@@ -104,7 +104,8 @@
     try {
       const fresh = await fetchThreads(true);
       if (!threadPolls.accept(ticket)) return;
-      threads = fresh;
+      // An unchanged list (a 304) is the same array: nothing to redo.
+      if (fresh !== threads) threads = fresh;
       threadsLoaded = true;
       failedPolls = 0;
       if (threadId && fresh.find((thread) => thread.id === threadId)?.archived) {
