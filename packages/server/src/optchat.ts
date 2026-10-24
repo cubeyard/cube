@@ -183,6 +183,22 @@ export const THREAD_NOTE = "(This thread was started by OptChat, the user's chat
   + "If you stop before the task is done, say plainly what is left and what you are waiting for.)";
 
 /** Where OptChat's threads come from: cube's projects and threads. */
+/** A thread whose machine fails to start or wake, as `events` rejects:
+ * `episode` names a wake's failed tries in a row (the first one's time,
+ * kept across restarts), so the watcher reports each episode once (a
+ * start's failure, with none, once per thread); `retrying`:
+ * cubed tries again on its own; `waking`: its machine is asleep. */
+export class ThreadFailure extends Error {
+  readonly episode: string | null;
+  readonly retrying: boolean;
+  readonly waking: boolean;
+  constructor(message: string, episode: string | null, retrying: boolean, waking: boolean) {
+    super(message);
+    this.name = "ThreadFailure";
+    this.episode = episode; this.retrying = retrying; this.waking = waking;
+  }
+}
+
 export interface OptThreads {
   /** Projects, models and capacity a new thread can use, as text. */
   projects(): Promise<string>;
@@ -200,7 +216,8 @@ export interface OptThreads {
    * while its archive (or a release left unfinished) goes on; "stored"
    * while its agent is not open (its machine starting, suspended or being
    * woken): nothing is started for a watcher, whose report comes from
-   * `history`. */
+   * `history`. Rejects while its machine fails to start or wake, with a
+   * ThreadFailure when cubed counts those tries. */
   events(id: string): Promise<ThreadEvents | null | "archiving" | "stored">;
   /** What cubed has of a thread, read only: its own record beside a page of
    * the agent's stored transcript, which may disagree. null: no such thread. */
@@ -520,6 +537,7 @@ export class OptChat {
    * (archived in the UI, say), its stored run is read once more, so a run
    * that settled just before is not lost. */
   private readonly seenOpen = new Set<string>();
+  /** Failure reports handed to the chat (by request id) in this process. */
   private readonly startReported = new Set<string>();
   /** When each thread's machine was first seen failing to start, until it starts. */
   private readonly startFailing = new Map<string, number>();
@@ -1406,23 +1424,27 @@ export class OptChat {
         catch (error) {
           // cubed retries a machine that failed to start (a lost guest, a
           // lease not yet let go), and most come up on a later try: only a
-          // failure that lasts is reported, once per thread, as one cubed
+          // failure that lasts is reported, once per episode of failed tries
+          // (once per thread when cubed names none), saying whether cubed
           // still retries. The next round watches it again.
           const message = error instanceof Error ? error.message : String(error);
+          const failure = error instanceof ThreadFailure ? error : null;
           const since = this.startFailing.get(id) ?? Date.now();
           this.startFailing.set(id, since);
           const lasted = Date.now() - since;
-          if (lasted >= (this.options.limits?.startGraceMs ?? START_GRACE_MS) && !this.startReported.has(id) && !this.closing) {
-            this.startReported.add(id);
+          const requestId = failure?.episode ? `report:${id}:failure:${failure.episode}` : `report:${id}:start`;
+          if (lasted >= (this.options.limits?.startGraceMs ?? START_GRACE_MS) && !this.startReported.has(requestId) && !this.closing) {
+            this.startReported.add(requestId);
+            const what = failure?.waking ? "its machine failed to wake" : "failed to start";
             // Not handed over: a later round says it again (once, by its request id).
-            void this.send(`[${short(id)}] failed to start for ${Math.round(lasted / 1000)} s; cubed keeps retrying: ${message}`, `report:${id}:start`)
-              .catch(() => { this.startReported.delete(id); });
+            void this.send(`[${short(id)}] ${what} for ${Math.round(lasted / 1000)} s${failure?.retrying === false ? "" : "; cubed keeps retrying"}: ${message}`, requestId)
+              .catch(() => { this.startReported.delete(requestId); });
           }
           this.watchers.delete(id);
           return null;
         }
         // Started (or gone): a later failure's grace starts again. Its report
-        // keeps the request id, so a thread reports a failure to start once.
+        // keeps the request id, so each episode is reported once.
         this.startFailing.delete(id);
         // An archive may still be refused: the next round looks again.
         if (events === "archiving") { this.watchers.delete(id); return null; }
