@@ -34,7 +34,8 @@ Rust tests, the real `berth host` with cubed (`runner-host-test.ts`,
 cube-gateway (`gateway-test.ts`).
 
 It also runs `berth vm` (runner protocol 4) with keel machines on
-Linux with KVM and on macOS with HVF: `runner-vm-test.ts` (the guest channel,
+Linux with KVM and on macOS with HVF (when a change needs this native gate,
+and on which host, is decided by risk; see AGENTS.md): `runner-vm-test.ts` (the guest channel,
 the Workspace contract, network, credentials, portal, templates, diagnosis)
 and `runner-vm-cubed-test.ts` (cubed's real code with `berth vm` as the
 pool). They need `CUBE_TEST_BERTH_QEMU` and `CUBE_TEST_BERTH_QEMU_IMG`

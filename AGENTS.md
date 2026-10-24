@@ -68,13 +68,25 @@ of it (it uses that host's own gh/git logins).
 Node ≥26, pnpm pinned in package.json, Rust pinned in rust-toolchain.toml.
 `bash scripts/setup-dev.sh` bootstraps a Linux development account. Run
 `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm build`. New offline Node tests
-belong in `scripts/test-offline.sh`. Runner, gateway and VM changes also need
-`scripts/test-node-transport.sh`'s real-VM runs: `berth vm` with
-`CUBE_TEST_BERTH_VM=required` and the `CUBE_TEST_BERTH_*` paths
-(DEVELOPING.md), on Linux with KVM and on macOS with HVF. Mocks are not
-runner acceptance.
-keel kernel changes need `packages/keel/kernel/build.sh` for both
-architectures and a boot under KVM and HVF.
+belong in `scripts/test-offline.sh`.
+
+Choose further tests by risk, not by which package a change touches:
+
+- Platform-independent changes (including most runner, gateway and VM code
+  whose behavior does not depend on the host) are covered by the thread's
+  own tests and CI.
+- Run a native gate (`scripts/test-node-transport.sh`'s real-VM runs: `berth
+  vm` with `CUBE_TEST_BERTH_VM=required` and the `CUBE_TEST_BERTH_*` paths,
+  DEVELOPING.md; or a keel kernel build and boot) only for a concrete risk
+  in VM, OS, filesystem or host integration, on the host where that risk
+  lives, and say what the risk is.
+- Run it on both Linux/KVM and macOS/HVF only with a separately stated
+  reason the change can behave differently across the two.
+- Reuse evidence that still applies (an earlier native run of the same
+  code); when landing, validate only the delta since that evidence.
+
+Mocks are not runner acceptance: a change that does need a native gate is
+not accepted on mocks.
 Inspect rendered UI at desktop/phone sizes for appearance changes; behavior
 changes to the chat or transcript need a `pnpm test:browser` scenario.
 
