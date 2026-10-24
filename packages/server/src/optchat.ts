@@ -28,7 +28,7 @@ import { countCut, markSent, RESTART_LIMIT, SendsDoc, settleSends } from "./pi-s
 import { boundedOutput, CHAT_OUTPUT_TOKENS } from "./optchat-output.ts";
 import { piReports, reportText as errorText } from "./pi-report.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
-import { PENDING_ID, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
+import { PENDING_ID, STEER_LOST, type ThreadAcceptance, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
 import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
 import type { Artifacts } from "./artifact-service.ts";
 import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
@@ -111,7 +111,10 @@ what the user asked, tell it to go on and to wait for such things
 itself; otherwise tell the user what it needs. Between two messages of
 the user a thread takes at most ${TELLS} tells from you; once they are
 spent, ask the user, and do not start another thread to go on instead.
-tell(id, message) gives a thread that has reported more to do.
+tell(id, message) gives a thread that has reported more to do. A thread
+that is still working gets it after its current tool call, in the same
+turn; its next report covers it. Tell a working thread only to correct
+or add to its task, not to ask how it is doing.
 history(id) reads one of your threads without changing it: cubed's state
 for it beside its latest answer and conversation. Use it when a report is
 missing or short, or contradicts what threads shows; say what disagrees
@@ -218,8 +221,9 @@ export interface OptThreads {
   /** `runner`: a runner's node id or id; the thread starts there and stays
    * (a host runner takes no other threads). Absent: the pool chooses. */
   spawn(task: { project: string; task: string; model?: string | undefined; runner?: string | undefined }, requestId: string, signal?: AbortSignal): Promise<{ id: string; title: string }>;
-  /** A message to a thread; refused while it works. */
-  tell(id: string, text: string, requestId: string): Promise<void>;
+  /** A message to a thread. One that works gets it steered into its running
+   * turn; the answer says what the thread did with it (void: started). */
+  tell(id: string, text: string, requestId: string): Promise<ThreadAcceptance | void>;
   /** One line per thread, in the order given: its state and title. By
    * default only threads not archived, then how many archived ones were
    * left out; `archived`: only archived ones matching `query` (id, title or
@@ -477,9 +481,11 @@ export function runReport(status: ThreadStatus, reply: string): string {
   const last = text ? `; last reply: ${text}` : "";
   if (status.state === "completed") {
     const waiting = status.waiting ?? [];
-    if (waiting.length) return `ended its turn, waiting on its ${agents(waiting)}; another report comes when ${waiting.length === 1 ? "it finishes" : "they finish"}${said}`;
-    if (WAITS.test(text)) return `ended its turn; nothing of it runs now and nothing wakes it, though its reply speaks of waiting: it goes on only when told${said}`;
-    return `ended its turn; nothing of it runs now${said}`;
+    // A message steered into the run that never reached its agent.
+    const note = status.error && STEER_LOST.test(status.error) ? ` (${status.error})` : "";
+    if (waiting.length) return `ended its turn, waiting on its ${agents(waiting)}; another report comes when ${waiting.length === 1 ? "it finishes" : "they finish"}${note}${said}`;
+    if (WAITS.test(text)) return `ended its turn; nothing of it runs now and nothing wakes it, though its reply speaks of waiting: it goes on only when told${note}${said}`;
+    return `ended its turn; nothing of it runs now${note}${said}`;
   }
   if (status.state === "stopped") return `stopped${status.error ? `: ${status.error}` : ""}${last}`;
   return `failed: ${status.error ?? "unknown error"}${last}`;
@@ -1631,7 +1637,7 @@ export class OptChat {
     });
     const tell = defineTool({
       name: "tell",
-      description: `Send a message to a thread you started, once it has reported: more work, an answer, a correction, or to go on when it stopped short. At most ${TELLS} per thread between two messages of the user.`,
+      description: `Send a message to a thread you started: more work, an answer, a correction, or to go on when it stopped short. A thread still working reads it after its current tool call. At most ${TELLS} per thread between two messages of the user.`,
       parameters: Type.Object({ id: Type.String(), message: Type.String() }),
       replay: "safe",
       execute: async (args, api, callContext) => {
@@ -1642,12 +1648,17 @@ export class OptChat {
         // chat's tools run one at a time (toolExecution "sequential").
         const tells = (await this.harness.snapshot(SettingsDoc, context))?.threads[id]?.tells ?? [];
         if (!tells.includes(api.callId) && tells.length >= TELLS) return text(`not sent: [${short(id)}] had ${TELLS} tells from you since the user's last message; tell the user what it needs instead`);
-        await this.options.threads.tell(id, args.message, `optchat:${api.callId}`);
+        // A working thread queues it into its running turn (steering).
+        const accepted = await this.options.threads.tell(id, args.message, `optchat:${api.callId}`);
         await api.commit(async tx => {
           const thread = (await tx.doc(SettingsDoc)).threads[id];
           if (thread && !thread.tells?.includes(api.callId)) thread.tells = [...thread.tells ?? [], api.callId];
         }, callContext);
-        return text(`sent to [${short(id)}]; its report comes back as a message starting "[${short(id)}] "`);
+        const report = `its report comes back as a message starting "[${short(id)}] "`;
+        if (accepted === "queued") return text(`queued for [${short(id)}], which is working: it has not read it yet, and reads it after its current tool call, in this turn; ${report}`);
+        if (accepted === "consumed") return text(`[${short(id)}] already has it and has read it; ${report}`);
+        if (accepted === "dropped") return text(`[${short(id)}] took it while working, but it never reached the agent; ${report}, saying why`);
+        return text(`sent to [${short(id)}]; ${report}`);
       },
     });
     // Newest first: the threads this chat started, by when it started them

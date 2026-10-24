@@ -12,7 +12,7 @@ import { SendsDoc } from "./pi-sends.ts";
 import { assertCurrentThreadStore, downText, openAgent, type Agent } from "./durable-agent.ts";
 import { createLogger } from "./log.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
-import type { ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
+import type { ThreadAcceptance, ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
 import type { WindowQuery } from "./transcript-window.ts";
 import { readClaudeHistory, readPiHistory, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
@@ -560,13 +560,19 @@ export class Conversations {
     finally { if (this.commands.get(id) === promise) this.commands.delete(id); }
   }
   /** A message is an explicit demand: once the thread has it (under its
-   * request id) it is answered as accepted, and a replay wakes nothing. */
-  submit(id: string, text: string, requestId: string): Promise<{ runId: string }> {
+   * request id) it is answered as accepted, and a replay wakes nothing.
+   * A thread that is working refuses it, unless `steer`: then it is queued
+   * into the running turn, and the agent takes it in after its current tool
+   * call (or, as the turn ends, goes on with it), never in a second turn
+   * beside it. `accepted` says what the thread did with it (steer only). */
+  submit(id: string, text: string, requestId: string, options: { steer?: boolean } = {}): Promise<{ runId: string; accepted?: ThreadAcceptance }> {
     return this.command(id, async () => {
       await this.settled(id);
-      if (await this.accepted(id, text, requestId)) return { runId: requestId };
+      const prior = await this.accepted(id, text, requestId);
+      if (prior) return { runId: requestId, ...options.steer ? { accepted: prior } : {} };
       await this.wakeFor(id, requestId);
-      return this.accept(id, text, requestId);
+      const accepted = await this.accept(id, text, requestId, !!options.steer);
+      return { runId: requestId, ...options.steer ? { accepted } : {} };
     });
   }
   /** A message to a thread whose machine is suspended wakes it first, so
@@ -585,28 +591,28 @@ export class Conversations {
       await this.activate(id);
     }
   }
-  /** Whether the thread already has the message `requestId` (a replay): read
-   * from its agent, opened if need be, which wakes nothing. Only a ready
-   * thread has an agent to ask. */
-  private async accepted(id: string, text: string, requestId: string): Promise<boolean> {
+  /** What the thread did with the message `requestId` if it already has it
+   * (a replay): read from its agent, opened if need be, which wakes nothing.
+   * Only a ready thread has an agent to ask. */
+  private async accepted(id: string, text: string, requestId: string): Promise<ThreadAcceptance | undefined> {
     const thread = this.registry.getThread(id);
-    if (!thread || thread.archived || thread.workspaceState !== "available" || this.downs.has(id) || releaseUnfinished(thread)) return false;
+    if (!thread || thread.archived || thread.workspaceState !== "available" || this.downs.has(id) || releaseUnfinished(thread)) return undefined;
     if (this.isClaude(id)) {
-      if (!this.claude) return false;
-      const prior = (await this.claudeAgent(id)).state().submissions.find(submission => submission.requestId === requestId);
-      if (prior && prior.text !== text) throw new Error("message request conflicts with the previous request");
-      return !!prior;
+      if (!this.claude) return undefined;
+      return (await this.claudeAgent(id)).request(requestId, text);
     }
     const prior = await this.priorInput(await this.agent(id), requestId);
     if (prior && (prior.type !== "input" || (prior.text !== undefined && prior.text !== text))) throw new Error("message request conflicts with the previous request");
-    return !!prior;
+    return prior?.accepted;
   }
-  private async priorInput({ conversation }: Agent, requestId: string): Promise<{ type: string; text: string | undefined } | undefined> {
+  private async priorInput({ conversation }: Agent, requestId: string): Promise<{ type: string; text: string | undefined; accepted: ThreadAcceptance } | undefined> {
     return conversation.commit(async tx => {
       const submission = await tx.submissionByRequest(conversation.id, requestId);
       if (!submission) return undefined;
       const entry = submission.type === "input" && submission.entry !== undefined ? await tx.entry(submission.entry) : undefined;
-      return { type: submission.type, text: entry?.model?.[0] ? messageText(entry.model[0]) : undefined };
+      // Pi's inbox holds a steer until a boundary places it; a stop withdraws it unplaced.
+      const accepted = submission.status === "queued" ? "queued" : submission.entry === undefined ? "dropped" : "consumed";
+      return { type: submission.type, text: entry?.model?.[0] ? messageText(entry.model[0]) : undefined, accepted };
     }, context);
   }
   /** Suspends the machines that have been idle for 5 minutes (B7-1; the
@@ -656,15 +662,14 @@ export class Conversations {
     if (pi && (await pi.harness.snapshot(LiveDoc, pi.conversation.id, context))?.run) return "the agent is working";
     return null;
   }
-  private async accept(id: string, text: string, requestId: string): Promise<{ runId: string }> {
+  private async accept(id: string, text: string, requestId: string, steer: boolean): Promise<ThreadAcceptance> {
     if (this.isClaude(id)) {
       const agent = await this.claudeAgent(id);
-      try { await agent.submit(requestId, text); }
+      try { return await agent.submit(requestId, text, { steer }); }
       catch (error) {
         if (error instanceof ClaudeBusy) throw new Error("thread is already working or message is invalid", { cause: error });
         throw error;
       }
-      return { runId: requestId };
     }
     const agent = await this.agent(id);
     const { conversation } = agent;
@@ -672,12 +677,21 @@ export class Conversations {
     // not stored in a second host workflow journal.
     const prior = await this.priorInput(agent, requestId);
     if (prior && (prior.type !== "input" || (prior.text !== undefined && prior.text !== text))) throw new Error("message request conflicts with the previous request");
-    try { await conversation.submit({ type: "input", content: text, requestId, whenBusy: "reject" }, context); }
+    if (prior) return prior.accepted;
+    // A steer is admitted into Pi's inbox in the same commit that finds the
+    // run: placed at the run's next tool boundary, or at its final one if
+    // the run is ending, which then goes on; an idle thread starts a run.
+    let submission;
+    try { submission = await conversation.submit({ type: "input", content: text, requestId, whenBusy: steer ? "steer" : "reject" }, context); }
     catch (error) {
       if (error instanceof ConversationBusy) throw new Error("thread is already working or message is invalid", { cause: error });
       throw error;
     }
-    return { runId: requestId };
+    if (!steer) return "started";
+    const record = await submission.status(context);
+    if (record.status === "queued") return "queued";
+    const live = await agent.harness.snapshot(LiveDoc, conversation.id, context);
+    return live?.run?.inputs[0] === submission.id ? "started" : record.status === "unanswered" && record.entry === undefined ? "dropped" : "consumed";
   }
   async model(id: string, selection?: ModelSelection): Promise<ModelSelection> {
     return this.command(id, async () => {

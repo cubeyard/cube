@@ -227,7 +227,9 @@ export async function openAgent(options: {
     const gate = { closing: false, held: 0 };
     registry.install(sendsExtension(() => harness!, () => epoch, gate));
     const thread = path.basename(options.directory);
-    harness = await Harness.open(storage, { models: sessions.models, registry, onReport: piReports(log, { thread }), settings: { toolExecution: "sequential", restartLimit: RESTART_LIMIT } }, context);
+    // A message steered into a run (OptChat's tell) waits in Pi's inbox;
+    // every one waiting is placed at the next tool boundary.
+    harness = await Harness.open(storage, { models: sessions.models, registry, onReport: piReports(log, { thread }), settings: { toolExecution: "sequential", restartLimit: RESTART_LIMIT, steeringMode: "all" } }, context);
     // Before anything is scheduled: a request that was out when the last
     // process stopped is counted and its run ends (stopped); it is never
     // sent again on its own. A message of the user goes on.

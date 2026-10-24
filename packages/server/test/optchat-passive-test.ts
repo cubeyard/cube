@@ -199,7 +199,7 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
     owner: () => null,
     storedHistory: async (id: string) => page(id),
     history: async (id: string) => transcriptOf(id),
-    submit: async (id: string, text: string) => { submitted.push(`${id}:${text}`); },
+    submit: async (id: string, text: string, requestId: string) => { submitted.push(`${id}:${text}`); return { runId: requestId, accepted: "started" as const }; },
     live: async (id: string): Promise<ThreadEvents | null> => !open.has(id) ? null : ({
       async read() { return transcriptOf(id); },
       async watch(listener) {

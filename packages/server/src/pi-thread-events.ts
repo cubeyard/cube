@@ -117,12 +117,17 @@ export async function storedPiTranscript(storage: Pick<Storage, "scanEntries" | 
 
 /** A run stopped because its request was out at a stop says so (pi-sends.ts). */
 export function withDropped(status: ThreadStatus, entries: readonly { id: number; kind: string }[]): ThreadStatus {
-  return status.state === "stopped" && !status.error ? { ...status, error: droppedReason(entries) } : status;
+  if (status.state !== "stopped") return status;
+  return { ...status, error: [droppedReason(entries), status.error].filter(Boolean).join("; ") || null };
 }
+
+/** A stopped run's newest input that Pi never placed: a message steered
+ * into the run, which the stop withdrew from Pi's inbox. */
+export const WITHDRAWN = "a message sent while it worked never reached it (the stop withdrew it); send it again if still needed";
 
 export function settlement(submission: SubmissionRecord): Pick<ThreadStatus, "state" | "error"> {
   if (submission.status === "done") return { state: "completed", error: null };
-  if (submission.reason === "aborted") return { state: "stopped", error: null };
+  if (submission.reason === "aborted") return { state: "stopped", error: submission.type === "input" && submission.entry === undefined ? WITHDRAWN : null };
   return {
     state: "failed",
     error: typeof submission.detail === "string" ? submission.detail : submission.reason === "no_model" ? "model unavailable — choose another model" : submission.reason ?? null,

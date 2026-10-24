@@ -14,7 +14,9 @@
  * running, which sees the notification), `background-quiet …` (finishes
  * without a turn of its own), `background-later …` (started in the
  * foreground, then backgrounded by task_updated), `monitor <task_id>` (a
- * backgrounded task of another kind that never notifies).
+ * backgrounded task of another kind that never notifies), `think <ms>` (a
+ * model call without tools). A message with a uuid sent during a turn is
+ * steered: see `queued` below.
  * FAKE_CLAUDE_LOG names a file that receives one JSON line per start.
  *
  * At start it says the mod is in, as the mod's last `session.start` hook
@@ -86,23 +88,40 @@ const usage = () => {
     uuid: randomUUID() };
 };
 const emit = (message: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ ...message, session_id: session })}\n`);
-emit({ type: "system", subtype: "init", model, cwd: process.cwd(), tools: ["Bash", "Read", "Write", "Edit"], plugins: [{ name: "cube", path: mod }] });
+// FAKE_CLAUDE_STEER=none: a Claude Code that advertises neither capability steering needs.
+const capabilities = env.FAKE_CLAUDE_STEER === "none" ? ["interrupt_receipt_v1"] : ["interrupt_receipt_v1", "interrupt_cancel_queued_v1", "msg_lifecycle_v1"];
+emit({ type: "system", subtype: "init", model, cwd: process.cwd(), tools: ["Bash", "Read", "Write", "Edit"], plugins: [{ name: "cube", path: mod }], claude_code_version: "2.1.310-fake", capabilities });
 
 if (env.FAKE_CLAUDE_MOD === "early") emit({ type: "assistant", parent_tool_use_id: null, message: { id: "msg_early", role: "assistant", model, content: [{ type: "text", text: "a turn of its own" }] } });
 let calls = 0;
 let current: AbortController | undefined;
 let ignoreInterrupt = false;
 let queue = Promise.resolve();
+/** Messages with a uuid sent while a turn runs, as Claude Code 2.1.310
+ * queues them: 'queued' at once, 'started' when a tool result takes them
+ * into the turn (their steps run in it), or after the turn's result as a
+ * turn of their own; an interrupt with cancel_queued 'cancelled's them. */
+const queued: Array<{ uuid: string; text: string }> = [];
+const lifecycle = (uuid: string, state: string) => emit({ type: "command_lifecycle", command_uuid: uuid, state, uuid: randomUUID() });
 const input = createInterface({ input: process.stdin });
 input.on("line", line => {
-  const message = JSON.parse(line) as { type: string; request_id?: string; request?: { subtype: string }; message?: { content: Array<{ type: string; text: string }> } };
+  const message = JSON.parse(line) as { type: string; uuid?: string; request_id?: string; request?: { subtype: string; cancel_queued?: boolean }; message?: { content: Array<{ type: string; text: string }> } };
   if (message.type === "control_request") {
-    emit({ type: "control_response", response: { subtype: "success", request_id: message.request_id } });
+    const cancelled = message.request?.subtype === "interrupt" && message.request.cancel_queued ? queued.splice(0) : [];
+    for (const item of cancelled) lifecycle(item.uuid, "cancelled");
+    emit({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: { still_queued: queued.map(item => item.uuid), cancelled: cancelled.map(item => item.uuid) } } });
     if (message.request?.subtype === "interrupt" && !ignoreInterrupt) current?.abort();
     return;
   }
   if (message.type !== "user") return;
   const text = message.message!.content.map(part => part.text).join("");
+  if (message.uuid) {
+    lifecycle(message.uuid, "queued");
+    if (current) { queued.push({ uuid: message.uuid, text }); return; }
+    const uuid = message.uuid;
+    queue = queue.then(() => { lifecycle(uuid, "started"); return turn(text); });
+    return;
+  }
   queue = queue.then(() => turn(text));
 });
 input.on("close", () => { void queue.then(() => process.exit(0)); });
@@ -164,8 +183,10 @@ async function turn(text: string, prompted = true): Promise<void> {
   current = controller;
   const started = Date.now();
   try {
-    for (const raw of text.split("\n")) {
+    const steps = text.split("\n");
+    for (let step = 0; step < steps.length; step++) {
       if (controller.signal.aborted) break;
+      const raw = steps[step]!;
       let line = raw.trim();
       let id = `toolu_${session.slice(0, 8)}_${process.pid}_${++calls}`;
       const fixed = /^id (\S+) (.*)$/.exec(line);
@@ -189,7 +210,13 @@ async function turn(text: string, prompted = true): Promise<void> {
       else if (verb === "hang") await new Promise(() => {});
       else if (verb === "background" || verb === "background-quiet" || verb === "background-later") background(id, rest[0]!, Number(rest[1]), rest.slice(2).join(" "), verb !== "background-quiet", verb === "background-later");
       else if (verb === "monitor") emit({ type: "system", subtype: "task_started", task_id: rest[0], description: "watch a log", task_type: "monitor", is_backgrounded: true });
+      // A model call that takes `ms` and calls no tool: what is queued meanwhile waits.
+      else if (verb === "think") await delay(Number(rest[0]));
       else if (verb) await say(`unknown step ${verb}`);
+      // A tool result takes in what was queued: the turn goes on with it.
+      if (TOOLS.has(verb!) && !controller.signal.aborted) {
+        for (const item of queued.splice(0)) { lifecycle(item.uuid, "started"); steps.push(...item.text.split("\n")); }
+      }
     }
     if (controller.signal.aborted) {
       emit({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] } });
@@ -198,5 +225,11 @@ async function turn(text: string, prompted = true): Promise<void> {
     }
     if (prompted) await say(`done with ${model}`);
     emit({ type: "result", subtype: "success", is_error: false, result: prompted ? `done with ${model}` : "", duration_ms: Date.now() - started, ...usage() });
-  } finally { if (current === controller) current = undefined; }
+  } finally {
+    if (current === controller) current = undefined;
+    // Still queued at the result: a turn of its own, right after it.
+    const next = queued.splice(0);
+    if (next.length) queue = queue.then(() => { for (const item of next) lifecycle(item.uuid, "started"); return turn(next.map(item => item.text).join("\n")); });
+  }
 }
+const TOOLS = new Set(["run", "slow", "write", "edit", "read", "write-at", "read-at", "edit-at"]);

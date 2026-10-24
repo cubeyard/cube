@@ -235,6 +235,45 @@ try {
   }
   console.log("ok: a reopen after cubed died mid-turn cancels the interrupted turn's guest commands");
 
+  // Steering (thread-steer-test.ts runs it through cubed). cubed dies with a
+  // steer queued: the reopen drops it and the interrupted run says that
+  // whether Claude Code took it in is not known; nothing is resent.
+  {
+    const crashed = path.join(root, "crashed-steer");
+    const opened = await ClaudeAgent.open({ directory: crashed, threadId: "t1", workspace, runtime, model: "sonnet" });
+    await opened.close();
+    const db = new DatabaseSync(path.join(crashed, "claude.sqlite"));
+    db.prepare("INSERT INTO submission(request_id, text, state, error, created_at) VALUES ('turn', 'slow sleep 9', 'running', NULL, 0)").run();
+    db.prepare("INSERT INTO steer(request_id, uuid, text, submission, state, created_at) VALUES ('steer', 'u-steer', 'say late', (SELECT seq FROM submission WHERE request_id='turn'), 'queued', 0)").run();
+    db.close();
+    const reopened = await ClaudeAgent.open({ directory: crashed, threadId: "t1", workspace, runtime, model: "sonnet" });
+    try {
+      const turn = reopened.state().submissions.at(-1)!;
+      assert.equal(turn.state, "failed");
+      assert.match(turn.error!, /^cubed stopped during this turn.*; a message sent while it worked never reached it \(cubed stopped during the turn, so whether claude code took it in is not known\); send it again if still needed$/);
+      assert.equal(reopened.request("steer", "say late"), "dropped");
+      assert.throws(() => reopened.request("steer", "other"), /conflicts/);
+      // Idle now: a steer is a prompt of its own, a new turn.
+      assert.equal(await reopened.submit("next", "say fresh", { steer: true }), "started");
+    } finally { await reopened.close(); }
+  }
+  // A Claude Code that does not report a queued message's fate is not
+  // steered: the message is refused while it works, and says why.
+  {
+    const old = await ClaudeAgent.open({ directory: path.join(root, "unsteerable"), threadId: "t1", workspace, model: "sonnet",
+      runtime: { ...runtime, env: { ...runtime.env, FAKE_CLAUDE_STEER: "none" } } });
+    try {
+      await old.submit("first", "say first");
+      await until(() => old.state().submissions.at(-1)?.state === "completed", "the first turn");
+      await old.submit("slow", "slow sleep 1");
+      await until(() => old.running && old.state().messages.some(message => message.data.type === "assistant"), "the turn runs");
+      await assert.rejects(old.submit("steer", "say no", { steer: true }), /this claude code \(2\.1\.310-fake\) does not report when it takes in a message sent while it works/);
+      await assert.rejects(old.submit("plain", "say no"), (error: unknown) => error instanceof ClaudeBusy, "without steer: busy, as before");
+      assert.equal(old.request("steer", "say no"), undefined, "nothing was kept");
+    } finally { await old.close(); }
+  }
+  console.log("ok: steers across a cubed crash, and a claude code that cannot be steered");
+
   // Claude Code without the mod (it could not load it, or the mod's word is
   // forged): no prompt reaches it, so nothing runs on the host.
   // One hooks module: the mod's ready (its last hook) then says all of it is in.
