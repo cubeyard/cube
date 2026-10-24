@@ -216,7 +216,7 @@ lines under it below that), read from its own log (spawn result lines,
 artifact tool results, `#/a/` links, comment messages) and resolved against
 the overview, the thread list and the artifacts; nothing is inferred and
 nothing is kept by hand (`lib/provenance.ts`, `lib/margin-layout.ts`). The
-index (work key, wordmark, `/`, ctrl/⌘ k) holds the chat's threads,
+index (wordmark, `/`, ctrl/⌘ k) holds the chat's threads,
 artifacts, the places, the chat's model and its memory. UI only: no route,
 API or tool changed. Contract: DESIGN.md "The Sheet", "The Margin", "The
 Index" and the chat's surface brief. Regression: `provenance-test.ts`,
@@ -224,6 +224,16 @@ Index" and the chat's surface brief. Regression: `provenance-test.ts`,
 check in `artifact-browser-test.ts` (real cubed, faux model). Open: thread
 names (#239) beside the titles once merged; no unread marking (cube has no
 seen state); the other pages still wear the bench instrument.
+
+## Nothing beside the chat's composer
+
+At the user's request the work key before the chat's composer (the index
+mark with `1 running` or `1 failed`) is gone at every width; the field
+stands alone on the column's line. The index opens from the wordmark, `/`
+and ctrl/⌘ k; threads' states stay in the margin's notes, the index and the
+thread pages. `workCounts` and the `index` icon went with it. Regression:
+`chat-sheet-browser-test.ts` (desktop, between, phone with a working and a
+failed thread, and an empty chat) and `mobile-browser-test.ts`.
 
 ## States in print, no status lamps
 

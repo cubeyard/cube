@@ -14,7 +14,7 @@
   import Icon from "./Icon.svelte";
 
   let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread", images = null,
-    sheet = false, onRows, toolLine, reportLabel, after, margin, composerStart }: {
+    sheet = false, onRows, toolLine, reportLabel, after, margin }: {
     threadId?: string;
     /** Messages may be sent while the agent works; they reach it between tool calls. */
     steer?: boolean;
@@ -45,8 +45,6 @@
     after?: Snippet<[TranscriptRow]>;
     /** Drawn beside the conversation's column, scrolling with it; rows carry `data-anchor` (`rowKey`). */
     margin?: Snippet;
-    /** Drawn before the composer's field, at its height. */
-    composerStart?: Snippet;
   } = $props();
   // The neutral thread event model is the only input; no agent shapes here.
   const events = $derived(threadEvents(base));
@@ -519,7 +517,6 @@
     {/if}
     <!-- the deck is full-bleed; the field sits in the transcript's measure -->
     <div class="composer-row">
-      {@render composerStart?.()}
       <!-- a press on the field's padding puts the caret in the text; the keys keep their own -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <div class="composer-field" onclick={(event) => { if (event.target === event.currentTarget) composer?.focus(); }}>

@@ -128,7 +128,7 @@ for (const viewport of [desktop, laptop, { width: 1216, height: 800 }]) {
     assert.ok(Math.abs(field.left - column.left) <= 0.5 && Math.abs(field.right - column.right) <= 0.5, `the composer keeps the column's line: ${field.left}–${field.right}`);
     assert.ok(margin.left >= column.right + 16, `the margin hangs outward to the right: ${margin.left} after ${column.right}`);
     assert.ok(margin.right <= viewport.width - 8 && margin.width >= 180, `the margin fits the window: ${margin.left}–${margin.right}, ${margin.width} wide`);
-    assert.ok((await boxOf(page, ".work-key")).right <= field.left, "the work key hangs before the field");
+    assert.equal(await page.locator(".composer-row > *").count(), 1, "nothing beside the field");
     for (const note of await page.locator(".margin-note.placed").all()) {
       const box = await note.evaluate(element => element.getBoundingClientRect().right);
       assert.ok(box <= margin.right + 0.5, "every note within the margin");
@@ -193,8 +193,8 @@ await scenario("streaming and a growing margin never move what the reader looks 
   assert.deepEqual(after.slice(0, before.length), before, "earlier messages stay where they were");
   assert.equal(await page.locator(".transcript").evaluate(element => element.scrollTop), scroll, "the reader's place stays");
   assert.equal((await notes(page)).overlap, false);
-  // the work key counts what moves and what failed, in cubed's words
-  assert.match(await page.locator(".work-key").getAttribute("aria-label") ?? "", /2 running · 1 failed$/);
+  // what moves and what failed is said in the notes, not counted beside the composer
+  assert.equal(await page.locator(".composer").getByText(/running|failed/).count(), 0);
 });
 
 await scenario("many threads from one message: four shown, the rest a press away, never overlapping", desktop, async page => {
@@ -239,6 +239,9 @@ await scenario("a failed thread scrolled away is pinned at the margin's top, wit
 for (const [viewport, engine] of [[between, browser], [phone, browser], ...safari ? [[phone, safari] as const] : []] as const) {
   await scenario("narrower: the notes are quiet lines under their message, threads only, never twice", viewport, async page => {
     assert.equal(await page.locator(".sheet-margin").count(), 0, "no margin");
+    // a thread works and one failed, and still nothing stands beside the composer
+    assert.equal(await page.locator(".composer-row > *").count(), 1, "nothing beside the field");
+    assert.equal(await page.locator(".composer").getByText(/running|failed/).count(), 0, "no count beside the composer");
     const inline = page.locator(".transcript-column .sheet-note");
     assert.equal(await inline.count(), 2, "under the two spawns");
     assert.equal(await page.locator(".transcript-column .sheet-note .note-head.artifact").count(), 0, "artifacts stay links in the text");
@@ -256,9 +259,9 @@ for (const [viewport, engine] of [[between, browser], [phone, browser], ...safar
   }, () => {}, { engine });
 }
 
-await scenario("the index: its key, / and ctrl k open it; arrows walk it; escape gives focus back; / in the composer is just text", desktop, async page => {
-  const key = page.locator(".work-key");
-  assert.equal(await key.getAttribute("aria-label"), "index: threads, artifacts and settings · 1 running · 1 failed");
+await scenario("the index: the wordmark, / and ctrl k open it; arrows walk it; escape gives focus back; / in the composer is just text", desktop, async page => {
+  const key = page.locator(".sheet-bar .name-key");
+  assert.equal(await key.getAttribute("aria-label"), "cube · index: threads, artifacts and settings · press /");
   await key.focus();
   await page.keyboard.press("Enter");
   const index = page.locator(".chat-index");
@@ -366,7 +369,7 @@ await scenario("an overview that cannot be read is said, never guessed; the last
   const spawn = page.locator(`.margin-note[data-note="call:spawn-1"]`);
   assert.deepEqual(await spawn.locator(".note-state").allTextContents(), ["state not read · cube", "state not read · cube", "state not read · keel-images", "nope · no project nope"]);
   assert.equal(await spawn.locator(".note-state.failure").count(), 1, "no state is shown as failed when it was not read");
-  await page.locator(".work-key").click();
+  await page.locator(".sheet-bar .name-key").click();
   await page.locator(".chat-index .index-error", { hasText: "threads could not be read" }).waitFor();
   host.overviewError = null;
   await page.locator(".chat-index .index-error button").click();
@@ -380,7 +383,7 @@ await scenario("an overview that cannot be read is said, never guessed; the last
 }, host => { host.overviewError = "the host had a problem"; });
 
 for (const engine of [browser, ...safari ? [safari] : []]) await scenario("a tap opens the index without the keyboard: the sheet takes focus, its close key is in reach, focus goes back", phone, async page => {
-  await page.locator(".work-key").tap();
+  await page.locator(".sheet-bar .name-key").tap();
   const index = page.locator(".chat-index");
   await index.locator(".index-row").first().waitFor();
   await settle(page);
@@ -401,16 +404,11 @@ for (const engine of [browser, ...safari ? [safari] : []]) await scenario("a tap
   assert.equal(await page.evaluate(() => document.activeElement?.tagName), "INPUT");
   await close.tap();
   await index.waitFor({ state: "hidden" });
-  await page.waitForFunction(() => document.activeElement?.classList.contains("work-key"));
-  // the wordmark too
-  await page.locator(".sheet-bar .name-key").tap();
-  await index.locator(".index-row").first().waitFor();
-  await settle(page);
-  assert.equal(await page.evaluate(() => document.activeElement?.tagName), "DIALOG");
+  await page.waitForFunction(() => document.activeElement?.classList.contains("name-key"));
 }, () => {}, { engine });
 
 await scenario("a mouse or a key opens the index with the filter ready to type, its focus seen", desktop, async page => {
-  await page.locator(".work-key").click();
+  await page.locator(".sheet-bar .name-key").click();
   const input = page.locator(".chat-index input[type=search]");
   await page.waitForFunction(() => document.activeElement?.matches(".chat-index input"));
   assert.notEqual(await page.locator(".index-filter").evaluate(element => getComputedStyle(element).boxShadow), "none", "the focused filter shows its rule");
@@ -422,12 +420,12 @@ await scenario("a mouse or a key opens the index with the filter ready to type, 
   await page.waitForFunction(() => document.activeElement?.matches(".chat-index input"));
 });
 
-await scenario("an empty chat: an empty margin, the key says only where it goes", desktop, async page => {
+await scenario("an empty chat: an empty margin, nothing beside the composer", desktop, async page => {
   await page.locator(".conversation-empty", { hasText: "one chat, every thread" }).waitFor();
   assert.ok(await page.locator(".sheet-margin").isVisible(), "the margin's room is kept, so the column never jumps");
   assert.equal(await page.locator(".margin-note").count(), 0);
-  assert.equal(await page.locator(".work-key").getAttribute("aria-label"), "index: threads, artifacts and settings");
-  await page.locator(".work-key").click();
+  assert.equal(await page.locator(".composer-row > *").count(), 1, "nothing beside the field");
+  await page.locator(".sheet-bar .name-key").click();
   await page.locator(".chat-index .index-quiet", { hasText: "no open threads" }).waitFor();
   await page.locator(".chat-index .index-quiet", { hasText: "no artifacts yet" }).waitFor();
   await shoot(page, "sheet-desktop-empty");
@@ -445,7 +443,7 @@ await scenario("reduced motion: notes and the index open without movement", desk
     return `${style.animationName}|${style.transitionDuration}`;
   }));
   assert.deepEqual(motion, ["none|0s", "none|0s"]);
-  await page.locator(".work-key").click();
+  await page.locator(".sheet-bar .name-key").click();
   assert.equal(await page.locator(".chat-index").evaluate(element => getComputedStyle(element).animationName), "none");
 }, () => {}, { reducedMotion: "reduce" });
 

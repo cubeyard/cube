@@ -65,15 +65,16 @@ and settings.
 - **Narrower (< 76rem, phone).** No margin: the thread notes are quiet
   one-liners under their spawn (state whole, the title gives way), artifacts
   stay the links they are in the text, so nothing shows twice.
-- **The index.** The composer's work key (the index mark and, in words, what
-  failed, else what runs), the wordmark, `/` outside a field and
-  ctrl/⌘ k open one dialog that rises from the composer (on a phone the whole
+- **The index.** The wordmark, `/` outside a field and ctrl/⌘ k open one dialog that rises from the composer (on a phone the whole
   screen, sized to the visual viewport so the keyboard never covers the
   filter or its results while the user types): a filter; the chat's threads, failed then moving then the rest;
   the newest artifacts; the places (threads, artifacts, projects, settings);
   the chat's model and memory. A key or a mouse focuses the filter; a tap
   focuses the sheet, so no keyboard rises; a close key is always there.
   Arrows walk it, enter opens, escape closes and gives focus back. It is the one floating surface (`--shadow-float`).
+- **Nothing beside the composer.** No key, count or state before or
+  after the field, at any width: what runs and what failed is in the notes
+  and the index (removed at the user's request).
 - Composer, uploads, history paging and scroll keeping, routes and deep
   links, artifact reading, comments and confirmed merge actions are the
   existing ones, unchanged.

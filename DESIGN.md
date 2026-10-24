@@ -323,7 +323,7 @@ steps of 0.55 / 0.7–0.75 / 0.85–0.9 / 1.0 / 1.4 / 2.1.
 The chat is the exception: one sheet with no header row beyond the wordmark
 (the index key) and the 47rem column on the viewport's centreline, the
 composer on the same line (both reserve the scrollbar's room on both
-edges), its work key hanging before it. At 76rem and wider a margin hangs
+edges), nothing beside it. At 76rem and wider a margin hangs
 outward to the right, 1.5rem beside the column, as wide as the room there
 allows up to 18rem; it never shifts the column or the composer. Below
 76rem the margin is not drawn and its thread notes sit under their messages.
@@ -394,9 +394,8 @@ dashed border in the system is the missing-image retry placeholder.
 Iconography is one authored stroke family in `Icon.svelte`: 24-box, 2px
 stroke, round caps and joins, drawn to match the cube wireframe glyph (the
 brand mark, drawn inline in the header and favicon). The set: plus, close,
-pencil, trash, chevron, file, refresh, arrow (up), down and index (three
-rules with dots, the chat's work key at rest). No icon libraries, and no
-unicode glyphs standing in for controls.
+pencil, trash, chevron, file, refresh, arrow (up), down and search. No icon
+libraries, and no unicode glyphs standing in for controls.
 
 ## Components
 
@@ -605,9 +604,9 @@ are quiet: no face until opened. The chat's own tools speak in words —
 `started 3 threads · 1 not started`, `told <thread>`, `created <title> ·
 revision 1` — with the tool's mono name after; other tools keep their raw
 primary argument. The composer field takes the well radius and a soft
-1px-offset shadow; before it sits the **work key**: the index mark and the
-one count that matters most in words (`1 failed` in `--bad`, else `2
-running`). Its accessible name says every count.
+1px-offset shadow, and nothing stands beside it: no key, count or state.
+What runs and what failed is said where it belongs, in the margin's notes
+and the index.
 
 ### The Margin
 At 76rem and wider, a margin to the right of the centred column (up to
@@ -645,7 +644,7 @@ then the chat's threads (failed, moving, the rest; title, state ·
 project), archived and lost counts, the newest artifacts (each after its file
 mark), the places
 (threads, artifacts, projects, settings) and the chat's model select and
-memory toggle. Opened by the work key, the wordmark, `/` outside a field and
+memory toggle. Opened by the wordmark, `/` outside a field and
 ctrl/⌘ k. A key, `/`, ctrl/⌘ k or a mouse puts focus in the filter; a tap
 puts it on the sheet itself, so no on-screen keyboard rises over it (the
 filter is a tap away). The arrow keys walk its items, enter in the filter

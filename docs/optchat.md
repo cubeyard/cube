@@ -506,7 +506,7 @@ The chat is an archive, not the way to find what is going on. Its page
 shows every thread this chat started twice over, each from the chat's own
 records: in the **margin**, a note beside the message whose spawn started
 it (on a phone and below 76rem, a line under that message), and in the
-**index** (the composer's work key, the wordmark, `/` or ctrl/⌘ k), the
+**index** (the wordmark, `/` or ctrl/⌘ k), the
 open ones listed failed first, then moving, then the rest. Nobody keeps
 either:
 

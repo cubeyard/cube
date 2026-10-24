@@ -399,9 +399,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844,
     host.overview = { threads: [thread("aaaaaaa1", "cube", "fix the gateway host check", "completed"), thread("bbbbbbb2", "site", "a much longer thread title that has to wrap or clamp in the narrow panel without overflowing it at all", "working"),
       thread("ccccccc3", "cube", "old work", "stopped", true)], archived: { shown: 1, total: 3 }, unknown: 0 };
     await page.reload();
-    await page.locator(".work-key .work-count", { hasText: "1 running" }).waitFor();
-    assert.match(await page.locator(".work-key").getAttribute("aria-label") ?? "", /1 running$/);
-    await page.locator(".work-key").click();
+    await page.locator(".sheet-bar .name-key").click();
     const rows = page.locator(".chat-index .index-row[href^='#/t/']");
     await rows.first().waitFor();
     assert.deepEqual(await page.locator(".chat-index .index-row[href^='#/t/'] .index-meta").allTextContents(), ["working · site", "turn ended · cube"], "moving first, each in its own state; archived ones not listed");
@@ -419,8 +417,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844,
     await page.locator(".chat-index").getByText("4 archived").waitFor();
     assert.deepEqual(await page.locator(".chat-index .index-row[href^='#/t/'] .index-meta").allTextContents(), ["turn ended · cube"], "the thread that is not archived stays");
     await page.keyboard.press("Escape");
-    await page.locator(".work-key svg").waitFor();
-    assert.equal(await page.locator(".work-key").getAttribute("aria-label"), "index: threads, artifacts and settings", "nothing running: the key says only where it goes");
+    assert.equal(await page.locator(".composer").getByText(/running|failed/).count(), 0, "no count beside the composer");
 
     // no model-inferred wish list: no section, no request for one
     assert.equal(await page.locator(".work-wishes, .work-wish").count(), 0);
