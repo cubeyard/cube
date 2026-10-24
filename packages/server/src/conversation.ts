@@ -541,7 +541,7 @@ export class Conversations {
   private async wakeFor(id: string, requestId: string): Promise<void> {
     const thread = this.registry.getThread(id);
     if (!thread || thread.archived) return;
-    if (thread.vm?.suspension) { await this.activate(id); return; }
+    if (thread.vm?.suspension) { this.machines.renewWake?.(thread); await this.activate(id); return; }
     const key = `${id}\n${requestId}`;
     if ((thread.workspaceState !== "available" || this.failures.has(id) || retriesExhausted(thread)) && !this.retried.has(key)) {
       this.retried.add(key);
