@@ -67,9 +67,11 @@ phase, `suspended` or running. It is not continued.
   next waits 30 s, doubling to 30 min; a success clears the count;
 - a release left unfinished: the release, only, for as long as it fails
   (an obligation, never given up);
-- a start (or wake) whose runner does not answer waits: the thread says
-  so. After 30 min of that (counted in this process, so a restart counts
-  again) each try is a failed one, with the pauses and the limit below. A
+- the start of a thread not ready yet whose VM runner does not answer
+  waits: the thread says so. After 30 min of that (counted in this
+  process, so a restart counts again) each try is a failed one, with the
+  pauses and the limit below. A ready thread (checked, or reopened after a
+  restart) and a thread on a host runner wait as long as it takes, and a
   wait for a slot on a full runner is not bounded: a slot frees when work
   ends;
 - after 8 failed starts in a row (about an hour) the loop stops starting
@@ -115,7 +117,8 @@ no wake.
   runner (R5), a runner fuller than the registry knows (R6); a failing
   start's 8 tries, its stop across restarts and a message's one more try
   (R7); a failing release retried until it succeeds (R8); a replayed
-  message (R9); a failing wake (R10); a runner that does not answer (R12).
+  message (R9); a failing wake (R10); a runner that does not answer
+  (R12, R12b, R12c).
 - `packages/server/test/lifecycle-model-test.ts`: seeded random runs of
   creates (some whose machine can never be made), messages and their
   replays, reads, idle and recovery rounds, restarts (with wakes cut short)

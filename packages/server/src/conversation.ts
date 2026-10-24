@@ -221,10 +221,12 @@ export class Conversations {
         // An archive that ended is not this thread's failure.
         if (error instanceof ThreadArchiving || this.registry.getThread(id)?.archived !== false) return;
         const message = error instanceof Error ? error.message : String(error);
-        // A start (not a check of a running machine) waits on a runner that
-        // does not answer for RUNNER_WAIT_MS; after that each try is a
-        // failed one, with the recovery loop's pause and limit.
-        const unanswered = error instanceof RunnerWait && error.unanswered && !this.checks.has(id);
+        // The start of a thread not ready yet waits on a VM runner that does
+        // not answer for RUNNER_WAIT_MS; after that each try is a failed
+        // one, with the recovery loop's pause and limit. A ready thread
+        // (checked, or opened again after a restart) waits as long as it takes.
+        const unanswered = error instanceof RunnerWait && error.unanswered && !this.checks.has(id)
+          && this.registry.getThread(id)?.workspaceState !== "available";
         if (!unanswered) this.unansweredSince.delete(id);
         else if (!this.unansweredSince.has(id)) this.unansweredSince.set(id, this.now());
         const waited = unanswered ? this.now() - this.unansweredSince.get(id)! : 0;

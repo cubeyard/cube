@@ -32,14 +32,18 @@
  *   R12 a new thread on a runner that does not answer waits 30 min, then
  *       each try counts as a failed start (pauses, the limit of 8, an error
  *       that says why); a new message tries once more. A wait for a slot on
- *       a full runner is not bounded (R6). */
+ *       a full runner is not bounded (R6).
+ *   R12b a ready thread whose runner does not answer across a restart waits
+ *       as long as it takes and is reattached when the runner is back.
+ *   R12c a thread on a host runner that is down waits as long as it takes
+ *       (AGENTS.md: a host runner's threads wait while it is down). */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Thread } from "../src/registry.ts";
 import { recoveryStep } from "../src/thread-recovery.ts";
-import { lifecycle, Phase, until, type Cubed } from "./lifecycle-fixture.ts";
+import { lifecycle, Phase, project, RUNNER, until, type Cubed } from "./lifecycle-fixture.ts";
 
 {
   const t = (workspaceState: Thread["workspaceState"], suspension?: "suspended" | "waking", extra: Partial<Thread> = {}) =>
@@ -392,6 +396,53 @@ try {
     assert.equal(fresh(a.id).workspaceState, "available", "a message tries once more and the runner answers");
     assert.equal(cubed.conversations.error(a.id), null);
     console.log("ok: R12 a new thread on a runner that does not answer waits 30 min, then fails its tries (8, with pauses) saying why; a message tries again");
+  } finally {
+    await cubed.close().catch(() => {});
+    berth.stopAll();
+  }
+}
+// ---------------------------------------------------------------- R12b
+{
+  const ready = lifecycle(path.join(root, "ready-down"), { slots: 2 });
+  const { berth, clock, fresh } = ready;
+  let cubed = ready.start();
+  const status = async (id: string) => (await cubed.conversations.storedHistory(id, { limit: 1 }))?.status;
+  try {
+    const a = ready.thread();
+    await cubed.conversations.activate(a.id);
+    await until("a settles", async () => { const s = await status(a.id); return !!s && s.state !== "working" && s.state !== "idle"; });
+    assert.equal(fresh(a.id).workspaceState, "available");
+    await cubed.close();
+    berth.down = true;
+    cubed = ready.start();
+    for (let minutes = 0; minutes < 150; minutes += 10) { clock.now += 10 * 60_000; await cubed.conversations.boot(); }
+    assert.deepEqual([fresh(a.id).retry, cubed.conversations.error(a.id)], [undefined, null], "a ready thread's wait is no failed start");
+    assert.match(cubed.conversations.waiting(a.id) ?? "", /waiting for runner node-life: it does not answer/);
+    berth.down = false;
+    clock.now += 60_000;
+    await cubed.conversations.boot();
+    assert.deepEqual([cubed.conversations.waiting(a.id), cubed.conversations.error(a.id), cubed.conversations.agentOpen(a.id)], [null, null, true], "with the runner back it is reattached");
+    console.log("ok: R12b a ready thread whose runner does not answer across a restart waits, and is reattached when it is back");
+  } finally {
+    await cubed.close().catch(() => {});
+    berth.stopAll();
+  }
+}
+
+// ---------------------------------------------------------------- R12c
+{
+  const host = lifecycle(path.join(root, "host-down"), { slots: 2, kind: "host" });
+  const { berth, clock, fresh, registry, model } = host;
+  const cubed = host.start();
+  try {
+    berth.down = true;
+    // A host runner is never in the pool: a thread is started on it by name.
+    const a = registry.createThread(project.id, "create-host", model, "hello", "pi", undefined, { runnerId: RUNNER });
+    await cubed.conversations.activate(a.id);
+    for (let minutes = 0; minutes < 150; minutes += 10) { clock.now += 10 * 60_000; await cubed.conversations.boot(); }
+    assert.deepEqual([fresh(a.id).retry, cubed.conversations.error(a.id)], [undefined, null], "a host runner's thread waits");
+    assert.match(cubed.conversations.waiting(a.id) ?? "", /waiting for runner node-life: it does not answer.*a host runner runs only while someone runs berth host/);
+    console.log("ok: R12c a thread on a host runner that is down waits as long as it takes");
   } finally {
     await cubed.close().catch(() => {});
     berth.stopAll();
