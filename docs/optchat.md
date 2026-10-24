@@ -364,7 +364,8 @@ Restarts and failures:
   back from the runner as suspended or running, never continued. Reading a thread in the UI opens its agent
   but does not start or wake its machine. `threads` lists a sleeping
   thread as "its machine is suspended" or "being woken", with its stored
-  run state.
+  run state; one whose last wake failed as "waking it failed: …" (the
+  overview: `machine error`), and the watcher reports that failure.
   These reads (`readThreads` in optchat-threads.ts) get only a
   `ThreadReader` (conversation.ts): cubed's own state, an agent already
   open and the thread's store. They have no way to start or wake a
