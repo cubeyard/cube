@@ -22,7 +22,7 @@ import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWork
   type ThreadMachines } from "./vm.ts";
 import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
-import { needsDemand, recoveryStep, releaseUnfinished } from "./thread-recovery.ts";
+import { needsDemand, recoveryStep, releaseUnfinished, retriesExhausted, START_TRIES } from "./thread-recovery.ts";
 import type { ModelSelection } from "./models.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -102,15 +102,21 @@ export class Conversations {
   /** Host tools a Pi thread's agent gets (artifacts). */
   private readonly hostTools: ((thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"]) | null;
   private closing = false;
+  private readonly now: () => number;
+  /** Messages (thread and request id) that already gave a thread whose
+   * start failed its one more try: a delivery retried under the same id
+   * (an artifact comment, OptChat's replay) does not start it again. */
+  private readonly retried = new Set<string>();
   /** Told a Pi agent's usage just before the agent closes (usage-service.ts):
    * until it opens again, nothing else may read its store. */
   onUsage: ((id: string, state: UsageState) => void) | null = null;
   /** `claude` is null when this host has no Claude Code to start. */
-  constructor(options: { registry: Registry; directory: string; models: Models; machines: ThreadMachines; claude?: ClaudeRuntime | null;
+  constructor(options: { registry: Registry; directory: string; models: Models; machines: ThreadMachines; claude?: ClaudeRuntime | null; now?: () => number;
     portal?: (thread: Thread) => GuestPortal; hostTools?: (thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"] }) {
     this.registry = options.registry; this.directory = options.directory; this.models = options.models;
     this.hostTools = options.hostTools ?? null;
     this.machines = options.machines; this.claude = options.claude ?? null;
+    this.now = options.now ?? Date.now;
     this.portal = options.portal ?? (() => ({ reason: "this cube installation has no portal" }));
   }
   /** Whether claude-code threads can run on this host. */
@@ -130,7 +136,7 @@ export class Conversations {
     if (this.closing || this.archiveHolds.has(id) || this.suspends.has(id)) return;
     const owned = this.activations.has(id) || !!this.machines.wakeInFlight?.(thread);
     const demand = needsDemand(thread, owned) && await this.demand(id);
-    switch (recoveryStep(thread, { owned, demand })) {
+    switch (recoveryStep(thread, { owned, demand, now: this.now() })) {
       case "release": await this.command(id, () => this.release(id)).catch(() => {}); return;
       case "check": case "start": await this.activate(id); return;
       case "settle-wake":
@@ -159,7 +165,14 @@ export class Conversations {
    * thread's activation (for a running machine under an open agent only a
    * check) beside the idle round, which waits for those checks. */
   async recover(): Promise<void> { await Promise.all([this.boot(), this.suspendIdle()]); }
-  error(id: string): string | null { return this.failures.get(id) ?? null; }
+  /** Why the thread's last try failed; once the recovery loop stopped
+   * trying (START_TRIES), that too, also after a restart. */
+  error(id: string): string | null {
+    const failure = this.failures.get(id) ?? null;
+    const thread = this.registry.getThread(id);
+    if (!thread?.retry || !retriesExhausted(thread)) return failure;
+    return `${failure ?? thread.retry.error}; cube stopped retrying after ${thread.retry.failures} tries in a row, a message to the thread tries once more`;
+  }
   /** Why the thread's Pi agent is down (its Session failed), if it is. */
   down(id: string): string | null { return this.downs.get(id) ?? null; }
   /** Why the thread's machine waits for a runner, if it does. */
@@ -191,6 +204,7 @@ export class Conversations {
         else await this.agent(id);
         this.failures.delete(id);
         this.waits.delete(id);
+        if (this.registry.getThread(id)?.retry) this.registry.clearFailures(id);
       } catch (error) {
         // An archive that ended is not this thread's failure.
         if (error instanceof ThreadArchiving || this.registry.getThread(id)?.archived !== false) return;
@@ -204,10 +218,22 @@ export class Conversations {
         this.waits.delete(id);
         if (this.failures.get(id) !== message) log.warn("activation failed", { thread: id, error: message });
         this.failures.set(id, message);
+        this.countFailure(id, message);
       }
     })().finally(() => { this.activations.delete(id); this.checks.delete(id); });
     this.activations.set(id, activation);
     return activation;
+  }
+  /** Counts a failed try for the recovery loop's pause and limit. A
+   * registry that cannot record it only loses the pause: the try's failure
+   * itself stands. */
+  private countFailure(id: string, message: string): void {
+    try {
+      const retry = this.registry.recordFailure(id, message, this.now());
+      if (retry.failures === START_TRIES && !releaseUnfinished(this.registry.getThread(id)!)) {
+        log.warn("cube stops retrying the thread's start; a message to it tries once more", { thread: id, tries: retry.failures });
+      }
+    } catch (error) { log.warn("a failed try was not counted", { thread: id, error: error instanceof Error ? error.message : String(error) }); }
   }
   /** Waits for a running activation; a thread is used only once its machine is up. */
   private async settled(id: string): Promise<void> { await this.activations.get(id); }
@@ -490,15 +516,55 @@ export class Conversations {
     try { return await promise; }
     finally { if (this.commands.get(id) === promise) this.commands.delete(id); }
   }
+  /** A message is an explicit demand: once the thread has it (under its
+   * request id) it is answered as accepted, and a replay wakes nothing. */
   submit(id: string, text: string, requestId: string): Promise<{ runId: string }> {
-    return this.command(id, async () => { await this.settled(id); await this.wakeFor(id); return this.accept(id, text, requestId); });
+    return this.command(id, async () => {
+      await this.settled(id);
+      if (await this.accepted(id, text, requestId)) return { runId: requestId };
+      await this.wakeFor(id, requestId);
+      return this.accept(id, text, requestId);
+    });
   }
   /** A message to a thread whose machine is suspended wakes it first, so
    * the agent's run never meets a machine that starts again from its disk
    * (B7-5). With a full runner the activation records that it waits, and
-   * the run's first guest call waits on (runner-machines.ts `wake`). */
-  private async wakeFor(id: string): Promise<void> {
-    if (this.registry.getThread(id)?.vm?.suspension) await this.activate(id);
+   * the run's first guest call waits on (runner-machines.ts `wake`). A
+   * thread whose start failed (or whose last check did) gets one more try
+   * for each new message, whatever the recovery loop's pause or limit. */
+  private async wakeFor(id: string, requestId: string): Promise<void> {
+    const thread = this.registry.getThread(id);
+    if (!thread || thread.archived) return;
+    if (thread.vm?.suspension) { await this.activate(id); return; }
+    const key = `${id}\n${requestId}`;
+    if ((thread.workspaceState !== "available" || this.failures.has(id) || retriesExhausted(thread)) && !this.retried.has(key)) {
+      this.retried.add(key);
+      await this.activate(id);
+    }
+  }
+  /** Whether the thread already has the message `requestId` (a replay): read
+   * from its agent, opened if need be, which wakes nothing. Only a ready
+   * thread has an agent to ask. */
+  private async accepted(id: string, text: string, requestId: string): Promise<boolean> {
+    const thread = this.registry.getThread(id);
+    if (!thread || thread.archived || thread.workspaceState !== "available" || this.downs.has(id) || releaseUnfinished(thread)) return false;
+    if (this.isClaude(id)) {
+      if (!this.claude) return false;
+      const prior = (await this.claudeAgent(id)).state().submissions.find(submission => submission.requestId === requestId);
+      if (prior && prior.text !== text) throw new Error("message request conflicts with the previous request");
+      return !!prior;
+    }
+    const prior = await this.priorInput(await this.agent(id), requestId);
+    if (prior && (prior.type !== "input" || (prior.text !== undefined && prior.text !== text))) throw new Error("message request conflicts with the previous request");
+    return !!prior;
+  }
+  private async priorInput({ conversation }: Agent, requestId: string): Promise<{ type: string; text: string | undefined } | undefined> {
+    return conversation.commit(async tx => {
+      const submission = await tx.submissionByRequest(conversation.id, requestId);
+      if (!submission) return undefined;
+      const entry = submission.type === "input" && submission.entry !== undefined ? await tx.entry(submission.entry) : undefined;
+      return { type: submission.type, text: entry?.model?.[0] ? messageText(entry.model[0]) : undefined };
+    }, context);
   }
   /** Suspends the machines that have been idle for 5 minutes (B7-1; the
    * runner side decides idleness from guest calls, commands and portal
@@ -557,15 +623,11 @@ export class Conversations {
       }
       return { runId: requestId };
     }
-    const { conversation } = await this.agent(id);
+    const agent = await this.agent(id);
+    const { conversation } = agent;
     // Request identity is committed atomically with the user message by Pi,
     // not stored in a second host workflow journal.
-    const prior = await conversation.commit(async tx => {
-      const submission = await tx.submissionByRequest(conversation.id, requestId);
-      if (!submission) return undefined;
-      const entry = submission.type === "input" && submission.entry !== undefined ? await tx.entry(submission.entry) : undefined;
-      return { type: submission.type, text: entry?.model?.[0] ? messageText(entry.model[0]) : undefined };
-    }, context);
+    const prior = await this.priorInput(agent, requestId);
     if (prior && (prior.type !== "input" || (prior.text !== undefined && prior.text !== text))) throw new Error("message request conflicts with the previous request");
     try { await conversation.submit({ type: "input", content: text, requestId, whenBusy: "reject" }, context); }
     catch (error) {
@@ -777,6 +839,8 @@ export class Conversations {
       const message = `workspace release failed: ${error instanceof Error ? error.message : String(error)}`;
       this.registry.markWorkspaceFailed(id, message);
       this.failures.set(id, message);
+      // Retried after a pause, for as long as it fails: never given up.
+      this.countFailure(id, message);
       throw new Error(message, { cause: error });
     }
   }

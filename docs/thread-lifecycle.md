@@ -54,7 +54,7 @@ phase, `suspended` or running. It is not continued.
 | Trigger | Starts or wakes |
 |---|---|
 | a new thread (UI, OptChat `spawn`) | yes, once (`activate`) |
-| a message (UI prompt, OptChat `tell`, an artifact comment) | yes (`submit` → `wakeFor`) |
+| a message (UI prompt, OptChat `tell`, an artifact comment) | a new one wakes a sleeping machine, and gives a thread whose start failed one more try; a replayed one (a request id the agent already has) wakes nothing |
 | a guest call of the agent's run, a portal connection | yes (`awake` → `wake`) |
 | an archive's release check | only with a slot free now (`wakeNow`); otherwise the disk is kept unchecked at once, with the reason |
 | the recovery loop (`Conversations.boot`, every 30 s) | only by `recoveryStep` (thread-recovery.ts) |
@@ -63,12 +63,19 @@ phase, `suspended` or running. It is not continued.
 `recoveryStep` is the recovery loop's rule:
 
 - archived: nothing;
-- a release left unfinished: the release, only;
+- after a failed try (`thread.retry`: how many in a row, when, why) the
+  next waits 30 s, doubling to 30 min; a success clears the count;
+- a release left unfinished: the release, only, for as long as it fails
+  (an obligation, never given up);
+- after 8 failed starts in a row (about an hour) the loop stops starting
+  the thread; it shows as an error saying so, also after a restart, and a
+  new message tries once more;
 - a sleeping machine (`suspension` set): nothing while a start or wake of
   this process owns it; otherwise woken only when the agent has a stored
   run that did not finish (a Pi submission still queued or placed with no
   agent open: its run went out while the machine slept, then cubed
-  stopped); otherwise a `waking` is read back, a `suspended` stays;
+  stopped) and its pause is over and its starts did not stop; otherwise a
+  `waking` is read back (also one a failed wake left), a `suspended` stays;
 - a ready thread: its machine is checked (and started again when its
   runner restarted);
 - a thread not ready yet: its machine is started or prepared.
@@ -80,7 +87,8 @@ no wake.
 ## Invariants
 
 - I1 A read changes nothing on the runner.
-- I2 A request id (a new thread, a message) is accepted once.
+- I2 A request id (a new thread, a message) is accepted once, and its
+  replay changes nothing on the runner.
 - I3 An archived thread's machine is never asked to run again.
 - I4 The runner never holds more machines than the registry counts, and the
   registry never counts more than the runner's slots.
@@ -88,6 +96,8 @@ no wake.
   an owner.
 - I6 A restart wakes exactly the sleeping threads with a stored run that
   did not finish.
+- I8 A start that keeps failing is tried at most 8 times by the recovery
+  loop, plus once per new message; a release is retried until it succeeds.
 - I9 An archive answers within seconds; it never waits for a slot.
 
 `RunnerMachines.start` refuses an archived thread, whoever asks.
@@ -97,10 +107,14 @@ no wake.
 - `packages/server/test/thread-lifecycle-test.ts`: `recoveryStep` over
   every kind of thread; deterministic restarts (R0–R2b); one slot: a wake
   waits for a new thread's slot (R4), archiving a sleeping thread on a full
-  runner (R5), a runner fuller than the registry knows (R6).
+  runner (R5), a runner fuller than the registry knows (R6); a failing
+  start's 8 tries, its stop across restarts and a message's one more try
+  (R7); a failing release retried until it succeeds (R8); a replayed
+  message (R9).
 - `packages/server/test/lifecycle-model-test.ts`: seeded random runs of
-  creates, messages, reads, idle and recovery rounds, restarts (with wakes
-  cut short) and archives, checking I1, I3–I6 and I9 after every step (I4
+  creates (some whose machine can never be made), messages and their
+  replays, reads, idle and recovery rounds, restarts (with wakes cut short)
+  and archives, checking I1–I6, I8 and I9 after every step (I4
   as: the runner holds no more than the registry counts, the registry no
   more than the slots).
 - Both run over `lifecycle-fixture.ts`: the real Registry, RunnerMachines
