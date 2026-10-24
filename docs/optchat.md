@@ -840,7 +840,9 @@ failure) nor recovery rounds send its request again; then archives it.
 - A spawned thread goes to the runner pool (its `berth vm` runners; refused
   when none has a free slot) unless the task names a `runner`
   (its node id, from `runners`); then it starts on that runner and never
-  moves, and waits while it is down. That is the only way onto a host
+  moves, and waits while it is down (on a `berth vm`, one whose machine
+  was never ready stops after about 90 min of that, saying so, and a
+  message tries again; docs/thread-lifecycle.md). That is the only way onto a host
   runner (`berth host`, unsandboxed), which OptChat names only when the user
   asks for it. A protocol-3 runner (`cube-runner`, retired) takes none.
 - A spawned thread runs on the host's preferred model unless the task names

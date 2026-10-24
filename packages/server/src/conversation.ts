@@ -875,6 +875,7 @@ export class Conversations {
       this.failures.delete(id);
       this.downs.delete(id);
       this.waits.delete(id);
+      this.unansweredSince.delete(id);
       return released;
     } catch (error) {
       const message = `workspace release failed: ${error instanceof Error ? error.message : String(error)}`;
