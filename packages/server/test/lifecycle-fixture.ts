@@ -42,6 +42,8 @@ export class FakeBerth {
   failDeletes = 0;
   readonly phases = new Map<string, Phase>();
   readonly events: RunnerEvent[] = [];
+  /** Every request the runner answered or refused, by op and machine (`machineGet:<vm>`). */
+  readonly asks = new Map<string, number>();
   readonly violations: string[] = [];
   private readonly boots = new Map<string, number>();
   private readonly guests = new Map<string, LocalGuestTransport>();
@@ -80,6 +82,7 @@ export class FakeBerth {
     throw new RunnerError(code, code === "RESOURCE_EXHAUSTED" ? "capacity" : "", message);
   }
   request(op: string, ref: MachineRef, retain = false): Machine {
+    this.asks.set(`${op}:${ref.id}`, (this.asks.get(`${op}:${ref.id}`) ?? 0) + 1);
     if (this.down) this.refuse("UNAVAILABLE", "the runner does not answer");
     const vm = ref.id;
     const phase = this.phases.get(vm);
@@ -170,7 +173,7 @@ export const project: Project = { id: "p", name: "life", status: "ready", error:
 /** A cubed process over a state directory: a new one is a restart. */
 export interface Cubed { conversations: Conversations; machines: RunnerMachines; close(): Promise<void> }
 
-export function lifecycle(root: string, options: { slots: number; idleMs?: number; wakeWaitMs?: number }) {
+export function lifecycle(root: string, options: { slots: number; idleMs?: number; wakeWaitMs?: number; kind?: "vm" | "host" }) {
   const faux = fauxProvider({ tokensPerSecond: 1_000_000 });
   faux.setResponses(Array.from({ length: 2000 }, () => fauxAssistantMessage("done")));
   const models = createModels();
@@ -179,7 +182,7 @@ export function lifecycle(root: string, options: { slots: number; idleMs?: numbe
   const registry = new Registry(path.join(root, "registry.sqlite"));
   registry.saveProject(project);
   registry.enrollRunner({ nodeId: NODE, threadId: RUNNER, environmentId: 1, configPath: path.join(root, "runner.json"), configHash: RUNNER, maxActiveVms: options.slots,
-    protocol: 4, kind: "vm" } as never);
+    protocol: 4, kind: options.kind ?? "vm" } as never);
   const berth = new FakeBerth(path.join(root, "runner"), options.slots);
   const clock = { now: Date.now() };
   const policy = { policyFor: () => ({}) };

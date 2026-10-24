@@ -31,6 +31,9 @@ const log = createLogger("threads");
 const INITIAL_REQUEST = "cube:initial";
 /** How long an idle round waits for the recovery loop's check of a machine. */
 const CHECK_WAIT_MS = 60_000;
+/** How long a start waits on a runner that does not answer before each try
+ * counts as a failed one (as long as a guest call waits for a wake). */
+const RUNNER_WAIT_MS = 30 * 60_000;
 /** Why a disk the release check let go is kept all the same. */
 /** The threads' part of cubed's close (Conversations.close). */
 export const THREADS_CLOSE_MS = 9_000;
@@ -71,6 +74,9 @@ export class Conversations {
   private readonly agents = new Map<string, Promise<Agent>>();
   private readonly workspaces = new Map<string, { workspace: VmWorkspace; leases: LeaseStore }>();
   private readonly failures = new Map<string, string>();
+  /** Threads this process has tried to start or wake: until then, the try
+   * that failed before a restart (`retry`) is still their last one. */
+  private readonly tried = new Set<string>();
   /** Why a thread's Pi agent is down: its Session failed. Kept when the
    * agent closes (its machine booted again): reopening it would send the
    * request out at the failure again. Only the thread's release clears it. */
@@ -113,6 +119,8 @@ export class Conversations {
    * start failed its one more try: a delivery retried under the same id
    * (an artifact comment, OptChat's replay) does not start it again. */
   private readonly retried = new Set<string>();
+  /** Since when a start of the thread has found its runner not answering. */
+  private readonly unansweredSince = new Map<string, number>();
   /** Told a Pi agent's usage just before the agent closes (usage-service.ts):
    * until it opens again, nothing else may read its store. */
   onUsage: ((id: string, state: UsageState) => void) | null = null;
@@ -171,11 +179,12 @@ export class Conversations {
    * thread's activation (for a running machine under an open agent only a
    * check) beside the idle round, which waits for those checks. */
   async recover(): Promise<void> { await Promise.all([this.boot(), this.suspendIdle()]); }
-  /** Why the thread's last try failed; once the recovery loop stopped
-   * trying (START_TRIES), that too, also after a restart. */
+  /** Why the thread's last try failed, also one before a restart until
+   * this process tries again; once the recovery loop stopped trying
+   * (START_TRIES), that too. */
   error(id: string): string | null {
-    const failure = this.failures.get(id) ?? null;
     const thread = this.registry.getThread(id);
+    const failure = this.failures.get(id) ?? (this.tried.has(id) ? null : thread?.retry?.error ?? null);
     if (!thread?.retry || !retriesExhausted(thread)) return failure;
     return `${failure ?? thread.retry.error}; cube stopped retrying after ${thread.retry.failures} tries in a row, a message to the thread tries once more`;
   }
@@ -198,6 +207,7 @@ export class Conversations {
     const current = this.registry.getThread(id);
     if (current && releaseUnfinished(current)) return Promise.resolve();
     if (current?.workspaceState === "available" && this.agentOpen(id)) this.checks.add(id);
+    this.tried.add(id);
     const activation = (async () => {
       try {
         // Steps an earlier activation (or a cubed that stopped) left running
@@ -210,15 +220,33 @@ export class Conversations {
         else await this.agent(id);
         this.failures.delete(id);
         this.waits.delete(id);
+        this.unansweredSince.delete(id);
         if (this.registry.getThread(id)?.retry) this.registry.clearFailures(id);
       } catch (error) {
         // An archive that ended is not this thread's failure.
         if (error instanceof ThreadArchiving || this.registry.getThread(id)?.archived !== false) return;
         const message = error instanceof Error ? error.message : String(error);
-        if (error instanceof RunnerWait) {
+        // The start of a thread not ready yet waits on a VM runner that does
+        // not answer for RUNNER_WAIT_MS; after that each try is a failed
+        // one, with the recovery loop's pause and limit. A ready thread
+        // (checked, or opened again after a restart) waits as long as it takes.
+        const unanswered = error instanceof RunnerWait && error.unanswered && !this.checks.has(id)
+          && this.registry.getThread(id)?.workspaceState !== "available";
+        if (!unanswered) this.unansweredSince.delete(id);
+        else if (!this.unansweredSince.has(id)) this.unansweredSince.set(id, this.now());
+        const waited = unanswered ? this.now() - this.unansweredSince.get(id)! : 0;
+        if (error instanceof RunnerWait && waited < RUNNER_WAIT_MS) {
           if (this.waits.get(id) !== message) log.info("waiting for a runner", { thread: id, reason: message });
           this.waits.set(id, message);
           this.failures.delete(id);
+          return;
+        }
+        if (waited) {
+          this.waits.delete(id);
+          const failure = `${message.replace(/^waiting for runner (\S+): it does not answer/, "runner $1 has not answered for " + Math.round(RUNNER_WAIT_MS / 60_000) + " min")}`;
+          if (this.failures.get(id) !== failure) log.warn("activation failed", { thread: id, error: failure });
+          this.failures.set(id, failure);
+          this.countFailure(id, failure);
           return;
         }
         this.waits.delete(id);
@@ -541,7 +569,7 @@ export class Conversations {
   private async wakeFor(id: string, requestId: string): Promise<void> {
     const thread = this.registry.getThread(id);
     if (!thread || thread.archived) return;
-    if (thread.vm?.suspension) { await this.activate(id); return; }
+    if (thread.vm?.suspension) { this.machines.renewWake?.(thread); await this.activate(id); return; }
     const key = `${id}\n${requestId}`;
     if ((thread.workspaceState !== "available" || this.failures.has(id) || retriesExhausted(thread)) && !this.retried.has(key)) {
       this.retried.add(key);
@@ -852,6 +880,7 @@ export class Conversations {
       this.failures.delete(id);
       this.downs.delete(id);
       this.waits.delete(id);
+      this.unansweredSince.delete(id);
       return released;
     } catch (error) {
       const message = `workspace release failed: ${error instanceof Error ? error.message : String(error)}`;

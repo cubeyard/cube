@@ -57,6 +57,9 @@ export interface ThreadMachines {
   /** A `waking` no one in this process owns (a restart cut the wake short):
    * the runner's own phase is recorded instead, and nothing is started. */
   settleWake?(thread: Thread): Promise<void>;
+  /** A new message asks for the machine: its run's first guest call waits
+   * for a slot the whole time again, even if an earlier run's wait gave up. */
+  renewWake?(thread: Thread): void;
   /** Read-only evidence about the thread's machine (vm-diagnostics.ts);
    * never starts, stops or attaches it. */
   diagnose?(thread: Thread): Promise<MachineEvidence>;
@@ -150,7 +153,11 @@ export function currentMachineEpoch(directory: string): number {
  * it now, or the runner that has (or may have) it does not answer. Not a
  * failure of the thread; cubed's recovery loop tries again. */
 export class RunnerWait extends Error {
-  constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "RunnerWait"; }
+  /** A VM runner does not answer (rather than being full): a new thread's
+   * start waits for it only so long (Conversations, RUNNER_WAIT_MS). A host
+   * runner runs only while someone runs it; its threads wait (AGENTS.md). */
+  readonly unanswered: boolean;
+  constructor(message: string, options?: ErrorOptions & { unanswered?: boolean }) { super(message, options); this.name = "RunnerWait"; this.unanswered = !!options?.unanswered; }
 }
 /** An error as a runner observation records it. */
 export function errorText(error: unknown): string {

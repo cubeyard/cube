@@ -19,7 +19,7 @@ import { createCodemodeTool, type CodemodeLimits, type NestedTool } from "./code
 import { settleOperation, WorkspaceError, type Workspace } from "./workspace.ts";
 import { expandHome, WORKSPACE_ROOT, WorkspaceEnv, workspacePath } from "./workspace-env.ts";
 import { createLogger } from "./log.ts";
-import { sendsExtension, settleSends } from "./pi-sends.ts";
+import { RESTART_LIMIT, sendsExtension, settleSends } from "./pi-sends.ts";
 import { piReports, reportText } from "./pi-report.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -37,7 +37,7 @@ const bashParameters = Type.Object({
  * random storage identity that scopes every workspace key Pi derives from
  * task ids. */
 export const RunnerDoc = defineDoc<{ binding: string; instance: string }>({
-  kind: "cube.runner", version: 1, scope: "session", initial: () => ({ binding: "", instance: "" }),
+  kind: "cube.runner", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({ binding: "", instance: "" }),
 });
 
 /** pi-durable's SQLite storage on cubed's own connection: WAL with
@@ -61,8 +61,8 @@ const READ_BYTES = 64 * 2 ** 20;
  * connection (a WAL reader never waits for the writer): it is never created,
  * migrated or locked for writing. pi-durable's open, which checks its schema
  * in a write transaction, and its close, which checkpoints, run on the
- * private copy, deleted afterwards. A store of another schema version is
- * refused. */
+ * private copy, deleted afterwards (which migrates the copy of an older
+ * schema). A store of a newer schema version is refused. */
 export async function readStorage<T>(file: string, read: (storage: SqliteStorage) => Promise<T>): Promise<T | null> {
   if (!fs.existsSync(file)) return null;
   const directory = fs.mkdtempSync(path.join(path.dirname(file), ".read-"));
@@ -71,7 +71,9 @@ export async function readStorage<T>(file: string, read: (storage: SqliteStorage
     const source = new DatabaseSync(file, { readOnly: true });
     try {
       const row = source.prepare("SELECT version FROM durable_schema WHERE singleton = 1").get() as { version: number } | undefined;
-      if (row?.version !== CURRENT_SQLITE_SCHEMA_VERSION) throw new Error(`the stored history has schema version ${row?.version ?? "none"}, not ${CURRENT_SQLITE_SCHEMA_VERSION}`);
+      // An older schema is read too (an archived thread's store stays at 1):
+      // pi-durable migrates the private copy, never the original.
+      if (row === undefined || !Number.isSafeInteger(row.version) || row.version < 1 || row.version > CURRENT_SQLITE_SCHEMA_VERSION) throw new Error(`the stored history has schema version ${row?.version ?? "none"}, not 1 to ${CURRENT_SQLITE_SCHEMA_VERSION}`);
       // The copy is synchronous: a store too large to copy at once is refused.
       const { size } = source.prepare("SELECT page_count * page_size AS size FROM pragma_page_count(), pragma_page_size()").get() as { size: number };
       if (size > READ_BYTES) throw new Error(`the stored history is too large to read here (${Math.ceil(size / 2 ** 20)} MiB)`);
@@ -225,7 +227,7 @@ export async function openAgent(options: {
     const gate = { closing: false, held: 0 };
     registry.install(sendsExtension(() => harness!, () => epoch, gate));
     const thread = path.basename(options.directory);
-    harness = await Harness.open(storage, { models: sessions.models, registry, onReport: piReports(log, { thread }), settings: { toolExecution: "sequential" } }, context);
+    harness = await Harness.open(storage, { models: sessions.models, registry, onReport: piReports(log, { thread }), settings: { toolExecution: "sequential", restartLimit: RESTART_LIMIT } }, context);
     // Before anything is scheduled: a request that was out when the last
     // process stopped is counted and its run ends (stopped); it is never
     // sent again on its own. A message of the user goes on.

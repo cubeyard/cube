@@ -160,11 +160,12 @@ export interface Thread {
    * runner is down. */
   pinned?: true;
   /** Tries of the thread's start (or of its release) that failed in a row:
-   * how many, when the last one ended and its error. A success clears it.
+   * how many, when the first (`since`, absent on rows older than it) and
+   * the last one ended and its error. A success clears it.
    * The recovery loop waits longer after each and stops starting after
    * START_TRIES; a release it tries for as long as it fails
    * (thread-recovery.ts). A wait for a runner is no failed try. */
-  retry?: { failures: number; at: number; error: string };
+  retry?: { failures: number; at: number; since?: number; error: string };
 }
 /** Where the thread's own machine stands on `thread.runnerId`:
  * `provisional`: no `vm.allocate` for it ever reached that runner, so the
@@ -767,7 +768,8 @@ export class Registry {
     try {
       const thread = this.getThread(threadId);
       if (!thread) throw new Error("thread not found");
-      const retry = { failures: (thread.retry?.failures ?? 0) + 1, at, error: error.slice(0, 1024) };
+      // A row older than `since` takes its last try's time as the first.
+      const retry = { failures: (thread.retry?.failures ?? 0) + 1, at, since: thread.retry ? thread.retry.since ?? thread.retry.at : at, error: error.slice(0, 1024) };
       this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, retry }), threadId);
       this.db.exec("COMMIT");
       return retry;

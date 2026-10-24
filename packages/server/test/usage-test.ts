@@ -337,7 +337,7 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
     // What an older cube left: no compactor count at all.
     const harness = await Harness.open(await openStorage(path.join(directory, "pi.sqlite")), { models, registry: createRegistry() }, context);
     const { defineDoc } = await import("@earendil-works/pi-durable");
-    const doc = defineDoc<{ models: Record<string, never>; calls: Record<string, number>; since: number | null; earlier?: boolean }>({ kind: "cube.optchat.usage", version: 1, scope: "session", initial: () => ({ models: {}, calls: {}, since: null }) });
+    const doc = defineDoc<{ models: Record<string, never>; calls: Record<string, number>; since: number | null; earlier?: boolean }>({ kind: "cube.optchat.usage", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({ models: {}, calls: {}, since: null }) });
     await harness.commit(async tx => { const usage = await tx.doc(doc); usage.since = null; delete usage.earlier; }, context);
     await harness.close(context);
     chat = await open(directory);

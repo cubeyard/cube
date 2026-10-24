@@ -264,16 +264,26 @@ export class RunnerMachines implements ThreadMachines {
     if (thread?.vm?.suspension) await this.wake(thread);
   }
 
+  /** Threads whose wake waited the whole wakeWaitMs in vain, and why: until
+   * the machine runs (whoever starts it) or a new message asks for it
+   * (renewWake), a guest call tries once and fails at once, so the thread's
+   * later tool calls do not each wait the whole time again. */
+  private readonly wakeGaveUp = new Map<string, string>();
+
+  renewWake(thread: Thread): void { this.wakeGaveUp.delete(thread.id); }
+
   /** Resumes the thread's suspended machine; with a full runner, tries
-   * again every wakeRetryMs (the thread says it waits) for wakeWaitMs. */
+   * again every wakeRetryMs (the thread says it waits) for wakeWaitMs, once
+   * per run (wakeGaveUp). */
   wake(thread: Thread): Promise<void> {
     const pending = this.waking.get(thread.id);
     if (pending) return pending;
     const waking = (async () => {
-      const deadline = Date.now() + (this.options.wakeWaitMs ?? WAKE_WAIT_MS);
+      const gaveUp = this.wakeGaveUp.has(thread.id);
+      const deadline = Date.now() + (gaveUp ? 0 : this.options.wakeWaitMs ?? WAKE_WAIT_MS);
       for (;;) {
         const current = this.options.registry.getThread(thread.id);
-        if (!current?.vm?.suspension || current.archived) return;
+        if (!current?.vm?.suspension || current.archived) { this.wakeGaveUp.delete(thread.id); return; }
         try {
           if (this.onWake) await this.onWake(current);
           // The conversation did not wake it and nothing waits for a slot
@@ -282,8 +292,13 @@ export class RunnerMachines implements ThreadMachines {
           if (!this.onWake || (declined && !declined.waiting)) await this.start(this.options.registry.getThread(thread.id) ?? current);
         } catch (error) { if (!(error instanceof RunnerWait)) throw error; }
         const after = this.options.registry.getThread(thread.id)?.vm?.suspension;
-        if (!after) return;
-        if (Date.now() >= deadline) throw new Error(`the thread's machine is suspended and could not be resumed: ${after.waiting ?? "its runner did not resume it"}`);
+        if (!after) { this.wakeGaveUp.delete(thread.id); return; }
+        if (Date.now() >= deadline) {
+          const why = after.waiting ?? "its runner did not resume it";
+          this.wakeGaveUp.set(thread.id, why);
+          throw new Error(`the thread's machine is suspended and could not be resumed: ${why}`
+            + (gaveUp ? "; this run already waited its whole time for it, a new message waits again" : ""));
+        }
         await new Promise(resolve => setTimeout(resolve, this.options.wakeRetryMs ?? WAKE_RETRY_MS));
       }
     })().finally(() => this.waking.delete(thread.id));
@@ -466,7 +481,7 @@ export class RunnerMachines implements ThreadMachines {
     if (!(error instanceof RunnerError && error.code === "UNAVAILABLE")) return error;
     return new RunnerWait(`waiting for runner ${node}: it does not answer; this thread was `
       + `${thread.pinned ? "started on it by name" : "placed on it"} and stays there`
-      + (this.onVm(thread) ? "" : " (a host runner runs only while someone runs berth host)"), { cause: error });
+      + (this.onVm(thread) ? "" : " (a host runner runs only while someone runs berth host)"), { cause: error, unanswered: this.onVm(thread) });
   }
 
   private async boot(thread: Thread, options: StartOptions): Promise<MachineStart> {
@@ -545,7 +560,11 @@ export class RunnerMachines implements ThreadMachines {
       // A machine started or resumed now is active now, and nothing from
       // before runs in it. A check of one that ran already is not activity:
       // the recovery loop's checks must not keep it awake (B-207-1).
-      if (machine.status?.phase !== MachineStatus_Phase.RUNNING) this.activity.started(thread.id);
+      if (machine.status?.phase !== MachineStatus_Phase.RUNNING) {
+        this.activity.started(thread.id);
+        // Whoever started it, the machine ran: a later wake waits whole again.
+        this.wakeGaveUp.delete(thread.id);
+      }
       const booted = this.boots.get(thread.id) !== boot;
       this.boots.set(thread.id, boot);
       if (booted) this.events.record(thread.id, "ready", `boot ${boot.slice(0, 8)} of ${what} ${node}`);
@@ -827,6 +846,7 @@ export class RunnerMachines implements ThreadMachines {
   async release(thread: Thread, retain: boolean): Promise<{ retained: boolean }> {
     this.boots.delete(thread.id);
     this.activity.forget(thread.id);
+    this.wakeGaveUp.delete(thread.id);
     this.suspendRetry.delete(thread.id);
     // A build machine that outlived its start (cubed's own) goes first.
     if (this.onVm(thread)) await this.abandonBuild(thread, this.session(thread));
