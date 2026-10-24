@@ -505,9 +505,11 @@ threads' `sealFailure` records stay readable.
     starting it, and that holds after the newer release is installed: the
     thread's transcript reads again, but its agent starts only when the
     thread gets a message, and until then the thread still shows the old
-    schema error and an unfinished run does not go on. A supervisor restore
-    within probation adds a try or two, which the newer release retries
-    after a short pause.
+    schema error and an unfinished run does not go on. This holds however
+    the older release came back, a supervisor restore after a failed
+    probation included: what counts is how long it runs. Under about an
+    hour, the newer release starts the thread again by itself after the
+    last try's pause (at most 30 minutes).
     A store 1.4.0 never opened stays at schema 1: a thread
     archived before the upgrade, or one whose agent did not open under 1.4.0
     (cube's readers take 1 and 2 and never migrate). A thread archived after

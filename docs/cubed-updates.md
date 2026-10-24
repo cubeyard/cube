@@ -154,9 +154,11 @@ While the older release runs, each such thread's failed starts are counted.
 After about an hour (8 tries) cube stops starting it, and that holds after the
 newer release is installed: the thread's transcript reads again, but its agent
 starts only when the thread gets a message. Until then the thread still shows
-the old schema error, and an unfinished run does not go on. A supervisor
-restore within probation adds a try or two, which the newer release retries
-after a short pause.
+the old schema error, and an unfinished run does not go on. This holds however
+the older release came back, a supervisor restore after a failed probation
+included: what counts is how long it runs. Under about an hour, the newer
+release starts the thread again by itself after the last try's pause (at most
+30 minutes).
 
 A release ships `bin/cube-gateway` next to `bin/node`; the candidate's
 self-check runs `cube-gateway --version` and fails without a working gateway.
