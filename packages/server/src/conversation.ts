@@ -71,6 +71,9 @@ export class Conversations {
   private readonly agents = new Map<string, Promise<Agent>>();
   private readonly workspaces = new Map<string, { workspace: VmWorkspace; leases: LeaseStore }>();
   private readonly failures = new Map<string, string>();
+  /** Threads this process has tried to start or wake: until then, the try
+   * that failed before a restart (`retry`) is still their last one. */
+  private readonly tried = new Set<string>();
   /** Why a thread's Pi agent is down: its Session failed. Kept when the
    * agent closes (its machine booted again): reopening it would send the
    * request out at the failure again. Only the thread's release clears it. */
@@ -171,11 +174,12 @@ export class Conversations {
    * thread's activation (for a running machine under an open agent only a
    * check) beside the idle round, which waits for those checks. */
   async recover(): Promise<void> { await Promise.all([this.boot(), this.suspendIdle()]); }
-  /** Why the thread's last try failed; once the recovery loop stopped
-   * trying (START_TRIES), that too, also after a restart. */
+  /** Why the thread's last try failed, also one before a restart until
+   * this process tries again; once the recovery loop stopped trying
+   * (START_TRIES), that too. */
   error(id: string): string | null {
-    const failure = this.failures.get(id) ?? null;
     const thread = this.registry.getThread(id);
+    const failure = this.failures.get(id) ?? (this.tried.has(id) ? null : thread?.retry?.error ?? null);
     if (!thread?.retry || !retriesExhausted(thread)) return failure;
     return `${failure ?? thread.retry.error}; cube stopped retrying after ${thread.retry.failures} tries in a row, a message to the thread tries once more`;
   }
@@ -198,6 +202,7 @@ export class Conversations {
     const current = this.registry.getThread(id);
     if (current && releaseUnfinished(current)) return Promise.resolve();
     if (current?.workspaceState === "available" && this.agentOpen(id)) this.checks.add(id);
+    this.tried.add(id);
     const activation = (async () => {
       try {
         // Steps an earlier activation (or a cubed that stopped) left running

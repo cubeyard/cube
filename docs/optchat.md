@@ -346,7 +346,10 @@ Restarts and failures:
   and sent again in a later round; a thread archived (in the UI, say)
   before a round saw its last run settle reports that run from its store.
 - **A thread whose machine is unavailable** reports a failure to start
-  once, after the start grace (cubed keeps retrying); see "Archiving".
+  once, after the start grace, saying whether cubed keeps retrying; see
+  "Archiving". A sleeping machine whose wake fails reports each episode
+  of failed tries in a row once (`report:<thread>:failure:<first try>`),
+  also after a restart.
 - **The chat's own observation starts nothing**: neither a thread's
   watcher, nor `threads`, nor `history` starts its machine, wakes a
   suspended one or opens its agent. With the agent open in cubed, the
@@ -365,7 +368,8 @@ Restarts and failures:
   but does not start or wake its machine. `threads` lists a sleeping
   thread as "its machine is suspended" or "being woken", with its stored
   run state; one whose last wake failed as "waking it failed: …" (the
-  overview: `machine error`), and the watcher reports that failure.
+  overview: `machine error`), also after a restart, and the watcher
+  reports that failure once per episode.
   These reads (`readThreads` in optchat-threads.ts) get only a
   `ThreadReader` (conversation.ts): cubed's own state, an agent already
   open and the thread's store. They have no way to start or wake a
