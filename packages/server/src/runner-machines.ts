@@ -291,6 +291,42 @@ export class RunnerMachines implements ThreadMachines {
     return waking;
   }
 
+  wakeInFlight(thread: Thread): boolean { return this.waking.has(thread.id) || this.starting.has(thread.id); }
+
+  /** A `waking` that no start or wake of this process owns: one a cubed
+   * restart cut short, or one whose owner gave up. Nothing asks for the
+   * machine now, so it is not woken: the runner's phase is recorded. Still
+   * suspended (or gone), it is `suspended` again and holds no slot; running
+   * (the start went through before the stop), the suspension is cleared and
+   * the next recovery round checks it like any running machine. A runner
+   * that does not answer leaves it for the next round. */
+  async settleWake(thread: Thread): Promise<void> {
+    const id = thread.id;
+    if (this.wakeInFlight(thread)) return;
+    const current = this.options.registry.getThread(id);
+    const sleep = current?.vm?.suspension;
+    if (!current || current.archived || sleep?.state !== "waking") return;
+    let machine: Machine | null;
+    try { machine = await this.session(current).machine({ case: "machineGet", value: { ref: this.ref(current) } }); }
+    catch (error) {
+      if (!(error instanceof RunnerError && error.code === "NOT_FOUND")) throw this.waitFor(current, error);
+      machine = null;
+    }
+    // A start that began meanwhile owns the thread now.
+    if (this.wakeInFlight(thread) || this.options.registry.getThread(id)?.vm?.suspension?.state !== "waking") return;
+    const phase = machine?.status?.phase;
+    if (phase === MachineStatus_Phase.SUSPENDING) return;
+    if (machine && phase !== MachineStatus_Phase.SUSPENDED) {
+      this.options.registry.updateThreadVm(id, { suspension: undefined });
+      this.events.record(id, "wake read back", `runner ${this.session(current).nodeId} runs it (${MachineStatus_Phase[phase ?? 0]}); a restart had cut its wake short`);
+      this.log.info("wake read back: the machine runs", { thread: id, phase: MachineStatus_Phase[phase ?? 0] });
+      return;
+    }
+    this.options.registry.updateThreadVm(id, { suspension: { state: "suspended", at: sleep.at, ...(sleep.memoryBytes ? { memoryBytes: sleep.memoryBytes } : {}) } });
+    this.events.record(id, "wake dropped", "nothing asked for the machine after a restart cut its wake short; it stays suspended until something does");
+    this.log.info("wake dropped: no one asks for the machine", { thread: id, phase: machine ? "SUSPENDED" : "gone" });
+  }
+
   /** Suspends the thread's machine when it has been idle for idleMs and
    * nothing runs in it: `busy` (the conversation's), its commands, calls and
    * portal connections, and no registered service (asked last, with the
