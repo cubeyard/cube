@@ -139,12 +139,21 @@ installation is refused an in-place update and must be reinstalled on a fresh
 `CUBED_STATE` with re-enrolled runners (see DEVELOPING.md); cubed also refuses
 to open a thread directory that still holds the old Pi session store.
 
+State schema 102 and rollback-safe-from 102 do not cover Pi stores. Since
+the release with Pi 1.4.0, each Pi store cubed opens (OptChat's at start, a
+thread's when its agent opens) moves to Pi SQLite schema 2, one way. A
+release before it, including one the supervisor restores after a failed
+probation, starts, but OptChat and those threads (agent and transcript) stay
+unavailable until a release with Pi 1.4.0 or later is installed again.
+Nothing is deleted, and the system page can still install that release.
+
 A release ships `bin/cube-gateway` next to `bin/node`; the candidate's
 self-check runs `cube-gateway --version` and fails without a working gateway.
 
 For manual recovery, stop the foreground process or user service, inspect
 `current`, `previous`, `update.json` and the service logs, then atomically repoint
-`current` to a reviewed release under `releases/`. Do not delete state or runner
+`current` to a reviewed release under `releases/` (one with Pi 1.4.0 or later
+once that release has run; see above). Do not delete state or runner
 evidence. A manifest requiring a newer supervisor, or a signing-key rotation,
 requires rerunning the external installer; the GUI intentionally cannot replace
 its own trust/supervision boundary.

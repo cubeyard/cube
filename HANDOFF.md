@@ -489,14 +489,18 @@ threads' `sealFailure` records stay readable.
     conversation stalls, silently in 1.0.1, until Pi is upgraded again. Stop
     cubed with every thread and the chat idle first;
   - **rolling back past Pi 1.4.0 is not possible in place**: pi-durable
-    1.4.0 migrates every Pi store it opens (each open thread's `pi.sqlite`
-    and OptChat's, at cubed's start) from SQLite schema 1 to 2, one way, and
-    1.3.0 refuses schema 2 ("Durable SQLite schema version 2 is newer than
-    supported version 1"). A cubed with Pi ≤1.3.0, including one the
-    supervisor restores as `previous` after a failed probation, starts but
-    its OptChat and those threads' agents stay down until Pi 1.4.0 runs
-    again; nothing is lost. Archived threads' stores stay at schema 1 (only
-    read, never migrated); cube's readers take 1 and 2. A stopped-cubed
+    1.4.0 migrates every Pi store it opens (OptChat's within moments of
+    cubed's ready, a thread's `pi.sqlite` when its agent opens) from SQLite
+    schema 1 to 2, one way, and 1.3.0 refuses schema 2 ("Durable SQLite
+    schema version 2 is newer than supported version 1"). A cubed with Pi
+    ≤1.3.0, including one the supervisor restores as `previous` after a
+    failed probation, starts but its OptChat and those threads stay down
+    until Pi 1.4.0 runs again: the agent does not open and the transcript
+    does not load either (1.3.0's history reader refuses schema 2 as well);
+    nothing is lost. A store 1.4.0 never opened stays at schema 1: a thread
+    archived before the upgrade, or one whose agent did not open under 1.4.0
+    (cube's readers take 1 and 2 and never migrate). A thread archived after
+    its agent ran under 1.4.0 is at 2. A stopped-cubed
     backup (`VACUUM INTO`) opens in 1.3.0, but restoring it replays any
     tool call made since. The state schema stays 102, whose manifests still
     declare rollback safety: whether this needs a rollback contract of its
@@ -506,5 +510,11 @@ threads' `sealFailure` records stay readable.
     before 1.4.0: a parked task keeps its conversation busy and cube has no
     `retryTask()` control yet (D1′ open). A model request out at a stop is
     still never sent again (`settleSends`);
+  - pi-ai 1.4.0 drops Codex `gpt-5.5` and `gpt-5.3-codex-spark` from its
+    catalog: a thread or OptChat that had one selected fails its next run
+    with `no_model` ("model unavailable — choose another model") until
+    another model is chosen;
+  - pi-ai 1.4.0's OpenAI/Codex request shape (tools as a head
+    `additional_tools` item) is pinned offline only, never accepted live;
   - AGENTS.md still calls Pi an AgentHarness;
   - `docs/architecture-tour-notes.md` is historical.
