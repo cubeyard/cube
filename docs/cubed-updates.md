@@ -150,6 +150,14 @@ with Pi 1.4.0 or later (or repointing `current` to one) makes them readable
 again with their whole history, and nothing has to be restored. The system
 page can still install that release.
 
+While the older release runs, each such thread's failed starts are counted.
+After about an hour (8 tries) cube stops starting it, and that holds after the
+newer release is installed: the thread's transcript reads again, but its agent
+starts only when the thread gets a message. Until then the thread still shows
+the old schema error, and an unfinished run does not go on. A supervisor
+restore within probation adds a try or two, which the newer release retries
+after a short pause.
+
 A release ships `bin/cube-gateway` next to `bin/node`; the candidate's
 self-check runs `cube-gateway --version` and fails without a working gateway.
 

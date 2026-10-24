@@ -495,11 +495,19 @@ threads' `sealFailure` records stay readable.
     schema version 2 is newer than supported version 1"). A cubed with Pi
     ≤1.3.0, including one the supervisor restores as `previous` after a
     failed probation, starts but its OptChat and those threads stay down
-    until Pi 1.4.0 runs again: the agent does not open and the transcript
-    does not load either (1.3.0's history reader refuses schema 2 as well).
-    The refused stores are not written, so nothing is lost: installing (or
-    repointing `current` to) a release with Pi 1.4.0 or later makes them
-    readable again with their whole history, and nothing has to be restored.
+    while it runs: the agent does not open and the transcript does not load
+    either (1.3.0's history reader refuses schema 2 as well). The refused
+    stores are not written, so nothing is lost: installing (or repointing
+    `current` to) a release with Pi 1.4.0 or later makes them readable again
+    with their whole history, and nothing has to be restored. While the
+    older release runs, each such thread's failed starts are counted (in the
+    registry, not the Pi store). After about an hour (8 tries) cube stops
+    starting it, and that holds after the newer release is installed: the
+    thread's transcript reads again, but its agent starts only when the
+    thread gets a message, and until then the thread still shows the old
+    schema error and an unfinished run does not go on. A supervisor restore
+    within probation adds a try or two, which the newer release retries
+    after a short pause.
     A store 1.4.0 never opened stays at schema 1: a thread
     archived before the upgrade, or one whose agent did not open under 1.4.0
     (cube's readers take 1 and 2 and never migrate). A thread archived after
