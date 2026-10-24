@@ -92,6 +92,20 @@ try {
   const threads = await settledThreads();
   assert.equal(threads.length, 1); assert.equal(threads[0].state, "error");
   assert.match(threads[0].error, /workspace allocation failed.*absent\.json/);
+  // The polled list: the same list again is a 304 without a body; a changed one is the whole list.
+  const first = await fetch(`${base}/api/threads?includeArchived=1`);
+  const etag = first.headers.get("etag")!;
+  assert.match(etag, /^"[\w-]+"$/);
+  assert.deepEqual((await first.json()).threads, threads);
+  const same = await fetch(`${base}/api/threads?includeArchived=1`, { headers: { "if-none-match": etag } });
+  assert.deepEqual([same.status, await same.text()], [304, ""]);
+  app.registry.saveThread({ ...app.registry.getThread(threads[0].id)!, title: "renamed" });
+  const changed = await fetch(`${base}/api/threads?includeArchived=1`, { headers: { "if-none-match": etag } });
+  assert.equal(changed.status, 200);
+  assert.equal((await changed.json()).threads[0].title, "renamed");
+  assert.notEqual(changed.headers.get("etag"), etag);
+  assert.deepEqual((await (await fetch(`${base}/api/projects`)).json()).projects.map((item: { id: string; threadCount: number; retainedThreadCount: number }) =>
+    [item.id, item.threadCount, item.retainedThreadCount]), [[project.id, 1, 1]], "each project's threads, counted");
   const idleHealth: TrustedRunnerHealth = { lifecycle: "ready", draining: false, error: null, activeVms: 0, runningVms: 0, maxActiveVms: 1,
     retainedVms: 1, retainedBytes: 1024, softwareVersion: "test", protocolVersion: 4, kind: "vm" };
   app.registry.enrollRunner({ nodeId: "node-operator", threadId: "operator-binding", environmentId: 2,
