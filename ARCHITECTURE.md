@@ -720,7 +720,9 @@ something needs it; who may start or wake a machine, and what the recovery
 loop does with each thread, is in docs/thread-lifecycle.md. The machine's
 sleep (`vm.suspension`) changes only by a typed event through
 `Registry.applySleep`, whose transitions and slot rule are
-`machine-sleep.ts`.
+`machine-sleep.ts`. Every reader of a thread (the API's row, OptChat's
+`threads`, `history`, overview and watcher) renders one `ThreadCondition`
+(`thread-condition.ts`); none ranks the thread's facts itself.
 
 ## Machine templates and hooks
 

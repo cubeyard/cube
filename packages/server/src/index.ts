@@ -21,6 +21,7 @@ import { registryCredentialRoute } from "./runner-credentials.ts";
 import { closeRunnerSessions, routeCredentials } from "./runner-session.ts";
 import { runnerHealth as protocolRunnerHealth, runnerProtocol } from "./runner-select.ts";
 import { threadRuntime, type RunnerSeams } from "./thread-runtime.ts";
+import { threadRow } from "./thread-condition.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
@@ -320,10 +321,6 @@ export async function createCubed(options: {
   const configuredHosts = options.allowedHosts ?? process.env.CUBED_ALLOWED_HOSTS?.split(",") ?? [];
   const allowedHosts = new Set(["localhost", "127.0.0.1", "[::1]", ...configuredHosts.map(host => host.trim()).filter(Boolean)]);
   const runnerHealth = options.runnerHealth ?? protocolRunnerHealth;
-  /** A machine that waits for a runner is still starting (`waiting` says
-   * why), unless its agent is open on it already. */
-  const threadState = (id: string) => conversations.error(id) || conversations.down(id) ? "error"
-    : conversations.starting(id) || (conversations.waiting(id) && !conversations.agentOpen(id)) ? "starting" : "ready";
   const runnerView = (id: string) => registry.runnerStatuses().find(runner => runner.id === id);
   const probeRunner = async (id: string) => {
     const runner = registry.getRunner(id);
@@ -777,7 +774,7 @@ export async function createCubed(options: {
         if (parts.length > 4 && parts[3] !== "workspace" && !(parts[3] === "media" && parts.length === 5)) return json({ error: "not found" }, 404);
         if (!id && method === "GET") {
           const names = new Map(registry.listProjects().map(project => [project.id, project.name]));
-          const list = JSON.stringify({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...listed(thread), state: threadState(thread.id), error: conversations.error(thread.id) ?? conversations.down(thread.id), waiting: conversations.waiting(thread.id), project: { id: thread.projectId, name: names.get(thread.projectId)! } })) });
+          const list = JSON.stringify({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...listed(thread), ...threadRow(conversations.condition(thread)), project: { id: thread.projectId, name: names.get(thread.projectId)! } })) });
           // The UI polls this: a list it already has is a 304 without a body.
           const etag = `"${createHash("sha1").update(list).digest("base64url")}"`;
           response.writeHead(request.headers["if-none-match"] === etag ? 304 : 200, { "content-type": "application/json", "cache-control": "no-store", etag });

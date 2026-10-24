@@ -16,6 +16,7 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Me
 import { ThreadWorking, type Conversations } from "../src/conversation.ts";
 import { ARCHIVED_MAX, OptChat, type OptThreads, type ThreadListRequest, type ThreadRecord } from "../src/optchat.ts";
 import { cubeThreads, readThreads } from "../src/optchat-threads.ts";
+import { threadCondition } from "../src/thread-condition.ts";
 import type { Registry, Thread } from "../src/registry.ts";
 import type { ThreadTranscript } from "../src/thread-events.ts";
 import { pageOf } from "../src/thread-history.ts";
@@ -154,8 +155,9 @@ try {
     const registry = { getThread: (id: string) => all.get(id) ?? null, getProject: (id: string) => ({ name: id }) } as unknown as Registry;
     const stored: string[] = [];
     const reader = {
-      error: (id: string) => id === failed.id ? "workspace allocation failed: boom" : null, waiting: () => null, archivingNow: () => false, agentOpen: () => false, starting: () => false,
-      live: async () => null, owner: () => null, down: () => null,
+      condition: (thread: Thread) => threadCondition(thread, { archiving: false, starting: false, agentOpen: false, down: null, waiting: null,
+        error: thread.id === failed.id ? "workspace allocation failed: boom" : null }),
+      agentOpen: () => false, live: async () => null, owner: () => null,
       async storedHistory(id: string) { stored.push(id); return { status: { state: id === open.id ? "working" : "completed", run: "r", error: null } }; },
     } as unknown as Parameters<typeof readThreads>[0]["conversations"];
     const reads = readThreads({ registry, conversations: reader });

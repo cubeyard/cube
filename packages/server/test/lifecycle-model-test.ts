@@ -17,6 +17,9 @@
  *   I8  a machine whose create keeps failing is asked for at most 8 times;
  *   I9  an archive answers within seconds, also for a sleeping machine on a
  *       full runner;
+ *   I10 every reader of a thread agrees (thread-condition.ts): the API's
+ *       row, OptChat's `threads`, `history` and overview say the same
+ *       failure, the same state and the same wait;
  *   I11 the slots the registry counts (its SQL) are the threads `holdsSlot`
  *       says hold one (machine-sleep.ts);
  *   G   no guest call reaches a machine that does not run;
@@ -29,6 +32,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { readThreads } from "../src/optchat-threads.ts";
+import { threadRow } from "../src/thread-condition.ts";
 import { START_TRIES } from "../src/thread-recovery.ts";
 import { lifecycle, until, Phase, type Cubed } from "./lifecycle-fixture.ts";
 
@@ -61,6 +66,29 @@ for (const seed of seeds) {
   const stored = async (id: string) => (await cubed.conversations.storedHistory(id, { limit: 1 }).catch(() => null))?.status;
   const quiet = async () => {
     for (const t of open()) await until(`${t.id.slice(0, 8)} quiet`, async () => (await stored(t.id))?.state !== "working", 15_000).catch(() => {});
+  };
+  /** I10, for each open thread whose condition holds still while it is read. */
+  const agreed = new Map<string, number>();
+  const readersAgree = async (after: string) => {
+    const reads = readThreads({ registry, conversations: cubed.conversations });
+    for (const t of open()) {
+      const before = JSON.stringify(cubed.conversations.condition(fresh(t.id)));
+      const row = threadRow(cubed.conversations.condition(fresh(t.id)));
+      const line = await reads.describe([t.id]);
+      const record = (await reads.history(t.id))!;
+      const overview = (await reads.observe([t.id])).get(t.id)!.state;
+      if (JSON.stringify(cubed.conversations.condition(fresh(t.id))) !== before) continue;
+      const what = `I10 after ${after}: ${t.id.slice(0, 8)} (${before})`;
+      assert.equal(record.failure, row.error, `${what}: history's failure is the row's`);
+      assert.ok(line.startsWith(`[${t.id.slice(0, 8)}] life · ${fresh(t.id).title} · ${record.machine}`), `${what}: threads says history's state: ${line}`);
+      if (row.error) assert.ok(line.includes(row.error), `${what}: threads says the failure: ${line}`);
+      if (row.waiting && !fresh(t.id).vm?.suspension) assert.ok(line.includes(row.waiting), `${what}: threads says the wait: ${line}`);
+      if (overview === "machine error" || overview === "agent error") assert.equal(row.state, "error", `${what}: the overview's failure is the row's`);
+      if (overview === "starting" || overview === "waiting for a runner") assert.notEqual(row.state, "ready", `${what}: the overview's start is the row's`);
+      if (row.state === "starting") assert.ok(overview === "starting" || overview === "waiting for a runner", `${what}: the row's start is the overview's: ${overview}`);
+      const kind = (JSON.parse(before) as { kind: string }).kind;
+      agreed.set(kind, (agreed.get(kind) ?? 0) + 1);
+    }
   };
   const actions: Record<string, () => Promise<void>> = {
     async create() {
@@ -163,6 +191,7 @@ for (const seed of seeds) {
       assert.deepEqual(berth.violations, [], `G after ${name}`);
       const counted = registry.runnerSlots();
       assert.equal(counted.total - counted.free, held(), `I11 after ${name}: the registry's count is holdsSlot's`);
+      await readersAgree(name);
       assert.ok(berth.holding() <= held() && held() <= berth.slots, `I4 after ${name}: the runner holds ${berth.holding()}, the registry counts ${held()}, of ${berth.slots} slots`);
       for (const vm of broken) assert.ok(berth.asked("machineCreate", vm) <= START_TRIES, `I8: ${vm}'s create was asked for ${berth.asked("machineCreate", vm)} times`);
       for (const [vm, at] of archivedAt) {
@@ -177,7 +206,7 @@ for (const seed of seeds) {
       db.close();
       assert.equal(n, 1, `${tell.requestId} is in its thread's store once`);
     }
-    console.log(`ok: lifecycle model seed ${seed}: ${steps} steps (${trace.filter(line => line.startsWith("restart")).length} restarts, ${tells.length} messages, ${archivedAt.size} archives, ${berth.starts()} starts on the runner); I1–I6, I8, I9, I11 and G held`);
+    console.log(`ok: lifecycle model seed ${seed}: ${steps} steps (${trace.filter(line => line.startsWith("restart")).length} restarts, ${tells.length} messages, ${archivedAt.size} archives, ${berth.starts()} starts on the runner); I1–I6, I8–I11 and G held; I10 over ${[...agreed].map(([kind, n]) => `${n} ${kind}`).join(", ")}`);
   } catch (error) {
     console.error(`seed ${seed} trace:\n  ${trace.join("\n  ")}`);
     throw error;

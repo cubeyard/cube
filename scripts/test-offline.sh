@@ -15,6 +15,7 @@ OFFLINE_TESTS=(
   packages/server/test/registry-test.ts
   packages/server/test/runner-slots-test.ts
   packages/server/test/machine-sleep-test.ts
+  packages/server/test/thread-condition-test.ts
   packages/server/test/runner-suspend-test.ts
   packages/server/test/thread-lifecycle-test.ts
   packages/server/test/lifecycle-model-test.ts
