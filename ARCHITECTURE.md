@@ -579,11 +579,12 @@ RunnerSession ── one Iroh connection ──────▶ accept from the e
   guest   Open{guest}+request bytes → StreamAnswer + `cube-guest host MACHINE call OP` answer
 ```
 
-- `runner-select.ts` is the one place cubed tells protocols apart: a thread
-  whose runner was enrolled with `"protocol": 4` gets `RunnerMachines` and a
-  `RunnerGuestTransport`; a thread on a runner enrolled with protocol 3 gets
-  `RetiredProtocolMachines`, which contacts nothing. Runner health for
-  placement and `cubed runners status` goes through the same module.
+- `runner-select.ts` is the one place cubed tells protocols apart
+  (`retiredRunner`): `RunnerMachines` runs a thread whose runner was
+  enrolled with `"protocol": 4` over a `RunnerGuestTransport`, and refuses
+  one on a runner enrolled with protocol 3 before contacting anything (its
+  `session` fails closed too). Runner health for placement and `cubed
+  runners status` goes through the same module.
 - A machine on a host runner is `DIRECTORY/<vm id>`: `workspace/` and
   `repos/` beside it, the journal in `state/`, the helper and the agent's
   `cube` in `bin/`, hook logs in `logs/`. `/workspace` in a file tool names

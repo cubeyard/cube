@@ -36,7 +36,7 @@ import { cubeThreads } from "../src/optchat-threads.ts";
 import type { Registry, Thread } from "../src/registry.ts";
 import type { ThreadEvents, ThreadStatus, ThreadTranscript } from "../src/thread-events.ts";
 import type { HistoryPage } from "../src/thread-history.ts";
-import type { ThreadMachines } from "../src/vm.ts";
+import { NoMachines } from "./local-guest.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-passive-"));
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
@@ -68,14 +68,8 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
   const listed = makeThread("a5a5a5a5-0000-4000-8000-000000000002", { state: "suspended", at: 1 });
   const waking = makeThread("a5a5a5a5-0000-4000-8000-000000000003", { state: "waking", at: 1, waiting: "waiting for a free slot on runner node" });
   const awake = makeThread("a5a5a5a5-0000-4000-8000-000000000004");
-  const starts: string[] = [];
-  const guests: string[] = [];
-  const machines = {
-    start: async (thread: Thread) => { starts.push(thread.id); throw new Error("no machine in this test"); },
-    guest: (thread: Thread) => ({ call: async (op: string) => { guests.push(`${thread.id}:${op}`); throw new Error("no guest in this test"); } }),
-    touch: () => {},
-    close: async () => {},
-  } as unknown as ThreadMachines;
+  const machines = new NoMachines();
+  const { starts, calls: guests } = machines;
   const registry = registryOf([asleep, listed, waking, awake]);
   const conversations = new Conversations({ registry, directory: path.join(root, "threads"), models, machines });
   const threads = cubeThreads({ registry, conversations, ...noThreads });
@@ -130,17 +124,14 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
   const inSuspend = new Promise<void>(resolve => { entered = resolve; });
   let save!: () => void;
   const saved = new Promise<void>(resolve => { save = resolve; });
-  const machines = {
-    start: async (current: Thread) => {
+  class Racing extends NoMachines {
+    override async start(current: Thread): Promise<{ booted: boolean }> {
       steps.push("start");
       await suspending;
       if (registry.getThread(current.id)?.vm?.suspension) steps.push("resumed what the idle round saved");
       return { booted: false };
-    },
-    guest: () => ({ call: async () => { throw new Error("no guest in this test"); } }),
-    touch: () => {},
-    close: async () => {},
-    suspendIfIdle: async (current: Thread, busy: () => Promise<string | null>) => {
+    }
+    override async suspendIfIdle(current: Thread, busy: () => Promise<string | null>): Promise<boolean> {
       let open!: () => void;
       suspending = new Promise(resolve => { open = resolve; });
       try {
@@ -151,8 +142,9 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
         steps.push("suspended");
         return true;
       } finally { suspending = null; open(); }
-    },
-  } as unknown as ThreadMachines;
+    }
+  }
+  const machines = new Racing();
   const conversations = new Conversations({ registry, directory: path.join(root, "race"), models, machines });
   const threads = cubeThreads({ registry, conversations, ...noThreads });
   const round = conversations.suspendIdle();

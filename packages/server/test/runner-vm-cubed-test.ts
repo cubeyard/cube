@@ -1,7 +1,7 @@
 /** cubed's real code with a real `berth vm` (C-a): a fresh cubed in this
  * process (createCubed with a new state, a faux model, the real
- * cube-gateway built with test-hooks, the real ProtocolMachines and
- * RunnerMachines with its egress policy) and a keel machine under QEMU.
+ * cube-gateway built with test-hooks, the real RunnerMachines with its
+ * egress policy) and a keel machine under QEMU.
  *
  * berth vm is enrolled in this test's cubed only, where it is the whole
  * pool: OptChat's spawn naming it starts a thread there, pinned, and a

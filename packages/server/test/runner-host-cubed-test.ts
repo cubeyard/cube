@@ -21,8 +21,7 @@ import { createCubed } from "../src/index.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
 import { describeRunners, observeRunners } from "../src/runner-observe.ts";
 import { enrollRunner } from "../src/runner-enroll.ts";
-import { RunnerMachines } from "../src/runner-machines.ts";
-import { ProtocolMachines, runnerHealth } from "../src/runner-select.ts";
+import { runnerHealth } from "../src/runner-select.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
 assert.ok(fs.existsSync(binary), `${binary}: build berth first (cargo build -p berth)`);
@@ -72,8 +71,8 @@ const faux = fauxProvider({ tokensPerSecond: 100_000 });
 faux.setResponses(Array.from({ length: 20 }, () => () => fauxAssistantMessage("done")));
 const models = createModels();
 models.setProvider(faux.provider);
-const app = await createCubed({ state, models, claude: null, gateway: null,
-  machines: (registry, threads) => new ProtocolMachines({ registry, p4: new RunnerMachines({ registry, threads }) }) });
+// cubed's own machines: the same wiring as a real cubed (thread-runtime.ts).
+const app = await createCubed({ state, models, claude: null, gateway: null });
 try {
   // enrollment: the host runner by its hello; a protocol-3 runner beside it
   const enrolled = await enrollRunner({ state, configPath });

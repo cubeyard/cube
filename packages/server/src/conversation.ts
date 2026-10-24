@@ -66,6 +66,10 @@ export class ThreadArchiving extends Error {
   constructor() { super("thread is being archived"); this.name = "ThreadArchiving"; }
 }
 export { releaseUnfinished };
+export interface ConversationsOptions {
+  registry: Registry; directory: string; models: Models; machines: ThreadMachines; claude?: ClaudeRuntime | null; now?: () => number;
+  portal?: (thread: Thread) => GuestPortal; hostTools?: (thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"];
+}
 export class Conversations {
   private readonly registry: Registry;
   private readonly directory: string;
@@ -125,8 +129,7 @@ export class Conversations {
    * until it opens again, nothing else may read its store. */
   onUsage: ((id: string, state: UsageState) => void) | null = null;
   /** `claude` is null when this host has no Claude Code to start. */
-  constructor(options: { registry: Registry; directory: string; models: Models; machines: ThreadMachines; claude?: ClaudeRuntime | null; now?: () => number;
-    portal?: (thread: Thread) => GuestPortal; hostTools?: (thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"] }) {
+  constructor(options: ConversationsOptions) {
     this.registry = options.registry; this.directory = options.directory; this.models = options.models;
     this.hostTools = options.hostTools ?? null;
     this.machines = options.machines; this.claude = options.claude ?? null;
@@ -148,14 +151,14 @@ export class Conversations {
   private async recoverOne(thread: Thread): Promise<void> {
     const id = thread.id;
     if (this.closing || this.archiveHolds.has(id) || this.suspends.has(id)) return;
-    const owned = this.activations.has(id) || !!this.machines.wakeInFlight?.(thread);
+    const owned = this.activations.has(id) || this.machines.wakeInFlight(thread);
     const demand = needsDemand(thread, owned) && await this.demand(id);
     switch (recoveryStep(thread, { owned, demand, now: this.now() })) {
       case "release": await this.command(id, () => this.release(id)).catch(() => {}); return;
       case "check": case "start": await this.activate(id); return;
       case "settle-wake":
         // A runner that does not answer is read again next round.
-        await this.machines.settleWake?.(thread).catch((error: unknown) => {
+        await this.machines.settleWake(thread).catch((error: unknown) => {
           if (!(error instanceof RunnerWait)) log.warn("reading back a wake failed", { thread: id, error: error instanceof Error ? error.message : String(error) });
         });
         return;
@@ -355,7 +358,7 @@ export class Conversations {
       this.recordHooks(id, outcome.hooks, "prepare", preparing);
       if (outcome.stale && preparation?.templateId) {
         log.info("template is stale: the pinned .agents/setup changed", { thread: id, template: preparation.templateId });
-        await this.machines.invalidateTemplate?.(thread, preparation.templateId).catch(error => log.warn("invalidating the template failed", { thread: id, error }));
+        await this.machines.invalidateTemplate(thread, preparation.templateId).catch(error => log.warn("invalidating the template failed", { thread: id, error }));
       }
       await this.resume(id, true);
       const startup = this.thread(id).vm?.startup;
@@ -393,7 +396,7 @@ export class Conversations {
     let log = error instanceof StepFailure ? error.log : undefined;
     if (!log) {
       const thread = this.registry.getThread(id);
-      const read = thread && this.machines.startupLog ? await this.machines.startupLog(thread).catch(() => null) : null;
+      const read = thread ? await this.machines.startupLog(thread).catch(() => null) : null;
       if (read?.hook && read.text) log = stepLog(read.text);
     }
     this.registry.endStartupStep(id, { name, ...(attempt !== undefined ? { attempt } : {}), state: "failed",
@@ -569,7 +572,7 @@ export class Conversations {
   private async wakeFor(id: string, requestId: string): Promise<void> {
     const thread = this.registry.getThread(id);
     if (!thread || thread.archived) return;
-    if (thread.vm?.suspension) { this.machines.renewWake?.(thread); await this.activate(id); return; }
+    if (thread.vm?.suspension) { this.machines.renewWake(thread); await this.activate(id); return; }
     const key = `${id}\n${requestId}`;
     if ((thread.workspaceState !== "available" || this.failures.has(id) || retriesExhausted(thread)) && !this.retried.has(key)) {
       this.retried.add(key);
@@ -606,7 +609,7 @@ export class Conversations {
    * the recovery loop. Each thread's attempt is queued with its commands,
    * so a message waits for it and then wakes the machine. */
   suspendIdle(): Promise<void> {
-    if (this.closing || !this.machines.suspendIfIdle) return Promise.resolve();
+    if (this.closing) return Promise.resolve();
     this.suspendRound ??= Promise.all(this.registry.listThreads().map(thread => this.suspendOne(thread)))
       .then(() => {}).finally(() => { this.suspendRound = null; });
     return this.suspendRound;
@@ -628,9 +631,9 @@ export class Conversations {
     }
     const current = this.registry.getThread(id);
     if (skip(current)) return;
-    if (this.commands.has(id) || this.activations.has(id) || this.archiveHolds.has(id)) { machines.touch?.(current!); return; }
+    if (this.commands.has(id) || this.activations.has(id) || this.archiveHolds.has(id)) { machines.touch(current!); return; }
     this.suspends.add(id);
-    try { await this.command(id, () => machines.suspendIfIdle!(this.registry.getThread(id) ?? current!, () => this.busy(id))); }
+    try { await this.command(id, () => machines.suspendIfIdle(this.registry.getThread(id) ?? current!, () => this.busy(id))); }
     catch (error) { log.warn("suspending an idle machine failed", { thread: id, error: error instanceof Error ? error.message : String(error) }); }
     finally { this.suspends.delete(id); }
   }
@@ -845,7 +848,7 @@ export class Conversations {
    * now if it slept and its runner had a slot), else why it still sleeps. */
   private async wakeForCheck(id: string): Promise<string | null> {
     const thread = this.registry.getThread(id);
-    if (!thread?.vm?.suspension || !this.machines.wakeNow) return null;
+    if (!thread?.vm?.suspension) return null;
     try { return await this.machines.wakeNow(thread); }
     catch (error) { return `it could not be woken: ${error instanceof Error ? error.message : String(error)}`; }
   }

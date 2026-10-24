@@ -15,7 +15,6 @@ import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { ClaudeAgent } from "../src/claude-agent.ts";
 import { Conversations } from "../src/conversation.ts";
 import type { Registry } from "../src/registry.ts";
-import type { ThreadMachines } from "../src/vm.ts";
 import { render } from "../src/claude-thread-events.ts";
 import { openStorage, readStorage } from "../src/durable-agent.ts";
 import { formatHistory, HISTORY_MAX, OptChat, type OptThreads, type ReportState, type ThreadRecord } from "../src/optchat.ts";
@@ -23,6 +22,7 @@ import { storedPiTranscript } from "../src/pi-thread-events.ts";
 import type { ThreadEvent, ThreadTranscript } from "../src/thread-events.ts";
 import { pageOf, readPiHistory, type HistoryRequest } from "../src/thread-history.ts";
 import type { Workspace } from "../src/workspace.ts";
+import { NoMachines } from "./local-guest.ts";
 
 const context = BACKGROUND_CONTEXT;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-history-"));
@@ -208,7 +208,7 @@ try {
   {
     const directory = path.join(root, "threads");
     const threads: Record<string, { id: string; agent?: string }> = { pi: { id: "pi" }, legacy: { id: "legacy" }, quiet: { id: "quiet" }, claude: { id: "claude", agent: "claude-code" } };
-    const conversations = new Conversations({ registry: { getThread: (id: string) => threads[id] ?? null } as unknown as Registry, directory, models: createModels(), machines: {} as ThreadMachines });
+    const conversations = new Conversations({ registry: { getThread: (id: string) => threads[id] ?? null } as unknown as Registry, directory, models: createModels(), machines: new NoMachines() });
     fs.mkdirSync(path.join(directory, "legacy", "session"), { recursive: true });
     await assert.rejects(conversations.storedHistory("legacy"), /created by an older cube/);
     assert.equal(await conversations.storedHistory("quiet"), null);

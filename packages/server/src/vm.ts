@@ -16,7 +16,10 @@ import { clean, type MachineEvidence } from "./vm-diagnostics.ts";
 import { skillInstallScripts } from "./skills.ts";
 import { settleOperation, WorkspaceError, type WorkspaceOwner } from "./workspace.ts";
 
-/** What Conversations needs from a thread's machine. */
+/** What Conversations and the portal need from a thread's machine. Every
+ * member is required: machines that cannot do something say so in their
+ * answer (a machine that never suspends is never `suspended`), never by
+ * leaving a member out. */
 export interface ThreadMachines {
   /** How cubed reaches the thread's guest helper. */
   guest(thread: Thread): GuestTransport;
@@ -27,7 +30,7 @@ export interface ThreadMachines {
    * runs: it boots or re-attaches the machine (which may take minutes). */
   start(thread: Thread, options?: StartOptions): Promise<MachineStart | void>;
   /** Stops new machines from using a template (its setup changed). */
-  invalidateTemplate?(thread: Thread, templateId: string): Promise<void>;
+  invalidateTemplate(thread: Thread, templateId: string): Promise<void>;
   /** Release the machine; `retain` keeps its disk. The runner always keeps
    * an interrupted or failed one. */
   release(thread: Thread, retain: boolean): Promise<{ retained: boolean }>;
@@ -36,37 +39,37 @@ export interface ThreadMachines {
   close(): Promise<void>;
   /** Whether this process has the thread's machine running and attached;
    * never starts one (the portal must not wake a machine). */
-  running?(thread: Thread): boolean;
+  running(thread: Thread): boolean;
   /** A TCP connection to a port of the thread's running machine, for the
    * portal (a protocol-4 runner allows 1024-65535). */
-  dial?(thread: Thread, port: number): Promise<Duplex>;
+  dial(thread: Thread, port: number): Promise<Duplex>;
   /** Suspend (S-7a, P7-5; runner-machines.ts): whether the thread's machine
    * is suspended; suspend it when idle and `busy` finds nothing running;
    * wake it; something happened for it now (its idle time starts again).
    * Only protocol-4 VM runners suspend. */
-  suspended?(thread: Thread): boolean;
-  suspendIfIdle?(thread: Thread, busy: () => Promise<string | null>): Promise<boolean>;
-  wake?(thread: Thread): Promise<void>;
-  touch?(thread: Thread): void;
+  suspended(thread: Thread): boolean;
+  suspendIfIdle(thread: Thread, busy: () => Promise<string | null>): Promise<boolean>;
+  wake(thread: Thread): Promise<void>;
+  touch(thread: Thread): void;
   /** Whether a start or a wake of the thread's machine is under way in this
    * process (the owner of a `waking` it recorded). */
-  wakeInFlight?(thread: Thread): boolean;
+  wakeInFlight(thread: Thread): boolean;
   /** Wakes a suspended machine for cubed's own check if a slot is free now;
    * null once it runs, otherwise why it stays suspended. Never waits. */
-  wakeNow?(thread: Thread): Promise<string | null>;
+  wakeNow(thread: Thread): Promise<string | null>;
   /** A `waking` no one in this process owns (a restart cut the wake short):
    * the runner's own phase is recorded instead, and nothing is started. */
-  settleWake?(thread: Thread): Promise<void>;
+  settleWake(thread: Thread): Promise<void>;
   /** A new message asks for the machine: its run's first guest call waits
    * for a slot the whole time again, even if an earlier run's wait gave up. */
-  renewWake?(thread: Thread): void;
+  renewWake(thread: Thread): void;
   /** Read-only evidence about the thread's machine (vm-diagnostics.ts);
    * never starts, stops or attaches it. */
-  diagnose?(thread: Thread): Promise<MachineEvidence>;
+  diagnose(thread: Thread): Promise<MachineEvidence>;
   /** The end of the log of the hook running now in the thread's template
    * build machine or its own machine; null when neither is reachable. Read
    * only, with no lease: it never waits for or disturbs the preparation. */
-  startupLog?(thread: Thread): Promise<StartupLog | null>;
+  startupLog(thread: Thread): Promise<StartupLog | null>;
 }
 
 /** The hook running now in a machine (from ~/.cache/cube/running) and the

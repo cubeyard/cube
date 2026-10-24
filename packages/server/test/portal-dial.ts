@@ -15,6 +15,7 @@ import { Portal, portalSettings } from "../src/portal.ts";
 import type { Thread } from "../src/registry.ts";
 import type { MachineRef, RunnerSession } from "../src/runner-session.ts";
 import { settleOperation, type Workspace } from "../src/workspace.ts";
+import { NoMachines } from "./local-guest.ts";
 
 export const DIAL_APP = path.join(import.meta.dirname, "dial-app.pl");
 export const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
@@ -31,13 +32,14 @@ export async function dialPortal(options: { session: () => RunnerSession; guest:
   await new Promise(resolve => free.close(resolve));
   const thread = { id: options.ref.owner, archived: false, workspaceState: "available" } as Thread;
   const running = { value: true };
-  const machines = {
-    running: () => running.value,
-    guest: () => options.guest(),
-    dial: (_thread: Thread, servicePort: number) => options.session().dial(options.ref, options.epoch(), servicePort),
-  };
+  class Dialed extends NoMachines {
+    override running(): boolean { return running.value; }
+    override guest(): GuestTransport { return options.guest(); }
+    override dial(_thread: Thread, servicePort: number) { return options.session().dial(options.ref, options.epoch(), servicePort); }
+  }
+  const machines = new Dialed();
   const portal = new Portal({ settings: portalSettings({ CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_DOMAIN: "localhost", CUBED_PORTAL_PORT: String(port) }),
-    directory: options.directory, registry: { listThreads: () => [thread], getThread: (id: string) => id === thread.id ? thread : null } as never, machines: machines as never, archiving: () => false });
+    directory: options.directory, registry: { listThreads: () => [thread], getThread: (id: string) => id === thread.id ? thread : null } as never, machines, archiving: () => false });
   await portal.listen();
   assert.equal(portal.state, "listening");
   return { portal, port, running, host: service => `${service}-${portal.label(thread.id)}.localhost:${port}` };

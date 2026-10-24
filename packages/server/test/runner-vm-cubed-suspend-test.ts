@@ -1,7 +1,7 @@
 /** P7-5's native gate (masterplan S-7a; review a647b211 §9, N1–N7): cubed's
  * real suspend, slot and wake code with a real `berth vm` and a keel machine
  * under QEMU. A fresh cubed in this process (createCubed with a new state, a
- * faux model, the real cube-gateway, ProtocolMachines and RunnerMachines)
+ * faux model, the real cube-gateway and cubed's own thread runtime)
  * and its real 30 s recovery loop; only the idle time is short
  * (CUBE_TEST_SUSPEND_IDLE_MS, default 60 s, instead of 5 min). berth vm has
  * one slot. Every `machine_suspend` and `machine_start` cubed sends is
@@ -275,7 +275,7 @@ faux.setResponses(Array.from({ length: 1000 }, () => async (request: { messages:
 }));
 const models = createModels();
 models.setProvider(faux.provider);
-const app = await createCubed({ state, models, claude: null, gateway: gatewayBin, skillSource: null, suspendIdleMs: IDLE_MS,
+const app = await createCubed({ state, models, claude: null, gateway: gatewayBin, skillSource: null, runner: { idleMs: IDLE_MS },
   secrets: [{ name: "github", hosts: ["github.com", "api.github.com"], value: async () => token }],
   portal: portalSettings({ CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_DOMAIN: "localhost", CUBED_PORTAL_PORT: String(portalPort) }) });
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));

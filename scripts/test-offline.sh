@@ -17,11 +17,13 @@ OFFLINE_TESTS=(
   packages/server/test/runner-suspend-test.ts
   packages/server/test/thread-lifecycle-test.ts
   packages/server/test/lifecycle-model-test.ts
+  packages/server/test/cubed-wake-test.ts
   packages/server/test/runner-placement-test.ts
   packages/server/test/runner-host-placement-test.ts
   packages/server/test/berth-banner-test.ts
   packages/server/test/gateway-pids-test.ts
   packages/server/test/protocol3-history-test.ts
+  packages/server/test/protocol3-port-test.ts
   packages/server/test/runner-probe-test.ts
   packages/server/test/runner-observe-test.ts
   packages/server/test/api-test.ts

@@ -24,7 +24,7 @@ import { readThreads } from "../src/optchat-threads.ts";
 import type { Registry, Thread } from "../src/registry.ts";
 import type { ThreadStatus } from "../src/thread-events.ts";
 import type { HistoryPage } from "../src/thread-history.ts";
-import type { ThreadMachines } from "../src/vm.ts";
+import { NoMachines } from "./local-guest.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-reports-"));
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
@@ -48,13 +48,8 @@ const READER = ["live", "storedHistory", "agentOpen", "error", "down", "waiting"
     listThreads: () => threads, getThread: (id: string) => threads.find(t => t.id === id) ?? null, getProject: () => ({ id: "p", name: "cube" }),
     interruptStartupSteps: () => {}, initialPrompt: () => null, runner: () => ({ nodeId: "node", environmentId: 1, configHash: "config" }),
   } as unknown as Registry;
-  const starts: string[] = [];
-  const guests: string[] = [];
-  const machines = {
-    start: async (t: Thread) => { starts.push(t.id); throw new Error("no machine here"); },
-    guest: (t: Thread) => ({ call: async (op: string) => { guests.push(`${t.id}:${op}`); throw new Error("no guest here"); }, close: async () => {} }),
-    touch: () => {}, close: async () => {},
-  } as unknown as ThreadMachines;
+  const machines = new NoMachines();
+  const { starts, calls: guests } = machines;
   const conversations = new Conversations({ registry, directory: path.join(root, "threads"), models, machines });
   // Thread 4's agent is open (the UI read it): a reader may watch its events.
   await conversations.events(threads[3]!.id);

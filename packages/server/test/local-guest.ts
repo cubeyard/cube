@@ -8,10 +8,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import net from "node:net";
+import type { Duplex } from "node:stream";
 import { decodeGuestAnswer, encodeGuestRequest, GuestTransportError, type GuestAnswer, type GuestCallOptions, type GuestOp,
   type GuestTransport } from "../src/guest-transport.ts";
 import { clean } from "../src/vm-diagnostics.ts";
-import { readStartupLog, type StartOptions, type StartupLog, type ThreadMachines } from "../src/vm.ts";
+import { readStartupLog, type MachineStart, type StartOptions, type StartupLog, type ThreadMachines } from "../src/vm.ts";
+import type { MachineEvidence } from "../src/vm-diagnostics.ts";
 import type { Thread } from "../src/registry.ts";
 import { hookFileContent } from "../src/vm-seed.ts";
 
@@ -103,7 +105,8 @@ export class LocalGuestTransport implements GuestTransport {
   cubeCommand(): string { return `python3 ${LAUNCHER} ${this.root} cli`; }
 }
 
-/** Thread machines on local guests: one temporary root per thread. */
+/** Thread machines on local guests: one temporary root per thread. They
+ * never suspend, have no templates and report no diagnosis. */
 export class LocalMachines implements ThreadMachines {
   readonly root: string;
   readonly guests = new Map<string, LocalGuestTransport>();
@@ -153,6 +156,16 @@ export class LocalMachines implements ThreadMachines {
     fs.rmSync(path.join(this.root, thread.id), { recursive: true, force: true });
   }
   async close(): Promise<void> { for (const guest of this.guests.values()) guest.stop(); }
+  async invalidateTemplate(): Promise<void> {}
+  suspended(): boolean { return false; }
+  async suspendIfIdle(): Promise<boolean> { return false; }
+  async wake(): Promise<void> {}
+  touch(): void {}
+  wakeInFlight(): boolean { return false; }
+  async wakeNow(): Promise<string | null> { return null; }
+  async settleWake(): Promise<void> {}
+  renewWake(): void {}
+  diagnose(): Promise<MachineEvidence> { return Promise.reject(new Error("a local guest has no machine diagnosis")); }
   /** As RunnerMachines reads it; the guest's root stands for its /. */
   async startupLog(thread: Thread): Promise<StartupLog | null> {
     return this.guests.has(thread.id) ? readStartupLog(this.guest(thread), "thread", "/home/.cache/cube") : null;
@@ -167,4 +180,45 @@ export class LocalMachines implements ThreadMachines {
       socket.once("error", reject);
     });
   }
+}
+
+/** Machines for tests that must reach none: every start, wake and guest
+ * call fails and is recorded (`starts`: a start as the thread's id, a wake
+ * as `wake:<id>`; `calls`: `<id>:<op>`), reads say there is none, nothing
+ * sleeps. A test overrides what it gives a behavior. */
+export class NoMachines implements ThreadMachines {
+  readonly starts: string[] = [];
+  readonly calls: string[] = [];
+  start(thread: Thread, _options?: StartOptions): Promise<MachineStart | void> {
+    this.starts.push(thread.id);
+    return Promise.reject(new Error("no machine in this test"));
+  }
+  guest(thread: Thread): GuestTransport {
+    return {
+      call: op => { this.calls.push(`${thread.id}:${op}`); return Promise.reject(new GuestTransportError("no guest in this test")); },
+      close: async () => {},
+    };
+  }
+  async invalidateTemplate(_thread: Thread, _templateId: string): Promise<void> {}
+  release(_thread: Thread, _retain: boolean): Promise<{ retained: boolean }> { return Promise.reject(new Error("no machine in this test")); }
+  discard(_thread: Thread): Promise<void> { return Promise.reject(new Error("no machine in this test")); }
+  async close(): Promise<void> {}
+  running(_thread: Thread): boolean { return false; }
+  dial(_thread: Thread, _port: number): Promise<Duplex> { return Promise.reject(new Error("no machine in this test")); }
+  suspended(_thread: Thread): boolean { return false; }
+  async suspendIfIdle(_thread: Thread, _busy: () => Promise<string | null>): Promise<boolean> { return false; }
+  wake(thread: Thread): Promise<void> {
+    this.starts.push(`wake:${thread.id}`);
+    return Promise.reject(new Error("no machine in this test"));
+  }
+  touch(_thread: Thread): void {}
+  wakeInFlight(_thread: Thread): boolean { return false; }
+  wakeNow(thread: Thread): Promise<string | null> {
+    this.starts.push(`wake:${thread.id}`);
+    return Promise.reject(new Error("no machine in this test"));
+  }
+  async settleWake(_thread: Thread): Promise<void> {}
+  renewWake(_thread: Thread): void {}
+  diagnose(_thread: Thread): Promise<MachineEvidence> { return Promise.reject(new Error("no machine in this test")); }
+  async startupLog(_thread: Thread): Promise<StartupLog | null> { return null; }
 }

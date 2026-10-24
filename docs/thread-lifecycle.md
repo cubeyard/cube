@@ -128,7 +128,10 @@ no wake.
   and archives, checking I1–I6, I8 and I9 after every step (I4
   as: the runner holds no more than the registry counts, the registry no
   more than the slots).
-- Both run over `lifecycle-fixture.ts`: the real Registry, RunnerMachines
-  and Conversations, a stand-in `berth vm` with berth's slot rules, and the
-  real guest helper. Not runner acceptance:
-  `runner-vm-cubed-suspend-test.ts` runs a real `berth vm`.
+- Both run over `lifecycle-fixture.ts`: the real Registry and the thread
+  runtime createCubed builds (`thread-runtime.ts`: RunnerMachines,
+  Conversations and the wake between them), a stand-in `berth vm` with
+  berth's slot rules as its runner session, and the real guest helper.
+  `cubed-wake-test.ts` runs a wake through createCubed itself over the same
+  stand-in. Not runner acceptance: `runner-vm-cubed-suspend-test.ts` runs a
+  real `berth vm`.

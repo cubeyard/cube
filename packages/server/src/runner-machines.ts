@@ -33,7 +33,17 @@
  * thread waits, saying so, and tries again. A runner that cannot use the
  * snapshot starts the machine from its disk (`SnapshotDropped`), which the
  * thread shows as a notice. A runner that refuses the suspend (busy, short
- * of disk, a failed save) keeps the machine running. */
+ * of disk, a failed save) keeps the machine running.
+ *
+ * A thread whose runner was enrolled with protocol 3 (runner-select.ts
+ * `retiredRunner`) is never contacted. `start`, `guest`, `release`,
+ * `discard`, `diagnose`, `startupLog`, `invalidateTemplate`, `suspended`
+ * and `settleWake` check it first: a start, guest call, diagnosis or
+ * discard is refused with PROTOCOL_3_RETIRED, a release succeeds at once
+ * and counts the disk of a machine that was allocated as kept, the rest
+ * answer as for a machine that never ran. Every other path to its runner
+ * fails closed in `session`. protocol3-port-test.ts pins both, member by
+ * member. */
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -41,12 +51,13 @@ import type { Duplex } from "node:stream";
 import type { MessageInitShape } from "@bufbuild/protobuf";
 import { MachineStatus_Phase, Runner_Kind, Template_State, type EgressPolicySchema, type GuestInfo, type Machine, type Runner, type SizeSchema,
   type Template } from "./gen/runner_pb.js";
-import type { GuestTransport } from "./guest-transport.ts";
+import { GuestTransportError, type GuestTransport } from "./guest-transport.ts";
 import type { RunnerTemplate } from "./runner-types.ts";
 import { createLogger, type Logger } from "./log.ts";
 import { newPlaceholder } from "./egress-policy.ts";
 import { NO_HOOKS, placement, threadAgent, type HookOutcome, type Registry, type StartupStep, type Thread } from "./registry.ts";
-import { machineKey, RunnerError, runnerSession, type MachineRef, type RunnerSession } from "./runner-session.ts";
+import { closeRunnerSessions, machineKey, RunnerError, runnerSession, type MachineRef, type RunnerSession } from "./runner-session.ts";
+import { PROTOCOL_3_RETIRED, retiredRunner } from "./runner-select.ts";
 import { currentMachineEpoch, gib, nextMachineEpoch, preparationOutcome, preparationScript, readStartupLog, RunnerWait, StepFailure, stepLog, vmSizes,
   type MachineStart, type StartOptions, type StartupLog, type ThreadMachines, type VmSizes } from "./vm.ts";
 import { MachineEvents, safeText, type GuestAgent, type MachineEvidence } from "./vm-diagnostics.ts";
@@ -208,9 +219,14 @@ export class RunnerMachines implements ThreadMachines {
     this.activity = new MachineActivity(options.now);
   }
 
+  /** The thread's runner is one cubed never contacts (runner-select.ts).
+   * Protected only so protocol3-port-test.ts can model a member that
+   * forgot to ask, which `session` must still refuse. */
+  protected retired(thread: Thread): boolean { return retiredRunner(this.options.registry.runner(thread.id)); }
   private session(thread: Thread): RunnerSession {
     const admission = this.options.registry.runner(thread.id);
     if (!admission) throw new Error("thread runner allocation is missing");
+    if (retiredRunner(admission)) throw new Error(PROTOCOL_3_RETIRED);
     return (this.options.session ?? runnerSession)(admission);
   }
   private ref(thread: Thread): MachineRef {
@@ -246,6 +262,7 @@ export class RunnerMachines implements ThreadMachines {
   }
 
   guest(thread: Thread): GuestTransport {
+    if (this.retired(thread)) return { call: () => Promise.reject(new GuestTransportError(PROTOCOL_3_RETIRED)), close: () => Promise.resolve() };
     const directory = this.directory(thread);
     const transport = this.session(thread).guest(this.ref(thread), () => Math.max(1, currentMachineEpoch(directory)));
     return this.activity.guest(thread.id, transport, () => this.awake(thread.id));
@@ -254,7 +271,7 @@ export class RunnerMachines implements ThreadMachines {
   touch(thread: Thread): void { this.activity.touch(thread.id); }
 
   /** Whether the thread's machine is suspended (or waking). */
-  suspended(thread: Thread): boolean { return !!this.options.registry.getThread(thread.id)?.vm?.suspension; }
+  suspended(thread: Thread): boolean { return !this.retired(thread) && !!this.options.registry.getThread(thread.id)?.vm?.suspension; }
 
   /** Before a guest call or a dial: a suspend under way ends first, and a
    * suspended machine is woken. */
@@ -327,6 +344,7 @@ export class RunnerMachines implements ThreadMachines {
    * the next recovery round checks it like any running machine. A runner
    * that does not answer leaves it for the next round. */
   async settleWake(thread: Thread): Promise<void> {
+    if (this.retired(thread)) return;
     const id = thread.id;
     if (this.wakeInFlight(thread)) return;
     const current = this.options.registry.getThread(id);
@@ -456,6 +474,7 @@ export class RunnerMachines implements ThreadMachines {
 
 
   start(thread: Thread, options: StartOptions = {}): Promise<MachineStart> {
+    if (this.retired(thread)) return Promise.reject(new Error(PROTOCOL_3_RETIRED));
     const pending = this.starting.get(thread.id);
     if (pending) return pending;
     // An archived thread's machine is released: nothing starts it again.
@@ -825,7 +844,7 @@ export class RunnerMachines implements ThreadMachines {
   /** Stops new machines from using a template (its setup changed): on a VM
    * runner, `template_delete`; the runner removes it once no machine uses it. */
   async invalidateTemplate(thread: Thread, templateId: string): Promise<void> {
-    if (!this.onVm(thread)) return;
+    if (this.retired(thread) || !this.onVm(thread)) return;
     await this.removeTemplates(this.session(thread), [templateId], "its setup changed");
   }
 
@@ -844,6 +863,8 @@ export class RunnerMachines implements ThreadMachines {
    * retained. A VM runner stops the machine first (STOP_TIMEOUT_MS), then
    * keeps its disk only when asked to (or after an interruption). */
   async release(thread: Thread, retain: boolean): Promise<{ retained: boolean }> {
+    // A retired runner keeps whatever disk it has: nothing is asked of it.
+    if (this.retired(thread)) return { retained: !!thread.vm && placement(thread) !== "provisional" && !thread.vm.discarded };
     this.boots.delete(thread.id);
     this.activity.forget(thread.id);
     this.wakeGaveUp.delete(thread.id);
@@ -862,6 +883,7 @@ export class RunnerMachines implements ThreadMachines {
   }
 
   async discard(thread: Thread): Promise<void> {
+    if (this.retired(thread)) throw new Error(PROTOCOL_3_RETIRED);
     const node = this.options.registry.getRunner(thread.runnerId)?.nodeId ?? thread.runnerId;
     if (this.onVm(thread)) {
       try {
@@ -912,7 +934,7 @@ export class RunnerMachines implements ThreadMachines {
    * while this process has the machine running; null otherwise. A host
    * runner's logs are on that host (CUBE_LOGS): null. */
   async startupLog(thread: Thread): Promise<StartupLog | null> {
-    if (!this.onVm(thread)) return null;
+    if (this.retired(thread) || !this.onVm(thread)) return null;
     // While cubed prepares a template, the hook runs in the build machine.
     const build = this.buildGuests.get(thread.id);
     if (build) return readStartupLog(build, "build");
@@ -925,6 +947,7 @@ export class RunnerMachines implements ThreadMachines {
    * JSON document the runner redacted; cubed cleans the bundle again) and
    * what the keel agent last said of itself in the watch. */
   async diagnose(thread: Thread): Promise<MachineEvidence> {
+    if (this.retired(thread)) throw new Error(PROTOCOL_3_RETIRED);
     const machine = thread.vm ? this.session(thread).machines.get(`${thread.id}/${thread.vm.vmId}`) : undefined;
     const guest = machine?.status?.guest;
     const error = guest ? notReady(guest) : null;
@@ -960,5 +983,8 @@ export class RunnerMachines implements ThreadMachines {
     }
   }
 
-  async close(): Promise<void> {}
+  /** The runner sessions this process opened (none for a test's own). */
+  async close(): Promise<void> {
+    if (!this.options.session) await closeRunnerSessions();
+  }
 }
