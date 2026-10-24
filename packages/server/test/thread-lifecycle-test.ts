@@ -54,6 +54,7 @@ import type { Thread } from "../src/registry.ts";
 import { ThreadFailure } from "../src/optchat.ts";
 import { readThreads } from "../src/optchat-threads.ts";
 import { recoveryStep } from "../src/thread-recovery.ts";
+import { holdsSlot, slotWait } from "../src/machine-sleep.ts";
 import { lifecycle, Phase, project, RUNNER, until, type Cubed } from "./lifecycle-fixture.ts";
 
 {
@@ -126,7 +127,7 @@ try {
   // ---------------------------------------------------------------- R1
   // A wake a restart cut short: the registry says waking (holding a slot),
   // the runner still holds the machine suspended.
-  registry.updateThreadVm(c.id, { suspension: { ...fresh(c.id).vm!.suspension!, state: "waking" } });
+  assert.ok(holdsSlot(registry.applySleep(c.id, { type: "wakeAsked", waiting: "a wake a restart cuts short" })), "the wake held its slot");
   assert.equal(held(), 1, "the cut-short wake holds a slot in the registry");
   await cubed.close();
   const before = berth.events.length;
@@ -172,7 +173,7 @@ try {
   // The wake went through on the runner but cubed stopped before it recorded it.
   await idle(cubed);
   assert.equal(fresh(b.id).vm?.suspension?.state, "suspended");
-  registry.updateThreadVm(b.id, { suspension: { ...fresh(b.id).vm!.suspension!, state: "waking" } });
+  assert.ok(holdsSlot(registry.applySleep(b.id, { type: "wakeAsked", waiting: "a wake a restart cuts short" })), "the wake held its slot");
   berth.phases.set(vmOf(b.id), Phase.RUNNING);
   await cubed.close();
   const startsBefore = berth.starts();
@@ -212,7 +213,7 @@ try {
     slots("a new thread reserved the slot a freed");
     // A message to a while b's machine does not exist yet.
     const told = cubed.conversations.submit(a.id, "wake up", "tell-a");
-    await until("a's wake waits", () => fresh(a.id).vm?.suspension?.waiting !== undefined);
+    await until("a's wake waits", () => slotWait(fresh(a.id).vm?.suspension) !== undefined);
     assert.equal(berth.resumes(vmOf(a.id)), 0, "the wake did not take b's slot");
     slots("a waits");
     await cubed.conversations.activate(b.id);
@@ -363,7 +364,7 @@ try {
     assert.ok((fresh(w.id).retry?.failures ?? 0) >= 8, "its starts stopped");
     await rounds(3 * 3600_000);
     assert.deepEqual([fresh(w.id).vm?.suspension?.state, life.held(), berth.holding()], ["suspended", 0, 0], "the failed wake is read back: no slot held");
-    registry.updateThreadVm(w.id, { suspension: { ...fresh(w.id).vm!.suspension!, state: "waking" } });
+    assert.ok(holdsSlot(registry.applySleep(w.id, { type: "wakeAsked", waiting: "a wake a restart cuts short" })), "the wake held its slot");
     await cubed.close();
     cubed = life.start();
     await cubed.conversations.recover();

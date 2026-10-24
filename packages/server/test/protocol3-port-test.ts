@@ -75,7 +75,7 @@ function retiredThread(): { registry: Registry; thread: Thread } {
     protocol: 4, kind: "vm" });
   const created = registry.createThread(project.id, "p3", model, "hello", "pi", undefined, { runnerId: "old" });
   registry.markPlacement(created.id, "old", ["provisional"], "allocated");
-  registry.updateThreadVm(created.id, { suspension: { state: "waking", at: 1 } });
+  registry.applySleep(created.id, { type: "wakeAsked", waiting: "unused" }, 1);
   registry.close();
   const sqlite = new DatabaseSync(file);
   sqlite.prepare("UPDATE runner SET data=json_remove(data,'$.protocol','$.kind') WHERE id='old'").run();

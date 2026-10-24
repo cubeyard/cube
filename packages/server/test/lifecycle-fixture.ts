@@ -16,6 +16,7 @@ import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-work
 import { MachineSchema, MachineStatus_Phase as Phase, Runner_Kind, type Machine } from "../src/gen/runner_pb.js";
 import type { Conversations } from "../src/conversation.ts";
 import { GuestTransportError, type GuestTransport } from "../src/guest-transport.ts";
+import { holdsSlot } from "../src/machine-sleep.ts";
 import { Registry, type Project, type Thread } from "../src/registry.ts";
 import { RunnerError, type MachineRef, type RunnerSession } from "../src/runner-session.ts";
 import { threadRuntime } from "../src/thread-runtime.ts";
@@ -201,9 +202,8 @@ export function lifecycle(root: string, options: { slots: number; idleMs?: numbe
   const thread = (text = "hello"): Thread => registry.createThread(project.id, `create-${++requests}`, model, text);
   const fresh = (id: string) => registry.getThread(id)!;
   const vmOf = (id: string) => fresh(id).vm!.vmId;
-  /** Open threads holding a slot on the runner, as the registry counts them. */
-  const held = () => registry.listThreads().filter(t => !t.archived && t.runnerId === RUNNER
-    && (!t.vm?.suspension || (t.vm.suspension.state === "waking" && !t.vm.suspension.waiting))).length;
+  /** Open threads holding a slot on the runner (`holdsSlot`). */
+  const held = () => registry.listThreads().filter(t => !t.archived && t.runnerId === RUNNER && holdsSlot(t.vm?.suspension)).length;
   return { registry, berth, clock, model, start, thread, fresh, vmOf, held };
 }
 

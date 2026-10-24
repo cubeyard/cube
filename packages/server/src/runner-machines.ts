@@ -66,6 +66,7 @@ import { FAILED_BUILD_BACKOFF_MS, KEEL_TEMPLATE_CAPABILITIES, TEMPLATE_FORMAT, k
   templateMeta, templateSettings, type TemplateMeta, type TemplateParts, type TemplateSettings } from "./vm-template.ts";
 import { guestServices, VmWorkspace } from "./vm-workspace.ts";
 import { IDLE_MS, MachineActivity } from "./machine-idle.ts";
+import { holdsSlot, slotWait } from "./machine-sleep.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import { settleOperation, type WorkspaceOwner } from "./workspace.ts";
 
@@ -306,12 +307,12 @@ export class RunnerMachines implements ThreadMachines {
           // The conversation did not wake it and nothing waits for a slot
           // (an archive holds the thread and checks its disk): a start.
           const declined = this.options.registry.getThread(thread.id)?.vm?.suspension;
-          if (!this.onWake || (declined && !declined.waiting)) await this.start(this.options.registry.getThread(thread.id) ?? current);
+          if (!this.onWake || (declined && !slotWait(declined))) await this.start(this.options.registry.getThread(thread.id) ?? current);
         } catch (error) { if (!(error instanceof RunnerWait)) throw error; }
         const after = this.options.registry.getThread(thread.id)?.vm?.suspension;
         if (!after) { this.wakeGaveUp.delete(thread.id); return; }
         if (Date.now() >= deadline) {
-          const why = after.waiting ?? "its runner did not resume it";
+          const why = slotWait(after) ?? "its runner did not resume it";
           this.wakeGaveUp.set(thread.id, why);
           throw new Error(`the thread's machine is suspended and could not be resumed: ${why}`
             + (gaveUp ? "; this run already waited its whole time for it, a new message waits again" : ""));
@@ -348,8 +349,7 @@ export class RunnerMachines implements ThreadMachines {
     const id = thread.id;
     if (this.wakeInFlight(thread)) return;
     const current = this.options.registry.getThread(id);
-    const sleep = current?.vm?.suspension;
-    if (!current || current.archived || sleep?.state !== "waking") return;
+    if (!current || current.archived || current.vm?.suspension?.state !== "waking") return;
     let machine: Machine | null;
     try { machine = await this.session(current).machine({ case: "machineGet", value: { ref: this.ref(current) } }); }
     catch (error) {
@@ -361,12 +361,12 @@ export class RunnerMachines implements ThreadMachines {
     const phase = machine?.status?.phase;
     if (phase === MachineStatus_Phase.SUSPENDING) return;
     if (machine && phase !== MachineStatus_Phase.SUSPENDED) {
-      this.options.registry.updateThreadVm(id, { suspension: undefined });
+      this.options.registry.applySleep(id, { type: "running" });
       this.events.record(id, "wake read back", `runner ${this.session(current).nodeId} runs it (${MachineStatus_Phase[phase ?? 0]}); a restart had cut its wake short`);
       this.log.info("wake read back: the machine runs", { thread: id, phase: MachineStatus_Phase[phase ?? 0] });
       return;
     }
-    this.options.registry.updateThreadVm(id, { suspension: { state: "suspended", at: sleep.at, ...(sleep.memoryBytes ? { memoryBytes: sleep.memoryBytes } : {}) } });
+    this.options.registry.applySleep(id, { type: "wakeDropped" });
     this.events.record(id, "wake dropped", "nothing asked for the machine after a restart cut its wake short; it stays suspended until something does");
     this.log.info("wake dropped: no one asks for the machine", { thread: id, phase: machine ? "SUSPENDED" : "gone" });
   }
@@ -430,7 +430,7 @@ export class RunnerMachines implements ThreadMachines {
     const node = session.nodeId;
     const suspended = (machine: Machine) => {
       const memoryBytes = Number(machine.status?.suspended?.memoryBytes ?? 0n);
-      this.options.registry.updateThreadVm(thread.id, { suspension: { state: "suspended", at: Date.now(), ...(memoryBytes ? { memoryBytes } : {}) } });
+      this.options.registry.applySleep(thread.id, { type: "suspended", at: Date.now(), ...(memoryBytes ? { memoryBytes } : {}) });
       this.events.record(thread.id, "suspended", `idle; ${gib(memoryBytes)} of memory saved on VM runner ${node}; it holds no slot until it is resumed`);
       this.log.info("machine suspended", { thread: thread.id, runner: node, memoryBytes });
       return true;
@@ -551,21 +551,21 @@ export class RunnerMachines implements ThreadMachines {
       // B7-2: a full runner; the thread waits, saying so, and tries again.
       // A start that does not wait (`once`) leaves the machine suspended.
       const full = (cause?: unknown) => {
-        if (options.once) this.options.registry.updateThreadVm(thread.id, { suspension: { ...(suspension ?? { at: Date.now() }), state: "suspended", waiting: undefined } });
+        if (options.once) this.options.registry.applySleep(thread.id, { type: "wakeDropped" });
         return new RunnerWait(waiting, cause === undefined ? undefined : { cause });
       };
       if (resuming) {
         // The registry reserves the slot first, as for a new thread: a wake
         // never takes the slot of a thread whose machine is not created yet.
-        if (!this.options.registry.beginWake(thread.id, waiting)) throw full();
-      } else if (suspension) this.options.registry.updateThreadVm(thread.id, { suspension: undefined });
+        if (!holdsSlot(this.options.registry.applySleep(thread.id, { type: "wakeAsked", waiting }))) throw full();
+      } else if (suspension) this.options.registry.applySleep(thread.id, { type: "running" });
       const startAndWait = async () => {
         let started: Machine;
         try { started = await session.machine({ case: "machineStart", value: { ref, fence: this.fence(thread), ...start } }); }
         catch (error) {
           // The runner is full all the same (another cubed, a lowered bound).
           if (resuming && error instanceof RunnerError && error.code === "RESOURCE_EXHAUSTED") {
-            if (!options.once) this.options.registry.updateThreadVm(thread.id, { suspension: { ...(suspension ?? { at: Date.now() }), state: "waking", waiting } });
+            if (!options.once) this.options.registry.applySleep(thread.id, { type: "slotTaken", waiting });
             throw full(error);
           }
           throw error;
@@ -907,13 +907,13 @@ export class RunnerMachines implements ThreadMachines {
     const dropped = machine.status?.conditions.find(condition => condition.type === "SnapshotDropped");
     if (dropped) {
       const text = dropped.reason === "version" ? RESTARTED_AFTER_UPDATE : RESTARTED;
-      this.options.registry.updateThreadVm(thread.id, { suspension: undefined, notice: { text, at: Date.now() } });
+      this.options.registry.applySleep(thread.id, { type: "resumed", notice: { text, at: Date.now() } });
       this.events.record(thread.id, "restarted from its disk", `runner ${node} could not use the snapshot (${safeText(dropped.reason, 32)}: ${safeText(dropped.message, 256)})`);
       this.log.warn("snapshot dropped; the machine started from its disk", { thread: thread.id, runner: node, reason: dropped.reason });
       return;
     }
     // A notice of an earlier cold start is old news now (N-207-6).
-    this.options.registry.updateThreadVm(thread.id, { suspension: undefined, notice: undefined });
+    this.options.registry.applySleep(thread.id, { type: "resumed", notice: null });
     this.events.record(thread.id, "resumed", `on VM runner ${node}, the same boot`);
   }
 

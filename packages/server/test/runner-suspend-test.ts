@@ -46,6 +46,7 @@ import { DEFAULT_EXEC_TIMEOUT_MS, EXEC_GRACE_MS, IDLE_MS, MachineActivity } from
 import type { GuestTransport } from "../src/guest-transport.ts";
 import { createModels } from "@earendil-works/pi-ai";
 import { Registry, type Thread } from "../src/registry.ts";
+import { slotWait } from "../src/machine-sleep.ts";
 import { RunnerMachines } from "../src/runner-machines.ts";
 import { RunnerSession, type SessionConfig } from "../src/runner-session.ts";
 import { NoMachines } from "./local-guest.ts";
@@ -428,12 +429,12 @@ try {
   // waiting); each refusal says it waits.
   fake.startMs = 100;
   const woken = vms.guest(fresh(thread)).call("hello", {});
-  for (const deadline = Date.now() + 5000; !fresh(thread).vm!.suspension?.waiting;) {
+  for (const deadline = Date.now() + 5000; !slotWait(fresh(thread).vm!.suspension);) {
     assert.ok(Date.now() < deadline, "a refused try says the wake waits");
     await delay(10);
   }
   assert.equal(fresh(thread).vm!.suspension?.state, "waking");
-  assert.match(fresh(thread).vm!.suspension?.waiting ?? "", /^waiting for a free slot on runner node-vm-suspend/);
+  assert.match(slotWait(fresh(thread).vm!.suspension) ?? "", /^waiting for a free slot on runner node-vm-suspend/);
   await woken;
   assert.equal(fake.full, 0);
   assert.equal(fresh(thread).vm!.suspension, undefined, "resumed once a slot was free");
@@ -610,11 +611,12 @@ try {
   // N-207-2: a machine being woken holds its slot; one waiting for a slot does not.
   const slots = registry.runnerSlots().free;
   const saved = fresh(third).vm!.suspension!;
-  registry.updateThreadVm(third.id, { suspension: { ...saved, state: "waking" } });
+  assert.deepEqual(registry.applySleep(third.id, { type: "wakeAsked", waiting: "waiting for a free slot" }), { ...saved, state: "waking" });
   assert.equal(registry.runnerSlots().free, slots - 1, "waking: its QEMU may be starting");
-  registry.updateThreadVm(third.id, { suspension: { ...saved, state: "waking", waiting: "waiting for a free slot" } });
+  assert.deepEqual(registry.applySleep(third.id, { type: "slotTaken", waiting: "waiting for a free slot" }), { ...saved, state: "waking", waiting: "waiting for a free slot" });
   assert.equal(registry.runnerSlots().free, slots, "waiting for a slot: none held");
-  registry.updateThreadVm(third.id, { suspension: saved });
+  assert.deepEqual(registry.applySleep(third.id, { type: "wakeDropped" }), saved, "a dropped wake is the same sleep again");
+  assert.equal(registry.runnerSlots().free, slots);
   console.log("ok: N-207-2: a machine being woken holds its slot, one waiting for a slot does not");
 
   // N-207-4, K-6: a runner that says machine.suspend but has no such verb

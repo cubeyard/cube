@@ -11,6 +11,7 @@ import type { AddressInfo } from "node:net";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
 import { LocalMachines } from "./local-guest.ts";
+import type { SleepEvent } from "../src/machine-sleep.ts";
 
 export const STARTUP_PRE_SETUP = [
   "if [ ! -e ../once ]; then touch ../once; echo 'installing postgresql'; echo 'building the services'",
@@ -53,10 +54,9 @@ export async function startStartupHost() {
     guest: (id: string) => machines.guest(app.registry.getThread(id)!).root,
     /** Archives a thread, which frees its runner slot. */
     archive: async (id: string) => { await fetch(`${url}/api/threads/${id}`, { method: "DELETE" }); },
-    /** Sets what the registry says of the thread's machine's sleep (P7-5):
-     * suspended, being woken, waiting for a slot, or a notice. */
-    sleep: (id: string, vm: { suspension?: { state: "suspended" | "waking"; at: number; waiting?: string }; notice?: { text: string; at: number } }) =>
-      void app.registry.updateThreadVm(id, { suspension: vm.suspension, notice: vm.notice }),
+    /** Applies a sleep event to the thread's machine (P7-5, machine-sleep.ts):
+     * suspended, being woken, waiting for a slot, or resumed with a notice. */
+    sleep: (id: string, ...events: SleepEvent[]) => { for (const event of events) app.registry.applySleep(id, event); },
     /** The recovery loop's next round for one thread, now. */
     retry: (id: string) => void app.conversations.activate(id),
     project: () => app.registry.getProject(project.id)!,

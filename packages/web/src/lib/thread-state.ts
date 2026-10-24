@@ -13,6 +13,11 @@ export const stateLabel = (thread: ThreadSummary) => {
   if (suspended) return "suspended";
   return null;
 };
+/** Why a wake waits: the runner has no free slot (its full words). */
+export const slotReason = (thread: ThreadSummary) => {
+  const sleep = thread.vm?.suspension;
+  return sleep?.state === "waking" ? sleep.waiting ?? null : null;
+};
 /** Whether the strip's label is about the machine's sleep (it stays in
  * print on a phone, with the details closed). */
 export const sleepState = (thread: ThreadSummary) => !!suspension(thread);

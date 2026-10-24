@@ -660,7 +660,7 @@ try {
   const n5Run = await send(a, bashLine(`${BOOT}; echo n5`));
   const waitingText = await until("N5: A says it waits for a free slot", 60000, async () => (await listedThread(a)).vm?.suspension?.waiting);
   assert.match(waitingText, /^waiting for a free slot on runner /, waitingText);
-  // The registry reserves a wake's slot first (Registry.beginWake): with B
+  // The registry reserves a wake's slot first (Registry.applySleep, wakeAsked): with B
   // on the only one, berth is not asked to resume A at all.
   assert.equal(asked(a, "machineStart"), startsA, "N5: cubed did not ask berth to resume A while B held the slot");
   await delay(12000);
