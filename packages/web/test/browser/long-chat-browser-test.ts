@@ -189,6 +189,28 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.ok(!shown.includes(`turn ${pad(TURNS - 1)}`), "nothing of the lost window stays");
     assert.equal(host.queries.filter(query => query.endsWith("/stream?tail=120")).length, 2, "the window is chosen again");
   });
+  if (engine === "chromium") await scenario(browser, engine, "a thread left for the chat keeps nothing of itself", desktop, "chat", async page => {
+    const cdp = await page.context().newCDPSession(page);
+    const visit = async () => {
+      await page.evaluate(() => { location.hash = "#/t/t1"; });
+      await page.locator(".thread-body .composer textarea").waitFor();
+      await page.getByText(`answer ${pad(TURNS - 1)}`).waitFor();
+      await page.evaluate(() => { location.hash = "#/chat"; });
+      await page.locator(".thread-body").waitFor({ state: "detached" });
+      await settle(page);
+    };
+    const nodes = async () => {
+      await cdp.send("HeapProfiler.collectGarbage");
+      const { metrics } = await cdp.send("Performance.getMetrics");
+      return metrics.find(metric => metric.name === "Nodes")!.value;
+    };
+    await cdp.send("Performance.enable");
+    await visit();
+    const before = await nodes();
+    for (let i = 0; i < 6; i++) await visit();
+    const grown = await nodes() - before;
+    assert.ok(grown < 200, `6 visits leave ${grown} nodes behind (a visit's view has thousands)`);
+  });
   await browser.close();
 }
 
