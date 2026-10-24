@@ -225,7 +225,10 @@ runner.
   `"protocol": 4`: `cubed runners enroll --config <runner.json>`, as above.
 - **It is in the pool.** A thread that names no runner may be placed on an
   enrolled `berth vm` (never on a `berth host`). A thread on a `berth vm`
-  stays there and waits while the runner is down (above).
+  stays there and waits while the runner is down. One whose machine was
+  never ready counts failed tries after 30 min of that and stops after 8,
+  about 90 min, with an error that says so; a message tries again
+  (docs/thread-lifecycle.md).
 - **Upgrade.** Install the new release with the same `--dir`: the same peer
   and key, so no new enrollment. Point the start script at the new
   `libexec/berth-<version>/berth` (or install with a new `--unit-name`), and
