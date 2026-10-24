@@ -496,15 +496,19 @@ threads' `sealFailure` records stay readable.
     ≤1.3.0, including one the supervisor restores as `previous` after a
     failed probation, starts but its OptChat and those threads stay down
     until Pi 1.4.0 runs again: the agent does not open and the transcript
-    does not load either (1.3.0's history reader refuses schema 2 as well);
-    nothing is lost. A store 1.4.0 never opened stays at schema 1: a thread
+    does not load either (1.3.0's history reader refuses schema 2 as well).
+    The refused stores are not written, so nothing is lost: installing (or
+    repointing `current` to) a release with Pi 1.4.0 or later makes them
+    readable again with their whole history, and nothing has to be restored.
+    A store 1.4.0 never opened stays at schema 1: a thread
     archived before the upgrade, or one whose agent did not open under 1.4.0
     (cube's readers take 1 and 2 and never migrate). A thread archived after
     its agent ran under 1.4.0 is at 2. A stopped-cubed
     backup (`VACUUM INTO`) opens in 1.3.0, but restoring it replays any
     tool call made since. The state schema stays 102, whose manifests still
-    declare rollback safety: whether this needs a rollback contract of its
-    own is an open decision;
+    declare rollback safety; the user accepted this one-way step for Pi
+    1.4.0 as it is (2026-10-24, option A of #237's review), with no rollback
+    contract of its own;
   - Pi 1.4.0's crash-loop guard (`settings.restartLimit`, default 5) is
     off in both Harnesses (`RESTART_LIMIT = Infinity`, pi-sends.ts), as
     before 1.4.0: a parked task keeps its conversation busy and cube has no

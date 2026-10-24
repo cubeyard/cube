@@ -145,7 +145,10 @@ thread's when its agent opens) moves to Pi SQLite schema 2, one way. A
 release before it, including one the supervisor restores after a failed
 probation, starts, but OptChat and those threads (agent and transcript) stay
 unavailable until a release with Pi 1.4.0 or later is installed again.
-Nothing is deleted, and the system page can still install that release.
+The older release does not write the stores it refuses: installing a release
+with Pi 1.4.0 or later (or repointing `current` to one) makes them readable
+again with their whole history, and nothing has to be restored. The system
+page can still install that release.
 
 A release ships `bin/cube-gateway` next to `bin/node`; the candidate's
 self-check runs `cube-gateway --version` and fails without a working gateway.
