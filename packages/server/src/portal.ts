@@ -202,16 +202,16 @@ export class Portal {
     const thread = this.thread(match[2]!);
     if (!thread) throw unknown;
     // B7-3: a connection to a suspended machine wakes it.
-    if (thread.workspaceState === "available" && !this.options.archiving(thread.id) && this.options.machines.suspended?.(thread)) {
+    if (thread.workspaceState === "available" && !this.options.archiving(thread.id) && this.options.machines.suspended(thread)) {
       // A request waits for it a while; a machine that waits for a free slot keeps waking.
-      const woken = this.options.machines.wake?.(thread).then(() => true, () => false) ?? Promise.resolve(false);
+      const woken = this.options.machines.wake(thread).then(() => true, () => false);
       const waited = await Promise.race([woken, new Promise<false>(resolve => setTimeout(() => resolve(false), WAKE_WAIT_MS).unref())]);
       if (!waited) {
         const waiting = this.options.registry.getThread(thread.id)?.vm?.suspension?.waiting;
         throw new Refusal(503, `this thread's machine was suspended and is waking${waiting ? `: ${waiting}` : ""}; try again shortly`);
       }
     }
-    if (thread.workspaceState !== "available" || this.options.archiving(thread.id) || !this.options.machines.running?.(thread)) {
+    if (thread.workspaceState !== "available" || this.options.archiving(thread.id) || !this.options.machines.running(thread)) {
       this.cache.delete(thread.id);
       throw new Refusal(503, "this thread's machine is not running; open the thread in cube to start it");
     }
@@ -252,7 +252,7 @@ export class Portal {
   }
 
   private async connect(thread: Thread, service: GuestService): Promise<Duplex> {
-    try { return await this.options.machines.dial!(thread, service.port); }
+    try { return await this.options.machines.dial(thread, service.port); }
     catch (error) {
       // The registration may be stale (stopped, replaced): ask again next time.
       this.cache.delete(thread.id);

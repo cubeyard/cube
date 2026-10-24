@@ -20,7 +20,7 @@ import { refreshGuest } from "../src/vm.ts";
 import { GUEST_CLI_SHIM, shippedHelper } from "../src/vm-seed.ts";
 import { keelGuest, VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
-import { LocalMachines } from "./local-guest.ts";
+import { LocalMachines, NoMachines } from "./local-guest.ts";
 
 // Settings: off without an address, never public or on every interface.
 assert.equal(portalSettings({}), null);
@@ -108,7 +108,7 @@ const portalPort = await free();
   await new Promise<void>(resolve => taken.listen(0, "127.0.0.1", resolve));
   const port = (taken.address() as net.AddressInfo).port;
   const blocked = new Portal({ settings: portalSettings({ CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_DOMAIN: "localhost", CUBED_PORTAL_PORT: String(port) }),
-    directory: path.join(root, "blocked"), registry: null as never, machines: null as never, archiving: () => false, log: { error() {}, info() {} } as never });
+    directory: path.join(root, "blocked"), registry: null as never, machines: new NoMachines(), archiving: () => false, log: { error() {}, info() {} } as never });
   await blocked.listen();
   assert.match(blocked.state, /^failed: .*EADDRINUSE/);
   assert.deepEqual(blocked.guest({ id: "t" } as Thread), { reason: `cube's portal could not listen on 127.0.0.1:${port}; see cubed's log` });

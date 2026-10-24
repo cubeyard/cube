@@ -34,6 +34,8 @@ export interface RunnerEvent { op: string; vm: string; from: Phase | null; to: P
 export class FakeBerth {
   readonly root: string;
   slots: number;
+  /** What the runner's hello says it is. */
+  readonly kind: "vm" | "host";
   /** The runner does not answer (UNAVAILABLE), as a down runner. */
   down = false;
   /** Machines (by id) whose create fails, and with what. */
@@ -49,7 +51,7 @@ export class FakeBerth {
   readonly violations: string[] = [];
   private readonly boots = new Map<string, number>();
   private readonly guests = new Map<string, LocalGuestTransport>();
-  constructor(root: string, slots: number) { this.root = root; this.slots = slots; fs.mkdirSync(root, { recursive: true }); }
+  constructor(root: string, slots: number, kind: "vm" | "host" = "vm") { this.root = root; this.slots = slots; this.kind = kind; fs.mkdirSync(root, { recursive: true }); }
 
   holding(): number { return [...this.phases.values()].filter(phase => phase !== Phase.SUSPENDED && phase !== Phase.RETAINED).length; }
   running(): number { return [...this.phases.values()].filter(phase => phase === Phase.RUNNING).length; }
@@ -147,7 +149,7 @@ function sessionOf(berth: FakeBerth): RunnerSession {
     const value = (request: { value: unknown }) => request.value as { ref: MachineRef; retain?: boolean };
     return {
       nodeId: NODE, capabilities: ["machine.suspend"], machines: new Map(),
-      runner: { kind: Runner_Kind.VM, limits: { maxVcpus: 4, maxMemoryMib: 8192, maxDiskGib: 64, maxMachines: berth.slots, maxBootBytes: 262144 }, softwareVersion: "stand-in" },
+      runner: { kind: berth.kind === "vm" ? Runner_Kind.VM : Runner_Kind.HOST, limits: { maxVcpus: 4, maxMemoryMib: 8192, maxDiskGib: 64, maxMachines: berth.slots, maxBootBytes: 262144 }, softwareVersion: "stand-in" },
       hello: async () => { if (berth.down) berth.refuse("UNAVAILABLE", "the runner does not answer"); },
       machine: async (request: { case: string; value: unknown }) => berth.request(request.case, value(request).ref, value(request).retain ?? false),
       call: async (request: { case: string; value: unknown }) => ({ case: "machine", value: berth.request(request.case, value(request).ref) }),
@@ -185,7 +187,7 @@ export function lifecycle(root: string, options: { slots: number; idleMs?: numbe
   registry.saveProject(project);
   registry.enrollRunner({ nodeId: NODE, threadId: RUNNER, environmentId: 1, configPath: path.join(root, "runner.json"), configHash: RUNNER, maxActiveVms: options.slots,
     protocol: 4, kind: options.kind ?? "vm" } as never);
-  const berth = new FakeBerth(path.join(root, "runner"), options.slots);
+  const berth = new FakeBerth(path.join(root, "runner"), options.slots, options.kind ?? "vm");
   const clock = { now: Date.now() };
   const policy = { policyFor: () => ({}) };
   /** A cubed over the state; `wakeWaitMs` for this one only. */

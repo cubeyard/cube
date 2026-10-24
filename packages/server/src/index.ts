@@ -254,10 +254,10 @@ export async function createCubed(options: {
   runner?: RunnerSeams;
   /** Tests: the clock of the threads' idle times and retry pauses. */
   now?: () => number;
-  /** Thread machines; default: each thread on its runner's protocol
+  /** Thread machines; default: RunnerMachines, each thread on its runner
    * (protocol 4: `berth vm` and `berth host`; protocol 3 is refused).
-   * Offline tests pass local guests, or a factory given the registry. */
-  machines?: ThreadMachines | ((registry: Registry, threads: string) => ThreadMachines);
+   * Offline tests pass local guests. */
+  machines?: ThreadMachines;
   /** The cube-gateway binary (null: none); default: locateGateway(). */
   gateway?: string | null;
   /** Secrets the egress policy substitutes; default: the host's GitHub token. */
@@ -290,8 +290,7 @@ export async function createCubed(options: {
   const egress = await serveEgress(path.join(run, "egress.sock"), policy);
   let gateway: GatewaySupervisor | null = null;
   const threadsDirectory = path.join(options.state, "threads");
-  const given = typeof options.machines === "function" ? options.machines(registry, threadsDirectory) : options.machines;
-  if (!given) {
+  if (!options.machines) {
     const credential = path.join(run, "credential.sock");
     gateway = new GatewaySupervisor({ decide: path.join(run, "egress.sock"), credential, extraArgs: gatewayTestArgs(process.env),
       ...(options.gateway === undefined ? {} : { binary: options.gateway }) });
@@ -302,7 +301,7 @@ export async function createCubed(options: {
   }
   let portal: Portal | null = null;
   let artifacts: Artifacts | null = null;
-  const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, ...given ? { machines: given } : {}, ...options.now ? { now: options.now } : {},
+  const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, ...options.machines ? { machines: options.machines } : {}, ...options.now ? { now: options.now } : {},
     runner: { policy, ...options.runner }, claude: claudeCommand ? {
     command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
   } : null, portal: thread => portal!.guest(thread),
@@ -374,7 +373,7 @@ export async function createCubed(options: {
   const probeIntervalMs = options.runnerProbeIntervalMs ?? 60_000;
   // Read-only evidence about a thread's machine (vm-diagnostics.ts).
   const diagnostics = (id: string) => threadDiagnostics({ registry, conversations, version: `${versionInfo().version} (${versionInfo().commit})`,
-    machine: machines.diagnose ? thread => machines.diagnose!(thread) : undefined,
+    machine: thread => machines.diagnose(thread),
     runner: runnerId => observeRunners(registry, probeIntervalMs).runners.find(runner => runner.id === runnerId) ?? null }, id);
   const optchatThreads = { ...cubeThreads({ registry, conversations, catalog: threadCatalog, runners: () => observeRunners(registry, probeIntervalMs), latestCommits }), usage: usageQuery,
     diagnose: async (id: string) => { const bundle = await diagnostics(id); return bundle && formatDiagnostics(bundle); } };
@@ -811,7 +810,7 @@ export async function createCubed(options: {
         // The log of the hook running now while the machine starts (read
         // only, no lease); null when no machine of the thread is reachable.
         if (thread && parts[3] === "startup-log" && parts.length === 4 && method === "GET") {
-          return json({ log: thread.archived || !machines.startupLog ? null : await machines.startupLog(thread).catch((error: unknown) => ({ error: errorText(error) })) });
+          return json({ log: thread.archived ? null : await machines.startupLog(thread).catch((error: unknown) => ({ error: errorText(error) })) });
         }
         // So do the images its transcript shows: they are kept on this host,
         // in the thread's own store, not on its machine.
@@ -833,7 +832,7 @@ export async function createCubed(options: {
         if (parts[3] === "history" && method === "GET") return json(windowed(await conversations.history(id), url.searchParams));
         // `cube service` services in the thread's machine; never starts it.
         if (parts[3] === "services" && parts.length === 4 && method === "GET") {
-          const running = thread.workspaceState === "available" && !conversations.archivingNow(id) && !!machines.running?.(thread);
+          const running = thread.workspaceState === "available" && !conversations.archivingNow(id) && machines.running(thread);
           return json({ portal: portal.state, running,
             services: running ? await portal.services(thread, true).catch((error: unknown) => {
               // A machine whose helper predates services (its refresh failed) or does not answer.

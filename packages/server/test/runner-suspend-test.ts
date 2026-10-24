@@ -48,7 +48,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import { Registry, type Thread } from "../src/registry.ts";
 import { RunnerMachines } from "../src/runner-machines.ts";
 import { RunnerSession, type SessionConfig } from "../src/runner-session.ts";
-import type { ThreadMachines } from "../src/vm.ts";
+import { NoMachines } from "./local-guest.ts";
 
 // ------------------------------------------------ 1. machine-idle.ts
 
@@ -144,13 +144,12 @@ import type { ThreadMachines } from "../src/vm.ts";
     vm: { vmId: id.padEnd(16, "0"), placeholders: {}, ...vm } }) as unknown as Thread;
   const threads = [thread("idle"), thread("asleep", { suspension: { state: "suspended", at: 1 } }), thread("waking", { suspension: { state: "waking", at: 1 } }),
     thread("claude"), thread("working")];
-  const started: string[] = [];
   const asked: Array<{ id: string; busy: string | null }> = [];
-  const machines = {
-    start: async (t: Thread) => { started.push(t.id); throw new Error("not in this test"); },
-    suspendIfIdle: async (t: Thread, busy: () => Promise<string | null>) => { asked.push({ id: t.id, busy: await busy() }); return false; },
-    touch: () => {},
-  } as unknown as ThreadMachines;
+  class Asked extends NoMachines {
+    override async suspendIfIdle(t: Thread, busy: () => Promise<string | null>): Promise<boolean> { asked.push({ id: t.id, busy: await busy() }); return false; }
+  }
+  const machines = new Asked();
+  const started = machines.starts;
   const registry = { listThreads: () => threads, getThread: (id: string) => threads.find(t => t.id === id) ?? null, interruptStartupSteps: () => {} } as unknown as Registry;
   const conversations = new Conversations({ registry, directory: fs.mkdtempSync(path.join(os.tmpdir(), "cube-suspend-conv-")), models: createModels(), machines });
   await conversations.boot();
