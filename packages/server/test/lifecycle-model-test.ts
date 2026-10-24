@@ -7,10 +7,14 @@
  *   I1  a read changes nothing on the runner;
  *   I3  an archived thread's machine is never asked for anything again but
  *       its release;
- *   I4  the runner never holds more machines than its slots;
+ *   I4  the runner never holds more machines than the registry counts, nor
+ *       the registry more than the runner's slots (a wake is reserved like
+ *       a new thread);
  *   I5  after a restart's first round no `waking` is left without an owner;
  *   I6  a restart wakes exactly the sleeping threads with a stored run that
  *       did not finish;
+ *   I9  an archive answers within seconds, also for a sleeping machine on a
+ *       full runner;
  *   G   no guest call reaches a machine that does not run;
  *
  * and at the end, every message request id is in its thread's store once.
@@ -41,7 +45,7 @@ function random(seed: number) {
 for (const seed of seeds) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `cube-lifecycle-model-${seed}-`));
   const life = lifecycle(root, { slots: 2 });
-  const { registry, berth, clock, fresh, vmOf } = life;
+  const { registry, berth, clock, fresh, vmOf, held } = life;
   const rng = random(seed);
   let cubed: Cubed = life.start();
   const tells: Array<{ id: string; requestId: string; text: string }> = [];
@@ -114,7 +118,9 @@ for (const seed of seeds) {
     async archive() {
       const t = rng.pick(open().filter(t => t.workspaceState === "available" || t.workspaceState === "failed"));
       if (!t) return;
+      const began = Date.now();
       const result = await cubed.conversations.archive(t.id).then(r => `retained=${r.retained}`, (error: Error) => error.message);
+      assert.ok(Date.now() - began < 5_000, `I9: archiving ${t.id.slice(0, 8)} took ${Date.now() - began} ms`);
       if (fresh(t.id).archived) archivedAt.set(vmOf(t.id), berth.events.length);
       trace.push(`archive ${t.id.slice(0, 8)}: ${result}`);
     },
@@ -131,7 +137,7 @@ for (const seed of seeds) {
       const name = choose();
       await actions[name]!();
       assert.deepEqual(berth.violations, [], `G after ${name}`);
-      assert.ok(berth.holding() <= berth.slots, `I4: the runner holds ${berth.holding()} of ${berth.slots}`);
+      assert.ok(berth.holding() <= held() && held() <= berth.slots, `I4 after ${name}: the runner holds ${berth.holding()}, the registry counts ${held()}, of ${berth.slots} slots`);
       for (const [vm, at] of archivedAt) {
         assert.deepEqual(berth.touched(vm, at).filter(e => e.op !== "machineGet" && e.op !== "machineDelete" && e.op !== "machineDiscard"), [],
           `I3: archived machine ${vm} was not asked to run again`);
@@ -144,7 +150,7 @@ for (const seed of seeds) {
       db.close();
       assert.equal(n, 1, `${tell.requestId} is in its thread's store once`);
     }
-    console.log(`ok: lifecycle model seed ${seed}: ${steps} steps (${trace.filter(line => line.startsWith("restart")).length} restarts, ${tells.length} messages, ${archivedAt.size} archives, ${berth.starts()} starts on the runner); I1, I3, I4, I5, I6 and G held`);
+    console.log(`ok: lifecycle model seed ${seed}: ${steps} steps (${trace.filter(line => line.startsWith("restart")).length} restarts, ${tells.length} messages, ${archivedAt.size} archives, ${berth.starts()} starts on the runner); I1, I3, I4, I5, I6, I9 and G held`);
   } catch (error) {
     console.error(`seed ${seed} trace:\n  ${trace.join("\n  ")}`);
     throw error;

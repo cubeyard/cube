@@ -712,10 +712,17 @@ export class Conversations {
       else if (unopened) decision = { clean: false, reason: `the agent could not open: ${unopened}` };
       else {
         await this.closeAgents(id);
-        const workspace = this.openWorkspace(id);
-        try { decision = await releaseCheck(workspace, threadAgent(thread), thread.allocation); }
-        catch (error) { decision = { clean: false, reason: `the thread machine could not be checked: ${error instanceof Error ? error.message : String(error)}` }; }
-        if (decision.clean && workspace.agentChanged()) decision = { clean: true, reason: "clean: the agent's work is committed and pushed" };
+        // A suspended machine is woken for the check only if its runner has
+        // a slot free now; otherwise its disk is kept unchecked at once
+        // rather than the archive waiting for a slot (nothing is lost).
+        const asleep = await this.wakeForCheck(id);
+        if (asleep) decision = { clean: false, reason: `its machine is suspended and was not woken to check it (${asleep}); its disk is kept unchecked` };
+        else {
+          const workspace = this.openWorkspace(id);
+          try { decision = await releaseCheck(workspace, threadAgent(thread), thread.allocation); }
+          catch (error) { decision = { clean: false, reason: `the thread machine could not be checked: ${error instanceof Error ? error.message : String(error)}` }; }
+          if (decision.clean && workspace.agentChanged()) decision = { clean: true, reason: "clean: the agent's work is committed and pushed" };
+        }
       }
       this.closeWorkspace(id);
       this.resumed.delete(id);
@@ -725,6 +732,14 @@ export class Conversations {
       const released = await this.release(id);
       return { retained: released.retained, reason: released.retained && decision.clean ? RUNNER_KEPT : decision.reason };
     });
+  }
+  /** Before an archive's release check: null when the machine runs (woken
+   * now if it slept and its runner had a slot), else why it still sleeps. */
+  private async wakeForCheck(id: string): Promise<string | null> {
+    const thread = this.registry.getThread(id);
+    if (!thread?.vm?.suspension || !this.machines.wakeNow) return null;
+    try { return await this.machines.wakeNow(thread); }
+    catch (error) { return `it could not be woken: ${error instanceof Error ? error.message : String(error)}`; }
   }
   /** Deletes an archived thread's retained machine disk: the operator
    * decided its evidence is no longer needed. */

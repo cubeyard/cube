@@ -37,7 +37,8 @@
  *   N3d a portal request wakes it within the portal's 60 s and is answered
  *       by the guest (404, no such service), the same boot; suspended again;
  *   N5  one slot: thread A suspended, thread B takes the slot and stays busy;
- *       a message to A shows "waiting for a free slot …" and A stays
+ *       a message to A shows "waiting for a free slot …", berth is not
+ *       asked to resume A (the registry holds the slot for B) and A stays
  *       suspended; B archived, A resumes (the same boot) and its run ends;
  *   N6  berth restarted with A suspended and the snapshot's key changed as
  *       another berth would write it: the loop does not wake A across the
@@ -659,7 +660,9 @@ try {
   const n5Run = await send(a, bashLine(`${BOOT}; echo n5`));
   const waitingText = await until("N5: A says it waits for a free slot", 60000, async () => (await listedThread(a)).vm?.suspension?.waiting);
   assert.match(waitingText, /^waiting for a free slot on runner /, waitingText);
-  assert.ok(asked(a, "machineStart") > startsA, "N5: cubed asked berth to resume A");
+  // The registry reserves a wake's slot first (Registry.beginWake): with B
+  // on the only one, berth is not asked to resume A at all.
+  assert.equal(asked(a, "machineStart"), startsA, "N5: cubed did not ask berth to resume A while B held the slot");
   await delay(12000);
   assert.ok(thread(a).vm?.suspension && fs.existsSync(memoryFile(vmA)), "N5: A stays suspended while B holds the slot");
   assert.equal(asked(b), 0, "N5: B was never asked to suspend (busy)");
