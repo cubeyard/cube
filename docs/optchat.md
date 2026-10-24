@@ -341,7 +341,10 @@ Restarts and failures:
   not sent again (see "A paid call is never sent again on its own").
 - **Duplicate events**: every report has the request id
   `report:<thread>:<run>` and every run its own request id, so a watch
-  reconnect, a restart or an archive sends a report once.
+  reconnect, a restart or an archive sends a report once. A report the
+  chat could not take (its send failed) is read from the thread's store
+  and sent again in a later round; a thread archived (in the UI, say)
+  before a round saw its last run settle reports that run from its store.
 - **A thread whose machine is unavailable** reports a failure to start
   once, after the start grace (cubed keeps retrying); see "Archiving".
 - **The chat's own observation starts nothing**: neither a thread's
@@ -353,15 +356,19 @@ Restarts and failures:
   settled and was never reported (the request id keeps that to once; an
   idle thread is not taken for a reported one); once the agent is open,
   the next round watches it. Machines start for explicit work (`spawn`,
-  `tell`, the user's message, an archive's check of the disk, a portal
-  connection) and in cubed's recovery loop, which starts every open
-  thread whose machine is not suspended and leaves alone one an idle round
-  is suspending. That includes a wake a restart cut short (`waking`): the
-  loop goes on with it, retrying while the runner is full, whether or not
-  anything still waits for it. Reading a thread in the UI opens its agent
+  `tell`, the user's message, an archive's check of the disk when its
+  runner has a slot free, a portal connection) and in cubed's recovery
+  loop, by its one rule (`recoveryStep`, docs/thread-lifecycle.md): it
+  wakes a sleeping machine only for a stored Pi run that did not finish,
+  and a wake no one in this cubed owns (one a restart cut short) is read
+  back from the runner as suspended or running, never continued. Reading a thread in the UI opens its agent
   but does not start or wake its machine. `threads` lists a sleeping
   thread as "its machine is suspended" or "being woken", with its stored
   run state.
+  These reads (`readThreads` in optchat-threads.ts) get only a
+  `ThreadReader` (conversation.ts): cubed's own state, an agent already
+  open and the thread's store. They have no way to start or wake a
+  machine, open an agent or wait for a start.
 - **Archive and model change** refuse a thread waiting on background agents
   (archiving would end them): `not archived: it is waiting on its background
   agents; nothing was stopped`. The user's stop in the UI ends them, as a

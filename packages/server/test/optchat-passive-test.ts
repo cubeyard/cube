@@ -206,7 +206,7 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
     storedHistory: async (id: string) => page(id),
     history: async (id: string) => transcriptOf(id),
     submit: async (id: string, text: string) => { submitted.push(`${id}:${text}`); },
-    events: async (id: string): Promise<ThreadEvents> => ({
+    live: async (id: string): Promise<ThreadEvents | null> => !open.has(id) ? null : ({
       async read() { return transcriptOf(id); },
       async watch(listener) {
         listeners.set(id, listener);
