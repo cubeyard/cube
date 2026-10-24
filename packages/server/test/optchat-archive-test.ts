@@ -1,7 +1,9 @@
 /** OptChat's archive tool: it archives only the threads OptChat started,
  * named by their whole short id; a working thread is refused and nothing is
  * stopped; archiving again says so; the last run's report reaches the chat
- * once even when the watcher never sent it. The archive itself (Conversations)
+ * once even when the watcher never sent it. threads then lists only the
+ * chat's threads not archived; archived_threads searches the archived ones,
+ * a page at a time; history still reads an archived thread. The archive itself (Conversations)
  * runs against real threads in optchat-product-test.ts. Faux model,
  * disposable state. */
 import assert from "node:assert/strict";
@@ -12,9 +14,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { ThreadWorking, type Conversations } from "../src/conversation.ts";
-import { OptChat, type OptThreads, type ThreadRecord } from "../src/optchat.ts";
-import { cubeThreads } from "../src/optchat-threads.ts";
-import type { Registry } from "../src/registry.ts";
+import { ARCHIVED_MAX, OptChat, type OptThreads, type ThreadListRequest, type ThreadRecord } from "../src/optchat.ts";
+import { cubeThreads, readThreads } from "../src/optchat-threads.ts";
+import type { Registry, Thread } from "../src/registry.ts";
 import type { ThreadTranscript } from "../src/thread-events.ts";
 import { pageOf } from "../src/thread-history.ts";
 
@@ -48,13 +50,14 @@ try {
   models.setProvider(faux.provider);
   const archived = new Set<string>();
   const asked: string[] = [];
+  const listed: Array<[readonly string[], ThreadListRequest | undefined]> = [];
   let spawns = 0;
   const threads: OptThreads = {
     async projects() { return "projects: cube"; },
     async runners() { return "no runners"; },
     async spawn() { return spawns++ ? { id: BUSY, title: "busy" } : { id: DONE, title: "done" }; },
     async tell() {},
-    async describe(ids) { return ids.map(id => `[${id.slice(0, 8)}] cube · ${archived.has(id) ? "archived" : "ready"}`).join("\n"); },
+    async describe(ids, request) { listed.push([ids, request]); return ids.map(id => `[${id.slice(0, 8)}] cube · ${archived.has(id) ? "archived" : "ready"}`).join("\n"); },
     // The watcher never sees the run: its report is left to the archive.
     async events() { return null; },
     async history(id) { return id === DONE ? record(done) : null; },
@@ -74,6 +77,10 @@ try {
       call("archive", { ids: [OTHER.slice(0, 8), OTHER, "abcdef", "abcdef1"] }, "call-refused"),
       call("archive", { ids: ["[abcdef12]", "abcdef34"] }, "call-archive"),
       call("archive", { ids: [DONE] }, "call-again"),
+      call("threads", {}, "call-threads"),
+      call("archived_threads", {}, "call-archived"),
+      call("archived_threads", { query: "fix", offset: 20, limit: 5 }, "call-search"),
+      call("history", { id: DONE.slice(0, 8) }, "call-history"),
       () => fauxAssistantMessage("archived"),
     ];
     await chat.send("start two", "r1");
@@ -90,6 +97,12 @@ try {
     // Again: the thread is left as it is and says so.
     assert.equal(results.get("call-again"), "[abcdef12] was already archived: machine disk deleted; history still reads it\nfree thread machines: 2 of 2");
     assert.deepEqual(asked, [DONE, BUSY, DONE], "only the chat's own threads reach cubed");
+    // threads asks for the default list (no archived ones), archived_threads
+    // for a bounded page of the archived; both of the chat's own threads only,
+    // newest spawn first.
+    assert.deepEqual(listed, [[[BUSY, DONE], undefined], [[BUSY, DONE], { archived: true, query: undefined, offset: 0, limit: 20 }],
+      [[BUSY, DONE], { archived: true, query: "fix", offset: 20, limit: 5 }]]);
+    assert.match(results.get("call-history") ?? "", /PR #9/, "history still reads an archived thread");
 
     // The run the watcher never reported reaches the chat once, archived twice or not.
     const reports = async () => {
@@ -124,6 +137,53 @@ try {
     assert.deepEqual(await adapter.archive!(DONE), { already: false, disk: "no machine disk", free: "1 of 1" });
     assert.deepEqual(await adapter.archive!(DONE), { already: true, disk: "no machine disk", free: "1 of 1" });
     assert.equal(archives, 3, "an archived thread is not archived again (two refusals, one archive)");
+  }
+
+  // cubed's side of the lists (readThreads): the default leaves archived
+  // threads out and counts them; archived_threads' search matches id, title
+  // or project, pages and says where the next page starts. Only the ids the
+  // chat passes are read: another chat's thread is never listed. An
+  // archived thread's store is never read for a list.
+  {
+    const make = (n: number, extra: Partial<Thread>) => ({ id: `${String(n).padStart(8, "0")}-0000-4000-8000-000000000000`, title: `task ${n}`, projectId: n % 2 ? "web" : "cube",
+      archived: false, workspaceState: "available", workspaceError: null, vm: undefined, ...extra }) as unknown as Thread;
+    const open = make(1, { title: "running work" }), ended = make(2, { title: "ended work" }), failed = make(3, { title: "broken", workspaceState: "failed" });
+    const old = Array.from({ length: 60 }, (_, k) => make(100 + k, { archived: true, title: k === 7 ? "Fix the Cart" : `old ${k}` }));
+    const foreign = make(900, { archived: true, title: "fix elsewhere" });
+    const all = new Map([open, ended, failed, ...old, foreign].map(thread => [thread.id, thread]));
+    const registry = { getThread: (id: string) => all.get(id) ?? null, getProject: (id: string) => ({ name: id }) } as unknown as Registry;
+    const stored: string[] = [];
+    const reader = {
+      error: (id: string) => id === failed.id ? "workspace allocation failed: boom" : null, waiting: () => null, archivingNow: () => false, agentOpen: () => false, starting: () => false,
+      live: async () => null, owner: () => null, down: () => null,
+      async storedHistory(id: string) { stored.push(id); return { status: { state: id === open.id ? "working" : "completed", run: "r", error: null } }; },
+    } as unknown as Parameters<typeof readThreads>[0]["conversations"];
+    const reads = readThreads({ registry, conversations: reader });
+    const mine = [open.id, ended.id, failed.id, ...old.map(thread => thread.id)];
+
+    const list = await reads.describe(mine);
+    assert.deepEqual(list.split("\n"), [`[${open.id.slice(0, 8)}] web · running work · ready, working`, `[${ended.id.slice(0, 8)}] cube · ended work · ready, completed`,
+      `[${failed.id.slice(0, 8)}] web · broken · error: workspace allocation failed: boom`, "60 archived threads not listed; archived_threads searches them"]);
+    assert.deepEqual(stored, [open.id, ended.id], "only open threads' stores are read");
+    assert.equal(await reads.describe(old.slice(0, 1).map(thread => thread.id)), "no threads that are not archived\n1 archived thread not listed; archived_threads searches them");
+    assert.equal(await reads.describe([]), "no threads");
+
+    const first = (await reads.describe(mine, { archived: true })).split("\n");
+    assert.equal(first[0], "archived threads 1-20 of 60, newest first; next: offset 20");
+    assert.deepEqual(first.slice(1), old.slice(0, 20).map(thread => `[${thread.id.slice(0, 8)}] ${thread.projectId} · ${thread.title} · archived`));
+    const last = (await reads.describe(mine, { archived: true, offset: 40, limit: ARCHIVED_MAX })).split("\n");
+    assert.equal(last[0], "archived threads 41-60 of 60, newest first", "the last page has no next");
+    assert.equal(last.length, 21);
+    assert.equal((await reads.describe(mine, { archived: true, limit: 500 })).split("\n").length, ARCHIVED_MAX + 1, "a page is bounded");
+    assert.equal(await reads.describe(mine, { archived: true, offset: 60 }), "no archived threads from 61 on; there are 60");
+    // Title in any case, project and id prefix match; another chat's
+    // archived "fix elsewhere" is not among the chat's ids.
+    assert.equal(await reads.describe(mine, { archived: true, query: " fix " }), `archived threads matching "fix" 1-1 of 1, newest first\n[${old[7]!.id.slice(0, 8)}] web · Fix the Cart · archived`);
+    assert.match(await reads.describe(mine, { archived: true, query: "CUBE" }), /^archived threads matching "CUBE" 1-20 of 30, newest first; next: offset 20\n/);
+    assert.match(await reads.describe(mine, { archived: true, query: old[3]!.id.slice(0, 8) }), /^archived threads matching "\d+" 1-1 of 1, newest first\n.* · old 3 · archived$/);
+    assert.equal(await reads.describe(mine, { archived: true, query: "nothing like it" }), `no archived threads matching "nothing like it"`);
+    assert.equal(await reads.describe([open.id], { archived: true }), "no archived threads", "open threads are not in the archived search");
+    assert.deepEqual(stored, [open.id, ended.id], "the archived search reads no store");
   }
 } finally { fs.rmSync(root, { recursive: true, force: true }); }
 console.log("optchat archive: ok");

@@ -68,7 +68,7 @@ const CLOSE_JOIN_MS = 2_000;
  * task's, the same on replay) and answers a replay as the first run did.
  * extension() refuses a tool missing here; optchat-replay-test runs each. */
 export const TOOL_REPLAY: Readonly<Record<string, "read" | "keyed">> = {
-  zoom: "read", date: "read", projects: "read", runners: "read", threads: "read", history: "read", diagnose: "read", usage: "read", project_hooks: "read", artifact_read: "read",
+  zoom: "read", date: "read", projects: "read", runners: "read", threads: "read", archived_threads: "read", history: "read", diagnose: "read", usage: "read", project_hooks: "read", artifact_read: "read",
   spawn: "keyed", tell: "keyed", archive: "keyed", project_hooks_write: "keyed", artifact_write: "keyed",
 };
 
@@ -78,6 +78,9 @@ export const TELLS = 8;
 
 /** Archived threads the overview shows, newest first. */
 export const ARCHIVED_SHOWN = 8;
+/** Archived threads archived_threads lists per page, and at most. */
+export const ARCHIVED_PAGE = 20;
+export const ARCHIVED_MAX = 50;
 
 export const MASTER = `You are OptChat, an AI agent that works for one user in a single chat that
 never ends. You are the user's interface to cube. You never write code,
@@ -119,6 +122,9 @@ missing before proposing a fix. The user sees every thread you started, with
 its state as cube records it, beside this chat. An open thread holds a
 machine until it is archived: archive(ids) archives threads of yours that are done, to free
 theirs; history still reads them. It never stops a working thread.
+threads lists only your threads that are not archived (working, ended
+or failed); archived_threads(query) searches the archived ones, a page
+at a time.
 Images the user attaches reach you only in the turn they are sent; the
 view and zoom keep only "[image]", and threads never see them. So say in
 your reply what an image shows that will matter, and put in a thread's
@@ -199,6 +205,10 @@ export class ThreadFailure extends Error {
   }
 }
 
+/** archived_threads' search: a case-insensitive substring of a thread's id,
+ * title or project, and a page of the matches. */
+export type ThreadListRequest = { archived?: boolean; query?: string | undefined; offset?: number | undefined; limit?: number | undefined };
+
 export interface OptThreads {
   /** Projects, models and capacity a new thread can use, as text. */
   projects(): Promise<string>;
@@ -210,8 +220,11 @@ export interface OptThreads {
   spawn(task: { project: string; task: string; model?: string | undefined; runner?: string | undefined }, requestId: string, signal?: AbortSignal): Promise<{ id: string; title: string }>;
   /** A message to a thread; refused while it works. */
   tell(id: string, text: string, requestId: string): Promise<void>;
-  /** One line per thread: its state and title. */
-  describe(ids: readonly string[]): Promise<string>;
+  /** One line per thread, in the order given: its state and title. By
+   * default only threads not archived, then how many archived ones were
+   * left out; `archived`: only archived ones matching `query` (id, title or
+   * project), `limit` from `offset` on, with where the next page starts. */
+  describe(ids: readonly string[], request?: ThreadListRequest): Promise<string>;
   /** The thread's events; null once it is archived or gone; "archiving"
    * while its archive (or a release left unfinished) goes on; "stored"
    * while its agent is not open (its machine starting, suspended or being
@@ -1637,14 +1650,34 @@ export class OptChat {
         return text(`sent to [${short(id)}]; its report comes back as a message starting "[${short(id)}] "`);
       },
     });
+    // Newest first: the threads this chat started, by when it started them
+    // (one spawn's threads, started in the same millisecond, last first).
+    const spawned = async () => Object.entries((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {}).reverse().sort((a, b) => b[1].at - a[1].at).map(([id]) => id);
     const threads = defineTool({
       name: "threads",
-      description: "The threads you started, with their state.",
+      description: "The threads you started that are not archived (working, ended or failed), newest first, with their state. "
+        + "Archived threads are left out and only counted; archived_threads searches them.",
       parameters: Type.Object({}),
       replay: "safe",
       execute: async () => {
-        const ids = Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {});
+        const ids = await spawned();
         return text(ids.length ? await this.options.threads.describe(ids) : "no threads yet");
+      },
+    });
+    const archivedThreads = defineTool({
+      name: "archived_threads",
+      description: "Search the threads you started that are archived, newest first, read only. query: part of a thread's id, title or project "
+        + `(any case; absent: every archived thread). offset: skip that many matches, as the "next:" line gives; limit: at most ${ARCHIVED_MAX} (default ${ARCHIVED_PAGE}). `
+        + "history(id) reads any of them.",
+      parameters: Type.Object({
+        query: Type.Optional(Type.String()),
+        offset: Type.Optional(Type.Integer({ minimum: 0 })),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: ARCHIVED_MAX })),
+      }),
+      replay: "safe",
+      execute: async args => {
+        const ids = await spawned();
+        return text(ids.length ? await this.options.threads.describe(ids, { archived: true, query: args.query, offset: args.offset ?? 0, limit: Math.min(args.limit ?? ARCHIVED_PAGE, ARCHIVED_MAX) }) : "no threads yet");
       },
     });
     const history = defineTool({
@@ -1791,7 +1824,7 @@ export class OptChat {
     }) : [];
     return defineExtension({
       name: "optchat",
-      tools: [zoom, date, projects, runners, spawn, tell, threads, history, diagnose, archive, usage, hooks, writeHooks, ...artifacts].map(tool => this.guard(tool)),
+      tools: [zoom, date, projects, runners, spawn, tell, threads, archivedThreads, history, diagnose, archive, usage, hooks, writeHooks, ...artifacts].map(tool => this.guard(tool)),
       sections: [
         section("master", () => MASTER, { tag: false }),
         section("hooks", () => HOOKS_NOTE, { tag: false }),
