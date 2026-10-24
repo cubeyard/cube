@@ -1,18 +1,33 @@
 #!/usr/bin/env bash
 # The chat in a real browser (Chromium through Playwright): see DEVELOPING.md.
-# CI installs Chromium and runs it; elsewhere a missing Chromium is a SKIP
-# notice, and CUBE_TEST_BROWSER=required makes that a failure. The phone
-# layout also runs in WebKit, Safari's engine, when Playwright has it (CI does).
+# Elsewhere a missing Chromium is a SKIP notice, and CUBE_TEST_BROWSER=required
+# makes that a failure. The phone layout also runs in WebKit, Safari's engine,
+# when Playwright has it; in CI both are required. CI's browser job runs in
+# Playwright's own image, which has both browsers and their system libraries;
+# CI without them installs them here (apt-get and Playwright's download).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-if [ -n "${CI:-}" ]; then
-  pnpm --filter @cube/web exec playwright install --with-deps chromium webkit
-fi
 if ! (cd packages/web && node -e 'require.resolve("playwright")' 2>/dev/null); then
   echo "FAIL: playwright is not installed: pnpm install --frozen-lockfile" >&2
   exit 1
 fi
-if ! (cd packages/web && node -e 'const fs = require("node:fs"); process.exit(fs.existsSync(require("playwright").chromium.executablePath()) ? 0 : 1)'); then
+# Whether this Playwright's browsers named in the arguments are all installed.
+has_browsers() {
+  (cd packages/web && node -e 'const fs = require("node:fs"); const pw = require("playwright");
+    process.exit(process.argv.slice(1).every((name) => fs.existsSync(pw[name].executablePath())) ? 0 : 1)' "$@")
+}
+if [ -n "${CI:-}" ]; then
+  if has_browsers chromium webkit; then
+    echo "chromium and webkit for playwright $(cd packages/web && node -p 'require("playwright/package.json").version') are installed (${PLAYWRIGHT_BROWSERS_PATH:-default path})"
+  else
+    pnpm --filter @cube/web exec playwright install --with-deps chromium webkit
+  fi
+  if ! has_browsers chromium webkit; then
+    echo "FAIL: Chromium or WebKit for Playwright is missing in CI" >&2
+    exit 1
+  fi
+fi
+if ! has_browsers chromium; then
   if [ "${CUBE_TEST_BROWSER:-}" = required ]; then
     echo "FAIL: Chromium for Playwright is missing: pnpm --filter @cube/web exec playwright install chromium" >&2
     exit 1
