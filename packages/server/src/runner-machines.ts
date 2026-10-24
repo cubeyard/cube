@@ -265,9 +265,9 @@ export class RunnerMachines implements ThreadMachines {
   }
 
   /** Threads whose wake waited the whole wakeWaitMs in vain, and why: until
-   * the machine runs or a new message asks for it (renewWake), a guest call
-   * tries once and fails at once, so a run's tool calls do not each wait
-   * the whole time again. */
+   * the machine runs (whoever starts it) or a new message asks for it
+   * (renewWake), a guest call tries once and fails at once, so the thread's
+   * later tool calls do not each wait the whole time again. */
   private readonly wakeGaveUp = new Map<string, string>();
 
   renewWake(thread: Thread): void { this.wakeGaveUp.delete(thread.id); }
@@ -560,7 +560,11 @@ export class RunnerMachines implements ThreadMachines {
       // A machine started or resumed now is active now, and nothing from
       // before runs in it. A check of one that ran already is not activity:
       // the recovery loop's checks must not keep it awake (B-207-1).
-      if (machine.status?.phase !== MachineStatus_Phase.RUNNING) this.activity.started(thread.id);
+      if (machine.status?.phase !== MachineStatus_Phase.RUNNING) {
+        this.activity.started(thread.id);
+        // Whoever started it, the machine ran: a later wake waits whole again.
+        this.wakeGaveUp.delete(thread.id);
+      }
       const booted = this.boots.get(thread.id) !== boot;
       this.boots.set(thread.id, boot);
       if (booted) this.events.record(thread.id, "ready", `boot ${boot.slice(0, 8)} of ${what} ${node}`);
@@ -842,6 +846,7 @@ export class RunnerMachines implements ThreadMachines {
   async release(thread: Thread, retain: boolean): Promise<{ retained: boolean }> {
     this.boots.delete(thread.id);
     this.activity.forget(thread.id);
+    this.wakeGaveUp.delete(thread.id);
     this.suspendRetry.delete(thread.id);
     // A build machine that outlived its start (cubed's own) goes first.
     if (this.onVm(thread)) await this.abandonBuild(thread, this.session(thread));

@@ -400,6 +400,18 @@ try {
     await cubed.conversations.activate(c.id);
     const later = await call(a.id);
     assert.ok(later.ms >= 550, `once it ran, the next wait is whole again: ${later.ms} ms`);
+    // Woken by a start that is not a guest call's (the recovery loop's for a
+    // stored run, a message's activation): its next wait is whole too.
+    await cubed.conversations.archive(c.id);
+    await cubed.conversations.activate(a.id);
+    assert.equal(fresh(a.id).vm?.suspension, undefined, "a runs again, woken by its activation");
+    clock.now += 40 * 60_000;
+    for (let round = 0; round < 3; round++) await cubed.conversations.suspendIdle();
+    assert.equal(fresh(a.id).vm?.suspension?.state, "suspended");
+    const d = full.thread();
+    await cubed.conversations.activate(d.id);
+    const after = await call(a.id);
+    assert.ok(after.ms >= 550, `after a start that was not a wake, the next wait is whole again: ${after.ms} ms`);
     assert.deepEqual(berth.violations, []);
     console.log("ok: R11 a run on a full runner waits once for its sleeping machine; its later guest calls fail at once; a new message, or a machine that ran, waits again");
   } finally {
