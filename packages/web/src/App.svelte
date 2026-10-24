@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import ProjectList from "./components/ProjectList.svelte";
   import ProjectView from "./components/ProjectView.svelte";
   import ThreadList from "./components/ThreadList.svelte";
@@ -239,7 +239,9 @@
     <ArtifactList />
   {:else if threadId && threadsLoaded}
     {#key threadId}
-      <ThreadView {threadId} threads={activeThreads} {command} onConsume={consume} {onNewThread} />
+      <!-- The id as a plain value: the view is made again for another id, and
+           its signals read from it otherwise outlived it (2 800 nodes a visit). -->
+      <ThreadView threadId={untrack(() => threadId!)} threads={activeThreads} {command} onConsume={consume} {onNewThread} />
     {/key}
   {:else if threadId}
     <p class="loading">loading threads…</p>
