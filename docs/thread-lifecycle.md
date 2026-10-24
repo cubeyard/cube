@@ -55,7 +55,7 @@ phase, `suspended` or running. It is not continued.
 |---|---|
 | a new thread (UI, OptChat `spawn`) | yes, once (`activate`) |
 | a message (UI prompt, OptChat `tell`, an artifact comment) | a new one wakes a sleeping machine, and gives a thread whose start failed one more try; a replayed one (a request id the agent already has) wakes nothing |
-| a guest call of the agent's run, a portal connection | yes (`awake` → `wake`) |
+| a guest call of the agent's run, a portal connection | yes (`awake` → `wake`); on a full runner it waits for a slot up to 30 min, once: after that wait gave up, later calls try once and fail at once until the machine runs or a new message asks again (`renewWake`) |
 | an archive's release check | only with a slot free now (`wakeNow`); otherwise the disk is kept unchecked at once, with the reason |
 | the recovery loop (`Conversations.boot`, every 30 s) | only by `recoveryStep` (thread-recovery.ts) |
 | any read: the thread list, history, stream, model, steps, startup log, diagnostics, OptChat's watcher, `threads`, `history` | never |
@@ -110,7 +110,8 @@ no wake.
   runner (R5), a runner fuller than the registry knows (R6); a failing
   start's 8 tries, its stop across restarts and a message's one more try
   (R7); a failing release retried until it succeeds (R8); a replayed
-  message (R9).
+  message (R9); a failing wake (R10); a run's guest calls on a full
+  runner wait once, not once each (R11).
 - `packages/server/test/lifecycle-model-test.ts`: seeded random runs of
   creates (some whose machine can never be made), messages and their
   replays, reads, idle and recovery rounds, restarts (with wakes cut short)

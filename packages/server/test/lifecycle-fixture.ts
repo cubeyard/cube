@@ -42,6 +42,8 @@ export class FakeBerth {
   failDeletes = 0;
   readonly phases = new Map<string, Phase>();
   readonly events: RunnerEvent[] = [];
+  /** Every request the runner answered or refused, by op and machine (`machineGet:<vm>`). */
+  readonly asks = new Map<string, number>();
   readonly violations: string[] = [];
   private readonly boots = new Map<string, number>();
   private readonly guests = new Map<string, LocalGuestTransport>();
@@ -80,6 +82,7 @@ export class FakeBerth {
     throw new RunnerError(code, code === "RESOURCE_EXHAUSTED" ? "capacity" : "", message);
   }
   request(op: string, ref: MachineRef, retain = false): Machine {
+    this.asks.set(`${op}:${ref.id}`, (this.asks.get(`${op}:${ref.id}`) ?? 0) + 1);
     if (this.down) this.refuse("UNAVAILABLE", "the runner does not answer");
     const vm = ref.id;
     const phase = this.phases.get(vm);
