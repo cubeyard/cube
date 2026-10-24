@@ -182,7 +182,9 @@ try {
     const submission = await agent.conversation.submit({ type: "input", content: "count" }, context);
     await until(async () => (await live(agent))?.tools?.some(slot => slot.status === "running") ?? false, "running bash");
     await agent.close();
-    await delay(800);
+    // The command (0.5 s, then the write) outlives the close; on a loaded
+    // runner its start alone can take longer than a fixed wait.
+    await until(async () => fs.existsSync(path.join(files, "count")), "the command wrote after the close");
     assert.equal(fs.readFileSync(path.join(files, "count"), "utf8"), "x", "shutdown did not cancel the command");
     agent = await openAgent({ directory, binding: guest.binding, workspace, ...model([fauxAssistantMessage("recovered")]) });
     try {
