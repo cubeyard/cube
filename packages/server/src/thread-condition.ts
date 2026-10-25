@@ -42,13 +42,15 @@ export type ThreadCondition =
 
 export function threadCondition(thread: Thread, runtime: ThreadRuntime): ThreadCondition {
   if (thread.archived) return { kind: "archived", failure: thread.workspaceState === "failed" ? thread.workspaceError : null };
-  // An unfinished release is retried until it succeeds: the thread is on
-  // its way out, whatever else failed.
-  if (runtime.archiving || releaseUnfinished(thread)) return { kind: "archiving", failure: runtime.error };
-  if (runtime.down) return { kind: "down", failure: runtime.down };
-  const sleep = thread.vm?.suspension ?? null;
   // The row keeps a failure across a restart, until a try succeeds.
   const failure = runtime.error ?? (thread.workspaceState === "failed" ? thread.workspaceError ?? "the thread machine failed" : null);
+  // An unfinished release is retried until it succeeds: the thread is on
+  // its way out, whatever else failed.
+  if (runtime.archiving || releaseUnfinished(thread)) return { kind: "archiving", failure };
+  // A down agent is the whole story until cubed restarts: no try or wait
+  // of its machine lets it go on.
+  if (runtime.down) return { kind: "down", failure: runtime.down };
+  const sleep = thread.vm?.suspension ?? null;
   if (runtime.starting) return { kind: "starting", failure, waiting: runtime.waiting, sleep };
   // An open agent goes on with its run after a later check failed; a
   // machine that failed to wake cannot.

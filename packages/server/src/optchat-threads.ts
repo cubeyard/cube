@@ -232,7 +232,8 @@ export function readThreads(options: { registry: Registry; conversations: Thread
         // succeeds. A start's failure keeps the one report it always had.
         const sleep = sleepOf(condition);
         const since = sleep && failureOf(condition) && thread.retry?.since;
-        throw new ThreadFailure(failure, since ? String(since) : null, !retriesExhausted(thread), !!sleep);
+        // A down agent is not tried again until cubed restarts.
+        throw new ThreadFailure(failure, since ? String(since) : null, condition.kind !== "down" && !retriesExhausted(thread), !!sleep);
       }
       try { return await conversations.live(id) ?? "stored"; }
       catch (error) {
