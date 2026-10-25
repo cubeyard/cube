@@ -149,7 +149,7 @@ if (import.meta.main) {
     const model = { provider: faux.getModel().provider, id: faux.getModel().id };
     // Archived first: that frees the runner's one slot for the live thread.
     const gone = app.registry.createThread(project.id, "gone", model, "hello", "pi");
-    app.registry.finishRelease(gone.id);
+    app.registry.applyPhase(gone.id, { type: "released" });
     const live = app.registry.createThread(project.id, "live", model, "hello", "pi");
     // A live thread's routes are found (whatever its machine is doing).
     assert.notEqual((await call(`/api/threads/${live.id}/history`)).status, 404, "a live thread's history is found");

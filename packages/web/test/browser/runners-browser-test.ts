@@ -64,8 +64,8 @@ try {
   sqlite.prepare("UPDATE runner SET data=json_remove(data,'$.protocol','$.kind') WHERE id='old-b'").run();
   sqlite.close();
   registry.updateThreadVm(kept.id, { retain: true, retainReason: "dirty: work not pushed" });
-  registry.beginRelease(kept.id);
-  registry.finishRelease(kept.id);
+  registry.applyPhase(kept.id, { type: "releaseBegan" });
+  registry.applyPhase(kept.id, { type: "released" });
   // A project whose check failed: its status word is a failure, in error ink.
   // Its one thread (made while it was ready, archived since) has a store
   // that cannot be read: its usage is unknown.
@@ -74,8 +74,8 @@ try {
   const unread = registry.createThread("broken", "unread", { provider: "fixture", id: "m" }, "unread", "pi", undefined, { runnerId: "pool-a" });
   fs.mkdirSync(path.join(host.state, "threads", unread.id), { recursive: true });
   fs.writeFileSync(path.join(host.state, "threads", unread.id, "pi.sqlite"), "not a store");
-  registry.beginRelease(unread.id);
-  registry.finishRelease(unread.id);
+  registry.applyPhase(unread.id, { type: "releaseBegan" });
+  registry.applyPhase(unread.id, { type: "released" });
   registry.saveProject({ ...broken, status: "error", error: "github: repository not found" });
 
   for (const [viewport, name] of [[{ width: 1280, height: 900 }, "desktop"], [{ width: 390, height: 844 }, "phone"]] as const) {

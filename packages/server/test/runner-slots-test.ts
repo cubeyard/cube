@@ -26,7 +26,7 @@ const runner = (id: string, maxActiveVms?: number) => ({ nodeId: `node-${id}`, e
   configPath: `/private/${id}.json`, configHash: id, ...(maxActiveVms ? { maxActiveVms } : {}) });
 /** A berth vm: the pool is the berth vm runners (pooledRunner). */
 const pooled = (id: string, maxActiveVms?: number) => ({ ...runner(id, maxActiveVms), protocol: 4 as const, kind: "vm" as const });
-const archive = (registry: Registry, id: string) => { registry.beginRelease(id); registry.finishRelease(id); };
+const archive = (registry: Registry, id: string) => { registry.applyPhase(id, { type: "releaseBegan" }); registry.applyPhase(id, { type: "released" }); };
 
 try {
   // --- registry ---
@@ -48,8 +48,8 @@ try {
   assert.deepEqual(slots(), { free: 0, total: 2 });
 
   // A failed machine keeps its slot (its disk may exist) until archived.
-  registry.markWorkspaceAvailable(a.id);
-  registry.markWorkspaceFailed(b.id, allocationFailed("boom"));
+  registry.applyPhase(a.id, { type: "ready", base: null });
+  registry.applyPhase(b.id, { type: "failed", failure: allocationFailed("boom") });
   assert.deepEqual(registry.runnerCapacity().errors, ["workspace allocation failed: boom"]);
   assert.equal(status().allocationState, "failed");
   assert.throws(() => registry.createThread("p", "c", model, "c"), /no free thread machine/);
@@ -64,7 +64,7 @@ try {
   const d = registry.createThread("p", "d", model, "d");
   assert.equal(d.runnerId, "other", "the least loaded runner is chosen");
   archive(registry, a.id); archive(registry, c.id);
-  registry.markWorkspaceFailed(d.id, allocationFailed("runner broken"));
+  registry.applyPhase(d.id, { type: "failed", failure: allocationFailed("runner broken") });
   assert.equal(registry.createThread("p", "e", model, "e").runnerId, "wide", "a runner with a failed machine is chosen last");
 
   // The runner's own bound wins: lowering it stops new allocations only.

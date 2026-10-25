@@ -129,7 +129,7 @@ try {
     for (const name of ["lookup", "build-prepare", "boot"] as const) registry.beginStartupStep(thread.id, { name });
     registry.beginStartupStep(thread.id, { name: "prepare", attempt: 3 });
     registry.updateThreadVm(thread.id, { provisionAttempt: 3 });
-    registry.markWorkspaceFailed(thread.id, allocationFailed("cubed stopped"));
+    registry.applyPhase(thread.id, { type: "failed", failure: allocationFailed("cubed stopped") });
   });
   const guestRoot = machines.guest({ id: thread.id } as never).root;
   fs.rmSync(path.join(guestRoot, "go"));

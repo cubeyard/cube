@@ -158,7 +158,7 @@ try {
     const before = new DatabaseSync(path.join(root, "capacity.sqlite"));
     before.prepare("UPDATE runner SET data=json_set(data,'$.protocol',4,'$.kind','vm') WHERE id='old3'").run();
     for (const id of ["a", "d"]) registry.createThread("p", id, model, id, "pi", undefined, { runnerId: "old3" });
-    registry.finishRelease(registry.threadByRequest("p", "d")!.id);
+    registry.applyPhase(registry.threadByRequest("p", "d")!.id, { type: "released" });
     registry.createThread("p", "b", model, "b", "pi", undefined, { runnerId: "old3" });
     before.prepare("UPDATE runner SET data=json_remove(data,'$.protocol','$.kind') WHERE id='old3'").run();
     before.close();

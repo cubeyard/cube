@@ -6,7 +6,7 @@ changes one names its owner here; a test that checks one is listed under
 
 | Lifecycle | Truth | cubed keeps | Owner of the transitions |
 |---|---|---|---|
-| Thread | the registry (`workspaceState`, `archived`) | persisted | `Conversations` (`ensureWorkspace`, `archive`, `release`) |
+| Thread | the registry (`workspaceState`, `workspaceError`, `retry`, `archived`) | persisted | `Conversations` (`ensureWorkspace`, `archive`, `release`); the phase's transitions are `thread-phase.ts`, written only by `Registry.applyPhase` |
 | Machine | the runner's phase | `vm.suspension`, `vm.placement` (a mirror and a slot reservation) | `RunnerMachines`; the sleep's transitions are `machine-sleep.ts`, written only by `Registry.applySleep` |
 | Agent | this process (`agents`, `claudes`, `downs`) | nothing; runs are in the agent's own store | `Conversations` |
 | Report | OptChat's Pi store, by request id `report:<thread>:<run>` | persisted | `OptChat` |
@@ -16,12 +16,30 @@ changes one names its owner here; a test that checks one is listed under
 ```text
 (new) ─createThread (takes a slot)─▶ allocating ─ready─▶ available
 allocating, failed ─a try fails─▶ failed ─a try succeeds─▶ available
-available, failed ─archive─▶ releasing ─finishRelease (frees the slot)─▶ archived
+available, failed ─archive─▶ releasing ─released (frees the slot)─▶ archived
 releasing ─release fails─▶ failed ("workspace release failed: …") ─retried─▶ archived
 ```
 
 `archived` is terminal: nothing starts, wakes or calls its machine again;
 only its retained disk can be discarded.
+
+Conversations reports what happened as one `PhaseEvent`, and `nextPhase`
+(`thread-phase.ts`) is the whole table of what follows:
+
+| event | the phase after it |
+|---|---|
+| `ready` (made and prepared) | `available`, no error, its base |
+| `failed` (making or releasing it failed) | `failed`, the failure's words |
+| `tryFailed` (a start or release try failed) | `retry` counts it: how many in a row, since when, the last words |
+| `trySucceeded` | no `retry` |
+| `releaseBegan` (an archive decided the disk) | `releasing`, no error, no `retry` (the release's own tries count from here) |
+| `released` | `archived`, its slot free |
+| any, once `archived` | unchanged |
+
+`Registry.applyPhase` is the only writer: it applies the event in one
+IMMEDIATE transaction with the runner's summary and writes nothing when
+nothing changes. The row keeps the fields and words cubed always wrote
+(thread-phase-test).
 
 ## Machine
 
@@ -198,6 +216,10 @@ machine's sleep (packages/web/src/lib/thread-state.ts).
   more than the slots; I10: the row, `threads`, `history` and the overview
   of each thread whose condition holds still while read; I11: the
   registry's SQL count is `holdsSlot`'s).
+- `packages/server/test/thread-phase-test.ts`: every `PhaseEvent` against the
+  table above, `archived` terminal, and through a real Registry the fields
+  each event writes (those the old writers wrote), the slot freed on
+  `released`, no write when nothing changes; (typecheck) no other writer.
 - `packages/server/test/thread-failure-test.ts`: each failure kind's words,
   read back to its kind, in a row an older cubed reads; an older row's
   failed release still retried.

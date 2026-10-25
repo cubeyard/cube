@@ -723,7 +723,9 @@ sleep (`vm.suspension`) changes only by a typed event through
 `machine-sleep.ts`. Every reader of a thread (the API's row, OptChat's
 `threads`, `history`, overview and watcher) renders one `ThreadCondition`
 (`thread-condition.ts`); none ranks the thread's facts itself. A failure
-carries its kind as data (`thread-failure.ts`); no decision reads its words.
+carries its kind as data (`thread-failure.ts`); no decision reads its words. A thread's phase
+(`workspaceState`, `retry`, `archived`) changes only by a typed event through
+`Registry.applyPhase` (`thread-phase.ts`).
 
 ## Machine templates and hooks
 

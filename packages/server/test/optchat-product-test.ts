@@ -159,11 +159,11 @@ try {
   assert.match(formatHistory(thread.id, open, "delivered"), /\nlatest answer #3: the repository has 1 file\n/);
   const workspaceBase = app.registry.getThread(thread.id)!.workspaceBase;
   const failure = "workspace allocation failed: thread workspace already has a writable owner";
-  app.registry.markWorkspaceFailed(thread.id, allocationFailed("thread workspace already has a writable owner"));
+  app.registry.applyPhase(thread.id, { type: "failed", failure: allocationFailed("thread workspace already has a writable owner") });
   const diverged = (await adapter.history(thread.id))!;
   assert.equal(diverged.failure, failure);
   assert.match(formatHistory(thread.id, diverged, "delivered"), /\nnote: cubed records a failure \(workspace allocation failed: thread workspace already has a writable owner\) while the stored history shows the agent ran \(run completed\);/);
-  app.registry.markWorkspaceAvailable(thread.id, workspaceBase);
+  app.registry.applyPhase(thread.id, { type: "ready", base: workspaceBase });
   // OptChat's archive is the UI's: the agent closes, the machine is
   // released, its slot is free again; history still reads the thread.
   const before = app.registry.runnerSlots().free;
@@ -190,7 +190,7 @@ try {
 
   // A thread whose machine failed is archived too, its disk kept; that
   // frees the slot the next thread takes.
-  app.registry.markWorkspaceFailed(quiet.id, allocationFailed("boom"));
+  app.registry.applyPhase(quiet.id, { type: "failed", failure: allocationFailed("boom") });
   const failed = (await adapter.archive!(quiet.id))!;
   assert.equal(failed.already, false);
   assert.equal(failed.disk, "machine disk retained (workspace allocation failed: boom)");
