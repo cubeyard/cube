@@ -138,6 +138,41 @@ An open agent's run wakes its machine itself, by its guest calls; a Claude
 Code turn cut off by a stop is not continued at the reopen, so it needs
 no wake.
 
+## Archive timing
+
+Each archive (the UI's, OptChat's `archive`, an API call: all go through
+`Conversations.archive`) logs one line in cubed's log (journald), with its
+outcome and the time of each phase it ran, in milliseconds:
+
+```text
+info threads archive thread=<id> outcome=archived disk=deleted reason=clean ms=454 queueMs=0 settleMs=0 agent=open agentMs=0 closeMs=1 wakeMs=0 checkMs=445 checkExecMs=143 checkWaitMs=300 releaseMs=6
+```
+
+`journalctl -u cubed | grep "threads archive"` lists them;
+`grep thread=<id>` one thread's.
+
+| field | what it covers |
+|---|---|
+| `outcome` | `archived`, `already` (archived before), `refused` (working, or its background agents run: nothing stopped), `failed` (at `warn`, with why) |
+| `disk`, `reason` | `deleted` or `retained`, and the release check's (or the refusal's, the failure's) words, cut at 200 characters. Only on an archive that ended |
+| `ms` | the whole archive, from the call to its answer |
+| `queueMs` | waiting for another command on the thread (an earlier archive, a message) |
+| `settleMs` | waiting for an activation under way (a start, or the reattach after a cubed restart) |
+| `agent`, `agentMs` | the working check: `open` (asked), `opened` (opened for the check, e.g. after a restart), `unopened` (it could not open: the disk is kept), `down` (not opened) |
+| `closeMs` | closing the thread's agents |
+| `wake`, `wakeMs` | a sleeping machine: `woken` for the check (its runner's resume) or `kept unchecked` (no slot: no check, disk kept) |
+| `checkMs`, `checkExecMs`, `checkWaitMs` | the release check: its command's `exec`, then the wait for its end (the script's run in the machine and the polls that saw it end) |
+| `releaseMs` | `RunnerMachines.release`: a build machine's removal, then the runner's `machine_delete` (stopping the machine, removing or keeping the disk) |
+
+A phase that did not run is not in the line. The runner does not report
+how its `machine_delete` splits between stopping and removing, so
+`releaseMs` is one number, and `wakeMs` includes the runner's restore.
+OptChat's own work between the threads of one `archive` call (its store
+commits, the stored-run read) is not in these lines: it is the gap between
+one line and the next of the same call. An archive's line says where that
+archive's time went; it does not say why a batch was slow (the 2 min a
+batch of 20 took once is not explained by anything measured so far).
+
 ## Invariants
 
 - I1 A read changes nothing on the runner.
@@ -231,6 +266,10 @@ machine's sleep (packages/web/src/lib/thread-state.ts).
   more than the slots; I10: the row, `threads`, `history` and the overview
   of each thread whose condition holds still while read; I11: the
   registry's SQL count is `holdsSlot`'s).
+- `packages/server/test/archive-timing-test.ts`: one archive line each,
+  with the phases it ran and no others, for a clean (deleted), a dirty
+  (retained), a closed agent's, a woken and a kept-unchecked sleeping
+  machine's, a queued second, a refused and a failed archive.
 - `packages/server/test/thread-phase-test.ts`: every `PhaseEvent` against the
   table above, `archived` terminal, and through a real Registry the fields
   each event writes (those the old writers wrote), the slot freed on
