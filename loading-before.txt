@@ -1,0 +1,18 @@
+== #/chat
+4ms  bg=rgba(0, 0, 0, 0)
+35ms loading:loading…@16 bg=rgb(236, 232, 223)
+576ms sr-only:optchat@45 | conversation-empty:opening the chat…@46 bg=rgb(236, 232, 223)
+1132ms sr-only:optchat@45 | conversation-empty:reading thread…@54 bg=rgb(236, 232, 223)
+1657ms sr-only:optchat@45 | conversation-message:start a thread on the java tru@54 | conversation-message:Started it in keel-images.@164 | conversation-message:the mobile composer feels cram@208 bg=rgb(236, 232, 223)
+== #/t/t1
+2ms  bg=rgba(0, 0, 0, 0)
+33ms loading:loading…@16 bg=rgb(236, 232, 223)
+534ms loading:loading threads…@16 bg=rgb(236, 232, 223)
+1032ms thread-strip:composer room: measure the mob@0 | conversation-empty:reading thread…@58 bg=rgb(236, 232, 223)
+1597ms thread-strip:composer room: measure the mob@0 | conversation-message:you  start a thread on the jav@58 | conversation-message:agent  Started it in keel-imag@189 | conversation-message:you  the mobile composer feels@249 bg=rgb(236, 232, 223)
+1602ms thread-strip:composer room: measure the mob@0 | conversation-message:you  start a thread on the jav@-34 | conversation-message:agent  Started it in keel-imag@97 | conversation-message:you  the mobile composer feels@157 bg=rgb(236, 232, 223)
+== #/a/eeeeeee5-5555-4555-8555-555555555555
+1ms  bg=rgba(0, 0, 0, 0)
+29ms loading:loading…@16 bg=rgb(236, 232, 223)
+589ms loading:loading artifact…@65 bg=rgb(236, 232, 223)
+1127ms  bg=rgb(236, 232, 223)
