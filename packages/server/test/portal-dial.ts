@@ -39,7 +39,7 @@ export async function dialPortal(options: { session: () => RunnerSession; guest:
   }
   const machines = new Dialed();
   const portal = new Portal({ settings: portalSettings({ CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_DOMAIN: "localhost", CUBED_PORTAL_PORT: String(port) }),
-    directory: options.directory, registry: { listThreads: () => [thread], getThread: (id: string) => id === thread.id ? thread : null } as never, machines, archiving: () => false });
+    directory: options.directory, registry: { listThreads: () => [thread], getThread: (id: string) => id === thread.id ? thread : null } as never, machines, wake: () => Promise.reject(new Error("no wake in this test")), archiving: () => false });
   await portal.listen();
   assert.equal(portal.state, "listening");
   return { portal, port, running, host: service => `${service}-${portal.label(thread.id)}.localhost:${port}` };

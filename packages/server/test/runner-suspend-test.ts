@@ -48,6 +48,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import { Registry, type Thread } from "../src/registry.ts";
 import { slotWait } from "../src/machine-sleep.ts";
 import { RunnerMachines } from "../src/runner-machines.ts";
+import { threadRuntime } from "../src/thread-runtime.ts";
 import { RunnerSession, type SessionConfig } from "../src/runner-session.ts";
 import { NoMachines } from "./local-guest.ts";
 
@@ -373,8 +374,11 @@ const policy = new EgressPolicy({ vms: { vm: () => null }, secrets: [] });
 const IDLE = 300;
 const sessionNow = () => new RunnerSession(config, { log: quiet });
 let session = sessionNow();
-const vms = new RunnerMachines({ registry, threads: path.join(root, "threads"), session: () => session, policy, idleMs: IDLE, wakeRetryMs: 50, wakeWaitMs: 10000,
-  suspendTimeoutMs: 400, log: quiet });
+// The wiring cubed runs: Conversations own the wake (their guest transports' `before`).
+const runtime = threadRuntime({ registry, threads: path.join(root, "threads"), models: createModels(), patience: { retryMs: 50, wakeMs: 10000 },
+  runner: { session: () => session, policy, idleMs: IDLE, suspendTimeoutMs: 400, log: quiet } });
+const vms = runtime.machines as RunnerMachines;
+const conversations = runtime.conversations;
 const count = (verb: string) => calls.filter(call => call === verb).length;
 const fresh = (thread: Thread) => registry.getThread(thread.id)!;
 const idle = () => Promise.resolve(null);
@@ -390,7 +394,7 @@ try {
   assert.equal(await vms.suspendIfIdle(fresh(thread), idle), false);
   assert.equal(count("machineSuspend"), 0, "not idle yet");
   // K-5: a command running between polls (no call open) keeps it.
-  const guest = vms.guest(fresh(thread));
+  const guest = conversations.guest(fresh(thread));
   await guest.call("exec", { id: "cmd", epoch: 1, command: "sleep 600", timeoutMs: 600000 });
   await delay(IDLE * 2);
   assert.equal(await vms.suspendIfIdle(fresh(thread), idle), false);
@@ -413,7 +417,7 @@ try {
 
   // A guest call wakes it: the same boot.
   const starts = count("machineStart");
-  await vms.guest(fresh(thread)).call("hello", {});
+  await conversations.guest(fresh(thread)).call("hello", {});
   assert.equal(count("machineStart"), starts + 1, "woken with machine_start");
   assert.equal(fresh(thread).vm!.suspension, undefined);
   assert.ok(vms.running(fresh(thread)));
@@ -428,7 +432,7 @@ try {
   // While a try is with the runner the slot is reserved (waking, no
   // waiting); each refusal says it waits.
   fake.startMs = 100;
-  const woken = vms.guest(fresh(thread)).call("hello", {});
+  const woken = conversations.guest(fresh(thread)).call("hello", {});
   for (const deadline = Date.now() + 5000; !slotWait(fresh(thread).vm!.suspension);) {
     assert.ok(Date.now() < deadline, "a refused try says the wake waits");
     await delay(10);
@@ -447,8 +451,13 @@ try {
   const suspending = vms.suspendIfIdle(fresh(thread), idle);
   await delay(50);
   const during = calls.length;
-  await vms.guest(fresh(thread)).call("hello", {});
-  assert.deepEqual(calls.slice(during).filter(call => call !== "machineGet"), ["machineStart", "guest:hello"], "the call waited for the suspend and woke the machine");
+  await conversations.guest(fresh(thread)).call("hello", {});
+  // The wake is the thread's activation: after the resume, its own check of
+  // the guest helper (hello, read) runs too, as in cubed.
+  const after = calls.slice(during).filter(call => call !== "machineGet");
+  assert.equal(after[0], "machineStart", "the call waited for the suspend, and the machine was resumed before any guest call");
+  assert.deepEqual(after.slice(1).filter(call => !call.startsWith("guest:")), [], "one resume, then only guest calls");
+  assert.ok(after.includes("guest:hello"), "the call reached the machine");
   assert.equal(await suspending, true);
   fake.suspendMs = 0;
   console.log("ok: a guest call that comes during a suspend waits for its end, then wakes the machine");
@@ -457,7 +466,7 @@ try {
   await delay(IDLE * 2);
   assert.equal(await vms.suspendIfIdle(fresh(thread), idle), true);
   fake.drop = true;
-  await vms.guest(fresh(thread)).call("hello", {});
+  await conversations.guest(fresh(thread)).call("hello", {});
   assert.deepEqual(fresh(thread).vm!.notice?.text, "restarted after an update; running commands were interrupted");
   assert.notEqual(session.machines.get(`${thread.id}/${thread.vm!.vmId}`)?.status?.bootId, boot, "a new boot");
   console.log("ok: a dropped snapshot (SnapshotDropped/version) starts the machine from its disk with the B7-5 notice");
@@ -466,11 +475,12 @@ try {
   // resumes the machine, by a start, for the archive's check of its disk.
   await delay(IDLE * 2);
   assert.equal(await vms.suspendIfIdle(fresh(thread), idle), true);
-  vms.onWake = async () => {};
-  await vms.guest(fresh(thread)).call("hello", {});
+  const holds = (conversations as unknown as { archiveHolds: Set<string> }).archiveHolds;
+  holds.add(thread.id);
+  await conversations.guest(fresh(thread)).call("hello", {});
   assert.equal(fresh(thread).vm!.suspension, undefined, "resumed though the conversation did not wake it");
   assert.equal(fresh(thread).vm!.notice, undefined, "N-207-6: a resume clears the notice of an earlier cold start");
-  vms.onWake = null;
+  holds.delete(thread.id);
   console.log("ok: a wake the conversation declines (an archive under way) resumes the machine by a start");
 
   // Refusals keep it running: low disk (not asked again soon), busy.
@@ -508,7 +518,7 @@ try {
   const saving = vms.suspendIfIdle(fresh(thread), idle);
   await delay(450);
   const atTimeout = calls.length;
-  const waiting = vms.guest(fresh(thread)).call("hello", {});
+  const waiting = conversations.guest(fresh(thread)).call("hello", {});
   await delay(50);
   assert.ok(!calls.slice(atTimeout).some(call => call.startsWith("guest:") || call === "machineStart"), "nothing reaches the machine while it saves");
   assert.equal(await saving, true, "SUSPENDING, then SUSPENDED: suspended");
@@ -552,26 +562,30 @@ try {
   assert.equal(await vms.suspendIfIdle(fresh(second), idle), true, "read back with machine_get");
   assert.equal(fresh(second).vm!.suspension?.state, "suspended");
   fake.suspendMs = 0;
-  await vms.guest(fresh(second)).call("hello", {});
+  await conversations.guest(fresh(second)).call("hello", {});
   console.log("ok: K-8: a suspend with no answer in time is read back with machine_get");
 
   // B-207-1: the recovery loop as index.ts runs it (Conversations.recover
   // every tick, without waiting for the last), with an open agent: the
   // machine is suspended once, and the loop does not wake it again. (On
   // d6b10971 each tick's check touched it: no machine_suspend at all.)
-  const conversations = new Conversations({ registry, directory: fs.mkdtempSync(path.join(root, "conv-")), models: createModels(), machines: vms });
-  (conversations as unknown as { agents: Map<string, Promise<unknown>> }).agents.set(second.id,
+  // The stand-in guest is no full guest helper: each wake's activation (which
+  // resumed the machine) counted a failed try, whose pause would skip the
+  // loop's check here.
+  registry.applyPhase(second.id, { type: "trySucceeded" });
+  const loop = new Conversations({ registry, directory: fs.mkdtempSync(path.join(root, "conv-")), models: createModels(), machines: vms });
+  (loop as unknown as { agents: Map<string, Promise<unknown>> }).agents.set(second.id,
     Promise.resolve({ harness: { snapshot: async () => null }, conversation: { id: "c" } }));
   const loopBefore = count("machineSuspend");
   const startsBefore = count("machineStart");
-  const ticks = setInterval(() => void conversations.recover(), IDLE / 3);
+  const ticks = setInterval(() => void loop.recover(), IDLE / 3);
   await delay(IDLE * 6);
   clearInterval(ticks);
-  await conversations.recover();
+  await loop.recover();
   assert.ok(count("machineStart") > startsBefore, "the loop did check the machine");
   assert.equal(count("machineSuspend") - loopBefore, 1, "suspended exactly once by the loop");
   assert.equal(fresh(second).vm!.suspension?.state, "suspended", "and the loop leaves it suspended");
-  await vms.guest(fresh(second)).call("hello", {});
+  await conversations.guest(fresh(second)).call("hello", {});
   console.log("ok: B-207-1: the recovery loop's own ticks (checks and idle rounds together) suspend an idle machine once and leave it so");
 
   // B-207-2: a cubed that restarted sees the machine running: it may run
@@ -589,7 +603,7 @@ try {
   assert.equal(count("machineSuspend"), restartBefore);
   clock += 2 + IDLE_MS;
   assert.equal(await restarted.suspendIfIdle(fresh(second), idle), true, "past 32 min and idle: suspended");
-  await vms.guest(fresh(second)).call("hello", {});
+  await conversations.guest(fresh(second)).call("hello", {});
   console.log("ok: B-207-2: after a cubed restart a running machine is not suspended before the guest's longest command and the grace");
 
   // B-207-3: one suspend per runner at a time.
@@ -621,7 +635,7 @@ try {
 
   // N-207-4, K-6: a runner that says machine.suspend but has no such verb
   // is not asked again, until it runs another version.
-  await vms.guest(fresh(second)).call("hello", {});
+  await conversations.guest(fresh(second)).call("hello", {});
   await delay(IDLE * 2);
   fake.noVerb = true;
   const noVerb = count("machineSuspend");
@@ -635,7 +649,7 @@ try {
   await session.hello();
   await delay(IDLE * 2);
   assert.equal(await vms.suspendIfIdle(fresh(second), idle), true, "a new runner version is asked again");
-  await vms.guest(fresh(second)).call("hello", {});
+  await conversations.guest(fresh(second)).call("hello", {});
   console.log("ok: K-6: a runner without the verb is not asked again until it runs another version");
 
   // K-6: a runner without the verb is not asked again; nor one that does not say machine.suspend.

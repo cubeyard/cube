@@ -194,8 +194,8 @@ export function lifecycle(root: string, options: { slots: number; idleMs?: numbe
   /** A cubed over the state; `wakeWaitMs` for this one only. */
   const start = (restart: { wakeWaitMs?: number } = {}): Cubed => {
     const { machines, conversations } = threadRuntime({ registry, threads: path.join(root, "threads"), models, now: () => clock.now,
-      runner: { session: () => berth.session(), policy, log: quiet, templates: { enabled: false, ttlMs: 0 }, idleMs: options.idleMs ?? 60_000,
-        wakeRetryMs: 50, wakeWaitMs: restart.wakeWaitMs ?? options.wakeWaitMs ?? 600 } });
+      patience: { retryMs: 50, wakeMs: restart.wakeWaitMs ?? options.wakeWaitMs ?? 600 },
+      runner: { session: () => berth.session(), policy, log: quiet, templates: { enabled: false, ttlMs: 0 }, idleMs: options.idleMs ?? 60_000 } });
     return { conversations, machines, close: () => conversations.close(2000) };
   };
   let requests = 0;

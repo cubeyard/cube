@@ -343,10 +343,10 @@ const agentEpoch = (id: string): number => {
   const db = new DatabaseSync(path.join(state, "threads", id, "lease.sqlite"), { readOnly: true });
   try { return Number((db.prepare("SELECT epoch FROM lease WHERE id = 1").get() as { epoch: number }).epoch); } finally { db.close(); }
 };
-/** One guest call through cubed's guest for the thread (RunnerMachines.guest:
+/** One guest call through cubed's guest for the thread (Conversations.guest:
  * counted as activity; it wakes a suspended machine first). */
 async function guestCall(id: string, op: "exec" | "get", header: Record<string, unknown>) {
-  const guest = app.machines!.guest(thread(id));
+  const guest = app.conversations.guest(thread(id));
   try { return await guest.call(op, header, { timeoutMs: 60000 }); } finally { await guest.close().catch(() => {}); }
 }
 /** A command as the agent's tool sends it (its epoch), and nothing polls it. */
@@ -576,7 +576,7 @@ try {
   assert.equal(await end(a, n2Op, (sleepS + 60) * 1000), "n2-done", "N2: the command over the quiet window");
   assert.ok(Date.now() - n2From >= (sleepS - 5) * 1000, "N2: the command really ran its time");
   const n2 = await suspendedBy(a, "N2 (after a get saw the end)", Date.now());
-  // A guest call wakes it (RunnerMachines.awake).
+  // A guest call wakes it (Conversations.wake, its transport's `before`).
   assert.equal(await end(a, await begin(a, BOOT, 60000), 120000), boot, "N2: a guest call woke it, the same boot");
   assert.ok(!thread(a).vm?.suspension, "N2: awake");
   note("N2: a guest call woke it; the same boot");

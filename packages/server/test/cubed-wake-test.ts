@@ -4,14 +4,19 @@
  * Regression for the audit's renewWake finding: a new message must make a
  * run wait for a slot the whole time again after an earlier run's wait gave
  * up; createCubed's machines once dropped that renewal while the lifecycle
- * tests, wired apart, passed (thread-lifecycle-test.ts R11). Offline, faux
- * model, disposable state. */
+ * tests, wired apart, passed (thread-lifecycle-test.ts R11). Also, through
+ * the same wiring: a wake of a running machine is a no-op; a run that gave
+ * up waits whole again once anything ran the machine; an archive or a close
+ * ends a wake that waits, which then asks nothing more. Offline, faux model,
+ * disposable state. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { PATIENCE } from "../src/conversation.ts";
 import { createCubed } from "../src/index.ts";
+import { slotWait } from "../src/machine-sleep.ts";
 import type { TrustedRunnerHealth } from "../src/runner-types.ts";
 import { FakeBerth, NODE, project, RUNNER, until } from "./lifecycle-fixture.ts";
 
@@ -28,9 +33,10 @@ const health: TrustedRunnerHealth = { lifecycle: "ready", draining: false, error
   retainedVms: 0, retainedBytes: 0, softwareVersion: "stand-in", protocolVersion: 4, kind: "vm" };
 const app = await createCubed({ state: path.join(root, "state"), models, claude: null, gateway: null, skillSource: null, now: () => clock.now,
   runnerHealth: async () => health,
-  runner: { session: () => berth.session(), log: quiet, templates: { enabled: false, ttlMs: 0 }, idleMs: 60_000, wakeRetryMs: 50, wakeWaitMs: 600 } });
+  patience: { retryMs: 50, wakeMs: 600 },
+  runner: { session: () => berth.session(), log: quiet, templates: { enabled: false, ttlMs: 0 }, idleMs: 60_000 } });
 try {
-  const { registry, conversations, machines } = app;
+  const { registry, conversations } = app;
   registry.saveProject(project);
   registry.enrollRunner({ nodeId: NODE, threadId: RUNNER, environmentId: 1, configPath: path.join(root, "runner.json"), configHash: RUNNER, maxActiveVms: 1,
     protocol: 4, kind: "vm" });
@@ -48,7 +54,7 @@ try {
   const call = async (id: string) => {
     const asked = () => berth.asks.get(`machineGet:${vmOf(id)}`) ?? 0;
     const before = asked();
-    try { await machines.guest(fresh(id)).call("stat", { path: "/workspace" }); return { tries: asked() - before, error: null }; }
+    try { await conversations.guest(fresh(id)).call("stat", { path: "/workspace" }); return { tries: asked() - before, error: null }; }
     catch (error) { return { tries: asked() - before, error: (error as Error).message }; }
   };
 
@@ -77,8 +83,71 @@ try {
   await done(a.id);
   assert.deepEqual(berth.violations, [], "no guest call reached a machine that did not run");
   console.log("ok: through createCubed, a new message to a thread whose run gave up waiting for its sleeping machine waits again; a freed slot resumes it");
-} finally {
+
+  // A wake of a machine that runs is no wake: it asks the runner nothing.
+  const quietFrom = berth.events.length;
+  await conversations.wake(a.id);
+  assert.deepEqual(berth.events.slice(quietFrom), [], "a wake of a running machine asks the runner nothing");
+  assert.equal(PATIENCE.startMs, 30 * 60_000, "one clock: a start waits for its runner 30 min");
+  assert.equal(PATIENCE.wakeMs, PATIENCE.startMs, "and so does a wake");
+  console.log("ok: a wake of a running machine is a no-op; a start and a wake wait for their runner on one clock");
+
+  // A run that gave up waits whole again once the machine ran, whoever started it.
+  await sleep();
+  const c = thread();
+  await conversations.activate(c.id);
+  await done(c.id);
+  assert.match((await call(a.id)).error ?? "", /^the thread's machine is suspended and could not be resumed/, "the run gives up");
+  await conversations.archive(c.id);
+  await conversations.activate(a.id);
+  assert.equal(fresh(a.id).vm?.suspension, undefined, "a start (not the run's call) resumed it");
+  await sleep();
+  const d = thread();
+  await conversations.activate(d.id);
+  await done(d.id);
+  const after = await call(a.id);
+  assert.ok(after.tries >= 3, `the machine ran since: a call waits its whole time again: ${after.tries} tries`);
+  assert.doesNotMatch(after.error ?? "", /already waited its whole time/);
+  console.log("ok: once the machine ran (whoever started it), a run that gave up waits its whole time again");
+
+  // An archive while a call's wake waits for a slot: the archive answers at
+  // once, the wake ends, and the archived machine is asked to run no more.
+  await sleep();
+  assert.equal(fresh(d.id).vm?.suspension?.state, "suspended", "d sleeps now");
+  const g = thread();
+  await conversations.activate(g.id);
+  await done(g.id);
+  const waiting = call(d.id);
+  await until("d's wake waits for a slot", () => !!slotWait(fresh(d.id).vm?.suspension) && conversations.owns(fresh(d.id)));
+  const began = Date.now();
+  await conversations.archive(d.id);
+  assert.ok(Date.now() - began < 5_000, `the archive did not wait for the wake: ${Date.now() - began} ms`);
+  const archivedAt = berth.events.length;
+  assert.ok((await waiting).error, "the call of the archived thread fails");
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.deepEqual(berth.touched(vmOf(d.id), archivedAt).filter(e => e.op === "machineStart"), [], "the ended wake asks the archived machine to run no more");
+  assert.equal(conversations.owns(fresh(d.id)), false, "no wake is left");
+  console.log("ok: an archive during a wake that waits for a slot answers at once; the wake ends and starts nothing more");
+
+  // A close ends a wake that waits: the machine stays asleep, nothing more is asked.
+  await conversations.archive(g.id);
+  const e = thread();
+  await conversations.activate(e.id);
+  await done(e.id);
+  await sleep();
+  const f = thread();
+  await conversations.activate(f.id);
+  await done(f.id);
+  const closing = conversations.guest(fresh(e.id)).call("stat", { path: "/workspace" }).then(() => null, (error: Error) => error.message);
+  await until("e's wake waits for a slot", () => !!slotWait(fresh(e.id).vm?.suspension));
   await app.close();
+  const closedAt = berth.events.length;
+  assert.equal(await closing, "cubed is closing; the thread's machine stays suspended");
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.deepEqual(berth.events.slice(closedAt).filter(e => e.op === "machineStart"), [], "a closed cubed's wake asks nothing more");
+  console.log("ok: a close ends a wake that waits for a slot; the machine stays asleep and nothing more is asked");
+} finally {
+  await app.close().catch(() => {});
   berth.stopAll();
   fs.rmSync(root, { recursive: true, force: true });
 }

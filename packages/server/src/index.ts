@@ -11,7 +11,7 @@ import type { Models } from "@earendil-works/pi-ai";
 import { GitService, normalizeRepoUrl } from "@cube/git";
 import { NO_HOOKS, projectHooks, projectMachine, Registry, threadAgent, type Project, type ResolvedRepositories, type Runner, type Thread } from "./registry.ts";
 import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
-import { THREADS_CLOSE_MS } from "./conversation.ts";
+import { PATIENCE, THREADS_CLOSE_MS } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
 import type { TrustedRunnerHealth } from "./runner-types.ts";
 import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
@@ -251,8 +251,10 @@ export async function createCubed(options: {
   claudeOptions?: { idleMs?: number; stopGraceMs?: number };
   /** Tests: RunnerMachines' seams: the runner session (a stand-in berth),
    * how long a machine must be idle before the recovery loop suspends it
-   * (default IDLE_MS, 5 min; runner-vm-cubed-suspend-test), a wake's waits. */
+   * (default IDLE_MS, 5 min; runner-vm-cubed-suspend-test). */
   runner?: RunnerSeams;
+  /** Tests: how long a thread waits for its runner (Conversations' PATIENCE). */
+  patience?: Partial<typeof PATIENCE>;
   /** Tests: the clock of the threads' idle times and retry pauses. */
   now?: () => number;
   /** Thread machines; default: RunnerMachines, each thread on its runner
@@ -303,7 +305,7 @@ export async function createCubed(options: {
   let portal: Portal | null = null;
   let artifacts: Artifacts | null = null;
   const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, ...options.machines ? { machines: options.machines } : {}, ...options.now ? { now: options.now } : {},
-    runner: { policy, ...options.runner }, claude: claudeCommand ? {
+    ...options.patience ? { patience: options.patience } : {}, runner: { policy, ...options.runner }, claude: claudeCommand ? {
     command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
   } : null, portal: thread => portal!.guest(thread),
   // A Pi thread writes and reads its own artifacts; a body may come from a workspace file.
@@ -313,7 +315,7 @@ export async function createCubed(options: {
       readable: async () => [{ kind: "thread", thread: thread.id }], readFile: file => readFile(file, ARTIFACT_LIMITS.body) }),
   }) });
   portal = new Portal({ settings: options.portal === undefined ? portalSettings() : options.portal, directory: path.join(options.state, "portal"),
-    registry, machines, archiving: id => conversations.archivingNow(id) });
+    registry, machines, wake: thread => conversations.wake(thread.id), archiving: id => conversations.archivingNow(id) });
   const git = new GitService(path.join(options.state, "repositories"));
   const latestCommits = latestCommitsOf({ registry, git, skills: () => settings.get().skills, skillSource: options.skillSource ?? null });
   const updates = options.updates ?? new UpdateService();
