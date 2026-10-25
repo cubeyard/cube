@@ -18,6 +18,7 @@ OFFLINE_TESTS=(
   packages/server/test/thread-condition-test.ts
   packages/server/test/thread-failure-test.ts
   packages/server/test/thread-phase-test.ts
+  packages/server/test/start-failure-publication-test.ts
   packages/server/test/runner-suspend-test.ts
   packages/server/test/thread-lifecycle-test.ts
   packages/server/test/lifecycle-model-test.ts
