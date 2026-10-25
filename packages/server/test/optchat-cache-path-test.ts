@@ -129,7 +129,7 @@ globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
 
 const models = createModels();
 models.setProvider(anthropicProvider());
-const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {},
+const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {}, onRunFeed: () => () => {},
   async projects() { return `projects: ${random(span(80, 6000))}`; }, async runners() { return "no runners"; },
   async spawn() { throw new Error("unused"); }, async tell() {}, async describe() { return ""; },
   async events() { throw new Error("unused"); }, async history() { return null; },

@@ -15,7 +15,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { OptChat, type OptThreads } from "../src/optchat.ts";
 import type { StartFailure } from "../src/thread-condition.ts";
-import type { ThreadEvents, ThreadTranscript } from "../src/thread-events.ts";
+import type { RunFeed, ThreadEvents, ThreadTranscript } from "../src/thread-events.ts";
 
 const context = BACKGROUND_CONTEXT;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-start-"));
@@ -31,15 +31,22 @@ const events: ThreadEvents = {
   async watch(listener) { await listener(done); return { stop: async () => {}, closed: new Promise<void>(() => {}) }; },
 };
 
-/** cubed's side of the fact, as Conversations has it: the current start
- * failure per thread, told to every listener when it changes. */
+/** cubed's side of the facts, as Conversations has them: the current start
+ * failure per thread, told to every listener when it changes; a start that
+ * ends opens the thread's run feed, which is told too. */
 class Starts {
   readonly now = new Map<string, StartFailure>();
   private readonly listeners = new Set<(id: string, failure: StartFailure | null) => void>();
+  private readonly feeds = new Set<(fact: RunFeed) => void>();
   set(id: string, failure: StartFailure | null): void {
     if (failure) this.now.set(id, failure); else this.now.delete(id);
     for (const listener of [...this.listeners]) listener(id, failure);
+    if (!failure) for (const listener of [...this.feeds]) listener({ thread: id, open: true });
   }
+  readonly onRunFeed = (listener: (fact: RunFeed) => void) => {
+    this.feeds.add(listener);
+    return () => { this.feeds.delete(listener); };
+  };
   readonly startFailure = (id: string) => this.now.get(id) ?? null;
   readonly onStartFailure = (listener: (id: string, failure: StartFailure | null) => void) => {
     this.listeners.add(listener);
@@ -64,7 +71,7 @@ async function chat(name: string, ids: string[], starts: Starts, startGraceMs: n
   models.setProvider(faux.provider);
   let next = 0;
   const threads: OptThreads = {
-    startFailure: starts.startFailure, onStartFailure: starts.onStartFailure,
+    startFailure: starts.startFailure, onStartFailure: starts.onStartFailure, onRunFeed: starts.onRunFeed,
     async projects() { return "projects: cube"; },
     async runners() { return "no runners"; },
     async spawn() { return { id: ids[next++]!, title: "work" }; },

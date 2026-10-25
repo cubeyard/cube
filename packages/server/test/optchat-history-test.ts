@@ -257,7 +257,7 @@ try {
     const models = createModels();
     models.setProvider(faux.provider);
     const asked: string[] = [];
-    const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {},
+    const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {}, onRunFeed: () => () => {},
       async projects() { return "projects: cube"; },
       async runners() { return "no runners"; },
       async spawn() { return { id: ID, title: "fix the gateway" }; },

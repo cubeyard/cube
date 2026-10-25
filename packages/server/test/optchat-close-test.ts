@@ -81,7 +81,7 @@ let toolMs = 0;
  * fetch, and stops on the abort, as git does. */
 let spawnMs = 0;
 const spawned = { asked: [] as string[], made: new Map<string, string>() };
-const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {},
+const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {}, onRunFeed: () => () => {},
   async projects() { runs[phase]++; if (toolMs < 0) await new Promise(() => {}); if (toolMs) await delay(toolMs); return "projects: cube"; }, async runners() { return "no runners"; },
   async spawn(task, requestId, signal) {
     spawned.asked.push(requestId);

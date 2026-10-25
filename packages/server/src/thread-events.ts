@@ -63,6 +63,13 @@ export interface ThreadTranscript {
   start?: number;
 }
 
+/** A thread's run feed opened (its agent, Pi or Claude Code, open in this
+ * process: its runs settle in the feed, which a watcher follows) or closed
+ * (the agent closed, also at an archive or a reboot, or went down: its
+ * stored last run is final until the agent opens again). Conversations
+ * tells it (`onRunFeed`); a run settles in no other way. */
+export interface RunFeed { thread: string; open: boolean }
+
 /** Events `[start, start + events.length)` of a thread's whole list. */
 export interface TranscriptPage { start: number; events: ThreadEvent[] }
 

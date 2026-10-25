@@ -70,7 +70,7 @@ faux.setResponses(Array.from({ length: 2_000 }, () => async (request, options, _
 }));
 const models = createModels();
 models.setProvider(faux.provider);
-const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {},
+const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {}, onRunFeed: () => () => {},
   async projects() { return "projects: cube"; },
   async runners() { return "no runners"; },
   async spawn() { throw new Error("unused"); },

@@ -12,7 +12,7 @@ import { SendsDoc } from "./pi-sends.ts";
 import { assertCurrentThreadStore, downText, openAgent, type Agent } from "./durable-agent.ts";
 import { createLogger } from "./log.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
-import type { ThreadAcceptance, ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
+import type { RunFeed, ThreadAcceptance, ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
 import type { WindowQuery } from "./transcript-window.ts";
 import { readClaudeHistory, readPiHistory, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
@@ -61,7 +61,7 @@ const RUNNER_KEPT = "the release check was clean, but the runner kept the disk (
  * machine, opens an agent or waits for an activation, so code given only a
  * ThreadReader (OptChat's watcher, `threads`, `history`, the overview)
  * cannot do any of that (docs/thread-lifecycle.md). */
-export type ThreadReader = Pick<Conversations, "live" | "storedHistory" | "agentOpen" | "condition" | "owner" | "startFailure" | "onStartFailure">;
+export type ThreadReader = Pick<Conversations, "live" | "storedHistory" | "agentOpen" | "condition" | "owner" | "startFailure" | "onStartFailure" | "onRunFeed">;
 /** Archive refused: the thread's agent is running. Nothing is interrupted. */
 export class ThreadWorking extends Error {
   /** `waiting`: no turn runs, but the agent's background agents do. */
@@ -143,6 +143,7 @@ export class Conversations {
    * do not each wait the whole time again. */
   private readonly gaveUp = new Map<string, string>();
   private readonly startFailureListeners = new Set<(id: string, failure: StartFailure | null) => void>();
+  private readonly runFeedListeners = new Set<(fact: RunFeed) => void>();
   /** The start failure last told per thread (`publish`), as JSON. */
   private readonly published = new Map<string, string>();
   /** Messages (thread and request id) that already gave a thread whose
@@ -266,6 +267,16 @@ export class Conversations {
     this.startFailureListeners.add(listener);
     this.published.clear();
     return () => { this.startFailureListeners.delete(listener); };
+  }
+  /** `listener` runs whenever a thread's run feed opens or closes (RunFeed). */
+  onRunFeed(listener: (fact: RunFeed) => void): () => void {
+    this.runFeedListeners.add(listener);
+    return () => { this.runFeedListeners.delete(listener); };
+  }
+  private feed(thread: string, open: boolean): void {
+    for (const listener of [...this.runFeedListeners]) {
+      try { listener({ thread, open }); } catch (error) { log.warn("a run feed listener failed", { thread, error: error instanceof Error ? error.message : String(error) }); }
+    }
   }
   /** Tells the listeners the thread's start failure if it changed since
    * this process last told it. Called after each of the thread's
@@ -614,8 +625,9 @@ export class Conversations {
         // cubed restarts; nothing here reopens it.
         void agent.harness.closed.then(() => {
           const down = agent.failure();
-          if (down && this.agents.get(id) === loading) { this.downs.set(id, down); this.publish(id); }
+          if (down && this.agents.get(id) === loading) { this.downs.set(id, down); this.publish(id); this.feed(id, false); }
         }, () => {});
+        this.feed(id, true);
         return agent;
       } catch (error) { await agent.close(); throw error; }
     })();
@@ -636,6 +648,7 @@ export class Conversations {
       const down = agent?.failure() ?? (end?.reason === "failed" ? downText(end.error) : null);
       if (down && !this.downs.has(id)) this.downs.set(id, down);
       this.publish(id);
+      if (claude || pi) this.feed(id, false);
     }
   }
   /** Closes a Pi agent, keeping its usage first. */
@@ -679,6 +692,7 @@ export class Conversations {
         // The first message is accepted once under this request id.
         const initial = this.registry.initialPrompt(id);
         if (initial) await agent.submit(INITIAL_REQUEST, initial);
+        this.feed(id, true);
         return agent;
       } catch (error) { await agent.close(); throw error; }
     })();

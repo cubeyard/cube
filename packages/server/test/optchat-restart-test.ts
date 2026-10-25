@@ -9,7 +9,7 @@
  *   closed, so their reports never go out. The idle round suspends all
  *   three (recorded as RunnerMachines records it) and cubed stops.
  *
- *   After it: many watch rounds and a recovery round start no machine, call
+ *   After it: many rounds and a recovery round start no machine, call
  *   no guest and open no agent; H's and C's stored runs report once, Q's
  *   not again. A message to H and to C wakes each (one start), the watcher
  *   follows the live agent, the earlier run is not reported again and the
@@ -169,7 +169,7 @@ try {
   await delay(300);
   const counts = (id: string) => [after.startsOf.get(id) ?? 0, after.callsOf.get(id) ?? 0, app.conversations.agentOpen(id)];
   assert.deepEqual([Q, H, C].map(counts), [[0, 0, false], [0, 0, false], [0, 0, false]],
-    "suspended threads through a restart, ~30 watch rounds and a recovery round: no start, no guest call, no agent");
+    "suspended threads through a restart, ~30 rounds and a recovery round: no start, no guest call, no agent");
   assert.deepEqual([Q, H, C].map(id => reportsOf(id).length), [1, 1, 1], "each settled run reported once: Q not again, H and C from their stores");
   assert.match(reportsOf(H)[0]!, /pi held done/);
   assert.match(reportsOf(C)[0]!, /ended its turn; nothing of it runs now: done with fable/, "the fake CLI ends each turn with its own line");

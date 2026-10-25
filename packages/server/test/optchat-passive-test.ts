@@ -35,7 +35,7 @@ import { OptChat } from "../src/optchat.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
 import { threadCondition } from "../src/thread-condition.ts";
 import type { Registry, Thread } from "../src/registry.ts";
-import type { ThreadEvents, ThreadStatus, ThreadTranscript } from "../src/thread-events.ts";
+import type { RunFeed, ThreadEvents, ThreadStatus, ThreadTranscript } from "../src/thread-events.ts";
 import type { HistoryPage } from "../src/thread-history.ts";
 import { NoMachines } from "./local-guest.ts";
 
@@ -181,7 +181,16 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
   };
   // What each thread's agent stored and shows now.
   const stored = new Map<string, { status: ThreadStatus; reply: string }>();
-  const open = new Set<string>();
+  /** Threads whose agent is open; opening and closing one tells its run
+   * feed, as Conversations does. */
+  const feeds = new Set<(fact: RunFeed) => void>();
+  const openIds = new Set<string>();
+  const tell = (thread: string, isOpen: boolean) => { for (const listener of [...feeds]) listener({ thread, open: isOpen }); };
+  const open = {
+    has: (id: string) => openIds.has(id),
+    add: (id: string) => { openIds.add(id); tell(id, true); },
+    clear: () => { const ids = [...openIds]; openIds.clear(); for (const id of ids) tell(id, false); },
+  };
   const listeners = new Map<string, (transcript: ThreadTranscript) => void | Promise<void>>();
   const activated: string[] = [];
   const submitted: string[] = [];
@@ -201,6 +210,7 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
     agentOpen: (id: string) => open.has(id),
     condition: (thread: Thread) => threadCondition(thread, { archiving: false, starting: false, agentOpen: open.has(thread.id), failure: null, down: null, waiting: null }),
     startFailure: () => null, onStartFailure: () => () => {},
+    onRunFeed: (listener: (fact: RunFeed) => void) => { feeds.add(listener); return () => { feeds.delete(listener); }; },
     owner: () => null,
     storedHistory: async (id: string) => page(id),
     history: async (id: string) => transcriptOf(id),
