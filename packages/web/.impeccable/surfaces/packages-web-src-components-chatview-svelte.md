@@ -75,6 +75,11 @@ and settings.
 - **Nothing beside the composer.** No key, count or state before or
   after the field, at any width: what runs and what failed is in the notes
   and the index (removed at the user's request).
+- **Reports fold (the user's call, 2026-10-25).** A thread's report is one
+  line (name, `report`, cube's state word, first words); opened, it is
+  whole. A failure stands open. Grouping consecutive reports, folding
+  artifact-comment messages and sending an index search to the chat are
+  proposals (artifact e113082c §8), not part of this.
 - Composer, uploads, history paging and scroll keeping, routes and deep
   links, artifact reading, comments and confirmed merge actions are the
   existing ones, unchanged.

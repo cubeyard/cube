@@ -161,9 +161,9 @@ await scenario("opening a note keeps the conversation still; it opens in place, 
   assert.equal(await peek.locator("a", { hasText: "open thread" }).getAttribute("href"), `#/t/${ID.composer}`, "the full view is a link away");
   assert.match(await peek.textContent() ?? "", /212px left/, "its newest report, from the chat");
   await shoot(page, "sheet-desktop-open");
-  // its report in the chat: shown and focused
+  // its report in the chat: shown, opened and focused (its folded line's summary)
   await peek.getByRole("button", { name: "its report in the chat" }).click();
-  await page.waitForFunction(() => document.activeElement?.classList.contains("report"));
+  await page.waitForFunction(() => { const report = document.activeElement?.closest("details.report"); return !!report && (report as HTMLDetailsElement).open && document.activeElement?.tagName === "SUMMARY"; });
   await composer.focus();
   await page.keyboard.press("Escape");
   await page.locator(".note-peek").waitFor({ state: "detached" });

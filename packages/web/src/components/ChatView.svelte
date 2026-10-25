@@ -68,6 +68,7 @@
 
   const titleOf = (short: string) => resolveThread({ short, project: null, title: null }, known).title;
   const toolLine = (row: Extract<TranscriptRow, { kind: "tool" }>) => chatToolLine(row, titleOf);
+  const reportTitle = (from: string) => titleOf(from) ?? `[${from}]`;
 
   /** What a message's note in the margin holds, for its skip key. */
   const skipText = (group: NoteGroup) => {
@@ -82,6 +83,8 @@
   function jump(row: string): void {
     const target = document.querySelector<HTMLElement>(`.chat-sheet [data-anchor="${CSS.escape(row)}"]`);
     if (!target) return;
+    // the way to a report from its note opens it: one action, not two
+    if (target instanceof HTMLDetailsElement && target.classList.contains("report-line")) target.open = true;
     target.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
     // a tool line's own key is its summary; a message takes focus as a place, not a stop in the tab order
     const place = target.querySelector<HTMLElement>(":scope > summary") ?? target;
@@ -216,7 +219,7 @@
   {#if modelState}
     <Conversation base={CHAT_BASE} steer sheet model={selectedModel} {changingModel} bind:busy onRows={(shown) => (rows = shown)}
       images={modelState.images ?? { supported: false, reason: "this host does not take images in the chat" }}
-      placeholder="message optchat" {toolLine} {reportLabel} {after} margin={wide ? margin : undefined}
+      placeholder="message optchat" {toolLine} {reportLabel} {reportTitle} {after} margin={wide ? margin : undefined}
       empty={{ title: "one chat, every thread", hint: "Say what you want done: the chat starts threads in your projects, follows their reports and remembers everything you said. A thread needs a project; add one under projects." }} />
   {:else}
     <div class="conversation-empty"><p class="conversation-wait" role="status">{modelError ? "connect a model provider to start the chat" : "loading…"}</p></div>
