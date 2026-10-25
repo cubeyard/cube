@@ -13,7 +13,6 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, type Message } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
-import { ThreadFailure } from "../src/optchat.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
 import { LocalMachines } from "./local-guest.ts";
 
@@ -43,6 +42,9 @@ const address = app.server.address();
 assert(address && typeof address === "object");
 const base = `http://127.0.0.1:${address.port}`;
 const adapter = cubeThreads({ registry: app.registry, conversations, catalog: async () => [], runners: () => { throw new Error("unused"); }, latestCommits: () => { throw new Error("unused"); } });
+/** The start failures cubed told OptChat's listener, in order, per thread. */
+const told = new Map<string, unknown[]>();
+adapter.onStartFailure((thread, failure) => { told.set(thread, [...told.get(thread) ?? [], failure]); });
 async function until<T>(read: () => T | Promise<T>, check: (value: T) => boolean, what: string): Promise<T> {
   for (let k = 0; ; k++) {
     const value = await read();
@@ -115,6 +117,11 @@ try {
   assert.equal(sent("t2"), 1);
   assert.equal(sent("t3"), 0);
   assert.equal(sent("t4"), 0);
+  // With its failed Harness still open the down agent is told too, with no
+  // retry promised; its events are not read from the failed Harness.
+  assert.deepEqual(adapter.startFailure(id), { failure: down, episode: null, retrying: false, waking: false });
+  assert.deepEqual(told.get(id)?.at(-1), adapter.startFailure(id), "cubed told OptChat as the agent went down");
+  assert.equal(await adapter.events(id), "stored");
   console.log("ok: before a reboot a down thread refuses submit, tell, stop, model and HTTP prompt/stop/model with why: 0 sends");
 
   // Its machine boots again: the agent closes for the resume hooks and is
@@ -134,9 +141,12 @@ try {
   assert.equal(row.error, down);
   assert.equal(await adapter.describe([id]), `[${id.slice(0, 8)}] empty · ${title} · error: ${down}`);
   assert.equal((await adapter.observe!([id])).get(id)?.state, "agent error");
-  // OptChat's watcher reports it as a failure nothing retries before a restart.
-  await assert.rejects(adapter.events(id), (error: unknown) => error instanceof ThreadFailure && error.message === down && !error.retrying && !error.waking,
-    "the watcher's failure says no retry comes");
+  // cubed tells OptChat a failure nothing retries before a restart; the
+  // watcher reads the stored run.
+  const fact = { failure: down, episode: null, retrying: false, waking: false };
+  assert.deepEqual(adapter.startFailure(id), fact, "the start failure says no retry comes");
+  assert.deepEqual(told.get(id)?.at(-1), fact, "and cubed told it as it changed");
+  assert.equal(await adapter.events(id), "stored");
   // Nor does a recovery round, or a second reboot.
   await conversations.boot();
   machines.reboot(app.registry.getThread(id)!);
@@ -186,6 +196,8 @@ try {
   assert.equal(app.registry.getThread(id)!.archived, true);
   assert.equal(conversations.down(id), null, "the release clears it");
   assert.equal(sent("t2"), 1);
+  assert.equal(adapter.startFailure(id), null, "an archived thread has no start failure");
+  assert.equal(told.get(id)?.at(-1), null, "and cubed told its end");
   console.log("ok: a down thread is archived after its release check, and the release clears the mark");
 } finally {
   await app.close();

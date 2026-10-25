@@ -76,7 +76,7 @@ const spawned: Array<{ task: string; requestId: string }> = [];
 const listeners = new Map<string, (transcript: ThreadTranscript) => void | Promise<void>>();
 const told: string[] = [];
 const THREAD = "abcdef12-0000-4000-8000-000000000001";
-const threads: OptThreads = {
+const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {},
   async projects() { inProjects = true; await projectsGate; inProjects = false; return "projects:\ncube (id p1; ready): https://github.com/cubeyard/cube.git@main"; },
   async runners() { return "runners as cubed last heard from them:\n- node-a (id r1)"; },
   async spawn(task, requestId) { spawned.push({ task: task.task, requestId }); return { id: THREAD, title: task.task.slice(0, 20) }; },

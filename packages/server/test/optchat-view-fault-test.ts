@@ -28,7 +28,7 @@ faux.setResponses(Array.from({ length: 4_000 }, () => async request => {
 }));
 const models = createModels();
 models.setProvider(faux.provider);
-const threads: OptThreads = {
+const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {},
   async projects() { return "projects: cube"; }, async runners() { return "no runners"; },
   async spawn() { throw new Error("unused"); }, async tell() {}, async describe() { return ""; },
   async events() { throw new Error("unused"); }, async history() { return null; },

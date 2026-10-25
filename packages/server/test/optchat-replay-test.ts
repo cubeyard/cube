@@ -49,7 +49,7 @@ const effects = () => ({
   threads: made.size, tells: tells.size, archived: archived.size, hooks: JSON.stringify(registry.getProject("demo")!.hooks ?? null),
   revisions: store.list().reduce((sum, artifact) => sum + store.revisions(artifact.id).length, 0),
 });
-const threads: OptThreads = {
+const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {},
   async projects() { return "projects: demo"; }, async runners() { return "no runners"; },
   async spawn(task, requestId) {
     // As the registry's creation table: one thread per request id.

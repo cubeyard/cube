@@ -155,6 +155,7 @@ no wake.
 - I9 An archive answers within seconds; it never waits for a slot.
 
 - I10 Every reader of a thread says the same failure, state and wait.
+- I12 The start failure cubed last told is the thread's start failure now.
 
 `RunnerMachines.start` refuses an archived thread, whoever asks.
 
@@ -191,7 +192,7 @@ becomes a kind again (thread-failure-test).
 `waiting` and `ready` carry the machine's sleep. Each
 reader renders the condition with an exhaustive switch:
 
-| condition | API row (`threadRow`) | `threads`, `history` | overview | watcher, agent closed |
+| condition | API row (`threadRow`) | `threads`, `history` | overview | start failure told (agent closed) |
 |---|---|---|---|---|
 | archiving | `ready`, or `error` with its failure | being archived | being archived | `archiving` |
 | down | `error` | error: … | agent error | a failure, not retried |
@@ -200,6 +201,10 @@ reader renders the condition with an exhaustive switch:
 | waiting | `starting` | starting its machine, … | waiting for a runner | a failure, unless it sleeps |
 | ready | `ready`, or `error` after a later check | ready …, or its sleep | its stored run | its stored run |
 | new | `ready` | not started | not started | its stored run |
+
+The last column is `startFailureOf`: the fact Conversations tells OptChat
+(`onStartFailure`) after each transition of the thread, when it changed. An
+open agent has none unless it is down.
 
 `ThreadReader` holds `condition`, not the facts it ranks, so code given a
 reader cannot rank them again. The web labels the row's `state` with the
@@ -221,7 +226,7 @@ machine's sleep (packages/web/src/lib/thread-state.ts).
 - `packages/server/test/lifecycle-model-test.ts`: seeded random runs of
   creates (some whose machine can never be made), messages and their
   replays, reads, idle and recovery rounds, restarts (with wakes cut short)
-  and archives, checking I1–I6 and I8–I11 after every step (I4
+  and archives, checking I1–I6 and I8–I12 after every step (I4
   as: the runner holds no more than the registry counts, the registry no
   more than the slots; I10: the row, `threads`, `history` and the overview
   of each thread whose condition holds still while read; I11: the

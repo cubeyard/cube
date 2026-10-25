@@ -275,7 +275,7 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
     prompts.push(JSON.stringify(system ? [system.content, system.sections ?? {}] : null));
     return fauxAssistantMessage("a short summary line"); }));
   const chat = await OptChat.open({ directory: path.join(root, "optchat"), models, model: async () => ({ provider: model.provider, id: model.id }),
-    threads: { projects: async () => "", spawn: async () => { throw new Error("no"); }, tell: async () => {}, describe: async () => "", events: async () => null, runners: async () => "", history: async () => null },
+    threads: { startFailure: () => null, onStartFailure: () => () => {}, projects: async () => "", spawn: async () => { throw new Error("no"); }, tell: async () => {}, describe: async () => "", events: async () => null, runners: async () => "", history: async () => null },
     limits: { retryMs: 50, watchMs: 60_000 } });
   try {
     // Longer than a node: the compactor summarizes it.
@@ -317,7 +317,7 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
   } finally { await chat.close(); }
   // Reopened: still counted from its first open, so nothing is unknown.
   const reopened = await OptChat.open({ directory: path.join(root, "optchat"), models, model: async () => ({ provider: model.provider, id: model.id }),
-    threads: { projects: async () => "", spawn: async () => { throw new Error("no"); }, tell: async () => {}, describe: async () => "", events: async () => null, runners: async () => "", history: async () => null },
+    threads: { startFailure: () => null, onStartFailure: () => () => {}, projects: async () => "", spawn: async () => { throw new Error("no"); }, tell: async () => {}, describe: async () => "", events: async () => null, runners: async () => "", history: async () => null },
     limits: { retryMs: 50, watchMs: 60_000 } });
   try { assert.ok(!(await reopened.usage()).compactor.earlier); }
   finally { await reopened.close(); }
@@ -326,7 +326,7 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
   // A chat whose tree was built before the compactor was counted (an older
   // cube): its free nodes cost nothing, its compacted ones are unknown.
   const { OptChat } = await import("../src/optchat.ts");
-  const threads = { projects: async () => "", spawn: async () => { throw new Error("no"); }, tell: async () => {}, describe: async () => "", events: async () => null, runners: async () => "", history: async () => null };
+  const threads = { startFailure: () => null, onStartFailure: () => () => {}, projects: async () => "", spawn: async () => { throw new Error("no"); }, tell: async () => {}, describe: async () => "", events: async () => null, runners: async () => "", history: async () => null };
   const open = (directory: string) => OptChat.open({ directory, models, model: async () => ({ provider: model.provider, id: model.id }), threads, limits: { retryMs: 50, watchMs: 60_000 } });
   const older = async (directory: string, text: string) => {
     let chat = await open(directory);

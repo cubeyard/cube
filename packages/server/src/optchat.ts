@@ -29,6 +29,7 @@ import { boundedOutput, CHAT_OUTPUT_TOKENS } from "./optchat-output.ts";
 import { piReports, reportText as errorText } from "./pi-report.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
 import { PENDING_ID, STEER_LOST, type ThreadAcceptance, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
+import type { StartFailure } from "./thread-condition.ts";
 import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
 import type { Artifacts } from "./artifact-service.ts";
 import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
@@ -192,22 +193,6 @@ export const THREAD_NOTE = "(This thread was started by OptChat, the user's chat
   + "If you stop before the task is done, say plainly what is left and what you are waiting for.)";
 
 /** Where OptChat's threads come from: cube's projects and threads. */
-/** A thread whose machine fails to start or wake, as `events` rejects:
- * `episode` names a wake's failed tries in a row (the first one's time,
- * kept across restarts), so the watcher reports each episode once (a
- * start's failure, with none, once per thread); `retrying`:
- * cubed tries again on its own; `waking`: its machine is asleep. */
-export class ThreadFailure extends Error {
-  readonly episode: string | null;
-  readonly retrying: boolean;
-  readonly waking: boolean;
-  constructor(message: string, episode: string | null, retrying: boolean, waking: boolean) {
-    super(message);
-    this.name = "ThreadFailure";
-    this.episode = episode; this.retrying = retrying; this.waking = waking;
-  }
-}
-
 /** archived_threads' search: a case-insensitive substring of a thread's id,
  * title or project, and a page of the matches. */
 export type ThreadListRequest = { archived?: boolean; query?: string | undefined; offset?: number | undefined; limit?: number | undefined };
@@ -231,11 +216,17 @@ export interface OptThreads {
   describe(ids: readonly string[], request?: ThreadListRequest): Promise<string>;
   /** The thread's events; null once it is archived or gone; "archiving"
    * while its archive (or a release left unfinished) goes on; "stored"
-   * while its agent is not open (its machine starting, suspended or being
-   * woken): nothing is started for a watcher, whose report comes from
-   * `history`. Rejects while its machine fails to start or wake, with a
-   * ThreadFailure when cubed counts those tries. */
+   * while its agent is not open or is down (its machine starting, failing,
+   * suspended or being woken): nothing is started for a watcher, whose
+   * report comes from `history`. A start that fails is told by
+   * `onStartFailure`, not here. */
   events(id: string): Promise<ThreadEvents | null | "archiving" | "stored">;
+  /** The thread's start failure now (its start or wake does not succeed);
+   * null: none, or no such thread. */
+  startFailure(id: string): StartFailure | null;
+  /** `listener` runs whenever a thread's start failure changes (null: it
+   * ended); `startFailure` reads what it missed. Returns the unsubscribe. */
+  onStartFailure(listener: (id: string, failure: StartFailure | null) => void): () => void;
   /** What cubed has of a thread, read only: its own record beside a page of
    * the agent's stored transcript, which may disagree. null: no such thread. */
   history(id: string, request?: HistoryRequest): Promise<ThreadRecord | null>;
@@ -558,8 +549,11 @@ export class OptChat {
   private readonly seenOpen = new Set<string>();
   /** Failure reports handed to the chat (by request id) in this process. */
   private readonly startReported = new Set<string>();
-  /** When each thread's machine was first seen failing to start, until it starts. */
+  /** When each thread's start was first told failing (`onStartFailure`), until it is told ended. */
   private readonly startFailing = new Map<string, number>();
+  /** Each thread's start failure as cubed last told it. */
+  private readonly failing = new Map<string, StartFailure>();
+  private unsubscribeStart: (() => void) | undefined;
   private lock: Promise<unknown> = Promise.resolve();
   private cacheKey = "optchat";
   private compactorModels!: Models;
@@ -815,6 +809,10 @@ export class OptChat {
     this.harness.resume();
     this.pump();
     void this.drain();
+    // Start failures are told as they change; what changed before this
+    // chat listened is read once.
+    this.unsubscribeStart = this.options.threads.onStartFailure((id, failure) => this.startFailureChanged(id, failure));
+    for (const id of Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {})) this.startFailureChanged(id, this.options.threads.startFailure(id));
     await this.watchThreads();
     this.watchTimer = setInterval(() => { void this.watchThreads(); }, this.options.limits?.watchMs ?? 15_000);
     this.watchTimer.unref();
@@ -1438,35 +1436,16 @@ export class OptChat {
     const settings = await this.harness.snapshot(SettingsDoc, context);
     for (const id of [...this.unsent]) { this.unsent.delete(id); void this.reportStored(id); }
     for (const id of Object.keys(settings?.threads ?? {})) {
+      this.reportStartFailure(id);
       if (this.watchers.has(id)) continue;
       const watching = (async () => {
         let events: ThreadEvents | null | "archiving" | "stored";
         try { events = await this.options.threads.events(id); }
         catch (error) {
-          // cubed retries a machine that failed to start (a lost guest, a
-          // lease not yet let go), and most come up on a later try: only a
-          // failure that lasts is reported, once per episode of failed tries
-          // (once per thread when cubed names none), saying whether cubed
-          // still retries. The next round watches it again.
-          const message = error instanceof Error ? error.message : String(error);
-          const failure = error instanceof ThreadFailure ? error : null;
-          const since = this.startFailing.get(id) ?? Date.now();
-          this.startFailing.set(id, since);
-          const lasted = Date.now() - since;
-          const requestId = failure?.episode ? `report:${id}:failure:${failure.episode}` : `report:${id}:start`;
-          if (lasted >= (this.options.limits?.startGraceMs ?? START_GRACE_MS) && !this.startReported.has(requestId) && !this.closing) {
-            this.startReported.add(requestId);
-            const what = failure?.waking ? "its machine failed to wake" : "failed to start";
-            // Not handed over: a later round says it again (once, by its request id).
-            void this.send(`[${short(id)}] ${what} for ${Math.round(lasted / 1000)} s${failure?.retrying === false ? "" : "; cubed keeps retrying"}: ${message}`, requestId)
-              .catch(() => { this.startReported.delete(requestId); });
-          }
+          if (!this.closing) log.warn("watching a thread failed; the next round looks again", { thread: id, error: error instanceof Error ? error.message : String(error) });
           this.watchers.delete(id);
           return null;
         }
-        // Started (or gone): a later failure's grace starts again. Its report
-        // keeps the request id, so each episode is reported once.
-        this.startFailing.delete(id);
         // An archive may still be refused: the next round looks again.
         if (events === "archiving") { this.watchers.delete(id); return null; }
         // Gone since a round of this process saw it open: its last run, if
@@ -1492,6 +1471,32 @@ export class OptChat {
       })();
       this.watchers.set(id, watching);
     }
+  }
+
+  /** cubed told a thread's start failure (null: it ended, by a start, an
+   * archive or the thread's end): a later failure's grace starts again. */
+  private startFailureChanged(id: string, failure: StartFailure | null): void {
+    if (!failure) { this.failing.delete(id); this.startFailing.delete(id); return; }
+    this.failing.set(id, failure);
+    if (!this.startFailing.has(id)) this.startFailing.set(id, Date.now());
+  }
+
+  /** cubed retries a machine that failed to start (a lost guest, a lease
+   * not yet let go), and most come up on a later try: only a failure that
+   * lasts is reported, once per episode of failed tries (once per thread
+   * when cubed names none), saying whether cubed still retries. */
+  private reportStartFailure(id: string): void {
+    const failure = this.failing.get(id);
+    const since = this.startFailing.get(id);
+    if (!failure || since === undefined || this.closing) return;
+    const lasted = Date.now() - since;
+    const requestId = failure.episode ? `report:${id}:failure:${failure.episode}` : `report:${id}:start`;
+    if (lasted < (this.options.limits?.startGraceMs ?? START_GRACE_MS) || this.startReported.has(requestId)) return;
+    this.startReported.add(requestId);
+    const what = failure.waking ? "its machine failed to wake" : "failed to start";
+    // Not handed over: a later round says it again (once, by its request id).
+    void this.send(`[${short(id)}] ${what} for ${Math.round(lasted / 1000)} s${failure.retrying ? "; cubed keeps retrying" : ""}: ${failure.failure}`, requestId)
+      .catch(() => { this.startReported.delete(requestId); });
   }
 
   private observe(id: string, transcript: ThreadTranscript): void {
@@ -1987,6 +1992,7 @@ export class OptChat {
     this.notify();
     for (const timer of this.timers) clearTimeout(timer);
     if (this.watchTimer) clearInterval(this.watchTimer);
+    this.unsubscribeStart?.();
     if (this.harness && this.conversation) {
       const out = await this.quiesce(this.down ? 0 : this.options.limits?.closeMs ?? CLOSE_GRACE_MS);
       const calling = [...this.calling];

@@ -24,7 +24,7 @@ import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import type { GuestTransport } from "./guest-transport.ts";
 import { slotWait } from "./machine-sleep.ts";
-import { threadCondition, type ThreadCondition } from "./thread-condition.ts";
+import { startFailureOf, threadCondition, type StartFailure, type ThreadCondition } from "./thread-condition.ts";
 import { allocationFailed, FailedTry, readFailure, releaseFailed, startFailed, type Failure } from "./thread-failure.ts";
 import { needsDemand, recoveryStep, releaseUnfinished, retriesExhausted, START_TRIES } from "./thread-recovery.ts";
 import type { ModelSelection } from "./models.ts";
@@ -61,7 +61,7 @@ const RUNNER_KEPT = "the release check was clean, but the runner kept the disk (
  * machine, opens an agent or waits for an activation, so code given only a
  * ThreadReader (OptChat's watcher, `threads`, `history`, the overview)
  * cannot do any of that (docs/thread-lifecycle.md). */
-export type ThreadReader = Pick<Conversations, "live" | "storedHistory" | "agentOpen" | "condition" | "owner">;
+export type ThreadReader = Pick<Conversations, "live" | "storedHistory" | "agentOpen" | "condition" | "owner" | "startFailure" | "onStartFailure">;
 /** Archive refused: the thread's agent is running. Nothing is interrupted. */
 export class ThreadWorking extends Error {
   /** `waiting`: no turn runs, but the agent's background agents do. */
@@ -142,6 +142,9 @@ export class Conversations {
    * guest call tries once and fails at once, so the run's later tool calls
    * do not each wait the whole time again. */
   private readonly gaveUp = new Map<string, string>();
+  private readonly startFailureListeners = new Set<(id: string, failure: StartFailure | null) => void>();
+  /** The start failure last told per thread (`publish`), as JSON. */
+  private readonly published = new Map<string, string>();
   /** Messages (thread and request id) that already gave a thread whose
    * start failed its one more try: a delivery retried under the same id
    * (an artifact comment, OptChat's replay) does not start it again. */
@@ -186,6 +189,9 @@ export class Conversations {
     return round;
   }
   private async recoverOne(thread: Thread): Promise<void> {
+    try { await this.recoverStep(thread); } finally { this.publish(thread.id); }
+  }
+  private async recoverStep(thread: Thread): Promise<void> {
     const id = thread.id;
     if (this.closing || this.archiveHolds.has(id) || this.suspends.has(id)) return;
     const owned = this.owns(thread);
@@ -248,6 +254,34 @@ export class Conversations {
     return threadCondition(thread, { archiving: this.archivingNow(id), starting: this.starting(id), agentOpen: this.agentOpen(id),
       failure: this.failure(id), down: this.down(id), waiting: this.waiting(id) });
   }
+  /** The thread's start failure now (thread-condition.ts), which OptChat
+   * reports once it lasts; null: none, or no such thread. */
+  startFailure(id: string): StartFailure | null {
+    const thread = this.registry.getThread(id);
+    return thread ? startFailureOf(thread, this.condition(thread), this.agentOpen(id)) : null;
+  }
+  /** `listener` runs whenever a thread's start failure changes (null: it
+   * ended). A new listener reads `startFailure` for what it missed. */
+  onStartFailure(listener: (id: string, failure: StartFailure | null) => void): () => void {
+    this.startFailureListeners.add(listener);
+    this.published.clear();
+    return () => { this.startFailureListeners.delete(listener); };
+  }
+  /** Tells the listeners the thread's start failure if it changed since
+   * this process last told it. Called after each of the thread's
+   * transitions here: an activation, a wake round, an agent opened, closed
+   * or down, an idle or recovery round, an archive. */
+  private publish(id: string): void {
+    if (!this.startFailureListeners.size) return;
+    let failure: StartFailure | null;
+    try { failure = this.startFailure(id); } catch { return; }
+    const key = JSON.stringify(failure);
+    if (this.published.get(id) === key) return;
+    this.published.set(id, key);
+    for (const listener of [...this.startFailureListeners]) {
+      try { listener(id, failure); } catch (error) { log.warn("a start failure listener failed", { thread: id, error: error instanceof Error ? error.message : String(error) }); }
+    }
+  }
   /** Whether a start or a wake of this process owns the thread's machine
    * (the owner of a `waking` it recorded). */
   owns(thread: Thread): boolean {
@@ -292,9 +326,10 @@ export class Conversations {
           throw new Error(`the thread's machine is suspended and could not be resumed: ${why}`
             + (gaveUp ? "; this run already waited its whole time for it, a new message waits again" : ""));
         }
+        this.publish(id);
         await delay(this.patience.retryMs);
       }
-    })().finally(() => this.wakes.delete(id));
+    })().finally(() => { this.wakes.delete(id); this.publish(id); });
     this.wakes.set(id, waking);
     return waking;
   }
@@ -358,7 +393,7 @@ export class Conversations {
         this.failures.set(id, failure);
         this.countFailure(id, failure);
       }
-    })().finally(() => { this.activations.delete(id); this.checks.delete(id); });
+    })().finally(() => { this.activations.delete(id); this.checks.delete(id); this.publish(id); });
     this.activations.set(id, activation);
     return activation;
   }
@@ -578,7 +613,7 @@ export class Conversations {
         // cubed restarts; nothing here reopens it.
         void agent.harness.closed.then(() => {
           const down = agent.failure();
-          if (down && this.agents.get(id) === loading) this.downs.set(id, down);
+          if (down && this.agents.get(id) === loading) { this.downs.set(id, down); this.publish(id); }
         }, () => {});
         return agent;
       } catch (error) { await agent.close(); throw error; }
@@ -586,6 +621,7 @@ export class Conversations {
     this.agents.set(id, loading);
     try { return await loading; }
     catch (error) { this.agents.delete(id); throw error; }
+    finally { this.publish(id); }
   }
   private async closeAgents(id: string): Promise<void> {
     const claude = this.claudes.get(id), pi = this.agents.get(id);
@@ -598,6 +634,7 @@ export class Conversations {
       const end = agent ? await agent.harness.closed.catch(() => null) : null;
       const down = agent?.failure() ?? (end?.reason === "failed" ? downText(end.error) : null);
       if (down && !this.downs.has(id)) this.downs.set(id, down);
+      this.publish(id);
     }
   }
   /** Closes a Pi agent, keeping its usage first. */
@@ -725,6 +762,9 @@ export class Conversations {
     return this.suspendRound;
   }
   private async suspendOne(thread: Thread): Promise<void> {
+    try { await this.suspendIfIdle(thread); } finally { this.publish(thread.id); }
+  }
+  private async suspendIfIdle(thread: Thread): Promise<void> {
     const machines = this.machines;
     const id = thread.id;
     const skip = (current: Thread | null) => !current || current.archived || current.workspaceState !== "available" || !!current.vm?.suspension || releaseUnfinished(current)
@@ -905,8 +945,9 @@ export class Conversations {
     // An activation beside the release check or the release would start the
     // machine or take its lease while it is being released.
     this.archiveHolds.add(id);
+    this.publish(id);
     try { return await this.archiveHeld(id); }
-    finally { this.archiveHolds.delete(id); }
+    finally { this.archiveHolds.delete(id); this.publish(id); }
     });
   }
   private async archiveHeld(id: string): Promise<{ retained: boolean; reason: string; already?: true }> {

@@ -20,6 +20,8 @@
  *   I10 every reader of a thread agrees (thread-condition.ts): the API's
  *       row, OptChat's `threads`, `history` and overview say the same
  *       failure, the same state and the same wait;
+ *   I12 the start failure cubed last told (onStartFailure) is the thread's
+ *       start failure now, for each thread no start or wake owns;
  *   I11 the slots the registry counts (its SQL) are the threads `holdsSlot`
  *       says hold one (machine-sleep.ts);
  *   G   no guest call reaches a machine that does not run;
@@ -57,7 +59,10 @@ for (const seed of seeds) {
   const life = lifecycle(root, { slots: 2 });
   const { registry, berth, clock, fresh, vmOf, held } = life;
   const rng = random(seed);
-  let cubed: Cubed = life.start();
+  /** I12: the start failure each cubed last told, per thread (a restart's new cubed tells again). */
+  const told = new Map<string, string>();
+  const listen = (c: Cubed) => { told.clear(); c.conversations.onStartFailure((id, failure) => told.set(id, JSON.stringify(failure))); return c; };
+  let cubed: Cubed = listen(life.start());
   const tells: Array<{ id: string; requestId: string; text: string }> = [];
   const archivedAt = new Map<string, number>();
   const broken = new Set<string>();
@@ -69,6 +74,7 @@ for (const seed of seeds) {
   };
   /** I10, for each open thread whose condition holds still while it is read. */
   const agreed = new Map<string, number>();
+  let toldFailures = 0;
   const readersAgree = async (after: string) => {
     const reads = readThreads({ registry, conversations: cubed.conversations });
     for (const t of open()) {
@@ -154,7 +160,7 @@ for (const seed of seeds) {
       const demand = new Set<string>();
       for (const t of asleep) if ((await stored(t.id))?.state === "working") demand.add(vmOf(t.id));
       const since = berth.events.length;
-      cubed = life.start();
+      cubed = listen(life.start());
       await cubed.conversations.boot();
       for (const t of asleep) {
         const resumed = berth.touched(vmOf(t.id), since).filter(e => e.op === "machineStart" && e.from === Phase.SUSPENDED && e.to === Phase.RUNNING).length;
@@ -192,6 +198,13 @@ for (const seed of seeds) {
       const counted = registry.runnerSlots();
       assert.equal(counted.total - counted.free, held(), `I11 after ${name}: the registry's count is holdsSlot's`);
       await readersAgree(name);
+      for (const t of open()) {
+        if (cubed.conversations.owns(fresh(t.id))) continue;
+        const now = JSON.stringify(cubed.conversations.startFailure(t.id));
+        // Never told: none since this cubed began, or one it found at its start.
+        assert.equal(told.get(t.id) ?? JSON.stringify(null), now, `I12 after ${name}: ${t.id.slice(0, 8)}'s told start failure is its start failure now`);
+        if (now !== JSON.stringify(null)) toldFailures++;
+      }
       assert.ok(berth.holding() <= held() && held() <= berth.slots, `I4 after ${name}: the runner holds ${berth.holding()}, the registry counts ${held()}, of ${berth.slots} slots`);
       for (const vm of broken) assert.ok(berth.asked("machineCreate", vm) <= START_TRIES, `I8: ${vm}'s create was asked for ${berth.asked("machineCreate", vm)} times`);
       for (const [vm, at] of archivedAt) {
@@ -206,7 +219,7 @@ for (const seed of seeds) {
       db.close();
       assert.equal(n, 1, `${tell.requestId} is in its thread's store once`);
     }
-    console.log(`ok: lifecycle model seed ${seed}: ${steps} steps (${trace.filter(line => line.startsWith("restart")).length} restarts, ${tells.length} messages, ${archivedAt.size} archives, ${berth.starts()} starts on the runner); I1–I6, I8–I11 and G held; I10 over ${[...agreed].map(([kind, n]) => `${n} ${kind}`).join(", ")}`);
+    console.log(`ok: lifecycle model seed ${seed}: ${steps} steps (${trace.filter(line => line.startsWith("restart")).length} restarts, ${tells.length} messages, ${archivedAt.size} archives, ${berth.starts()} starts on the runner); I1–I6, I8–I12 and G held; I12 over ${toldFailures} failing reads; I10 over ${[...agreed].map(([kind, n]) => `${n} ${kind}`).join(", ")}`);
   } catch (error) {
     console.error(`seed ${seed} trace:\n  ${trace.join("\n  ")}`);
     throw error;

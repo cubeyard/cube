@@ -51,7 +51,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Thread } from "../src/registry.ts";
-import { ThreadFailure } from "../src/optchat.ts";
 import { readThreads } from "../src/optchat-threads.ts";
 import { recoveryStep } from "../src/thread-recovery.ts";
 import { holdsSlot, slotWait } from "../src/machine-sleep.ts";
@@ -375,7 +374,7 @@ try {
     const reader = readThreads({ registry, conversations: cubed.conversations });
     assert.match(await reader.describe([w.id]), /its machine is suspended and waking it failed: .*the snapshot could not be restored; cube stopped retrying after \d+ tries in a row/);
     assert.equal((await reader.observe!([w.id])).get(w.id)?.state, "machine error");
-    await assert.rejects(reader.events(w.id), /the snapshot could not be restored/, "the watcher reports the failed wake");
+    assert.match(reader.startFailure(w.id)?.failure ?? "", /the snapshot could not be restored/, "cubed tells OptChat the failed wake");
     const sleeper = life.thread();
     await cubed.conversations.activate(sleeper.id);
     await done(sleeper.id);
@@ -384,7 +383,7 @@ try {
     assert.equal(fresh(sleeper.id).vm?.suspension?.state, "suspended");
     assert.match(await reader.describe([sleeper.id]), /its machine is suspended \(idle; it wakes when told\), completed$/);
     assert.equal((await reader.observe!([sleeper.id])).get(sleeper.id)?.state, "completed");
-    assert.equal(await reader.events(sleeper.id).then(() => "no failure", (error: Error) => error.message), "no failure", "an idle sleeping thread is no failure");
+    assert.equal(reader.startFailure(sleeper.id), null, "an idle sleeping thread is no failure");
     console.log("ok: R13 OptChat's threads, overview and watcher say a sleeping thread's wake failed; an idle sleeping thread reads as before");
 
     // ---------------------------------------------------------------- R13b
@@ -398,15 +397,15 @@ try {
     assert.equal(fresh(once.id).retry?.failures, 1, "one failed wake, cube still retries");
     const episode = fresh(once.id).retry?.since;
     assert.equal(episode, fresh(once.id).retry?.at, "the episode is its first failed try");
-    const failure = async (r: typeof reader) => (await r.events(once.id).then(() => null, (error: unknown) => error)) as ThreadFailure | null;
     await cubed.close();
     cubed = life.start();
     const restarted = readThreads({ registry, conversations: cubed.conversations });
     assert.match(await restarted.describe([once.id]), /its machine is suspended and waking it failed: .*the snapshot could not be restored/, "after a restart too");
     assert.equal((await restarted.observe!([once.id])).get(once.id)?.state, "machine error");
-    const after = await failure(restarted);
-    assert.ok(after instanceof ThreadFailure, "the watcher reports it (no agent open now)");
-    assert.match(after.message, /the snapshot could not be restored/);
+    // A restarted cubed has told nothing yet: what OptChat reads at its open.
+    const after = restarted.startFailure(once.id);
+    assert.ok(after, "cubed has the start failure (no agent open now)");
+    assert.match(after.failure, /the snapshot could not be restored/);
     assert.deepEqual([after.episode, after.retrying, after.waking], [String(episode), true, true], "its episode, cube still retries, its machine asleep");
     clock.now += 60_000;
     await cubed.conversations.recover();
