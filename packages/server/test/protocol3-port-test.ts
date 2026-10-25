@@ -11,8 +11,8 @@
  *             (`retired` answers false): `session` alone must refuse, so
  *             removing that last check fails this test.
  *
- * The row is `waking` (the hardest case: settleWake, wake, wakeNow and
- * dial all act on it) and its machine was allocated. Real Registry,
+ * The row is `waking` (the hardest case: settleWake, wakeNow and dial
+ * all act on it; a wake is Conversations', by start) and its machine was allocated. Real Registry,
  * disposable state; the session seam only counts. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -49,20 +49,18 @@ const members = {
   dial: (m, t) => m.dial(t, 8080),
   suspended: (m, t) => m.suspended(t),
   suspendIfIdle: (m, t) => m.suspendIfIdle(t, async () => null),
-  wake: (m, t) => m.wake(t),
   touch: (m, t) => m.touch(t),
   wakeInFlight: (m, t) => m.wakeInFlight(t),
   wakeNow: (m, t) => m.wakeNow(t),
   settleWake: (m, t) => m.settleWake(t),
-  renewWake: (m, t) => m.renewWake(t),
   diagnose: (m, t) => m.diagnose(t),
   startupLog: (m, t) => m.startupLog(t),
 } satisfies Record<keyof ThreadMachines, (machines: ThreadMachines, thread: Thread) => unknown>;
 /** RunnerMachines' own answers on a retired runner (the old RetiredProtocolMachines'). */
 const gated: Record<keyof typeof members, Outcome> = {
   guest: P3, start: P3, invalidateTemplate: { value: undefined }, release: { value: { retained: true } }, discard: P3, close: { value: undefined },
-  running: { value: false }, dial: P3, suspended: { value: false }, suspendIfIdle: { value: false }, wake: P3, touch: { value: undefined },
-  wakeInFlight: { value: false }, wakeNow: { value: null }, settleWake: { value: undefined }, renewWake: { value: undefined }, diagnose: P3,
+  running: { value: false }, dial: P3, suspended: { value: false }, suspendIfIdle: { value: false }, touch: { value: undefined },
+  wakeInFlight: { value: false }, wakeNow: { value: null }, settleWake: { value: undefined }, diagnose: P3,
   startupLog: { value: null },
 };
 
@@ -108,9 +106,12 @@ try {
       // Every member that would reach the runner is refused by `session`
       // itself; discard (a row without `kind` reads as a host runner's) stops
       // at its own refusal before it.
-      const refused = Object.entries(seen).filter(([, seen]) => "error" in seen).map(([member, seen]) => [member, (seen as { error: string }).error]);
+      // dial no longer wakes (Conversations does): a machine not running is
+      // refused before any session.
+      assert.deepEqual(seen.dial, { error: "the thread's machine is not running" });
+      const refused = Object.entries(seen).filter(([member, seen]) => member !== "dial" && "error" in seen).map(([member, seen]) => [member, (seen as { error: string }).error]);
       assert.deepEqual(refused.map(([member, error]) => [member, member === "discard" ? /never deletes a machine's directory/.test(error) : error === PROTOCOL_3_RETIRED]),
-        ["guest", "start", "release", "discard", "dial", "wake", "wakeNow", "settleWake", "diagnose"].map(member => [member, true]));
+        ["guest", "start", "release", "discard", "wakeNow", "settleWake", "diagnose"].map(member => [member, true]));
     }
   }
   console.log(`ok: all ${Object.keys(members).length} ThreadMachines members on a protocol-3 thread: no session, no registry change; gated they answer as before, ungated session() refuses`);

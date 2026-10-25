@@ -59,14 +59,14 @@ import { NO_HOOKS, placement, threadAgent, type HookOutcome, type Registry, type
 import { closeRunnerSessions, machineKey, RunnerError, runnerSession, type MachineRef, type RunnerSession } from "./runner-session.ts";
 import { PROTOCOL_3_RETIRED, retiredRunner } from "./runner-select.ts";
 import { currentMachineEpoch, gib, nextMachineEpoch, preparationOutcome, preparationScript, readStartupLog, RunnerWait, StepFailure, stepLog, vmSizes,
-  type MachineStart, type StartOptions, type StartupLog, type ThreadMachines, type VmSizes } from "./vm.ts";
+  type GuestHooks, type MachineStart, type StartOptions, type StartupLog, type ThreadMachines, type VmSizes } from "./vm.ts";
 import { MachineEvents, safeText, type GuestAgent, type MachineEvidence } from "./vm-diagnostics.ts";
 import { bootDocuments, MAX_BOOT_BYTES } from "./vm-seed.ts";
 import { FAILED_BUILD_BACKOFF_MS, KEEL_TEMPLATE_CAPABILITIES, TEMPLATE_FORMAT, keelTemplateKey, keelTemplateParts, missingTemplate, obsoleteTemplates, pickTemplate, runnerCaSha256,
   templateMeta, templateSettings, type TemplateMeta, type TemplateParts, type TemplateSettings } from "./vm-template.ts";
 import { guestServices, VmWorkspace } from "./vm-workspace.ts";
 import { IDLE_MS, MachineActivity } from "./machine-idle.ts";
-import { holdsSlot, slotWait } from "./machine-sleep.ts";
+import { holdsSlot } from "./machine-sleep.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import { settleOperation, type WorkspaceOwner } from "./workspace.ts";
 
@@ -89,9 +89,6 @@ const SUSPEND_TIMEOUT_MS = 90000;
 /** A suspend the runner refused for want of disk or a failed save is not
  * tried again for this long; the machine keeps running meanwhile. */
 const SUSPEND_RETRY_MS = 30 * 60 * 1000;
-/** How often a waking machine tries a full runner again, and for how long. */
-const WAKE_RETRY_MS = 5000;
-const WAKE_WAIT_MS = 30 * 60 * 1000;
 /** B7-5: what a thread shows when its snapshot could not be used. */
 const RESTARTED_AFTER_UPDATE = "restarted after an update; running commands were interrupted";
 const RESTARTED = "restarted from its disk: its saved state could not be restored; running commands were interrupted";
@@ -172,8 +169,6 @@ export interface RunnerMachinesOptions {
   /** Tests: the clock of the machines' activity. */
   now?: () => number;
   /** Tests: how often and how long a wake tries a full runner. */
-  wakeRetryMs?: number;
-  wakeWaitMs?: number;
   /** Tests: `machine_suspend`'s wait (SUSPEND_TIMEOUT_MS). */
   suspendTimeoutMs?: number;
   /** Machine templates on VM runners (default: from CUBED_TEMPLATES and CUBED_TEMPLATE_TTL_HOURS). */
@@ -198,8 +193,6 @@ export class RunnerMachines implements ThreadMachines {
   readonly activity: MachineActivity;
   /** Suspends under way: a guest call waits for one, then wakes the machine. */
   private readonly suspending = new Map<string, Promise<void>>();
-  /** Wakes under way, one per thread. */
-  private readonly waking = new Map<string, Promise<void>>();
   /** Runners that answered `machine_suspend` with no such verb (K-6), by
    * the software version that did: a new release is asked again. */
   private readonly noSuspend = new Map<string, string>();
@@ -207,10 +200,6 @@ export class RunnerMachines implements ThreadMachines {
   private readonly suspendingOn = new Set<string>();
   /** When a refused suspend may be tried again, by thread. */
   private readonly suspendRetry = new Map<string, number>();
-  /** How a suspended machine is woken: the conversation's activation (a
-   * start, and the resume hooks if the machine started from its disk);
-   * by default a start. */
-  onWake: ((thread: Thread) => Promise<void>) | null = null;
 
   constructor(options: RunnerMachinesOptions) {
     this.options = options;
@@ -262,11 +251,11 @@ export class RunnerMachines implements ThreadMachines {
     return { size, boot: { documents, mac: "" }, policy: this.options.policy.policyFor(thread) };
   }
 
-  guest(thread: Thread): GuestTransport {
+  guest(thread: Thread, hooks: GuestHooks = {}): GuestTransport {
     if (this.retired(thread)) return { call: () => Promise.reject(new GuestTransportError(PROTOCOL_3_RETIRED)), close: () => Promise.resolve() };
     const directory = this.directory(thread);
     const transport = this.session(thread).guest(this.ref(thread), () => Math.max(1, currentMachineEpoch(directory)));
-    return this.activity.guest(thread.id, transport, () => this.awake(thread.id));
+    return this.activity.guest(thread.id, transport, () => this.awake(thread.id, hooks.before));
   }
 
   touch(thread: Thread): void { this.activity.touch(thread.id); }
@@ -274,54 +263,11 @@ export class RunnerMachines implements ThreadMachines {
   /** Whether the thread's machine is suspended (or waking). */
   suspended(thread: Thread): boolean { return !this.retired(thread) && !!this.options.registry.getThread(thread.id)?.vm?.suspension; }
 
-  /** Before a guest call or a dial: a suspend under way ends first, and a
-   * suspended machine is woken. */
-  private async awake(id: string): Promise<void> {
+  /** Before a guest call or a dial: a suspend under way ends first, then
+   * the wake owner's `before` (Conversations wakes a suspended machine). */
+  private async awake(id: string, before?: () => Promise<void>): Promise<void> {
     await this.suspending.get(id);
-    const thread = this.options.registry.getThread(id);
-    if (thread?.vm?.suspension) await this.wake(thread);
-  }
-
-  /** Threads whose wake waited the whole wakeWaitMs in vain, and why: until
-   * the machine runs (whoever starts it) or a new message asks for it
-   * (renewWake), a guest call tries once and fails at once, so the thread's
-   * later tool calls do not each wait the whole time again. */
-  private readonly wakeGaveUp = new Map<string, string>();
-
-  renewWake(thread: Thread): void { this.wakeGaveUp.delete(thread.id); }
-
-  /** Resumes the thread's suspended machine; with a full runner, tries
-   * again every wakeRetryMs (the thread says it waits) for wakeWaitMs, once
-   * per run (wakeGaveUp). */
-  wake(thread: Thread): Promise<void> {
-    const pending = this.waking.get(thread.id);
-    if (pending) return pending;
-    const waking = (async () => {
-      const gaveUp = this.wakeGaveUp.has(thread.id);
-      const deadline = Date.now() + (gaveUp ? 0 : this.options.wakeWaitMs ?? WAKE_WAIT_MS);
-      for (;;) {
-        const current = this.options.registry.getThread(thread.id);
-        if (!current?.vm?.suspension || current.archived) { this.wakeGaveUp.delete(thread.id); return; }
-        try {
-          if (this.onWake) await this.onWake(current);
-          // The conversation did not wake it and nothing waits for a slot
-          // (an archive holds the thread and checks its disk): a start.
-          const declined = this.options.registry.getThread(thread.id)?.vm?.suspension;
-          if (!this.onWake || (declined && !slotWait(declined))) await this.start(this.options.registry.getThread(thread.id) ?? current);
-        } catch (error) { if (!(error instanceof RunnerWait)) throw error; }
-        const after = this.options.registry.getThread(thread.id)?.vm?.suspension;
-        if (!after) { this.wakeGaveUp.delete(thread.id); return; }
-        if (Date.now() >= deadline) {
-          const why = slotWait(after) ?? "its runner did not resume it";
-          this.wakeGaveUp.set(thread.id, why);
-          throw new Error(`the thread's machine is suspended and could not be resumed: ${why}`
-            + (gaveUp ? "; this run already waited its whole time for it, a new message waits again" : ""));
-        }
-        await new Promise(resolve => setTimeout(resolve, this.options.wakeRetryMs ?? WAKE_RETRY_MS));
-      }
-    })().finally(() => this.waking.delete(thread.id));
-    this.waking.set(thread.id, waking);
-    return waking;
+    await before?.();
   }
 
   /** Wakes the thread's suspended machine for cubed's own check (an
@@ -335,7 +281,7 @@ export class RunnerMachines implements ThreadMachines {
     return this.suspended(thread) ? "it is still suspended" : null;
   }
 
-  wakeInFlight(thread: Thread): boolean { return this.waking.has(thread.id) || this.starting.has(thread.id); }
+  wakeInFlight(thread: Thread): boolean { return this.starting.has(thread.id); }
 
   /** A `waking` that no start or wake of this process owns: one a cubed
    * restart cut short, or one whose owner gave up. Nothing asks for the
@@ -380,7 +326,7 @@ export class RunnerMachines implements ThreadMachines {
   async suspendIfIdle(thread: Thread, busy: () => Promise<string | null>): Promise<boolean> {
     const current = this.options.registry.getThread(thread.id);
     if (!current || current.archived || current.workspaceState !== "available" || !this.onVm(current) || !this.running(current)) return false;
-    if (this.starting.has(thread.id) || this.suspending.has(thread.id) || this.waking.has(thread.id)) return false;
+    if (this.starting.has(thread.id) || this.suspending.has(thread.id)) return false;
     if (this.suspendingOn.has(current.runnerId) || (this.suspendRetry.get(thread.id) ?? 0) > Date.now()) return false;
     const session = this.session(current);
     if (!session.capabilities.includes(SUSPEND_CAPABILITY)) return false;
@@ -582,8 +528,6 @@ export class RunnerMachines implements ThreadMachines {
       // the recovery loop's checks must not keep it awake (B-207-1).
       if (machine.status?.phase !== MachineStatus_Phase.RUNNING) {
         this.activity.started(thread.id);
-        // Whoever started it, the machine ran: a later wake waits whole again.
-        this.wakeGaveUp.delete(thread.id);
       }
       const booted = this.boots.get(thread.id) !== boot;
       this.boots.set(thread.id, boot);
@@ -868,7 +812,6 @@ export class RunnerMachines implements ThreadMachines {
     if (this.retired(thread)) return { retained: !!thread.vm && placement(thread) !== "provisional" && !thread.vm.discarded };
     this.boots.delete(thread.id);
     this.activity.forget(thread.id);
-    this.wakeGaveUp.delete(thread.id);
     this.suspendRetry.delete(thread.id);
     // A build machine that outlived its start (cubed's own) goes first.
     if (this.onVm(thread)) await this.abandonBuild(thread, this.session(thread));
@@ -923,7 +866,8 @@ export class RunnerMachines implements ThreadMachines {
    * running. The runner refuses ports below 1024 and a machine it does not
    * run; `berth host` has no dial (masterplan B-9). */
   async dial(thread: Thread, port: number): Promise<Duplex> {
-    // B7-3: a connection to a suspended machine wakes it.
+    if (this.retired(thread)) throw new Error(PROTOCOL_3_RETIRED);
+    // A suspend under way ends first; the portal woke a suspended machine (B7-3).
     await this.awake(thread.id);
     if (!this.running(thread)) throw new Error("the thread's machine is not running");
     const socket = await this.session(thread).dial(this.ref(thread), Math.max(1, currentMachineEpoch(this.directory(thread))), port);

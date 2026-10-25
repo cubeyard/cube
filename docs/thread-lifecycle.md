@@ -92,10 +92,20 @@ phase, `suspended` or running. It is not continued.
 |---|---|
 | a new thread (UI, OptChat `spawn`) | yes, once (`activate`) |
 | a message (UI prompt, OptChat `tell`, an artifact comment) | a new one wakes a sleeping machine, and gives a thread whose start failed one more try; a replayed one (a request id the agent already has) wakes nothing |
-| a guest call of the agent's run, a portal connection | yes (`awake` → `wake`); on a full runner it waits for a slot up to 30 min, once: after that wait gave up, later calls try once and fail at once until the machine runs or a new message asks again (`renewWake`) |
+| a guest call of the agent's run, a portal connection | yes (`Conversations.wake`, the guest transport's `before`; the portal's `wake`); on a full runner it waits for a slot up to 30 min (`PATIENCE.wakeMs`), once: after that wait gave up, later calls try once and fail at once until the machine runs (whoever starts it) or a new message asks again |
 | an archive's release check | only with a slot free now (`wakeNow`); otherwise the disk is kept unchecked at once, with the reason |
 | the recovery loop (`Conversations.boot`, every 30 s) | only by `recoveryStep` (thread-recovery.ts) |
 | any read: the thread list, history, stream, model, steps, startup log, diagnostics, OptChat's watcher, `threads`, `history` | never |
+
+Conversations own every start and wake. A wake is the thread's activation;
+a machine still asleep after it with no slot to wait for (an archive holds
+the thread, a release is unfinished, or the activation's start failed) is
+started directly, and that start's error answers the call. `RunnerMachines`
+does the runner operations (start or resume, suspend, release) and never
+decides to wake. One clock (`PATIENCE`, 30 min) bounds both waits for a
+runner: a new thread's start on a VM runner that does not answer, and a
+wake on a full runner. A close ends a wake that waits; a wake of a machine
+that runs asks the runner nothing (cubed-wake-test).
 
 `recoveryStep` is the recovery loop's rule:
 
@@ -238,6 +248,8 @@ machine's sleep (packages/web/src/lib/thread-state.ts).
   runtime createCubed builds (`thread-runtime.ts`: RunnerMachines,
   Conversations and the wake between them), a stand-in `berth vm` with
   berth's slot rules as its runner session, and the real guest helper.
-  `cubed-wake-test.ts` runs a wake through createCubed itself over the same
-  stand-in. Not runner acceptance: `runner-vm-cubed-suspend-test.ts` runs a
+  `cubed-wake-test.ts` runs wakes through createCubed itself over the same
+  stand-in: a new message renews a run that gave up, a machine that ran
+  (whoever started it) renews it too, a wake of a running machine is a
+  no-op, an archive or a close ends a wake that waits. Not runner acceptance: `runner-vm-cubed-suspend-test.ts` runs a
   real `berth vm`.

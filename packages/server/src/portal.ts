@@ -96,6 +96,8 @@ export interface PortalOptions {
   directory: string;
   registry: Registry;
   machines: ThreadMachines;
+  /** Wakes the thread's suspended machine (Conversations.wake). */
+  wake: (thread: Thread) => Promise<void>;
   /** Whether an archive of the thread is under way (or deciding). */
   archiving: (id: string) => boolean;
   log?: Logger;
@@ -205,7 +207,7 @@ export class Portal {
     // B7-3: a connection to a suspended machine wakes it.
     if (thread.workspaceState === "available" && !this.options.archiving(thread.id) && this.options.machines.suspended(thread)) {
       // A request waits for it a while; a machine that waits for a free slot keeps waking.
-      const woken = this.options.machines.wake(thread).then(() => true, () => false);
+      const woken = this.options.wake(thread).then(() => true, () => false);
       const waited = await Promise.race([woken, new Promise<false>(resolve => setTimeout(() => resolve(false), WAKE_WAIT_MS).unref())]);
       if (!waited) {
         const waiting = slotWait(this.options.registry.getThread(thread.id)?.vm?.suspension);

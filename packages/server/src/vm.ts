@@ -20,9 +20,15 @@ import { settleOperation, WorkspaceError, type WorkspaceOwner } from "./workspac
  * member is required: machines that cannot do something say so in their
  * answer (a machine that never suspends is never `suspended`), never by
  * leaving a member out. */
+/** What the thread's wake owner gives a guest transport (ThreadMachines.guest). */
+export interface GuestHooks { before?: () => Promise<void> }
+
 export interface ThreadMachines {
-  /** How cubed reaches the thread's guest helper. */
-  guest(thread: Thread): GuestTransport;
+  /** How cubed reaches the thread's guest helper. `before` runs before
+   * each call (after a suspend under way ends): the thread's wake owner
+   * (Conversations) passes its wake there, so a call to a suspended
+   * machine wakes it first. */
+  guest(thread: Thread, hooks?: GuestHooks): GuestTransport;
   /** Boot or re-attach the machine; resolves once its guest answers ready.
    * `booted` says this call started the machine (a first boot or a boot
    * after it had stopped), not only re-attached a running one. `onBoot` is
@@ -45,14 +51,13 @@ export interface ThreadMachines {
   dial(thread: Thread, port: number): Promise<Duplex>;
   /** Suspend (S-7a, P7-5; runner-machines.ts): whether the thread's machine
    * is suspended; suspend it when idle and `busy` finds nothing running;
-   * wake it; something happened for it now (its idle time starts again).
+   * something happened for it now (its idle time starts again).
    * Only protocol-4 VM runners suspend. */
   suspended(thread: Thread): boolean;
   suspendIfIdle(thread: Thread, busy: () => Promise<string | null>): Promise<boolean>;
-  wake(thread: Thread): Promise<void>;
   touch(thread: Thread): void;
-  /** Whether a start or a wake of the thread's machine is under way in this
-   * process (the owner of a `waking` it recorded). */
+  /** Whether a start of the thread's machine is under way in this process
+   * (an owner of a `waking` it recorded; Conversations owns the rest). */
   wakeInFlight(thread: Thread): boolean;
   /** Wakes a suspended machine for cubed's own check if a slot is free now;
    * null once it runs, otherwise why it stays suspended. Never waits. */
@@ -60,9 +65,6 @@ export interface ThreadMachines {
   /** A `waking` no one in this process owns (a restart cut the wake short):
    * the runner's own phase is recorded instead, and nothing is started. */
   settleWake(thread: Thread): Promise<void>;
-  /** A new message asks for the machine: its run's first guest call waits
-   * for a slot the whole time again, even if an earlier run's wait gave up. */
-  renewWake(thread: Thread): void;
   /** Read-only evidence about the thread's machine (vm-diagnostics.ts);
    * never starts, stops or attaches it. */
   diagnose(thread: Thread): Promise<MachineEvidence>;
@@ -157,7 +159,7 @@ export function currentMachineEpoch(directory: string): number {
  * failure of the thread; cubed's recovery loop tries again. */
 export class RunnerWait extends Error {
   /** A VM runner does not answer (rather than being full): a new thread's
-   * start waits for it only so long (Conversations, RUNNER_WAIT_MS), then
+   * start waits for it only so long (Conversations, PATIENCE.startMs), then
    * fails saying which runner and why the thread stays on it. A host
    * runner runs only while someone runs it; its threads wait (AGENTS.md). */
   readonly unanswered: { runner: string; stays: string } | null;

@@ -22,6 +22,8 @@ import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWork
   type ThreadMachines } from "./vm.ts";
 import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
+import type { GuestTransport } from "./guest-transport.ts";
+import { slotWait } from "./machine-sleep.ts";
 import { threadCondition, type ThreadCondition } from "./thread-condition.ts";
 import { allocationFailed, FailedTry, readFailure, releaseFailed, startFailed, type Failure } from "./thread-failure.ts";
 import { needsDemand, recoveryStep, releaseUnfinished, retriesExhausted, START_TRIES } from "./thread-recovery.ts";
@@ -33,9 +35,17 @@ const log = createLogger("threads");
 const INITIAL_REQUEST = "cube:initial";
 /** How long an idle round waits for the recovery loop's check of a machine. */
 const CHECK_WAIT_MS = 60_000;
-/** How long a start waits on a runner that does not answer before each try
- * counts as a failed one (as long as a guest call waits for a wake). */
-const RUNNER_WAIT_MS = 30 * 60_000;
+/** How long a thread waits for its runner: one clock for every wait
+ * (docs/thread-lifecycle.md, "Who may start or wake a machine"). */
+const RUNNER_PATIENCE_MS = 30 * 60_000;
+/** Who waits for a thread's runner, and how long:
+ * - `startMs`: a new thread's start on a VM runner that does not answer;
+ *   past it each try counts as a failed one (cubed's clock, across rounds);
+ * - `wakeMs`: a suspended machine's wake for a guest call or a portal
+ *   connection on a full runner, trying again every `retryMs`; once per
+ *   run: after it gave up, later calls try once until the machine runs or a
+ *   new message asks again. */
+export const PATIENCE = { startMs: RUNNER_PATIENCE_MS, wakeMs: RUNNER_PATIENCE_MS, retryMs: 5_000 };
 /** Why a disk the release check let go is kept all the same. */
 /** The threads' part of cubed's close (Conversations.close). */
 export const THREADS_CLOSE_MS = 9_000;
@@ -69,6 +79,8 @@ export class ThreadArchiving extends Error {
 }
 export interface ConversationsOptions {
   registry: Registry; directory: string; models: Models; machines: ThreadMachines; claude?: ClaudeRuntime | null; now?: () => number;
+  /** PATIENCE's waits, shorter in tests. */
+  patience?: Partial<typeof PATIENCE>;
   portal?: (thread: Thread) => GuestPortal; hostTools?: (thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"];
 }
 export class Conversations {
@@ -122,6 +134,14 @@ export class Conversations {
   private readonly hostTools: ((thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"]) | null;
   private closing = false;
   private readonly now: () => number;
+  private readonly patience: typeof PATIENCE;
+  /** Wakes under way, one per thread (`wake`). */
+  private readonly wakes = new Map<string, Promise<void>>();
+  /** Threads whose wake waited the whole `wakeMs` in vain, and why: until
+   * the machine runs (whoever starts it) or a new message asks for it, a
+   * guest call tries once and fails at once, so the run's later tool calls
+   * do not each wait the whole time again. */
+  private readonly gaveUp = new Map<string, string>();
   /** Messages (thread and request id) that already gave a thread whose
    * start failed its one more try: a delivery retried under the same id
    * (an artifact comment, OptChat's replay) does not start it again. */
@@ -137,6 +157,7 @@ export class Conversations {
     this.hostTools = options.hostTools ?? null;
     this.machines = options.machines; this.claude = options.claude ?? null;
     this.now = options.now ?? Date.now;
+    this.patience = { ...PATIENCE, ...options.patience };
     this.portal = options.portal ?? (() => ({ reason: "this cube installation has no portal" }));
   }
   /** Whether claude-code threads can run on this host. */
@@ -167,7 +188,7 @@ export class Conversations {
   private async recoverOne(thread: Thread): Promise<void> {
     const id = thread.id;
     if (this.closing || this.archiveHolds.has(id) || this.suspends.has(id)) return;
-    const owned = this.activations.has(id) || this.machines.wakeInFlight(thread);
+    const owned = this.owns(thread);
     const demand = needsDemand(thread, owned) && await this.demand(id);
     // A close that began meanwhile starts nothing more.
     if (this.closing) return;
@@ -227,6 +248,56 @@ export class Conversations {
     return threadCondition(thread, { archiving: this.archivingNow(id), starting: this.starting(id), agentOpen: this.agentOpen(id),
       failure: this.failure(id), down: this.down(id), waiting: this.waiting(id) });
   }
+  /** Whether a start or a wake of this process owns the thread's machine
+   * (the owner of a `waking` it recorded). */
+  owns(thread: Thread): boolean {
+    return this.activations.has(thread.id) || this.wakes.has(thread.id) || this.machines.wakeInFlight(thread);
+  }
+  /** The thread's guest transport: each call wakes a suspended machine
+   * first (`wake`). The thread's workspace uses it. */
+  guest(thread: Thread): GuestTransport {
+    return this.machines.guest(thread, { before: () => this.wake(thread.id) });
+  }
+  /** Wakes the thread's suspended machine for a guest call of its agent or
+   * a portal connection, by its activation: a start, and the resume hooks
+   * when its runner started it from its disk. A machine still asleep after
+   * it with no slot to wait for (an archive holds the thread, a release is
+   * unfinished, or the activation's start failed) is started directly: that
+   * start's own error answers the call. On a full runner it tries again
+   * every `retryMs` for `wakeMs`, once per run (`gaveUp`). Concurrent calls
+   * share one wake; a close ends it, the machine left asleep. A machine
+   * not asleep answers at once, before any wake under way: the wake's own
+   * activation makes guest calls once it resumed the machine. */
+  wake(id: string): Promise<void> {
+    if (!this.registry.getThread(id)?.vm?.suspension) return Promise.resolve();
+    const pending = this.wakes.get(id);
+    if (pending) return pending;
+    const waking = (async () => {
+      const gaveUp = this.gaveUp.has(id);
+      const deadline = Date.now() + (gaveUp ? 0 : this.patience.wakeMs);
+      for (;;) {
+        if (this.closing) throw new Error("cubed is closing; the thread's machine stays suspended");
+        const thread = this.registry.getThread(id);
+        if (!thread?.vm?.suspension || thread.archived) { this.gaveUp.delete(id); return; }
+        try {
+          await this.activate(id);
+          const asleep = this.registry.getThread(id);
+          if (asleep?.vm?.suspension && !slotWait(asleep.vm.suspension)) await this.machines.start(asleep);
+        } catch (error) { if (!(error instanceof RunnerWait)) throw error; }
+        const after = this.registry.getThread(id)?.vm?.suspension;
+        if (!after) { this.gaveUp.delete(id); return; }
+        if (Date.now() >= deadline) {
+          const why = slotWait(after) ?? "its runner did not resume it";
+          this.gaveUp.set(id, why);
+          throw new Error(`the thread's machine is suspended and could not be resumed: ${why}`
+            + (gaveUp ? "; this run already waited its whole time for it, a new message waits again" : ""));
+        }
+        await delay(this.patience.retryMs);
+      }
+    })().finally(() => this.wakes.delete(id));
+    this.wakes.set(id, waking);
+    return waking;
+  }
   /** Boots the thread's machine, provisions it once and opens its agent.
    * Concurrent calls share one activation. */
   activate(id: string): Promise<void> {
@@ -251,13 +322,15 @@ export class Conversations {
         this.failures.delete(id);
         this.waits.delete(id);
         this.unansweredSince.delete(id);
+        // The machine runs: a later wake waits its whole time again.
+        this.gaveUp.delete(id);
         if (this.registry.getThread(id)?.retry) this.registry.applyPhase(id, { type: "trySucceeded" });
       } catch (error) {
         // An archive that ended is not this thread's failure.
         if (error instanceof ThreadArchiving || this.registry.getThread(id)?.archived !== false) return;
         const message = error instanceof Error ? error.message : String(error);
         // The start of a thread not ready yet waits on a VM runner that does
-        // not answer for RUNNER_WAIT_MS; after that each try is a failed
+        // not answer for PATIENCE.startMs; after that each try is a failed
         // one, with the recovery loop's pause and limit. A ready thread
         // (checked, or opened again after a restart) waits as long as it takes.
         const unanswered = error instanceof RunnerWait && !this.checks.has(id) && this.registry.getThread(id)?.workspaceState !== "available"
@@ -265,7 +338,7 @@ export class Conversations {
         if (!unanswered) this.unansweredSince.delete(id);
         else if (!this.unansweredSince.has(id)) this.unansweredSince.set(id, this.now());
         const waited = unanswered ? this.now() - this.unansweredSince.get(id)! : 0;
-        if (error instanceof RunnerWait && waited < RUNNER_WAIT_MS) {
+        if (error instanceof RunnerWait && waited < this.patience.startMs) {
           if (this.waits.get(id) !== message) log.info("waiting for a runner", { thread: id, reason: message });
           this.waits.set(id, message);
           this.failures.delete(id);
@@ -273,7 +346,7 @@ export class Conversations {
         }
         if (unanswered && waited) {
           this.waits.delete(id);
-          const failure: Failure = { kind: "start", text: `runner ${unanswered.runner} has not answered for ${Math.round(RUNNER_WAIT_MS / 60_000)} min; ${unanswered.stays}` };
+          const failure: Failure = { kind: "start", text: `runner ${unanswered.runner} has not answered for ${Math.round(this.patience.startMs / 60_000)} min; ${unanswered.stays}` };
           if (this.failures.get(id)?.text !== failure.text) log.warn("activation failed", { thread: id, error: failure.text });
           this.failures.set(id, failure);
           this.countFailure(id, failure);
@@ -330,7 +403,7 @@ export class Conversations {
     if (cached) return cached.workspace;
     const thread = this.thread(id);
     const leases = new LeaseStore(path.join(this.directory, id));
-    const workspace = new VmWorkspace({ guest: this.machines.guest(thread), leases, owner: threadAgent(thread), binding: this.binding(thread) });
+    const workspace = new VmWorkspace({ guest: this.guest(thread), leases, owner: threadAgent(thread), binding: this.binding(thread) });
     this.workspaces.set(id, { workspace, leases });
     return workspace;
   }
@@ -606,7 +679,7 @@ export class Conversations {
   private async wakeFor(id: string, requestId: string): Promise<void> {
     const thread = this.registry.getThread(id);
     if (!thread || thread.archived) return;
-    if (thread.vm?.suspension) { this.machines.renewWake(thread); await this.activate(id); return; }
+    if (thread.vm?.suspension) { this.gaveUp.delete(id); await this.activate(id); return; }
     const key = `${id}\n${requestId}`;
     if ((thread.workspaceState !== "available" || this.failures.has(id) || retriesExhausted(thread)) && !this.retried.has(key)) {
       this.retried.add(key);
@@ -654,7 +727,8 @@ export class Conversations {
   private async suspendOne(thread: Thread): Promise<void> {
     const machines = this.machines;
     const id = thread.id;
-    const skip = (current: Thread | null) => !current || current.archived || current.workspaceState !== "available" || !!current.vm?.suspension || releaseUnfinished(current);
+    const skip = (current: Thread | null) => !current || current.archived || current.workspaceState !== "available" || !!current.vm?.suspension || releaseUnfinished(current)
+      || this.wakes.has(id);
     if (skip(thread)) return;
     // The recovery loop's check of a machine that runs is not activity:
     // its end is waited for (B-207-1). A start is.
@@ -925,6 +999,7 @@ export class Conversations {
       // in time (or failed): recorded, so it is listed and can be discarded.
       if (released.retained && thread.vm && !thread.vm.retain) this.registry.updateThreadVm(id, { retain: true, retainReason: RUNNER_KEPT });
       this.registry.applyPhase(id, { type: "released" });
+      this.gaveUp.delete(id);
       this.failures.delete(id);
       this.downs.delete(id);
       this.waits.delete(id);

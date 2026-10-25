@@ -1,7 +1,7 @@
 /** The thread side of cubed, wired in one place: each thread's machine
  * (RunnerMachines; a thread on a retired protocol-3 runner is refused
- * there), the Conversations over the machines, and how a suspended machine
- * wakes (the thread's activation).
+ * there) and the Conversations over the machines, which own how a
+ * suspended machine wakes (their guest transports' `before`).
  * createCubed and the lifecycle tests both build it here, so the tests run
  * the wiring cubed runs; they give only seams (the runner session, the
  * clock, timings) or, offline, machines of their own (local guests). */
@@ -27,9 +27,5 @@ export function threadRuntime(options: ThreadRuntimeOptions): ThreadRuntime {
   const over = (machines: ThreadMachines) => new Conversations({ ...conversation, directory: threads, machines });
   if (given) return { machines: given, conversations: over(given) };
   const machines = new RunnerMachines({ ...runner, registry: options.registry, threads, ...options.now ? { now: options.now } : {} });
-  const conversations = over(machines);
-  // A suspended machine wakes by the thread's activation: a start, and the
-  // resume hooks when its runner started it from its disk (P7-5).
-  machines.onWake = thread => conversations.activate(thread.id);
-  return { machines, conversations };
+  return { machines, conversations: over(machines) };
 }

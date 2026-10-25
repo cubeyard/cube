@@ -433,7 +433,7 @@ try {
   const call = async (id: string) => {
     const asked = () => berth.asks.get(`machineGet:${vmOf(id)}`) ?? 0;
     const before = asked();
-    try { await cubed.machines.guest(fresh(id)).call("stat", { path: "/workspace" }); return { tries: asked() - before, error: null }; }
+    try { await cubed.conversations.guest(fresh(id)).call("stat", { path: "/workspace" }); return { tries: asked() - before, error: null }; }
     catch (error) { return { tries: asked() - before, error: (error as Error).message }; }
   };
   try {

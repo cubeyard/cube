@@ -159,12 +159,10 @@ export class LocalMachines implements ThreadMachines {
   async invalidateTemplate(): Promise<void> {}
   suspended(): boolean { return false; }
   async suspendIfIdle(): Promise<boolean> { return false; }
-  async wake(): Promise<void> {}
   touch(): void {}
   wakeInFlight(): boolean { return false; }
   async wakeNow(): Promise<string | null> { return null; }
   async settleWake(): Promise<void> {}
-  renewWake(): void {}
   diagnose(): Promise<MachineEvidence> { return Promise.reject(new Error("a local guest has no machine diagnosis")); }
   /** As RunnerMachines reads it; the guest's root stands for its /. */
   async startupLog(thread: Thread): Promise<StartupLog | null> {
@@ -207,10 +205,6 @@ export class NoMachines implements ThreadMachines {
   dial(_thread: Thread, _port: number): Promise<Duplex> { return Promise.reject(new Error("no machine in this test")); }
   suspended(_thread: Thread): boolean { return false; }
   async suspendIfIdle(_thread: Thread, _busy: () => Promise<string | null>): Promise<boolean> { return false; }
-  wake(thread: Thread): Promise<void> {
-    this.starts.push(`wake:${thread.id}`);
-    return Promise.reject(new Error("no machine in this test"));
-  }
   touch(_thread: Thread): void {}
   wakeInFlight(_thread: Thread): boolean { return false; }
   wakeNow(thread: Thread): Promise<string | null> {
@@ -218,7 +212,6 @@ export class NoMachines implements ThreadMachines {
     return Promise.reject(new Error("no machine in this test"));
   }
   async settleWake(_thread: Thread): Promise<void> {}
-  renewWake(_thread: Thread): void {}
   diagnose(_thread: Thread): Promise<MachineEvidence> { return Promise.reject(new Error("no machine in this test")); }
   async startupLog(_thread: Thread): Promise<StartupLog | null> { return null; }
 }
