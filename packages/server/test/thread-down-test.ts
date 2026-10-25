@@ -13,6 +13,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, type Message } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
+import { ThreadFailure } from "../src/optchat.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
 import { LocalMachines } from "./local-guest.ts";
 
@@ -133,6 +134,9 @@ try {
   assert.equal(row.error, down);
   assert.equal(await adapter.describe([id]), `[${id.slice(0, 8)}] empty · ${title} · error: ${down}`);
   assert.equal((await adapter.observe!([id])).get(id)?.state, "agent error");
+  // OptChat's watcher reports it as a failure nothing retries before a restart.
+  await assert.rejects(adapter.events(id), (error: unknown) => error instanceof ThreadFailure && error.message === down && !error.retrying && !error.waking,
+    "the watcher's failure says no retry comes");
   // Nor does a recovery round, or a second reboot.
   await conversations.boot();
   machines.reboot(app.registry.getThread(id)!);

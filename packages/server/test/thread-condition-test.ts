@@ -15,7 +15,7 @@ const W = "its runner does not answer";
 const D = "the thread's agent stopped: its history could not be saved";
 const R = "workspace release failed: the runner did not answer";
 
-type Expect = { kind: string; row: ReturnType<typeof threadRow>; threads: string; machine: string | null; overview: string; watcher: string | null | { failure: string; waking: boolean; episode: string | null } };
+type Expect = { kind: string; row: ReturnType<typeof threadRow>; threads: string; machine: string | null; overview: string; watcher: string | null | { failure: string; waking: boolean; episode: string | null; retrying: boolean } };
 const cases: Array<{ name: string; thread?: Partial<Thread>; runtime?: Partial<ThreadRuntime>; expect: Expect }> = [
   { name: "ready", expect: { kind: "ready", row: { state: "ready", error: null, waiting: null }, threads: "ready, completed", machine: "ready", overview: "completed", watcher: "stored" } },
   { name: "new, never started", thread: { workspaceState: "allocating" },
@@ -25,10 +25,10 @@ const cases: Array<{ name: string; thread?: Partial<Thread>; runtime?: Partial<T
     expect: { kind: "starting", row: { state: "starting", error: null, waiting: null }, threads: "starting its machine", machine: "starting its machine", overview: "starting", watcher: "stored" } },
   { name: "starting again after a failed try", runtime: { starting: true, error: E },
     expect: { kind: "starting", row: { state: "error", error: E, waiting: null }, threads: `starting its machine again (the last try failed: ${E})`,
-      machine: `starting its machine again (the last try failed: ${E})`, overview: "starting", watcher: { failure: E, waking: false, episode: null } } },
+      machine: `starting its machine again (the last try failed: ${E})`, overview: "starting", watcher: { failure: E, waking: false, episode: null, retrying: true } } },
   { name: "waiting for a runner, no agent open", runtime: { waiting: W },
     expect: { kind: "waiting", row: { state: "starting", error: null, waiting: W }, threads: `starting its machine, ${W}`, machine: `starting its machine, ${W}`,
-      overview: "waiting for a runner", watcher: { failure: W, waking: false, episode: null } } },
+      overview: "waiting for a runner", watcher: { failure: W, waking: false, episode: null, retrying: true } } },
   { name: "agent open, its runner does not answer", runtime: { agentOpen: true, waiting: W },
     expect: { kind: "ready", row: { state: "ready", error: null, waiting: W }, threads: `ready (its runner does not answer now: ${W}), completed`,
       machine: `ready (its runner does not answer now: ${W})`, overview: "completed", watcher: "stored" } },
@@ -37,11 +37,11 @@ const cases: Array<{ name: string; thread?: Partial<Thread>; runtime?: Partial<T
       machine: `ready (a later check of its machine failed: ${E})`, overview: "completed", watcher: "stored" } },
   { name: "failed", runtime: { error: E },
     expect: { kind: "failed", row: { state: "error", error: E, waiting: null }, threads: `error: ${E}`, machine: `error: ${E}`, overview: "machine error",
-      watcher: { failure: E, waking: false, episode: null } } },
+      watcher: { failure: E, waking: false, episode: null, retrying: true } } },
   { name: "failed, known only from its row", thread: { workspaceState: "failed", workspaceError: "workspace allocation failed: boom" },
     // was: the row said "ready", `threads` "ready", the overview "machine failed"
     expect: { kind: "failed", row: { state: "error", error: "workspace allocation failed: boom", waiting: null }, threads: "error: workspace allocation failed: boom",
-      machine: "error: workspace allocation failed: boom", overview: "machine error", watcher: { failure: "workspace allocation failed: boom", waking: false, episode: null } } },
+      machine: "error: workspace allocation failed: boom", overview: "machine error", watcher: { failure: "workspace allocation failed: boom", waking: false, episode: null, retrying: true } } },
   { name: "agent open, its row records a failure", thread: { workspaceState: "failed", workspaceError: "workspace allocation failed: boom" }, runtime: { agentOpen: true },
     // was: history's failure said it, the row and `threads` did not
     expect: { kind: "ready", row: { state: "error", error: "workspace allocation failed: boom", waiting: null },
@@ -52,7 +52,8 @@ const cases: Array<{ name: string; thread?: Partial<Thread>; runtime?: Partial<T
     expect: { kind: "down", row: { state: "error", error: D, waiting: null }, threads: `error: ${D}`, machine: `error: ${D}`, overview: "agent error", watcher: "stored" } },
   { name: "agent down, after a reboot", runtime: { down: D, error: D },
     expect: { kind: "down", row: { state: "error", error: D, waiting: null }, threads: `error: ${D}`, machine: `error: ${D}`, overview: "agent error",
-      watcher: { failure: D, waking: false, episode: null } } },
+      // was: the watcher said cubed keeps retrying; nothing retries a down agent before a restart
+      watcher: { failure: D, waking: false, episode: null, retrying: false } } },
   { name: "suspended", thread: { vm: { suspension: { state: "suspended", at: 1 } } as Thread["vm"] },
     // was: `history` said "ready"
     expect: { kind: "ready", row: { state: "ready", error: null, waiting: null }, threads: "its machine is suspended (idle; it wakes when told), completed",
@@ -63,7 +64,7 @@ const cases: Array<{ name: string; thread?: Partial<Thread>; runtime?: Partial<T
   { name: "a wake that failed", thread: { vm: { suspension: { state: "suspended", at: 1 } } as Thread["vm"], retry: { failures: 2, at: 5, since: 3, error: E } },
     runtime: { error: E },
     expect: { kind: "failed", row: { state: "error", error: E, waiting: null }, threads: `its machine is suspended and waking it failed: ${E}`,
-      machine: `its machine is suspended and waking it failed: ${E}`, overview: "machine error", watcher: { failure: E, waking: true, episode: "3" } } },
+      machine: `its machine is suspended and waking it failed: ${E}`, overview: "machine error", watcher: { failure: E, waking: true, episode: "3", retrying: true } } },
   { name: "being archived", runtime: { archiving: true },
     expect: { kind: "archiving", row: { state: "ready", error: null, waiting: null }, threads: "being archived", machine: "being archived", overview: "being archived", watcher: "archiving" } },
   { name: "being archived, its machine asleep", thread: { vm: { suspension: { state: "suspended", at: 1 } } as Thread["vm"] }, runtime: { archiving: true },
@@ -71,6 +72,19 @@ const cases: Array<{ name: string; thread?: Partial<Thread>; runtime?: Partial<T
     expect: { kind: "archiving", row: { state: "ready", error: null, waiting: null }, threads: "being archived", machine: "being archived", overview: "being archived", watcher: "archiving" } },
   { name: "a release that failed, retried", thread: { workspaceState: "failed", workspaceError: R }, runtime: { error: R },
     // was: `threads` said "error: …", the overview "machine error"
+    expect: { kind: "archiving", row: { state: "error", error: R, waiting: null }, threads: `being archived (the last try failed: ${R})`,
+      machine: `being archived (the last try failed: ${R})`, overview: "being archived", watcher: "archiving" } },
+  // Ranking cases between kinds (review 7ed05705).
+  { name: "agent down, being archived", runtime: { archiving: true, agentOpen: true, down: D },
+    expect: { kind: "archiving", row: { state: "ready", error: null, waiting: null }, threads: "being archived", machine: "being archived", overview: "being archived", watcher: "archiving" } },
+  { name: "never started, waiting for a runner", thread: { workspaceState: "allocating" }, runtime: { waiting: W },
+    expect: { kind: "waiting", row: { state: "starting", error: null, waiting: W }, threads: `starting its machine, ${W}`, machine: `starting its machine, ${W}`,
+      overview: "waiting for a runner", watcher: { failure: W, waking: false, episode: null, retrying: true } } },
+  { name: "agent open, its machine asleep, a wake failed", thread: { vm: { suspension: { state: "suspended", at: 1 } } as Thread["vm"] }, runtime: { agentOpen: true, error: E },
+    expect: { kind: "failed", row: { state: "error", error: E, waiting: null }, threads: `its machine is suspended and waking it failed: ${E}`,
+      machine: `its machine is suspended and waking it failed: ${E}`, overview: "machine error", watcher: "stored" } },
+  { name: "a release that failed, known only from its row", thread: { workspaceState: "failed", workspaceError: R },
+    // was: the row said "ready" and `threads` "being archived": a restart lost the release's failure
     expect: { kind: "archiving", row: { state: "error", error: R, waiting: null }, threads: `being archived (the last try failed: ${R})`,
       machine: `being archived (the last try failed: ${R})`, overview: "being archived", watcher: "archiving" } },
 ];
@@ -100,7 +114,7 @@ for (const [n, item] of cases.entries()) {
   assert.equal(record.failure, item.expect.row.error, `${item.name}: history's failure is the row's error`);
   assert.equal((await reads.observe([t.id])).get(t.id)?.state, item.expect.overview, `${item.name}: the overview`);
   const watched = await reads.events(t.id).then(events => events === "stored" || events === "archiving" || events === null ? events : "live",
-    (error: unknown) => error instanceof ThreadFailure ? { failure: error.message, waking: error.waking, episode: error.episode } : String(error));
+    (error: unknown) => error instanceof ThreadFailure ? { failure: error.message, waking: error.waking, episode: error.episode, retrying: error.retrying } : String(error));
   assert.deepEqual(watched, item.expect.watcher, `${item.name}: the watcher`);
 }
 console.log(`ok: ${cases.length} kinds of thread: the API's row, threads, history, the overview and the watcher render one condition, in these words`);

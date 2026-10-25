@@ -144,14 +144,17 @@ archived ▸ archiving (an archive, or an unfinished release) ▸ down ▸ start
 ```
 
 A failure is the last try's in this process, or else the row's
-(`workspaceState` `failed`, which outlives a restart). `starting`, `failed`,
+(`workspaceState` `failed`, which outlives a restart), also while a thread
+is being archived. `down` says only why the agent is down: a failure or a
+wait of its machine changes nothing until cubed restarts, so the watcher
+reports it without "cubed keeps retrying". `starting`, `failed`,
 `waiting` and `ready` carry the machine's sleep. Each
 reader renders the condition with an exhaustive switch:
 
 | condition | API row (`threadRow`) | `threads`, `history` | overview | watcher, agent closed |
 |---|---|---|---|---|
 | archiving | `ready`, or `error` with its failure | being archived | being archived | `archiving` |
-| down | `error` | error: … | agent error | a failure |
+| down | `error` | error: … | agent error | a failure, not retried |
 | failed | `error` | error: …, or "waking it failed: …" | machine error | a failure |
 | starting | `starting`, or `error` after a failed try | starting its machine … | starting | a failure, if a try failed |
 | waiting | `starting` | starting its machine, … | waiting for a runner | a failure, unless it sleeps |
