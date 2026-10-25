@@ -1616,6 +1616,32 @@ header.sheet-bar {
   border: 0; border-left: 1px solid var(--line-2); border-radius: 0; background: none;
 }
 .conversation.sheet .report .message-label { margin-bottom: 0.3rem; font-size: 12.5px; letter-spacing: 0.01em; font-weight: 450; }
+/* a report folded to one line, as a tool line is: the thread's name, its
+   state in cube's words, the first words it said; opened, the report whole
+   under one hairline. A failure stands open, its state in error ink. */
+.conversation.sheet .conversation-message.report.report-line {
+  align-self: stretch; max-width: none; padding: 0; border: 0; background: none;
+}
+.report-line > summary {
+  display: flex; align-items: baseline; gap: 0.5rem; min-width: 0;
+  padding: 0.25rem 0; cursor: pointer; list-style: none; border-radius: var(--r-key);
+  color: var(--ink-3); font-size: 13px; line-height: 1.5;
+}
+.report-line > summary::-webkit-details-marker { display: none; }
+.report-line > summary:hover :is(.report-title, .report-summary) { color: var(--ink); }
+.report-title { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-weight: 600; }
+.report-line > summary .report-kind { flex: none; margin-left: 0; }
+.report-state { flex: none; white-space: nowrap; }
+.report-state.failure { color: var(--bad); }
+.report-summary { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* opened, the whole report follows: its first words need not stand twice */
+.report-line[open] > summary .report-summary { display: none; }
+.report-line[open] > summary .tool-chevron { transform: rotate(180deg); }
+.report-line > summary .tool-chevron { align-self: center; }
+.report-body { margin: 0.3rem 0 0.2rem; padding: 0.05rem 0 0.05rem 0.95rem; border-left: 1px solid var(--line-2); max-width: min(42rem, 92%); }
+.report-line.failed .report-body { border-left-color: var(--bad-line); }
+.report-body .message-label { margin-bottom: 0.3rem; font-size: 12.5px; letter-spacing: 0.01em; font-weight: 450; }
+@media (pointer: coarse) { .report-line > summary { min-height: 2.75rem; align-items: center; } }
 .report-name { color: var(--ink); font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
 a.report-name:hover { color: var(--signal); text-decoration: underline; text-underline-offset: 3px; }
 .report-kind { margin-left: 0.3em; color: var(--ink-3); }

@@ -637,8 +637,16 @@ The chat's page is the reading field (`--s4`) from edge to edge: the
 wordmark row (a key that opens the index; the auth chip only on failure),
 the conversation, the composer. User messages are soft `--s3` faces with the
 well radius, no border or shadow, right-aligned; replies are plain prose; a
-thread's report is its words under its name (linked to the thread while it
-is open) and `· report`, set off by one `--line-2` hairline. No message
+thread's report is **one folded line**, as a tool line is: the thread's
+name, `report`, its state in cube's words (`turn ended`, `stopped`, `failed`,
+`failed to start`, `machine failed to wake`; `lib/report-line.ts` reads it
+from cubed's own report forms, no model writes it) and its first words.
+The chat's own answer is what the reader reads. A press or enter opens it:
+its words under its name (linked to the thread while it is open) and
+`· report`, set off by one `--line-2` hairline; the reader's choice holds.
+A failed report stands open, its state in `--bad` ink (it folds when the
+reader folds it): a failure is never hidden by default. New reports come
+folded; the margin's way to a report opens it. No message
 carries a "you"/"agent" label; each keeps its accessible name. Tool lines
 are quiet: no face until opened. The chat's own tools speak in words —
 `started 3 threads · 1 not started`, `told <thread>`, `created <title> ·

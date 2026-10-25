@@ -4,6 +4,7 @@
   import { errorText, imageUrl, sendPrompt, stopThread, threadBase, threadEvents, uploadImage } from "../lib/api.ts";
   import { ACCEPT, MEDIA_LIMITS, pastedImages, prepareImage } from "../lib/images.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
+  import { reportLine } from "../lib/report-line.ts";
   import { keep, keptOf, listen, recover, type Pending } from "../lib/drafts.ts";
   import { echo, echoRows, unanswered, unlogged, type Echo } from "../lib/outbox.ts";
   import { keepRows, picturePath, toolOpen, transcriptRows, type ToolState, type TranscriptRow } from "../lib/transcript.ts";
@@ -16,7 +17,7 @@
   import ThinkingCube from "./ThinkingCube.svelte";
 
   let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread", images = null,
-    sheet = false, onRows, toolLine, reportLabel, after, margin }: {
+    sheet = false, onRows, toolLine, reportLabel, reportTitle, after, margin }: {
     threadId?: string;
     /** Messages may be sent while the agent works; they reach it between tool calls. */
     steer?: boolean;
@@ -43,6 +44,8 @@
     toolLine?: (row: Extract<TranscriptRow, { kind: "tool" }>) => string | null;
     /** A thread report's label, given its short id; default "thread <id>". */
     reportLabel?: Snippet<[string]>;
+    /** A thread report's name in plain words, for its folded line; default "thread <id>". */
+    reportTitle?: (from: string) => string;
     /** Drawn after a row, in the conversation's flow. */
     after?: Snippet<[TranscriptRow]>;
     /** Drawn beside the conversation's column, scrolling with it; rows carry `data-anchor` (`rowKey`). */
@@ -457,6 +460,12 @@
 
   // Strips the reader opened or closed stay that way while frames arrive.
   const chosen = new SvelteMap<string, boolean>();
+  /** A report stands folded (open if it failed) until the reader opens or folds it; that choice holds. */
+  const reportOpen = (id: string, failed: boolean) => chosen.get(`report:${id}`) ?? failed;
+  function onReportToggle(event: Event, id: string, failed: boolean): void {
+    const open = (event.currentTarget as HTMLDetailsElement).open;
+    if (open !== reportOpen(id, failed)) chosen.set(`report:${id}`, open);
+  }
   function onToolToggle(event: Event, row: Extract<TranscriptRow, { kind: "tool" }>): void {
     // The element, not ToggleEvent.newState: older Safari sends a plain Event.
     const open = (event.currentTarget as HTMLDetailsElement).open;
@@ -506,11 +515,24 @@
               {#if row.images}{@render messageImages(row.images, row.summary || row.name)}{/if}
             </details>
           {:else if row.kind === "user" && row.from}
-            <article class="conversation-message report" aria-label="thread report" data-anchor={rowKey(row)} tabindex="-1">
-              <span class="message-label">{#if reportLabel}{@render reportLabel(row.from)}{:else}thread {row.from}{/if}</span>
-              <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text and allows only http(s)/mailto links -->
-              <div class="message-copy markdown">{@html renderMarkdown(row.text)}</div>
-            </article>
+            <!-- A report is one folded line: the chat's own answer is what is read.
+                 A failure stands open; opened, the report is whole, as before. -->
+            {@const line = reportLine(row.text)}
+            {@const title = reportTitle?.(row.from) ?? `thread ${row.from}`}
+            <details class="conversation-message report report-line" class:failed={line.failed} data-anchor={rowKey(row)}
+              open={reportOpen(row.id, line.failed)} ontoggle={(event) => onReportToggle(event, row.id, line.failed)}>
+              <summary aria-label={`report from ${title}${line.state ? `, ${line.state}` : ""}${line.summary ? `: ${line.summary}` : ""}`}>
+                <span class="report-title">{title}</span><span class="report-kind">report</span>
+                {#if line.state}<span class="report-state" class:failure={line.failed}>{line.state}</span>{/if}
+                {#if line.summary}<span class="report-summary">{line.summary}</span>{/if}
+                <span class="tool-chevron"><Icon name="chevron" size={12} /></span>
+              </summary>
+              <div class="report-body">
+                <span class="message-label">{#if reportLabel}{@render reportLabel(row.from)}{:else}thread {row.from}{/if}</span>
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text and allows only http(s)/mailto links -->
+                <div class="message-copy markdown">{@html renderMarkdown(row.text)}</div>
+              </div>
+            </details>
           {:else if row.kind === "user"}
             <article class="conversation-message user" class:sending={row.sending} aria-label="user message" data-anchor={rowKey(row)}>
               {#if !sheet}<span class="message-label">you{#if row.sending}<span class="message-sending"> · sending</span>{/if}</span>
