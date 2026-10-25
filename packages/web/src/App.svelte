@@ -132,13 +132,20 @@
    * from a control the user is still in (the project filter select
    * navigates on change), and never from the terminal, which claims focus
    * itself on its first connect. */
-  async function focusHeading(): Promise<void> {
+  // A newer navigation ends an older one's wait: a panel closed within the
+  // 250ms of its opening must not get the chat's heading focused after it.
+  let navigation = 0;
+  async function focusHeading(fromPanel = false): Promise<void> {
+    const mine = ++navigation;
     if (threadId) return;
     for (const wait of [0, 250]) {
       if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
       else await tick();
+      if (mine !== navigation) return;
       const active = document.activeElement;
-      if (active && active !== document.body && !(active instanceof HTMLAnchorElement)) return;
+      // Back from the panel, the dialog has handed focus to what opened it
+      // (often a link in the chat): it stays there.
+      if (active && active !== document.body && (fromPanel || !(active instanceof HTMLAnchorElement))) return;
       // the panel's page when one is open: the chat underneath has its own heading
       const heading = document.querySelector<HTMLElement>(".page-panel main h1") ?? (chatRoute ? document.querySelector<HTMLElement>("main h1") : null);
       if (!heading) continue;
@@ -149,9 +156,10 @@
   }
 
   function onHashChange(): void {
+    const fromPanel = !chatRoute;
     hash = settle();
     void refresh();
-    void focusHeading();
+    void focusHeading(fromPanel && chatRoute);
   }
 
   // Keyboard: `n` new thread, `g c` chat, `g t` threads, `g p` projects — only while

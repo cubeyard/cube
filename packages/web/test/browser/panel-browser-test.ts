@@ -8,7 +8,8 @@
  * beside it) and phone (the whole screen). Needs a built UI (pnpm build)
  * and Playwright's Chromium. */
 import assert from "node:assert/strict";
-import { chromium, type Page } from "playwright";
+import fs from "node:fs";
+import { chromium, webkit, type Browser, type Page } from "playwright";
 import { artifacts, bodies, chatEvents, overview, threads } from "./chat-sheet-data.ts";
 import { ScriptedHost } from "./scripted-host.ts";
 
@@ -21,15 +22,29 @@ host.threads = threads.slice(1);
 host.artifacts = artifacts;
 host.bodies = bodies;
 host.overview = overview();
-const browser = await chromium.launch();
 const errors: string[] = [];
 const panel = (page: Page) => page.locator("dialog.page-panel");
 const chatDraft = (page: Page) => page.locator(".chat-sheet .composer textarea");
 const inPanel = (page: Page) => page.evaluate(() => !!document.activeElement?.closest("dialog.page-panel"));
+/** What has focus, in words: its text and whether it is the element marked `data-opener`. */
+const focused = (page: Page) => page.evaluate(() => ({ opener: document.activeElement?.hasAttribute("data-opener") ?? false, what: `${document.activeElement?.tagName} ${document.activeElement?.textContent?.trim().slice(0, 30)}` }));
+/** Opens a place from a link in the chat by the keyboard, as a reader does, and marks the link. */
+async function openFrom(page: Page, link: ReturnType<Page["locator"]>): Promise<void> {
+  await link.evaluate(element => element.setAttribute("data-opener", ""));
+  await link.focus();
+  await page.keyboard.press("Enter");
+  await panel(page).locator("main h1, .thread-strip").first().waitFor();
+}
+// WebKit (Safari's engine) too, where Playwright has it.
+const engines: Array<[string, Browser]> = [["chromium", await chromium.launch()]];
+if (fs.existsSync(webkit.executablePath())) engines.push(["webkit", await webkit.launch()]);
+else console.log("SKIP: webkit (install it: pnpm --filter @cube/web exec playwright install webkit)");
 
 try {
-  for (const size of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844, touch: true }]) {
-    const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, isMobile: !!size.touch, hasTouch: !!size.touch });
+  for (const [engine, browser] of engines) for (const base of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844, touch: true }]) {
+    const size = { ...base, name: `${engine} ${base.name}` };
+    // WebKit on Linux has no mobile emulation; it still has touch.
+    const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, isMobile: !!size.touch && engine === "chromium", hasTouch: !!size.touch });
     const page = await context.newPage();
     page.on("pageerror", error => errors.push(String(error)));
     await page.goto(`${host.url}/#/chat`);
@@ -62,6 +77,38 @@ try {
     assert.equal(await page.evaluate(() => location.hash), "#/chat");
     assert.equal(await chatDraft(page).inputValue(), "a draft the chat keeps", `${size.name}: the draft is kept`);
     assert.equal(await scroller.evaluate(element => element.scrollTop), scrolled, `${size.name}: the scroll is kept`);
+
+    // focus goes back to the link that opened the place: after escape, and after the close key
+    const link = page.locator(".chat-sheet .markdown a", { hasText: "composer room: more space on the phone" });
+    for (const how of ["escape", "close key"] as const) {
+      await openFrom(page, link);
+      if (how === "escape") await page.keyboard.press("Escape");
+      else await panel(page).locator(".panel-close").first().click();
+      await panel(page).waitFor({ state: "detached" });
+      await page.waitForTimeout(350);
+      const now = await focused(page);
+      assert.ok(now.opener, `${size.name}: after the ${how}, focus is back on the link that opened the place, not ${now.what}`);
+    }
+
+    if (!size.touch) {
+      // a selection dragged out of the panel onto the chat beside it keeps the panel open
+      await openFrom(page, link);
+      const text = panel(page).locator(".artifact-body p").first();
+      await text.waitFor();
+      const from = (await text.boundingBox())!;
+      await page.mouse.move(from.x + 10, from.y + from.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(40, from.y + from.height / 2, { steps: 8 });
+      await page.mouse.up();
+      await page.waitForTimeout(200);
+      assert.equal(await panel(page).count(), 1, `${size.name}: a selection dragged onto the backdrop does not close the panel`);
+      assert.ok((await page.evaluate(() => String(getSelection()))).length > 0, `${size.name}: the selection is kept`);
+      // a press that begins and ends on the backdrop still closes it, focus back on the link
+      await page.mouse.click(40, 400);
+      await panel(page).waitFor({ state: "detached" });
+      await page.waitForTimeout(350);
+      assert.ok((await focused(page)).opener, `${size.name}: after a press on the backdrop, focus is back on the link`);
+    }
 
     // a thread from the index: the index goes, the thread opens; escape in its composer with text keeps the panel
     await page.locator(".sheet-bar .name-key").click();
@@ -97,7 +144,7 @@ try {
   assert.deepEqual(errors, [], "no script errors");
   console.log("panel browser: ok");
 } finally {
-  await browser.close();
+  for (const [, browser] of engines) await browser.close();
   await host.close();
 }
 process.exit(0);

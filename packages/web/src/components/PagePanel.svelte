@@ -14,11 +14,14 @@
   // modal panel: a sheet from the right on a wide screen, the whole screen
   // on a phone. Its address is the place's own (deep links and back work);
   // closing it goes to the chat. Escape closes it unless a field has the
-  // text (a draft is never lost to Escape); a press on the chat beside it
+  // focus (a draft is never lost to Escape); a press on the chat beside it
   // closes it too. Focus goes back to where it was in the chat.
   let { label, children }: { label: string; children: Snippet } = $props();
 
   let dialog = $state<HTMLDialogElement>();
+  // A press closes it only if it began on the backdrop too: a selection
+  // dragged out of the panel ends there without meaning to leave.
+  let downOnBackdrop = false;
   const close = () => { location.hash = "#/chat"; };
   setContext(KEY, { close });
 
@@ -30,15 +33,22 @@
   }
 
   onMount(() => {
+    // What had focus in the chat (a link, an index row's key, the composer):
+    // it has it again once the panel goes. The dialog may already be out of
+    // the page when this runs, so the browser's own return cannot be relied on.
+    const opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
     dialog?.showModal();
-    // Closed before it leaves the page, so the browser hands focus back to the chat.
-    return () => { if (dialog?.open) dialog.close(); };
+    return () => {
+      if (dialog?.open) dialog.close();
+      if (opener?.isConnected && !opener.closest("dialog:not([open])")) opener.focus({ preventScroll: true });
+    };
   });
 </script>
 
 <!-- a press on the backdrop (the chat beside the panel) closes it; escape and the close key do too -->
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
 <dialog class="page-panel" bind:this={dialog} aria-label={label} oncancel={onCancel}
-  onclick={(event) => { if (event.target === dialog) close(); }}>
+  onpointerdown={(event) => { downOnBackdrop = event.target === dialog; }}
+  onclick={(event) => { if (downOnBackdrop && event.target === dialog) close(); downOnBackdrop = false; }}>
   {@render children()}
 </dialog>
