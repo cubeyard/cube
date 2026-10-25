@@ -2,8 +2,12 @@
   import AuthBadge from "./AuthBadge.svelte";
   import Icon from "./Icon.svelte";
   import Wordmark from "./Wordmark.svelte";
+  import { pagePanel } from "./PagePanel.svelte";
 
-  let { section }: { section: "chat" | "threads" | "artifacts" | "projects" | "settings" } = $props();
+  // `closeKey`: in the panel over the chat, the row ends with the way back
+  // to it (a thread's sidebar leaves it to the thread's own strip).
+  let { section, closeKey = true }: { section: "chat" | "threads" | "artifacts" | "projects" | "settings"; closeKey?: boolean } = $props();
+  const panel = pagePanel();
 
   // On a phone the destinations fold behind one key that names the current
   // one; the menu closes on a choice, Escape or a press outside it, and
@@ -35,9 +39,13 @@
 
 <svelte:window onkeydown={onWindowKeydown} onpointerdown={onWindowPointerdown} onhashchange={() => closeMenu()} />
 
-<!-- Tab out of the header closes the menu, as a press outside does -->
+<!-- Tab out of the menu closes it, as a press outside does (the menu key and
+     the menu itself keep it; the panel's close key after them does not) -->
 <header class="main-header" bind:this={header} class:menu-open={menuOpen}
-  onfocusout={(event) => { if (!header.contains(event.relatedTarget as Node | null)) closeMenu(); }}>
+  onfocusout={(event) => {
+    const next = event.relatedTarget as Node | null;
+    if (!next || !(menuKey?.contains(next) || header.querySelector("nav")?.contains(next))) closeMenu();
+  }}>
   <Wordmark href="#/chat" />
   <button class="nav-menu-key" bind:this={menuKey} aria-expanded={menuOpen} aria-controls="main-nav" onclick={() => (menuOpen = !menuOpen)}>
     <span class="sr-only">menu, current page:</span>{section}<Icon name="chevron" size={12} />
@@ -53,4 +61,7 @@
   </nav>
   <span class="spacer"></span>
   <AuthBadge />
+  {#if panel && closeKey}
+    <button class="key icon panel-close" type="button" aria-label="close, back to the chat" title="back to the chat · esc" onclick={panel.close}><Icon name="close" size={14} /></button>
+  {/if}
 </header>

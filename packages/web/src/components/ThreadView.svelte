@@ -23,6 +23,7 @@
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
   import StartupPanel from "./StartupPanel.svelte";
+  import { pagePanel } from "./PagePanel.svelte";
 
   let { threadId, threads, command = null, onConsume = () => {}, onNewThread }: {
     threadId: string;
@@ -155,6 +156,7 @@
   // The view is keyed on threadId: a delete or a new thread navigates
   // away mid-request, and the completion must then touch nothing here.
   let disposed = false;
+  const panel = pagePanel();
 
   onMount(() => {
     void loadModels();
@@ -298,6 +300,9 @@
           {#if deleting}archiving…{:else if armed.is("thread")}archive?{:else}<Icon name="trash" size={13} />{/if}
         </button>
       </span>
+      {#if panel}
+        <button class="key icon panel-close strip-close" type="button" aria-label="close, back to the chat" title="back to the chat · esc" onclick={panel.close}><Icon name="close" size={14} /></button>
+      {/if}
     {/if}
   </section>
 {/snippet}
@@ -312,7 +317,7 @@
   {/if}
 
   <aside id="thread-sidebar" class="thread-sidebar" class:open={threadSidebarOpen} aria-label="threads">
-    <div class="thread-navigation"><Header section="threads" /></div>
+    <div class="thread-navigation"><Header section="threads" closeKey={false} /></div>
     <div class="sidebar-actions">
       <button class="sidebar-create" onclick={() => onNewThread()} aria-label="new thread" title="new thread · press n"><Icon name="plus" size={14} />thread</button>
       <button class="key sidebar-close" bind:this={sidebarClose} onclick={closeSidebar}>close</button>

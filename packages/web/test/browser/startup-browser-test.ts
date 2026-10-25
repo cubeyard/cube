@@ -14,6 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { chromium, webkit, type Browser, type Page } from "playwright";
 import { STARTUP_PRE_SETUP, startStartupHost } from "../../../server/test/startup-fixture.ts";
+import { ACTIVE } from "./monitor.ts";
 
 const shots = process.env.CUBE_SCREENSHOTS ?? null;
 if (shots) fs.mkdirSync(shots, { recursive: true });
@@ -79,12 +80,12 @@ try {
     await page.waitForTimeout(3500);
     assert.equal(await first.getAttribute("open"), "", "and the next poll keeps it open");
     // The composer stays on screen under the panel.
-    assert.ok(await page.locator(".composer textarea").isVisible(), "the composer stays reachable");
+    assert.ok(await page.locator(`${ACTIVE} .composer textarea`).isVisible(), "the composer stays reachable");
 
     // Ready: the steps fold away; the machine label opens them again.
     fs.writeFileSync(path.join(guest(), "go"), "");
     await panel.waitFor({ state: "detached", timeout: 20_000 });
-    if (layout === "phone") await page.locator(".strip-details-key").click();
+    if (layout === "phone") await page.locator(`${ACTIVE} .strip-details-key`).click();
     const label = page.locator("button.strip-machine");
     await label.waitFor();
     // (A local guest records no disk preparation, so the label names the steps.)
@@ -99,17 +100,17 @@ try {
 
     // P7-5: the machine's sleep in the strip, in print on a phone with the
     // details closed (U-207-1), and what the composer says while a wake waits.
-    if (layout === "phone") await page.locator(".strip-details-key").click();
+    if (layout === "phone") await page.locator(`${ACTIVE} .strip-details-key`).click();
     const strip = page.locator("section.thread-strip");
     const state = strip.locator(".strip-state:not(.strip-reason, .strip-notice)");
-    const composer = page.locator(".composer textarea");
+    const composer = page.locator(`${ACTIVE} .composer textarea`);
     const seen = async (text: string) => {
       await state.filter({ hasText: text }).waitFor({ timeout: 15_000 });
       assert.ok(await state.filter({ hasText: text }).isVisible(), `"${text}" is in print (${size}, details closed)`);
     };
     host.sleep(thread, { type: "suspended", at: Date.now() });
     await seen("suspended");
-    assert.equal(await page.locator(".lamp, .blink").count(), 0, "no lamp: the state is in words");
+    assert.equal(await page.locator(`${ACTIVE} .lamp, .blink`).count(), 0, "no lamp: the state is in words");
     assert.equal(await composer.isEnabled(), true);
     assert.equal(await composer.getAttribute("placeholder"), "message this thread", "a message wakes it");
     await shot(page, `${size}-5-suspended`);
@@ -121,10 +122,10 @@ try {
     assert.equal(await strip.locator(".strip-reason").isVisible(), false, "the full reason is the label's title, or a line of the details");
     await shot(page, `${size}-6-waiting`);
     if (layout === "phone") {
-      await page.locator(".strip-details-key").click();
+      await page.locator(`${ACTIVE} .strip-details-key`).click();
       assert.equal(await strip.locator(".strip-reason").innerText(), waiting, "the details say why in full");
       await shot(page, `${size}-7-waiting-details`);
-      await page.locator(".strip-details-key").click();
+      await page.locator(`${ACTIVE} .strip-details-key`).click();
     }
     const notice = "restarted after an update; running commands were interrupted";
     host.sleep(thread, { type: "resumed", notice: { text: notice, at: Date.now() } });
@@ -146,7 +147,7 @@ try {
   assert.equal(await memory.locator("option").first().innerText(), "cube default · 4 GB");
   await memory.selectOption("8192");
   await page.locator("button.key.primary", { hasText: "save changes" }).click();
-  await page.locator(".key-reason", { hasText: "saved" }).waitFor();
+  await page.locator(`${ACTIVE} .key-reason`, { hasText: "saved" }).waitFor();
   assert.deepEqual(host.project().machine, { memoryMiB: 8192 });
   assert.equal(host.project().hooks!.preSetup, STARTUP_PRE_SETUP, "the hooks stay as they were");
   await page.locator("#machine-size").scrollIntoViewIfNeeded();

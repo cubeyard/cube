@@ -1553,6 +1553,33 @@ select.compose-input {
   .thread-strip:has(> .strip-details-key) > .key-bank { margin-left: auto; }
 }
 
+/* ============================================================ the panel
+   Every place but the chat opens over it: a sheet from the right on a wide
+   screen with the chat showing beside it under a putty wash, the whole
+   screen on a narrow one. The one floating surface besides the index and
+   the menu; its pages keep their own rows and scroll inside it. */
+.page-panel {
+  position: fixed; inset: 0 0 0 auto; margin: 0; padding: 0;
+  width: min(66rem, calc(100vw - 8rem)); max-width: none;
+  height: var(--app-height, 100dvh); max-height: none;
+  display: none; flex-direction: column; overflow: hidden;
+  color: var(--ink); background: var(--s4);
+  border: 0; border-left: 1px solid var(--line-2); box-shadow: var(--shadow-float);
+}
+.page-panel[open] { display: flex; animation: panel-in 160ms ease-out; }
+@keyframes panel-in { from { opacity: 0; } }
+.page-panel::backdrop { background: color-mix(in srgb, var(--s0) 55%, transparent); }
+.page-panel:focus { outline: none; }
+.page-panel > main { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.panel-close { flex: none; }
+.thread-strip .panel-close.key.icon { width: var(--rail-key); height: var(--rail-key); }
+.panel-close.key { border-color: transparent; background: transparent; box-shadow: none; color: var(--ink-3); }
+.panel-close.key:hover:not(:disabled) { background: var(--s3); color: var(--ink); }
+@media (max-width: 52rem) {
+  .page-panel { width: 100vw; border-left: 0; box-shadow: none; padding: env(safe-area-inset-top) 0 0; }
+  .thread-strip > .strip-close { order: 1; }
+}
+
 /* ============================================================ the sheet
    OptChat, cube's home (A+ · ark med marg): one quiet sheet on the reading
    field. No deck, seam, rail or panel: the wordmark (the way to the index)

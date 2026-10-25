@@ -40,6 +40,7 @@ export CUBED_CLAUDE=off
 node packages/web/test/browser/chat-browser-test.ts
 node packages/web/test/browser/chat-sheet-browser-test.ts
 node packages/web/test/browser/loading-browser-test.ts
+node packages/web/test/browser/panel-browser-test.ts
 node packages/web/test/browser/long-chat-browser-test.ts
 node packages/web/test/browser/mobile-browser-test.ts
 node packages/web/test/browser/cubed-browser-test.ts

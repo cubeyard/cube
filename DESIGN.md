@@ -697,6 +697,24 @@ visual viewport's, followed as it changes, so while the user types into the
 filter the on-screen keyboard covers neither the filter nor the results
 (iOS keeps the layout viewport whole under its keyboard).
 
+### The panel (every place over the chat)
+The chat is home and stays mounted. Every other place (threads, a thread,
+artifacts, projects, settings) opens over it in one modal panel
+(`PagePanel.svelte`, a `<dialog>` shown modal): a sheet from the right on a
+wide screen (up to 66rem, the chat showing beside it under a putty wash),
+the whole screen at 52rem and below, its height the visual viewport's under
+an iOS keyboard. The place keeps its own address (deep links, back and
+forward work) and its own header row, which ends with a close key (a
+thread's in its strip); the wordmark and `chat` also close it. Escape closes
+it unless a field holds the focus (a draft is never lost to escape); a
+press on the chat beside it closes it. Closing goes to `#/chat` with the
+chat exactly as it was (draft, scroll); focus goes back where it was.
+While a place is open, the chat's own keys (`/`, ctrl/⌘ k) are off; a place
+opened from the chat's index closes the index. One panel at a time: a
+place opened from another replaces it; only a true dialog of the place (new
+thread, an action's confirmation) stacks above it. This is a bounded step;
+the structure around the chat may change again.
+
 ### A thread (the sheet beside its sidebar)
 A thread's page is the chat's sheet with a sidebar: the sidebar flush on
 `--s4` with one hairline beside it (global navigation at its top, projects

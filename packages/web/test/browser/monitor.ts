@@ -5,6 +5,9 @@
 import assert from "node:assert/strict";
 import type { Page } from "playwright";
 
+/** The place the reader is in: the panel open over the chat, else the chat. */
+export const ACTIVE = ":is(dialog.page-panel[open], #app:not(:has(> dialog.page-panel[open])))";
+
 export type Seen = {
   at: number;
   /** The user's messages in the transcript, in order; `…` marks one still sending. */
@@ -28,19 +31,21 @@ function install(): void {
   w.__seen = [];
   let last = "";
   const record = (mark?: string) => {
-    const transcript = document.querySelector(".transcript");
-    const users = [...document.querySelectorAll(".transcript .conversation-message.user")]
+    // the place open over the chat when there is one, else the chat itself
+    const view: ParentNode = document.querySelector("dialog.page-panel[open]") ?? document;
+    const transcript = view.querySelector(".transcript");
+    const users = [...view.querySelectorAll(".transcript .conversation-message.user")]
       .map(article => `${article.classList.contains("sending") ? "…" : ""}${article.querySelector(".message-copy")?.textContent ?? ""}`);
-    const agent = [...document.querySelectorAll(".transcript .conversation-message.assistant .message-copy, .transcript .tool-strip summary")]
+    const agent = [...view.querySelectorAll(".transcript .conversation-message.assistant .message-copy, .transcript .tool-strip summary")]
       .map(node => (node.textContent ?? "").trim());
     const seen: Seen = {
       at: Math.round(performance.now()),
       users, agent,
-      draft: (document.querySelector(".composer textarea") as HTMLTextAreaElement | null)?.value ?? "",
-      busy: document.querySelector(".composer")?.getAttribute("aria-busy") === "true",
-      working: !!document.querySelector(".transcript .working-line"),
-      error: document.querySelector(".conversation-error")?.textContent ?? null,
-      reconnecting: !!document.querySelector(".conversation-note"),
+      draft: (view.querySelector(".composer textarea") as HTMLTextAreaElement | null)?.value ?? "",
+      busy: view.querySelector(".composer")?.getAttribute("aria-busy") === "true",
+      working: !!view.querySelector(".transcript .working-line"),
+      error: view.querySelector(".conversation-error")?.textContent ?? null,
+      reconnecting: !!view.querySelector(".conversation-note"),
       gap: transcript ? Math.round(transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight) : 0,
       ...mark ? { mark } : {},
     };

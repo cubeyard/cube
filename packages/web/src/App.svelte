@@ -13,6 +13,7 @@
   import ChatMemorySettings from "./components/ChatMemorySettings.svelte";
   import SettingsLayout, { type SettingsPage } from "./components/SettingsLayout.svelte";
   import Wordmark from "./components/Wordmark.svelte";
+  import PagePanel from "./components/PagePanel.svelte";
   import NewThreadDialog from "./components/NewThreadDialog.svelte";
   import SkillSettings from "./components/SkillSettings.svelte";
   import { errorText, fetchState, fetchThreads, isUnreachable } from "./lib/api.ts";
@@ -138,7 +139,8 @@
       else await tick();
       const active = document.activeElement;
       if (active && active !== document.body && !(active instanceof HTMLAnchorElement)) return;
-      const heading = document.querySelector<HTMLElement>("main h1");
+      // the panel's page when one is open: the chat underneath has its own heading
+      const heading = document.querySelector<HTMLElement>(".page-panel main h1") ?? (chatRoute ? document.querySelector<HTMLElement>("main h1") : null);
       if (!heading) continue;
       heading.tabIndex = -1;
       heading.focus({ preventScroll: true });
@@ -158,7 +160,7 @@
   function onKeydown(event: KeyboardEvent): void {
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
     const target = event.target as HTMLElement | null;
-    if (target?.closest?.("dialog, input, textarea, select, [contenteditable]")) return;
+    if (target?.closest?.("dialog:not(.page-panel), input, textarea, select, [contenteditable]")) return;
     const now = Date.now();
     const chord = pendingG && now - pendingG < 1500;
     pendingG = 0;
@@ -181,6 +183,10 @@
       if (!threadId && !(projectId && projectId !== "new")) location.hash = "#/threads";
     }
   }
+
+  // What the panel over the chat holds, for its accessible name.
+  const panelLabel = $derived(threadId ? "thread" : artifactId ? "artifact" : artifactsRoute ? "artifacts" : projectId ? "project"
+    : projectsRoute ? "projects" : settingsPage ? "settings" : "threads");
 
   // The tab title names the place, newest first: "<thread> · cube".
   // Project routes set their own once the project's name is known.
@@ -212,12 +218,10 @@
   </main>
 {:else if !daemon}
   <p class="loading" role="status">loading…</p>
-{:else if settingsPage}
+{:else if settingsPage && !daemon.onboardingComplete}
+  <!-- before setup ends, settings are a page of their own: there is no chat yet -->
   <SettingsLayout page={settingsPage}>
-    {#if settingsPage === "providers"}<ModelProviders />
-    {:else if settingsPage === "memory"}<ChatMemorySettings />
-    {:else if settingsPage === "skills"}<SkillSettings />
-    {:else}<SystemSettings />{/if}
+    {@render settings(settingsPage)}
   </SettingsLayout>
 {:else if !daemon.onboardingComplete}
   <Onboarding onComplete={() => {
@@ -230,40 +234,57 @@
   {#if offline}
     <div class="conn-strip" role="status">not connected to the host — retrying</div>
   {/if}
-  {#if chatRoute}
-    <ChatView {threads} {threadsLoaded} />
-  {:else if artifactId}
-    {#key artifactId}
-      <ArtifactView {artifactId} revision={artifactRevision} />
-    {/key}
-  {:else if artifactsRoute}
-    <ArtifactList />
-  {:else if threadId && threadsLoaded}
-    {#key threadId}
-      <!-- The id as a plain value: the view is made again for another id, and
-           its signals read from it otherwise outlived it (2 800 nodes a visit). -->
-      <ThreadView threadId={untrack(() => threadId!)} threads={activeThreads} {command} onConsume={consume} {onNewThread} />
-    {/key}
-  {:else if threadId}
-    <p class="loading" role="status">loading…</p>
-  {:else if projectId}
-    {#key projectId}
-      <ProjectView {projectId} githubLogin={/^#\/projects\/[^/?]+\/github(?:[?]|$)/.test(hash)} {command} onConsume={consume} {onNewThread} />
-    {/key}
-  {:else if projectsRoute}
-    <ProjectList />
-  {:else if threadsLoaded}
-    <ThreadList
-      threads={activeThreads}
-      initialProjectId={projectFilter}
-      onThreadsChanged={refresh}
-      notice={listNotice}
-      onDismissNotice={() => (listNotice = null)}
-      {command}
-      onConsume={consume}
-      {onNewThread}
-    />
-  {:else}
-    <p class="loading" role="status">loading…</p>
+  <!-- The chat is home and never leaves: every other place opens over it in
+       one panel, so the chat, its scroll and its draft are there when it closes. -->
+  <ChatView {threads} {threadsLoaded} />
+  {#if !chatRoute}
+    <PagePanel label={panelLabel}>
+      {#if settingsPage}
+        <SettingsLayout page={settingsPage}>
+          {@render settings(settingsPage)}
+        </SettingsLayout>
+      {:else if artifactId}
+        {#key artifactId}
+          <ArtifactView {artifactId} revision={artifactRevision} />
+        {/key}
+      {:else if artifactsRoute}
+        <ArtifactList />
+      {:else if threadId && threadsLoaded}
+        {#key threadId}
+          <!-- The id as a plain value: the view is made again for another id, and
+               its signals read from it otherwise outlived it (2 800 nodes a visit). -->
+          <ThreadView threadId={untrack(() => threadId!)} threads={activeThreads} {command} onConsume={consume} {onNewThread} />
+        {/key}
+      {:else if threadId}
+        <p class="loading" role="status">loading…</p>
+      {:else if projectId}
+        {#key projectId}
+          <ProjectView {projectId} githubLogin={/^#\/projects\/[^/?]+\/github(?:[?]|$)/.test(hash)} {command} onConsume={consume} {onNewThread} />
+        {/key}
+      {:else if projectsRoute}
+        <ProjectList />
+      {:else if threadsLoaded}
+        <ThreadList
+          threads={activeThreads}
+          initialProjectId={projectFilter}
+          onThreadsChanged={refresh}
+          notice={listNotice}
+          onDismissNotice={() => (listNotice = null)}
+          {command}
+          onConsume={consume}
+          {onNewThread}
+        />
+      {:else}
+        <p class="loading" role="status">loading…</p>
+      {/if}
+    </PagePanel>
   {/if}
 {/if}
+
+{#snippet settings(page: SettingsPage)}
+  {#if page === "providers"}<ModelProviders />
+  {:else if page === "memory"}<ChatMemorySettings />
+  {:else if page === "skills"}<SkillSettings />
+  {:else}<SystemSettings />{/if}
+{/snippet}
+

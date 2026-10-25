@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { chromium, webkit, type Browser, type BrowserType, type Page } from "playwright";
 import type { ThreadEvent, ThreadSummary, ThreadTranscript } from "../../src/lib/types.ts";
-import { assertSend, monitor } from "./monitor.ts";
+import { assertSend, monitor, ACTIVE } from "./monitor.ts";
 import { gate, ScriptedHost } from "./scripted-host.ts";
 
 const TURNS = 150;
@@ -44,8 +44,8 @@ async function scenario(browser: Browser, engine: string, name: string, viewport
   try {
     const watch = await monitor(page);
     await page.goto(`${host.url}/#/${route}`);
-    await page.locator(".composer textarea").waitFor();
-    await page.getByText(`answer ${pad(TURNS - 1)}`).waitFor();
+    await page.locator(`${ACTIVE} .composer textarea`).waitFor();
+    await page.locator(ACTIVE).getByText(`answer ${pad(TURNS - 1)}`).waitFor();
     await run(page, host, watch);
     assert.deepEqual(errors, [], "no script errors");
     console.log(`ok - ${label}`);
@@ -59,7 +59,7 @@ async function scenario(browser: Browser, engine: string, name: string, viewport
 }
 
 /** The user's messages shown, in order. */
-const users = (page: Page) => page.locator(".transcript .conversation-message.user .message-copy").allTextContents();
+const users = (page: Page) => page.locator(`${ACTIVE} .transcript .conversation-message.user .message-copy`).allTextContents();
 /** Every message shows once. */
 async function assertOnce(page: Page): Promise<string[]> {
   const shown = await users(page);
@@ -67,8 +67,8 @@ async function assertOnce(page: Page): Promise<string[]> {
   return shown;
 }
 const settle = (page: Page) => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-const toTop = (page: Page) => page.locator(".transcript").evaluate(element => { element.scrollTop = 0; });
-const top = (page: Page, text: string) => page.getByText(text, { exact: true }).evaluate(element => element.getBoundingClientRect().top);
+const toTop = (page: Page) => page.locator(`${ACTIVE} .transcript`).evaluate(element => { element.scrollTop = 0; });
+const top = (page: Page, text: string) => page.locator(ACTIVE).getByText(text, { exact: true }).evaluate(element => element.getBoundingClientRect().top);
 const olderRequests = (host: ScriptedHost) => host.queries.filter(query => query.includes("before="));
 const until = async (check: () => boolean | Promise<boolean>, what: string) => {
   const deadline = Date.now() + 10_000;
@@ -88,8 +88,8 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       const shown = await assertOnce(page);
       assert.equal(shown.at(-1), `turn ${pad(TURNS - 1)}`);
       assert.ok(shown.length < 40, `only the newest turns: ${shown.length}`);
-      await page.locator(".transcript-earlier button", { hasText: "show earlier messages" }).waitFor();
-      const gap = await page.locator(".transcript").evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight);
+      await page.locator(`${ACTIVE} .transcript-earlier button`, { hasText: "show earlier messages" }).waitFor();
+      const gap = await page.locator(`${ACTIVE} .transcript`).evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight);
       assert.ok(gap < 4, `the view is at the newest turn: ${gap}`);
     });
 
@@ -103,7 +103,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
         const asked = olderRequests(host).length;
         await toTop(page);
         await until(() => olderRequests(host).length > asked, "a request for older messages");
-        await page.locator(".transcript-earlier [role=status]", { hasText: "reading earlier messages" }).waitFor();
+        await page.locator(`${ACTIVE} .transcript-earlier [role=status]`, { hasText: "reading earlier messages" }).waitFor();
         await settle(page);
         const before = await top(page, anchor);
         held.open();
@@ -117,7 +117,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       }
       held.open();
       assert.equal(shown.length, TURNS, "every turn shows once");
-      assert.equal(await page.locator(".transcript-earlier").count(), 0, "nothing earlier to read");
+      assert.equal(await page.locator(`${ACTIVE} .transcript-earlier`).count(), 0, "nothing earlier to read");
       const pages = olderRequests(host);
       assert.ok(pages.every(query => /before=\d+&limit=120$/.test(query)), `pages are asked before the first shown: ${pages.join(", ")}`);
     });
@@ -133,17 +133,17 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     };
     await toTop(page);
     await until(() => olderRequests(host).length === 1, "a request for older messages");
-    await page.locator(".composer textarea").fill("hello while it reads");
+    await page.locator(`${ACTIVE} .composer textarea`).fill("hello while it reads");
     await watch.mark("send");
-    await page.locator(".composer textarea").press("Enter");
-    await page.getByText("hello while it reads").waitFor();
+    await page.locator(`${ACTIVE} .composer textarea`).press("Enter");
+    await page.locator(ACTIVE).getByText("hello while it reads").waitFor();
     held.open();
-    await page.getByText(`turn ${pad(TURNS - 31)}`, { exact: true }).waitFor();
+    await page.locator(ACTIVE).getByText(`turn ${pad(TURNS - 31)}`, { exact: true }).waitFor();
     const events = host.transcript.events.filter(event => !event.id.startsWith("pending."));
     host.set([...events, { type: "user-message", id: "2001.0", text: "hello while it reads" }, { type: "assistant-text", id: "2002.0.0", text: "read you", reasoning: false, final: true }], { state: "working", run: "r1" });
     logged.open();
     host.set(host.transcript.events, { state: "completed", run: "r1" });
-    await page.getByText("read you").waitFor();
+    await page.locator(ACTIVE).getByText("read you").waitFor();
     await settle(page);
     assertSend(await watch.since("send"), "hello while it reads");
     await assertOnce(page);
@@ -151,12 +151,12 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
 
   await scenario(browser, engine, "a lost stream reconnects from the same start; the older pages and the new turn show once", desktop, "chat", async (page, host) => {
     await toTop(page);
-    await page.getByText(`turn ${pad(TURNS - 31)}`, { exact: true }).waitFor();
+    await page.locator(ACTIVE).getByText(`turn ${pad(TURNS - 31)}`, { exact: true }).waitFor();
     const before = await assertOnce(page);
     const first = host.queries.find(query => query.includes("/stream?"))!;
     host.drop();
     host.transcript = { ...host.transcript, events: [...host.transcript.events, ...turn(TURNS)] };
-    await page.getByText(`answer ${pad(TURNS)}`).waitFor();
+    await page.locator(ACTIVE).getByText(`answer ${pad(TURNS)}`).waitFor();
     await until(() => host.queries.filter(query => query.includes("/stream?")).length === 2, "the stream reconnected");
     const reconnect = host.queries.filter(query => query.includes("/stream?")).at(-1)!;
     assert.match(first, /tail=120$/);
@@ -169,11 +169,11 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     const first = (await users(page))[0]!;
     for (let n = TURNS; n < TURNS + 80; n += 10) {
       host.set([...host.transcript.events, ...turns(10, n)], { state: "completed" });
-      await page.getByText(`answer ${pad(n + 9)}`).waitFor();
+      await page.locator(ACTIVE).getByText(`answer ${pad(n + 9)}`).waitFor();
     }
     await until(() => host.queries.filter(query => query.includes("/stream?from=")).length > 0, "the stream started later");
     host.set([...host.transcript.events, ...turn(TURNS + 80)], { state: "completed" });
-    await page.getByText(`answer ${pad(TURNS + 80)}`).waitFor();
+    await page.locator(ACTIVE).getByText(`answer ${pad(TURNS + 80)}`).waitFor();
     const whole = Buffer.byteLength(JSON.stringify(host.transcript));
     assert.ok(host.sent.at(-1)! * 4 < whole, `a frame stays a small part of the whole: ${host.sent.at(-1)} of ${whole} bytes`);
     const shown = await assertOnce(page);
@@ -183,7 +183,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
 
   await scenario(browser, engine, "a host that lost the window's start: the newest turns are read again, once", desktop, "chat", async (page, host) => {
     host.set(turns(40), { state: "completed" });
-    await page.getByText(`answer ${pad(39)}`).waitFor();
+    await page.locator(ACTIVE).getByText(`answer ${pad(39)}`).waitFor();
     await until(async () => (await users(page)).at(-1) === `turn ${pad(39)}`, "the shorter transcript shown");
     const shown = await assertOnce(page);
     assert.ok(!shown.includes(`turn ${pad(TURNS - 1)}`), "nothing of the lost window stays");
@@ -193,10 +193,10 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     const cdp = await page.context().newCDPSession(page);
     const visit = async () => {
       await page.evaluate(() => { location.hash = "#/t/t1"; });
-      await page.locator(".thread-body .composer textarea").waitFor();
-      await page.getByText(`answer ${pad(TURNS - 1)}`).waitFor();
+      await page.locator(`${ACTIVE} .thread-body .composer textarea`).waitFor();
+      await page.locator(ACTIVE).getByText(`answer ${pad(TURNS - 1)}`).waitFor();
       await page.evaluate(() => { location.hash = "#/chat"; });
-      await page.locator(".thread-body").waitFor({ state: "detached" });
+      await page.locator(`${ACTIVE} .thread-body`).waitFor({ state: "detached" });
       await settle(page);
     };
     const nodes = async () => {

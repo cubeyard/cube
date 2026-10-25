@@ -7,7 +7,8 @@
  * `loading threads…`, `opening the chat…`, `reading thread…` and
  * `loading artifact…` in turn, from the top of the page to its middle, and
  * the shell's putty turned to the sheet's white as the view came in.
- * Desktop and phone. Needs a built UI (pnpm build) and Playwright's Chromium. */
+ * Every place but the chat opens in the panel over it; the panel's waits
+ * are the ones read once it is open. Desktop and phone. Needs a built UI (pnpm build) and Playwright's Chromium. */
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
 import { artifacts, bodies, chatEvents, ID, overview, threads } from "./chat-sheet-data.ts";
@@ -40,14 +41,16 @@ try {
         let last = "";
         const look = () => {
           if (!document.body) return;
-          const waits = [...document.querySelectorAll<HTMLElement>(".loading, .conversation-wait")].filter(element => element.getClientRects().length).map(element => {
+          // the place being opened: the panel over the chat once it is there
+          const view: ParentNode = document.querySelector("dialog.page-panel[open]") ?? document;
+          const waits = [...view.querySelectorAll<HTMLElement>(".loading, .conversation-wait")].filter(element => element.getClientRects().length).map(element => {
             const range = document.createRange();
             range.selectNodeContents(element);
             const box = range.getBoundingClientRect();
             return { text: element.textContent!.trim(), x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
           });
-          const content = [...document.querySelectorAll("main h1:not(.sr-only), .transcript-column > article, .artifact-body")].filter(element => element.getClientRects().length).length;
-          const ink = [...document.querySelectorAll<HTMLElement>(".loading, .conversation-wait")].map(element => getComputedStyle(element).color);
+          const content = [...view.querySelectorAll("main h1:not(.sr-only), .transcript-column > article, .artifact-body")].filter(element => element.getClientRects().length).length;
+          const ink = [...view.querySelectorAll<HTMLElement>(".loading, .conversation-wait")].map(element => getComputedStyle(element).color);
           const entry = { at: Math.round(performance.now() - start), waits, content, background: getComputedStyle(document.body).backgroundColor, ink };
           const key = JSON.stringify({ ...entry, at: 0 });
           if (key !== last) { seen.push(entry); last = key; }
