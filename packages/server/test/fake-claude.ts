@@ -97,10 +97,19 @@ let calls = 0;
 let current: AbortController | undefined;
 let ignoreInterrupt = false;
 let queue = Promise.resolve();
-/** Messages with a uuid sent while a turn runs, as Claude Code 2.1.310
- * queues them: 'queued' at once, 'started' when a tool result takes them
- * into the turn (their steps run in it), or after the turn's result as a
- * turn of their own; an interrupt with cancel_queued 'cancelled's them. */
+/** Turns accepted and not yet ended, running or still waiting their turn:
+ * Claude Code is busy from a prompt's arrival on, not only once its turn
+ * runs (a prompt and a message right behind it can come in one read). */
+let turns = 0;
+const enqueue = (run: () => Promise<void>) => {
+  turns++;
+  queue = queue.then(run).finally(() => { turns--; });
+};
+/** Messages with a uuid sent while Claude Code is busy, as Claude Code
+ * 2.1.310 queues them: 'queued' at once, 'started' when a tool result
+ * takes them into the turn (their steps run in it), or after the turn's
+ * result as a turn of their own; an interrupt with cancel_queued
+ * 'cancelled's them. */
 const queued: Array<{ uuid: string; text: string }> = [];
 const lifecycle = (uuid: string, state: string) => emit({ type: "command_lifecycle", command_uuid: uuid, state, uuid: randomUUID() });
 const input = createInterface({ input: process.stdin });
@@ -117,12 +126,12 @@ input.on("line", line => {
   const text = message.message!.content.map(part => part.text).join("");
   if (message.uuid) {
     lifecycle(message.uuid, "queued");
-    if (current) { queued.push({ uuid: message.uuid, text }); return; }
+    if (turns > 0) { queued.push({ uuid: message.uuid, text }); return; }
     const uuid = message.uuid;
-    queue = queue.then(() => { lifecycle(uuid, "started"); return turn(text); });
+    enqueue(() => { lifecycle(uuid, "started"); return turn(text); });
     return;
   }
-  queue = queue.then(() => turn(text));
+  enqueue(() => turn(text));
 });
 input.on("close", () => { void queue.then(() => process.exit(0)); });
 
@@ -174,7 +183,7 @@ function background(toolUseId: string, task: string, ms: number, description: st
   setTimeout(() => {
     emit({ type: "system", subtype: "task_notification", task_id: task, tool_use_id: toolUseId, status: "completed", summary: `${description} found nothing` });
     // A running turn takes the notification in; between turns it gets one.
-    if (goOn && !current) queue = queue.then(() => turn(`say ${task} reviewed: nothing to fix`, false));
+    if (goOn && !current) enqueue(() => turn(`say ${task} reviewed: nothing to fix`, false));
   }, ms);
 }
 
@@ -231,7 +240,7 @@ async function turn(text: string, prompted = true): Promise<void> {
     // (FAKE_CLAUDE_STEER=stall: never, and no word of it).
     const next = queued.splice(0);
     if (env.FAKE_CLAUDE_STEER === "stall") next.length = 0;
-    if (next.length) queue = queue.then(() => { for (const item of next) lifecycle(item.uuid, "started"); return turn(next.map(item => item.text).join("\n")); });
+    if (next.length) enqueue(() => { for (const item of next) lifecycle(item.uuid, "started"); return turn(next.map(item => item.text).join("\n")); });
   }
 }
 const TOOLS = new Set(["run", "slow", "write", "edit", "read", "write-at", "read-at", "edit-at"]);
