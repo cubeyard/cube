@@ -40,10 +40,10 @@ try {
   assert.throws(() => registry.createThread("project", "request", model, "two"), /conflicts/);
   assert.equal(registry.initialPrompt(thread.id), "one");
   const base = { remote: "https://github.com/example/project.git", ref: "refs/heads/develop", oid: "a".repeat(40) };
-  registry.markWorkspaceAvailable(thread.id, base);
+  registry.applyPhase(thread.id, { type: "ready", base: base });
   assert.deepEqual(registry.getThread(thread.id)?.workspaceBase, base, "workspace base survives host restart/recovery");
-  registry.beginRelease(thread.id);
-  registry.finishRelease(thread.id);
+  registry.applyPhase(thread.id, { type: "releaseBegan" });
+  registry.applyPhase(thread.id, { type: "released" });
   assert.equal(registry.availableRunners().length, 1, "release returns global runner capacity");
   const next = registry.createThread("other", "next", model, "two");
   assert.notEqual(next.id, thread.id);

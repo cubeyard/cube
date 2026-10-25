@@ -381,7 +381,7 @@ const idle = () => Promise.resolve(null);
 try {
   const thread = registry.createThread("p", "t1", { provider: "faux", id: "faux" }, "hi", "pi", undefined, { runnerId: NODE });
   await vms.start(fresh(thread));
-  registry.markWorkspaceAvailable(thread.id, null);
+  registry.applyPhase(thread.id, { type: "ready", base: null });
   assert.ok(vms.running(fresh(thread)));
   assert.equal(registry.runnerSlots().free, 1, "the thread holds one of the runner's two slots");
   const boot = session.machines.get(`${thread.id}/${thread.vm!.vmId}`)?.status?.bootId;
@@ -541,12 +541,12 @@ try {
 
   // K-8: no answer in time; the runner says it is suspended.
   await vms.release(fresh(thread), false).catch(() => {});
-  registry.beginRelease(thread.id);
-  registry.finishRelease(thread.id);
+  registry.applyPhase(thread.id, { type: "releaseBegan" });
+  registry.applyPhase(thread.id, { type: "released" });
   const second = registry.createThread("p", "t2", { provider: "faux", id: "faux" }, "hi", "pi", undefined, { runnerId: NODE });
   machines.clear();
   await vms.start(fresh(second));
-  registry.markWorkspaceAvailable(second.id, null);
+  registry.applyPhase(second.id, { type: "ready", base: null });
   await delay(IDLE * 2);
   fake.suspendMs = 1000;
   assert.equal(await vms.suspendIfIdle(fresh(second), idle), true, "read back with machine_get");
@@ -595,7 +595,7 @@ try {
   // B-207-3: one suspend per runner at a time.
   const third = registry.createThread("p", "t3", { provider: "faux", id: "faux" }, "hi", "pi", undefined, { runnerId: NODE });
   await vms.start(fresh(third));
-  registry.markWorkspaceAvailable(third.id, null);
+  registry.applyPhase(third.id, { type: "ready", base: null });
   await delay(IDLE * 2);
   fake.suspendMs = 300;
   const firstSave = vms.suspendIfIdle(fresh(second), idle);

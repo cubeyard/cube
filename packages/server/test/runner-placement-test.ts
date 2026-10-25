@@ -94,8 +94,8 @@ try {
     assert.deepEqual([onHost.runnerId, onHost.pinned], ["host", true], "a host runner by name, pinned");
     // The berth vm is down with a free slot: the thread is placed there and
     // waits for it (runner-machines.ts).
-    w.registry.beginRelease(named.id);
-    w.registry.finishRelease(named.id);
+    w.registry.applyPhase(named.id, { type: "releaseBegan" });
+    w.registry.applyPhase(named.id, { type: "released" });
     w.registry.recordRunnerProbe("berth", { error: "UNAVAILABLE" });
     assert.equal(w.registry.runnerFitness("berth")!.fitness, "down");
     const waiting = w.create();

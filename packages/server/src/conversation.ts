@@ -251,7 +251,7 @@ export class Conversations {
         this.failures.delete(id);
         this.waits.delete(id);
         this.unansweredSince.delete(id);
-        if (this.registry.getThread(id)?.retry) this.registry.clearFailures(id);
+        if (this.registry.getThread(id)?.retry) this.registry.applyPhase(id, { type: "trySucceeded" });
       } catch (error) {
         // An archive that ended is not this thread's failure.
         if (error instanceof ThreadArchiving || this.registry.getThread(id)?.archived !== false) return;
@@ -294,7 +294,7 @@ export class Conversations {
    * itself stands. */
   private countFailure(id: string, failure: Failure): void {
     try {
-      const retry = this.registry.recordFailure(id, failure, this.now());
+      const retry = this.registry.applyPhase(id, { type: "tryFailed", failure, at: this.now() }).retry!;
       if (retry.failures === START_TRIES && !releaseUnfinished(this.registry.getThread(id)!)) {
         log.warn("cube stops retrying the thread's start; a message to it tries once more", { thread: id, tries: retry.failures });
       }
@@ -395,14 +395,14 @@ export class Conversations {
       log.info("machine ready for the agent", { thread: id, source: preparation?.source ?? "fresh", ...(preparation?.templateId ? { template: preparation.templateId } : {}),
         totalMs, phases: startup?.phases ?? {}, hooks: Object.fromEntries(Object.entries(this.thread(id).vm?.hooks ?? {}).map(([name, hook]) => [name, hook.status])) });
       const primary = thread.allocation.repositories[0];
-      this.registry.markWorkspaceAvailable(id, primary
+      this.registry.applyPhase(id, { type: "ready", base: primary
         ? { remote: primary.url, ref: primary.base.startsWith("refs/heads/") ? primary.base : `refs/heads/${primary.base}`, oid: primary.baseOid }
-        : null);
+        : null });
     } catch (error) {
       // Nothing failed: the machine waits for a runner, still allocating.
       if (error instanceof RunnerWait) throw error;
       const failure = allocationFailed(error);
-      this.registry.markWorkspaceFailed(id, failure);
+      this.registry.applyPhase(id, { type: "failed", failure });
       throw new FailedTry(failure, { cause: error });
     }
   }
@@ -884,7 +884,7 @@ export class Conversations {
       this.resumed.delete(id);
       if (again) decision = { clean: thread.vm?.retain === false, reason: thread.vm?.retainReason ?? decision.reason };
       else if (thread.vm) this.registry.updateThreadVm(id, { retain: !decision.clean, retainReason: decision.reason });
-      this.registry.beginRelease(id);
+      this.registry.applyPhase(id, { type: "releaseBegan" });
       const released = await this.release(id);
       return { retained: released.retained, reason: released.retained && decision.clean ? RUNNER_KEPT : decision.reason };
     });
@@ -924,7 +924,7 @@ export class Conversations {
       // The runner keeps a disk cubed let go when the machine did not stop
       // in time (or failed): recorded, so it is listed and can be discarded.
       if (released.retained && thread.vm && !thread.vm.retain) this.registry.updateThreadVm(id, { retain: true, retainReason: RUNNER_KEPT });
-      this.registry.finishRelease(id);
+      this.registry.applyPhase(id, { type: "released" });
       this.failures.delete(id);
       this.downs.delete(id);
       this.waits.delete(id);
@@ -932,7 +932,7 @@ export class Conversations {
       return released;
     } catch (error) {
       const failure = releaseFailed(error);
-      this.registry.markWorkspaceFailed(id, failure);
+      this.registry.applyPhase(id, { type: "failed", failure });
       this.failures.set(id, failure);
       // Retried after a pause, for as long as it fails: never given up.
       this.countFailure(id, failure);

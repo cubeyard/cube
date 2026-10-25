@@ -26,10 +26,10 @@ try {
   registry.enrollRunner({ nodeId: "n", threadId: "r", environmentId: 1, configPath: "/private/r.json", configHash: "h", maxActiveVms: 4, protocol: 4, kind: "vm" } as never);
   const model = { provider: "faux", id: "faux" };
   const released = registry.createThread("p", "a", model, "a");
-  registry.markWorkspaceFailed(released.id, releaseFailed("the runner did not answer"));
-  registry.recordFailure(released.id, releaseFailed("the runner did not answer"), 10);
+  registry.applyPhase(released.id, { type: "failed", failure: releaseFailed("the runner did not answer") });
+  registry.applyPhase(released.id, { type: "tryFailed", failure: releaseFailed("the runner did not answer"), at: 10 });
   const allocated = registry.createThread("p", "b", model, "b");
-  registry.markWorkspaceFailed(allocated.id, allocationFailed("boom"));
+  registry.applyPhase(allocated.id, { type: "failed", failure: allocationFailed("boom") });
   registry.close();
 
   // What an older cubed reads: the same JSON fields, the same words.
