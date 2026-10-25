@@ -28,7 +28,7 @@ import { countCut, markSent, RESTART_LIMIT, SendsDoc, settleSends } from "./pi-s
 import { boundedOutput, CHAT_OUTPUT_TOKENS } from "./optchat-output.ts";
 import { piReports, reportText as errorText } from "./pi-report.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
-import { PENDING_ID, STEER_LOST, type ThreadAcceptance, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
+import { PENDING_ID, STEER_LOST, type RunFeed, type ThreadAcceptance, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
 import type { StartFailure } from "./thread-condition.ts";
 import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
 import type { Artifacts } from "./artifact-service.ts";
@@ -227,6 +227,10 @@ export interface OptThreads {
   /** `listener` runs whenever a thread's start failure changes (null: it
    * ended); `startFailure` reads what it missed. Returns the unsubscribe. */
   onStartFailure(listener: (id: string, failure: StartFailure | null) => void): () => void;
+  /** `listener` runs whenever a thread's run feed opens or closes: a run
+   * settles only in an open feed, and a closed feed's stored last run is
+   * final until it opens again. Returns the unsubscribe. */
+  onRunFeed(listener: (fact: RunFeed) => void): () => void;
   /** What cubed has of a thread, read only: its own record beside a page of
    * the agent's stored transcript, which may disagree. null: no such thread. */
   history(id: string, request?: HistoryRequest): Promise<ThreadRecord | null>;
@@ -540,13 +544,15 @@ export class OptChat {
   private compactorError: string | null = null;
   private readonly watchers = new Map<string, Promise<ThreadWatch | null>>();
   private readonly reported = new Map<string, string>();
-  /** Threads whose report could not be handed to the chat: the next watch
-   * round reads their stored run again (the request id keeps it to once). */
+  /** Threads whose report could not be handed to the chat: the next round
+   * reads their stored run again (the request id keeps it to once). */
   private readonly unsent = new Set<string>();
-  /** Threads seen open by a watch round of this process: once one is gone
-   * (archived in the UI, say), its stored run is read once more, so a run
-   * that settled just before is not lost. */
-  private readonly seenOpen = new Set<string>();
+  /** The threads this chat started (its SettingsDoc's), as this process knows them. */
+  private readonly mine = new Set<string>();
+  /** Threads to attach again in the next round: a watch that ended, an
+   * attach that failed, an archive that may still be refused. */
+  private readonly reattach = new Set<string>();
+  private unsubscribeFeed: (() => void) | undefined;
   /** Failure reports handed to the chat (by request id) in this process. */
   private readonly startReported = new Set<string>();
   /** When each thread's start was first told failing (`onStartFailure`), until it is told ended. */
@@ -812,7 +818,13 @@ export class OptChat {
     // Start failures are told as they change; what changed before this
     // chat listened is read once.
     this.unsubscribeStart = this.options.threads.onStartFailure((id, failure) => this.startFailureChanged(id, failure));
-    for (const id of Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {})) this.startFailureChanged(id, this.options.threads.startFailure(id));
+    // Run feeds too: listening first, then attaching each thread once (its
+    // open feed's current state, or its stored last run) catches up on what
+    // settled before; an attach twice is one.
+    this.unsubscribeFeed = this.options.threads.onRunFeed(fact => this.runFeedChanged(fact));
+    for (const id of Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {})) this.mine.add(id);
+    for (const id of this.mine) this.startFailureChanged(id, this.options.threads.startFailure(id));
+    for (const id of this.mine) this.attach(id);
     await this.watchThreads();
     this.watchTimer = setInterval(() => { void this.watchThreads(); }, this.options.limits?.watchMs ?? 15_000);
     this.watchTimer.unref();
@@ -1430,47 +1442,59 @@ export class OptChat {
     return this.model;
   }
 
-  /** Watches every thread this chat started; a settled run sends its report once. */
+  /** The round (every watchMs): reports a start failure that lasted the
+   * grace, sends again a report the chat could not take, and attaches again
+   * a thread whose watch ended or failed. A thread's runs are not polled:
+   * its feed opening and closing is told (`onRunFeed`). */
   private async watchThreads(): Promise<void> {
     if (this.closing) return;
-    const settings = await this.harness.snapshot(SettingsDoc, context);
     for (const id of [...this.unsent]) { this.unsent.delete(id); void this.reportStored(id); }
-    for (const id of Object.keys(settings?.threads ?? {})) {
-      this.reportStartFailure(id);
-      if (this.watchers.has(id)) continue;
-      const watching = (async () => {
-        let events: ThreadEvents | null | "archiving" | "stored";
-        try { events = await this.options.threads.events(id); }
-        catch (error) {
-          if (!this.closing) log.warn("watching a thread failed; the next round looks again", { thread: id, error: error instanceof Error ? error.message : String(error) });
-          this.watchers.delete(id);
-          return null;
-        }
-        // An archive may still be refused: the next round looks again.
-        if (events === "archiving") { this.watchers.delete(id); return null; }
-        // Gone since a round of this process saw it open: its last run, if
-        // no watcher reported it, reports from its store (once).
-        if (!events) {
-          if (this.seenOpen.delete(id)) await this.reportStored(id);
-          return null;
-        }
-        this.seenOpen.add(id);
-        // A thread is not started or woken to be watched: its stored run, if
-        // it settled, reports (once: the report's request id), and the next
-        // round looks again, watching it once its agent is open.
-        if (events === "stored") {
-          await this.reportStored(id);
-          this.watchers.delete(id);
-          return null;
-        }
-        if (!events || this.closing) return null;
-        const watch = await events.watch(transcript => this.observe(id, transcript), { onEnd: () => { this.watchers.delete(id); } });
-        // An archived thread's source closes; the next round finds it gone.
-        void watch.closed.then(() => { if (!this.closing) this.watchers.delete(id); });
-        return watch;
-      })();
-      this.watchers.set(id, watching);
-    }
+    for (const id of [...this.reattach]) { this.reattach.delete(id); this.attach(id); }
+    for (const id of this.mine) this.reportStartFailure(id);
+  }
+
+  /** A thread's run feed opened (attach: watch it) or closed (its stored
+   * last run is final: report it if no watch did). */
+  private runFeedChanged(fact: RunFeed): void {
+    if (this.closing || !this.mine.has(fact.thread)) return;
+    if (fact.open) this.attach(fact.thread);
+    else void this.reportStored(fact.thread);
+  }
+
+  /** Follows one thread: its open feed is watched (a settled run sends its
+   * report once); without one its stored last run reports, once, and the
+   * thread is attached again when its feed opens. */
+  private attach(id: string): void {
+    if (this.closing || this.watchers.has(id)) return;
+    const watching = (async () => {
+      let events: ThreadEvents | null | "archiving" | "stored";
+      try { events = await this.options.threads.events(id); }
+      catch (error) {
+        if (!this.closing) log.warn("watching a thread failed; the next round looks again", { thread: id, error: error instanceof Error ? error.message : String(error) });
+        this.watchers.delete(id);
+        this.reattach.add(id);
+        return null;
+      }
+      // An archive may still be refused: the next round looks again.
+      if (events === "archiving") { this.watchers.delete(id); this.reattach.add(id); return null; }
+      // Archived or gone: its feed's close was told, and read, when it closed.
+      if (!events) { this.watchers.delete(id); return null; }
+      // A thread is not started or woken to be watched: its stored run, if
+      // it settled, reports (once: the report's request id); its feed's
+      // opening attaches it again.
+      if (events === "stored") {
+        this.watchers.delete(id);
+        await this.reportStored(id);
+        return null;
+      }
+      if (this.closing) return null;
+      // A watch that ends (its feed closed, or failed) is attached again next round.
+      const ended = () => { this.watchers.delete(id); if (!this.closing) this.reattach.add(id); };
+      const watch = await events.watch(transcript => this.observe(id, transcript), { onEnd: ended });
+      void watch.closed.then(ended);
+      return watch;
+    })();
+    this.watchers.set(id, watching);
   }
 
   /** cubed told a thread's start failure (null: it ended, by a start, an
@@ -1630,13 +1654,14 @@ export class OptChat {
           try {
             const thread = await this.options.threads.spawn(task, `optchat:${api.callId}:${index}`, signal);
             await api.commit(async tx => { (await tx.doc(SettingsDoc)).threads[thread.id] ??= { at: Date.now() }; }, callContext);
+            this.mine.add(thread.id);
+            this.attach(thread.id);
             lines.push(`[${short(thread.id)}] started in ${task.project}: ${thread.title}`);
           } catch (error) {
             if (signal?.aborted) throw error;
             lines.push(`task ${index + 1} (${task.project}) not started: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
-        void this.watchThreads();
         return text(lines.join("\n"));
       },
     });
@@ -1993,6 +2018,7 @@ export class OptChat {
     for (const timer of this.timers) clearTimeout(timer);
     if (this.watchTimer) clearInterval(this.watchTimer);
     this.unsubscribeStart?.();
+    this.unsubscribeFeed?.();
     if (this.harness && this.conversation) {
       const out = await this.quiesce(this.down ? 0 : this.options.limits?.closeMs ?? CLOSE_GRACE_MS);
       const calling = [...this.calling];

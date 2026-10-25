@@ -135,7 +135,7 @@ try {
     // OptChat: its read-only `projects` call cut off six times runs again
     // at every open; the turn ends answered.
     starts = 0;
-    const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {},
+    const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {}, onRunFeed: () => () => {},
       async projects() { return blocked(); }, async runners() { return "no runners"; },
       async spawn() { throw new Error("unused"); }, async tell() {}, async describe() { return ""; },
       async events() { throw new Error("unused"); }, async history() { return null; },

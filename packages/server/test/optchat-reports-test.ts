@@ -8,10 +8,10 @@
  *      reading threads in every state (asleep, waking, awake with its agent
  *      closed or open, failed, starting, archived) touches only the
  *      reader's members, starts no machine and calls no guest.
- *   2. Reports, over OptChat with stand-in threads: a run that settled while
- *      its agent was closed and whose thread was archived before the next
- *      round reports once (L1); a report the chat could not take (its send
- *      failed) is sent again in a later round, once (L2). */
+ *   2. Reports, over OptChat with stand-in threads that tell their run feeds
+ *      as Conversations does: a run whose feed closed at its thread's archive
+ *      reports once, from its store (L1); a report the chat could not take
+ *      (its send failed) is sent again in a later round, once (L2). */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -22,7 +22,7 @@ import { Conversations, type ThreadReader } from "../src/conversation.ts";
 import { OptChat, type OptThreads, type ThreadRecord } from "../src/optchat.ts";
 import { readThreads } from "../src/optchat-threads.ts";
 import type { Registry, Thread } from "../src/registry.ts";
-import type { ThreadStatus } from "../src/thread-events.ts";
+import type { RunFeed, ThreadStatus } from "../src/thread-events.ts";
 import type { HistoryPage } from "../src/thread-history.ts";
 import { NoMachines } from "./local-guest.ts";
 
@@ -103,14 +103,17 @@ const READER = ["live", "storedHistory", "agentOpen", "condition", "owner"];
   const [A, B] = ids as [string, string];
   const stored = new Map<string, ThreadStatus>();
   const archived = new Set<string>();
-  /** Threads a watch round has seen open (the watcher's `seenOpen`). */
+  /** Threads the chat attached (it read their stores). */
   const watched = new Set<string>();
   const page = (id: string): HistoryPage | null => {
     const status = stored.get(id);
     return status ? { agent: "pi", owner: null, status, total: 2, answer: { index: 1, text: `${id.slice(0, 2)} did it` }, asked: 0, start: 0, events: [] } : null;
   };
   let spawned = 0;
+  // An archive closes the thread's run feed (Conversations tells it).
+  const feeds = new Set<(fact: RunFeed) => void>();
   const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {},
+    onRunFeed: listener => { feeds.add(listener); return () => { feeds.delete(listener); }; },
     projects: async () => "", runners: async () => "", describe: async () => "", tell: async () => {},
     spawn: async () => { const id = ids[spawned++]!; return { id, title: id.slice(0, 8) }; },
     // Their agents never open here: the watcher reads their stores.
@@ -139,11 +142,12 @@ const READER = ["live", "storedHistory", "agentOpen", "condition", "owner"];
   try {
     await chat.send("start two threads", "u1");
     // chat.send returns before the spawn turn ends: wait for a round to see both.
-    await until(() => watched.has(A) && watched.has(B), "watch rounds read both stores: nothing settled yet");
+    await until(() => watched.has(A) && watched.has(B), "both threads are attached (their stores read): nothing settled yet");
 
     // L1: A's run settles and A is archived (in the UI) before the next round.
     stored.set(A, { state: "completed", run: "rA", error: null });
     archived.add(A);
+    for (const listener of [...feeds]) listener({ thread: A, open: false });
     await until(() => reportsOf(A).length === 1, "L1: the run of a thread archived before a round saw it settle reports");
 
     // L2: B's report cannot be handed to the chat once.
@@ -154,6 +158,8 @@ const READER = ["live", "storedHistory", "agentOpen", "condition", "owner"];
       return send(text, requestId, images);
     };
     stored.set(B, { state: "completed", run: "rB", error: null });
+    // B's agent closes after its run (its stored run is final): told.
+    for (const listener of [...feeds]) listener({ thread: B, open: false });
     await until(() => reportsOf(B).length === 1, "L2: a report whose send failed is sent again");
     await delay(400);
     assert.deepEqual([refused >= 2, reportsOf(A).length, reportsOf(B).length], [true, 1, 1], "each run reported exactly once");

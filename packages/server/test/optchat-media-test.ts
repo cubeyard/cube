@@ -115,7 +115,7 @@ models.setProvider(faux.provider);
 const vision = { provider: faux.models[0].provider, id: "vision" };
 let projectsGate: Promise<void> = Promise.resolve();
 let inProjects = false;
-const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {},
+const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {}, onRunFeed: () => () => {},
   async projects() { inProjects = true; await projectsGate; inProjects = false; return "projects: none"; }, async runners() { return "no runners"; },
   async spawn() { throw new Error("unused"); }, async tell() {}, async describe() { return ""; },
   async events() { return null; }, async history() { return null; },

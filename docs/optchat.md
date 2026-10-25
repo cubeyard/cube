@@ -384,11 +384,19 @@ Restarts and failures:
   watcher, nor `threads`, nor `history` starts its machine, wakes a
   suspended one or opens its agent. With the agent open in cubed, the
   watcher watches the agent's own events. Without it (the machine is
-  starting, suspended or being woken), each round (15 s) the watcher reads
-  the stored run (a one-message `history` page) and reports it if it
-  settled and was never reported (the request id keeps that to once; an
-  idle thread is not taken for a reported one); once the agent is open,
-  the next round watches it. Machines start for explicit work (`spawn`,
+  starting, suspended or being woken), the watcher reads the stored run
+  once (a one-message `history` page) and reports it if it settled and was
+  never reported (the request id keeps that to once; an idle thread is not
+  taken for a reported one). Runs are not polled: cubed tells each thread's
+  run feed opening and closing (`Conversations.onRunFeed`; a run settles
+  only in an open feed, Pi's or Claude Code's), and the watcher attaches a
+  feed that opens and reads the stored run of one that closes. When the
+  chat opens it attaches each of its threads once, which reports what
+  settled before; a watch that ended (or failed) is attached again on the
+  next round (15 s), which also sends again a report the chat could not
+  take. A run that settled while the chat was closed and whose thread was
+  archived before it opened again is not reported (it was not before
+  either). Machines start for explicit work (`spawn`,
   `tell`, the user's message, an archive's check of the disk when its
   runner has a slot free, a portal connection) and in cubed's recovery
   loop, by its one rule (`recoveryStep`, docs/thread-lifecycle.md): it

@@ -113,7 +113,7 @@ const disk = (vm: Thread["vm"]) => !vm ? "no machine disk" : vm.discarded ? "mac
  * ThreadReader, they cannot start or wake a machine, open an agent or wait
  * for an activation: they read cubed's own state, an agent already open, or
  * the thread's store. */
-export function readThreads(options: { registry: Registry; conversations: ThreadReader }): Required<Pick<OptThreads, "describe" | "observe" | "history" | "events" | "startFailure" | "onStartFailure">> {
+export function readThreads(options: { registry: Registry; conversations: ThreadReader }): Required<Pick<OptThreads, "describe" | "observe" | "history" | "events" | "startFailure" | "onStartFailure" | "onRunFeed">> {
   const { registry, conversations } = options;
   return {
     async describe(ids, request) {
@@ -230,6 +230,7 @@ export function readThreads(options: { registry: Registry; conversations: Thread
     },
     startFailure: id => conversations.startFailure(id),
     onStartFailure: listener => conversations.onStartFailure(listener),
+    onRunFeed: listener => conversations.onRunFeed(listener),
   };
 }
 
