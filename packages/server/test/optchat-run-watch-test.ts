@@ -6,13 +6,18 @@
  *   G2  a Claude Code turn whose first watch could not begin, still running
  *       when its agent closes (its machine booted again) with no reopen (the
  *       resume step fails), reports once, as the turn cut off: by the watch
- *       attached again, or by the close's fact, whichever comes;
+ *       attached again or by the close's fact (#278), whichever comes first.
+ *       It guards #278's close path in this case; it passed before #279's
+ *       fix too;
  *   G1  a watch that cannot begin (the feed's first read rejects) leaves no
  *       unhandled rejection and no stuck entry: the thread is attached again
  *       on a later round, once, not in a tight loop.
  *   G3  a watch that ends twice (its onEnd, then its closed later) removes
  *       only its own entry: the thread attached again since keeps its one
- *       watch (OptChat with stand-in threads).
+ *       watch (OptChat with stand-in threads);
+ *   G4  a watch refused again and again is tried once per round, never at
+ *       once: the attempts are a round apart, then the watch that begins
+ *       stays (OptChat with stand-in threads).
  * Each thread's first live watch is refused, as when its first read throws. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -182,6 +187,50 @@ try {
       assert.equal(begun, 2, "the first watch's late second end did not remove the watch begun since");
     } finally { await chat3.close(); }
     console.log("ok: G3 a watch that ends twice removes only its own entry: the thread keeps the one watch begun since");
+  }
+
+  // ---------------------------------------------------------------- G4
+  {
+    const REFUSED = "4ef00000-0000-4000-8000-000000000004";
+    const WATCH_MS = 150;
+    const attempts: number[] = [];
+    const transcript = { agent: "pi" as const, owner: null, status: { state: "working" as const, run: "r1", error: null }, events: [] };
+    const stand: OptThreads = {
+      startFailure: () => null, onStartFailure: () => () => {}, onRunFeed: () => () => {},
+      async projects() { return ""; }, async runners() { return ""; }, async tell() {}, async describe() { return ""; }, async history() { return null; },
+      async spawn() { return { id: REFUSED, title: "refused" }; },
+      async events() {
+        return { async read() { return transcript; }, async watch(listener) {
+          attempts.push(Date.now());
+          // Refused four times in a row, then it begins and stays.
+          if (attempts.length <= 4) throw new Error("the feed could not be read");
+          await listener(transcript);
+          return { closed: new Promise<void>(() => {}), async stop() {} };
+        } };
+      },
+    };
+    const faux4 = fauxProvider({ tokensPerSecond: 100_000 });
+    let spawned = false;
+    faux4.setResponses(Array.from({ length: 40 }, () => async () => {
+      if (spawned) return fauxAssistantMessage("noted");
+      spawned = true;
+      return fauxAssistantMessage([fauxToolCall("spawn", { tasks: [{ project: "p", task: "refused" }] }, { id: "call-refused" })], { stopReason: "toolUse" });
+    }));
+    const models4 = createModels();
+    models4.setProvider(faux4.provider);
+    const chat4 = await OptChat.open({ directory: path.join(root, "optchat-g4"), models: models4, model: async () => ({ provider: faux4.getModel().provider, id: faux4.getModel().id }),
+      threads: stand, limits: { node: 64, retryMs: 50, watchMs: WATCH_MS } });
+    try {
+      await chat4.send("go", "g4");
+      await until(() => attempts.length === 5, "the watch refused four times begins on the fifth try");
+      await delay(WATCH_MS * 4);
+      assert.equal(attempts.length, 5, "once begun it is not tried again");
+      const gaps = attempts.slice(1).map((at, index) => at - attempts[index]!);
+      // A round apart: never at once (a timer's jitter allowed below a round).
+      assert.ok(gaps.every(gap => gap >= WATCH_MS / 2), `each try a round after the last refusal, never at once: gaps ${gaps.join(", ")} ms`);
+      assert.equal(unhandled.length, 0, "no unhandled rejection");
+    } finally { await chat4.close(); }
+    console.log(`ok: G4 a watch refused four times is tried once per round (gaps ≥ ${WATCH_MS / 2} ms), then the watch that begins stays`);
   }
 } finally {
   machines.failResume = false;
