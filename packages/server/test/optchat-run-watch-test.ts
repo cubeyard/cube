@@ -226,11 +226,14 @@ try {
       await delay(WATCH_MS * 4);
       assert.equal(attempts.length, 5, "once begun it is not tried again");
       const gaps = attempts.slice(1).map((at, index) => at - attempts[index]!);
-      // A round apart: never at once (a timer's jitter allowed below a round).
-      assert.ok(gaps.every(gap => gap >= WATCH_MS / 2), `each try a round after the last refusal, never at once: gaps ${gaps.join(", ")} ms`);
+      // The first try comes from the spawn's attach, at any moment of a
+      // round, so the first gap may be anything up to a round. Later tries
+      // come one per round tick: a round apart, never at once (a timer's
+      // jitter allowed below a round).
+      assert.ok(gaps.slice(1).every(gap => gap >= WATCH_MS / 2), `from the second try on, each a round after the last refusal, never at once: gaps ${gaps.join(", ")} ms`);
       assert.equal(unhandled.length, 0, "no unhandled rejection");
     } finally { await chat4.close(); }
-    console.log(`ok: G4 a watch refused four times is tried once per round (gaps ≥ ${WATCH_MS / 2} ms), then the watch that begins stays`);
+    console.log(`ok: G4 a watch refused four times is tried once per round (gaps from the second on ≥ ${WATCH_MS / 2} ms), then the watch that begins stays`);
   }
 } finally {
   machines.failResume = false;

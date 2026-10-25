@@ -229,6 +229,9 @@ const fake = {
   suspend: null as null | { code: Code; reason: string },
   /** `machine_suspend` answers after this long (K-8). */
   suspendMs: 0,
+  /** `machine_suspend` reaches the runner this long after cubed sends it
+   * (a slow host): what a fixed delay in a test must not assume. */
+  receiveMs: 0,
   /** `machine_start` on a suspended machine: refused with capacity this many more times. */
   full: 0,
   /** `machine_start` on a suspended machine answers after this long. */
@@ -270,6 +273,7 @@ async function answerCall(stream: BiStream, verb: ReturnType<typeof fromJsonStri
   };
   const refuse = (code: Code, reason: string, message: string) => reply({ case: "error", value: { code, reason, message } });
   if (!verb.case) return refuse(Code.INVALID_ARGUMENT, "verb", "no verb");
+  if (verb.case === "machineSuspend" && fake.receiveMs) await delay(fake.receiveMs);
   calls.push(verb.case);
   const value = verb.value as { ref?: { owner: string; id: string } };
   const key = `${value.ref?.owner}/${value.ref?.id}`;
@@ -380,6 +384,15 @@ const runtime = threadRuntime({ registry, threads: path.join(root, "threads"), m
 const vms = runtime.machines as RunnerMachines;
 const conversations = runtime.conversations;
 const count = (verb: string) => calls.filter(call => call === verb).length;
+/** Waits until the runner received `verb` since `from` (an index in
+ * `calls`), at most `ms`; a slow host sends a suspend later than a fixed
+ * delay would assume. Fails saying what the runner received meanwhile. */
+const received = async (verb: string, from: number, ms = 10_000) => {
+  for (const deadline = Date.now() + ms; !calls.slice(from).includes(verb);) {
+    assert.ok(Date.now() < deadline, `${verb} was not sent within ${ms} ms; the runner received: ${calls.slice(from).join(", ") || "nothing"}`);
+    await delay(5);
+  }
+};
 const fresh = (thread: Thread) => registry.getThread(thread.id)!;
 const idle = () => Promise.resolve(null);
 try {
@@ -447,9 +460,14 @@ try {
 
   // A call that comes during a suspend waits for it, then wakes the machine.
   await delay(IDLE * 2);
+  // The suspend reaches the runner late, as on a loaded host (#278 CI).
   fake.suspendMs = 200;
-  const suspending = vms.suspendIfIdle(fresh(thread), idle);
-  await delay(50);
+  fake.receiveMs = 120;
+  const beforeSuspend = calls.length;
+  let suspended = false;
+  const suspending = vms.suspendIfIdle(fresh(thread), idle).finally(() => { suspended = true; });
+  await received("machineSuspend", beforeSuspend);
+  assert.equal(suspended, false, "the call comes while the runner still saves the machine");
   const during = calls.length;
   await conversations.guest(fresh(thread)).call("hello", {});
   // The wake is the thread's activation: after the resume, its own check of
@@ -460,6 +478,7 @@ try {
   assert.ok(after.includes("guest:hello"), "the call reached the machine");
   assert.equal(await suspending, true);
   fake.suspendMs = 0;
+  fake.receiveMs = 0;
   console.log("ok: a guest call that comes during a suspend waits for its end, then wakes the machine");
 
   // B7-5: a snapshot the runner could not use: started from its disk, with the notice.
@@ -537,8 +556,12 @@ try {
   // A start during a suspend waits for its end, then resumes it (B-207-1).
   await delay(IDLE * 2);
   fake.suspendMs = 200;
-  const asleep = vms.suspendIfIdle(fresh(thread), idle);
-  await delay(50);
+  fake.receiveMs = 120;
+  const beforeSave = calls.length;
+  let saveEnded = false;
+  const asleep = vms.suspendIfIdle(fresh(thread), idle).finally(() => { saveEnded = true; });
+  await received("machineSuspend", beforeSave);
+  assert.equal(saveEnded, false, "the start comes while the runner still saves the machine");
   const saveStart = calls.length;
   const restart = vms.start(fresh(thread));
   assert.equal(await asleep, true);
@@ -547,6 +570,7 @@ try {
   await restart;
   assert.equal(fresh(thread).vm!.suspension, undefined, "then resumed");
   fake.suspendMs = 0;
+  fake.receiveMs = 0;
   console.log("ok: a start that comes during a suspend waits for it, then resumes the machine");
 
   // K-8: no answer in time; the runner says it is suspended.
@@ -612,8 +636,9 @@ try {
   registry.applyPhase(third.id, { type: "ready", base: null });
   await delay(IDLE * 2);
   fake.suspendMs = 300;
+  const beforeFirst = calls.length;
   const firstSave = vms.suspendIfIdle(fresh(second), idle);
-  await delay(50);
+  await received("machineSuspend", beforeFirst);
   const serial = count("machineSuspend");
   assert.equal(await vms.suspendIfIdle(fresh(third), idle), false, "another machine on the runner waits for the next round");
   assert.equal(count("machineSuspend"), serial);
