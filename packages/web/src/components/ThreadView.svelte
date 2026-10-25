@@ -142,7 +142,7 @@
   const startupSteps = $derived(summary?.vm?.steps?.length ? summary.vm.steps : null);
   // A failed start's error is printed in full by its step; not twice.
   const startupCarriesError = $derived(!!summary && startupShown(summary) && !!startupSteps?.some((step) => step.state === "failed")
-    && !!summary.error?.startsWith("workspace allocation failed"));
+    && summary.failureKind === "allocation");
   // Models could not be read while the machine was not up; read them again once it is.
   $effect(() => {
     if (summary?.state === "ready" && modelError) untrack(() => void loadModels());

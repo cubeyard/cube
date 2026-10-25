@@ -3,6 +3,7 @@
  * what an owner still needs, never on a passive read: a sleeping machine is
  * woken only when the thread's agent has a run to go on with. */
 import type { Thread } from "./registry.ts";
+import { readFailure } from "./thread-failure.ts";
 
 /** `release`: finish a release a crash or a failure left; `check`: the
  * machine of a ready thread is attached (and started when its runner
@@ -39,7 +40,7 @@ export interface RecoveryFacts {
 
 /** A release that failed or was cut short: only the release is retried. */
 export const releaseUnfinished = (thread: Thread) => thread.workspaceState === "releasing"
-  || (thread.workspaceState === "failed" && !!thread.workspaceError?.startsWith("workspace release failed:"));
+  || (thread.workspaceState === "failed" && readFailure(thread.workspaceError ?? "").kind === "release");
 
 export function recoveryStep(thread: Thread, facts: RecoveryFacts): RecoveryStep {
   if (thread.archived) return "leave";

@@ -18,6 +18,8 @@ export interface ThreadSummary {
   title: string | null;
   state: ThreadState;
   error: string | null;
+  /** What `error` is about: the web decides by this, never by its words. */
+  failureKind?: import("../../../server/src/thread-failure.ts").FailureKind | null;
   createdAt: number | null;
   archived: boolean;
   /** Fixed at creation; absent means pi. */

@@ -147,7 +147,19 @@ A failure is the last try's in this process, or else the row's
 (`workspaceState` `failed`, which outlives a restart), also while a thread
 is being archived. `down` says only why the agent is down: a failure or a
 wait of its machine changes nothing until cubed restarts, so the watcher
-reports it without "cubed keeps retrying". `starting`, `failed`,
+reports it without "cubed keeps retrying".
+
+A failure is data, `Failure { kind, text }` (thread-failure.ts): `allocation`
+(making or preparing the machine), `release`, `start` (a later start, check
+or wake, or a runner that stopped answering) or `down`. Its kind decides:
+a `release` is retried until it succeeds (`releaseUnfinished`), and the web
+prints an `allocation`'s error with its startup step (the row's
+`failureKind`). Its text is what readers show, in the words cubed always
+wrote. A row keeps only the text (`workspaceError`, `retry.error`), so an
+older cubed reads it as before; `readFailure` is the one place stored text
+becomes a kind again (thread-failure-test).
+
+`starting`, `failed`,
 `waiting` and `ready` carry the machine's sleep. Each
 reader renders the condition with an exhaustive switch:
 
@@ -186,6 +198,9 @@ machine's sleep (packages/web/src/lib/thread-state.ts).
   more than the slots; I10: the row, `threads`, `history` and the overview
   of each thread whose condition holds still while read; I11: the
   registry's SQL count is `holdsSlot`'s).
+- `packages/server/test/thread-failure-test.ts`: each failure kind's words,
+  read back to its kind, in a row an older cubed reads; an older row's
+  failed release still retried.
 - `packages/server/test/thread-condition-test.ts`: every kind of
   condition, in the literal words of each reader (the API's row, `threads`,
   `history`, the overview and the watcher), with the cases where they

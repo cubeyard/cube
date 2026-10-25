@@ -10,6 +10,7 @@ import { threadAgent, type Project, type Registry, type ResolvedRepositories, ty
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
 import type { MachineSleep } from "./machine-sleep.ts";
 import { failureOf, type ThreadCondition } from "./thread-condition.ts";
+import type { Failure } from "./thread-failure.ts";
 import { retriesExhausted } from "./thread-recovery.ts";
 
 /** How long the overview waits for one thread's stored state. */
@@ -198,7 +199,7 @@ export function readThreads(options: { registry: Registry; conversations: Thread
       ];
       const record = {
         project: registry.getProject(thread.projectId)?.name ?? thread.projectId, title: thread.title, archived: thread.archived,
-        machine: thread.archived ? null : conditionText(condition), facts, agentOpen: conversations.agentOpen(id), failure: failureOf(condition),
+        machine: thread.archived ? null : conditionText(condition), facts, agentOpen: conversations.agentOpen(id), failure: failureOf(condition)?.text ?? null,
       };
       try { return { ...record, transcript: await conversations.storedHistory(id, request), unreadable: null }; }
       catch (error) { return { ...record, transcript: null, unreadable: error instanceof Error ? error.message : String(error) }; }
@@ -252,7 +253,7 @@ const sleepOf = (condition: ThreadCondition): MachineSleep | null => "sleep" in 
  * stored run that did not finish). Reading the thread does not wake it. A
  * wake that failed is said, whatever the sleep still records: the machine
  * sleeps, and the thread's agent cannot go on until it wakes. */
-const sleepText = (sleep: MachineSleep, failure: string | null) => failure ? `its machine is suspended and waking it failed: ${failure}`
+const sleepText = (sleep: MachineSleep, failure: Failure | null) => failure ? `its machine is suspended and waking it failed: ${failure.text}`
   : sleep.state === "waking" ? `its machine is being woken${sleep.waiting ? ` (${sleep.waiting})` : ""}` : "its machine is suspended (idle; it wakes when told)";
 
 /** The condition in `threads` and `history`. A failure is the last try's:
@@ -261,15 +262,15 @@ const sleepText = (sleep: MachineSleep, failure: string | null) => failure ? `it
 function conditionText(condition: ThreadCondition): string {
   switch (condition.kind) {
     case "archived": return "archived";
-    case "archiving": return condition.failure ? `being archived (the last try failed: ${condition.failure})` : "being archived";
-    case "down": return `error: ${condition.failure}`;
-    case "failed": return condition.sleep ? sleepText(condition.sleep, condition.failure) : `error: ${condition.failure}`;
+    case "archiving": return condition.failure ? `being archived (the last try failed: ${condition.failure.text})` : "being archived";
+    case "down": return `error: ${condition.failure.text}`;
+    case "failed": return condition.sleep ? sleepText(condition.sleep, condition.failure) : `error: ${condition.failure.text}`;
     case "starting": return condition.sleep ? sleepText(condition.sleep, condition.failure)
-      : condition.failure ? `starting its machine again (the last try failed: ${condition.failure})`
+      : condition.failure ? `starting its machine again (the last try failed: ${condition.failure.text})`
       : condition.waiting ? `starting its machine, ${condition.waiting}` : "starting its machine";
     case "waiting": return condition.sleep ? sleepText(condition.sleep, null) : `starting its machine, ${condition.waiting}`;
     case "ready": return condition.sleep ? sleepText(condition.sleep, condition.failure)
-      : condition.failure ? `ready (a later check of its machine failed: ${condition.failure})`
+      : condition.failure ? `ready (a later check of its machine failed: ${condition.failure.text})`
       : condition.waiting ? `ready (its runner does not answer now: ${condition.waiting})` : "ready";
     case "new": return "not started";
   }
@@ -294,8 +295,8 @@ function observedText(condition: ThreadCondition): string | null {
  * a wake that failed is. */
 function startFailure(condition: ThreadCondition): string | null {
   switch (condition.kind) {
-    case "down": case "failed": return condition.failure;
-    case "starting": return condition.failure ?? (condition.sleep ? null : condition.waiting);
+    case "down": case "failed": return condition.failure.text;
+    case "starting": return condition.failure?.text ?? (condition.sleep ? null : condition.waiting);
     case "waiting": return condition.sleep ? null : condition.waiting;
     case "archived": case "archiving": case "ready": case "new": return null;
   }

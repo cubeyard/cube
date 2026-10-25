@@ -493,13 +493,14 @@ try {
     berth.down = true;
     const a = down.thread();
     await cubed.conversations.activate(a.id);
-    assert.match(cubed.conversations.waiting(a.id) ?? "", /waiting for runner node-life: it does not answer/);
+    assert.equal(cubed.conversations.waiting(a.id), "waiting for runner node-life: it does not answer; this thread was placed on it and stays there");
     assert.equal(cubed.conversations.error(a.id), null, "at first it waits");
     await round(29);
     assert.equal(cubed.conversations.error(a.id), null, "29 min: still waiting");
     assert.equal(fresh(a.id).retry, undefined);
     await round(2);
-    assert.match(cubed.conversations.error(a.id) ?? "", /runner node-life has not answered for 30 min/, "past 30 min the wait is a failed start");
+    assert.equal(cubed.conversations.error(a.id), "runner node-life has not answered for 30 min; this thread was placed on it and stays there", "past 30 min the wait is a failed start");
+    assert.equal(cubed.conversations.failure(a.id)?.kind, "start");
     assert.equal(cubed.conversations.waiting(a.id), null);
     assert.equal(fresh(a.id).retry?.failures, 1);
     for (let i = 0; i < 40; i++) await round(10);
@@ -535,7 +536,7 @@ try {
     cubed = ready.start();
     for (let minutes = 0; minutes < 150; minutes += 10) { clock.now += 10 * 60_000; await cubed.conversations.boot(); }
     assert.deepEqual([fresh(a.id).retry, cubed.conversations.error(a.id)], [undefined, null], "a ready thread's wait is no failed start");
-    assert.match(cubed.conversations.waiting(a.id) ?? "", /waiting for runner node-life: it does not answer/);
+    assert.equal(cubed.conversations.waiting(a.id), "waiting for runner node-life: it does not answer; this thread was placed on it and stays there");
     berth.down = false;
     clock.now += 60_000;
     await cubed.conversations.boot();

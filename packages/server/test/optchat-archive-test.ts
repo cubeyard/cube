@@ -14,6 +14,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { ThreadWorking, type Conversations } from "../src/conversation.ts";
+import { allocationFailed } from "../src/thread-failure.ts";
 import { ARCHIVED_MAX, OptChat, type OptThreads, type ThreadListRequest, type ThreadRecord } from "../src/optchat.ts";
 import { cubeThreads, readThreads } from "../src/optchat-threads.ts";
 import { threadCondition } from "../src/thread-condition.ts";
@@ -156,7 +157,7 @@ try {
     const stored: string[] = [];
     const reader = {
       condition: (thread: Thread) => threadCondition(thread, { archiving: false, starting: false, agentOpen: false, down: null, waiting: null,
-        error: thread.id === failed.id ? "workspace allocation failed: boom" : null }),
+        failure: thread.id === failed.id ? allocationFailed("boom") : null }),
       agentOpen: () => false, live: async () => null, owner: () => null,
       async storedHistory(id: string) { stored.push(id); return { status: { state: id === open.id ? "working" : "completed", run: "r", error: null } }; },
     } as unknown as Parameters<typeof readThreads>[0]["conversations"];

@@ -14,6 +14,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
+import { allocationFailed } from "../src/thread-failure.ts";
 import { Registry, type StartupStep } from "../src/registry.ts";
 import { formatDiagnostics } from "../src/vm-diagnostics.ts";
 import { LocalMachines } from "./local-guest.ts";
@@ -87,6 +88,9 @@ try {
   assert.deepEqual(failed.memory, { peakBytes: 3758096384, totalBytes: 4013504 * 1024, oomKills: 1 });
   assert.equal(failed.log, undefined, "the thread list leaves the log out");
   assert.equal(failed.hasLog, true);
+  // The row says what failed as data; the web decides by it, not by the words.
+  const failedRow = await until(row, candidate => candidate.state === "error", "the row says the start failed");
+  assert.deepEqual([failedRow.failureKind, failedRow.error], ["allocation", "workspace allocation failed: pre-setup was stopped: the machine ran out of memory (this command used up to 3.5 GB; the machine has 3.8 GB)"]);
   const full = (await send(`/api/threads/${thread.id}/steps`)).json.steps as StartupStep[];
   assert.equal(full.find(step => step.name === "prepare")!.log, "building the services\ntoken=[redacted]", "the killed hook's log, from the machine, redacted");
   console.log("ok: a try the OOM killer stopped is a failed step with its memory and the end of its log");
@@ -125,7 +129,7 @@ try {
     for (const name of ["lookup", "build-prepare", "boot"] as const) registry.beginStartupStep(thread.id, { name });
     registry.beginStartupStep(thread.id, { name: "prepare", attempt: 3 });
     registry.updateThreadVm(thread.id, { provisionAttempt: 3 });
-    registry.markWorkspaceFailed(thread.id, "workspace allocation failed: cubed stopped");
+    registry.markWorkspaceFailed(thread.id, allocationFailed("cubed stopped"));
   });
   const guestRoot = machines.guest({ id: thread.id } as never).root;
   fs.rmSync(path.join(guestRoot, "go"));
