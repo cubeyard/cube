@@ -181,6 +181,28 @@ await scenario("tool calls and their results stream without the message or the b
   assertSend(await watch.since("count the files"), "count the files");
 });
 
+await scenario("a message steered into the run shows where the agent read it, after the tool's result, and the run stays busy", async (page, host, watch) => {
+  // A thread's transcript when OptChat's tell reached it mid-run: the user
+  // message comes from the host between the tool's result and the answer.
+  const base = host.transcript.events;
+  host.onPrompt = ({ text, requestId }) => { host.set([...base, user(`pending.${requestId}`, text)], { state: "working", run: "pending" }); };
+  await send(page, watch, "run the tests");
+  await page.locator(".conversation-message.user:not(.sending)", { hasText: "run the tests" }).waitFor();
+  const call: ThreadEvent = { type: "tool-call", id: "4.0.0", callId: "c1", name: "bash", input: { command: "pnpm test" }, final: true };
+  const result: ThreadEvent = { type: "tool-result", id: "5.0", callId: "c1", name: "bash", output: "ok", isError: false, final: true };
+  const ran = [...base, user("3.0", "run the tests"), call, result];
+  host.set([...ran, user("m7", "also run the linter")], { state: "working" });
+  await page.locator(".conversation-message.user", { hasText: "also run the linter" }).waitFor();
+  assert.equal(await page.locator(".composer").getAttribute("aria-busy"), "true", "still the one run");
+  host.set([...ran, user("m7", "also run the linter"), agent("8.0.0", "tests and lint pass")], { state: "completed" });
+  await page.locator(".composer[aria-busy=false]").waitFor();
+  await settle(page);
+  const order = await page.locator(".conversation-message.user, .tool-strip, .conversation-message.assistant").evaluateAll(nodes => nodes.map(node => node.textContent?.replace(/\s+/g, " ").trim().slice(0, 40)));
+  const at = (text: string) => order.findIndex(line => line?.includes(text));
+  assert.ok(at("run the tests") < at("pnpm test") && at("pnpm test") < at("also run the linter") && at("also run the linter") < at("tests and lint pass"), `in the order the agent saw it: ${JSON.stringify(order)}`);
+  assertSend(await watch.since("run the tests"), "run the tests");
+});
+
 await scenario("a failed run shows its error with the message in place", async (page, host, watch) => {
   const base = host.transcript.events;
   host.onPrompt = ({ text, requestId }) => { host.set([...base, user(`pending.${requestId}`, text)], { state: "working", run: "pending" }); };

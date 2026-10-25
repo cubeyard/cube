@@ -4,7 +4,7 @@ import type { ServerResponse } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message, Models } from "@earendil-works/pi-ai";
-import { ConversationBusy, LiveDoc, type UsageState } from "@earendil-works/pi-durable";
+import { ConversationBusy, InboxDoc, LiveDoc, type UsageState, type UserInput } from "@earendil-works/pi-durable";
 import { ClaudeAgent, ClaudeBusy, CLAUDE_PROVIDER, type ClaudeRuntime } from "./claude-agent.ts";
 import { ClaudeThreadEvents } from "./claude-thread-events.ts";
 import { skillsPrompt } from "./skills.ts";
@@ -12,7 +12,7 @@ import { SendsDoc } from "./pi-sends.ts";
 import { assertCurrentThreadStore, downText, openAgent, type Agent } from "./durable-agent.ts";
 import { createLogger } from "./log.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
-import type { ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
+import type { ThreadAcceptance, ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
 import type { WindowQuery } from "./transcript-window.ts";
 import { readClaudeHistory, readPiHistory, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
@@ -110,6 +110,8 @@ export class Conversations {
   private readonly suspends = new Set<string>();
   /** The idle round under way: rounds do not overlap. */
   private suspendRound: Promise<void> | null = null;
+  /** The recovery and idle rounds under way (`round`). */
+  private readonly rounds = new Set<Promise<void>>();
   private readonly feeds = new WeakMap<Agent, PiThreadEvents>();
   private readonly claudes = new Map<string, Promise<ClaudeAgent>>();
   private readonly claudeFeeds = new WeakMap<ClaudeAgent, ClaudeThreadEvents>();
@@ -146,14 +148,29 @@ export class Conversations {
    * until something needs it (P7-5): only an agent with a run to go on
    * with wakes it here; a wake no one in this process owns (a restart cut
    * it short) is read back from the runner, not continued. */
-  async boot(): Promise<void> {
-    await Promise.all(this.registry.listThreads().map(thread => this.recoverOne(thread)));
+  boot(): Promise<void> {
+    if (this.closing) return Promise.resolve();
+    return this.round(Promise.all(this.registry.listThreads().map(thread => this.recoverOne(thread).catch((error: unknown) => {
+      if (!this.closing) log.warn("recovering a thread failed", { thread: thread.id, error: error instanceof Error ? error.message : String(error) });
+    }))));
+  }
+  /** A recovery or idle round, run unawaited (index.ts): it never rejects,
+   * and a close waits for it (bounded) before the stores close under it. */
+  private round(work: Promise<unknown>): Promise<void> {
+    const round = work.then(() => {}, (error: unknown) => {
+      if (!this.closing) log.warn("a recovery round failed", { error: error instanceof Error ? error.message : String(error) });
+    });
+    this.rounds.add(round);
+    void round.finally(() => this.rounds.delete(round));
+    return round;
   }
   private async recoverOne(thread: Thread): Promise<void> {
     const id = thread.id;
     if (this.closing || this.archiveHolds.has(id) || this.suspends.has(id)) return;
     const owned = this.activations.has(id) || this.machines.wakeInFlight(thread);
     const demand = needsDemand(thread, owned) && await this.demand(id);
+    // A close that began meanwhile starts nothing more.
+    if (this.closing) return;
     switch (recoveryStep(thread, { owned, demand, now: this.now() })) {
       case "release": await this.command(id, () => this.release(id)).catch(() => {}); return;
       case "check": case "start": await this.activate(id); return;
@@ -565,13 +582,19 @@ export class Conversations {
     finally { if (this.commands.get(id) === promise) this.commands.delete(id); }
   }
   /** A message is an explicit demand: once the thread has it (under its
-   * request id) it is answered as accepted, and a replay wakes nothing. */
-  submit(id: string, text: string, requestId: string): Promise<{ runId: string }> {
+   * request id) it is answered as accepted, and a replay wakes nothing.
+   * A thread that is working refuses it, unless `steer`: then it is queued
+   * into the running turn, and the agent takes it in after its current tool
+   * call (or, as the turn ends, goes on with it), never in a second turn
+   * beside it. `accepted` says what the thread did with it (steer only). */
+  submit(id: string, text: string, requestId: string, options: { steer?: boolean } = {}): Promise<{ runId: string; accepted?: ThreadAcceptance }> {
     return this.command(id, async () => {
       await this.settled(id);
-      if (await this.accepted(id, text, requestId)) return { runId: requestId };
+      const prior = await this.accepted(id, text, requestId);
+      if (prior) return { runId: requestId, ...options.steer ? { accepted: prior } : {} };
       await this.wakeFor(id, requestId);
-      return this.accept(id, text, requestId);
+      const accepted = await this.accept(id, text, requestId, !!options.steer);
+      return { runId: requestId, ...options.steer ? { accepted } : {} };
     });
   }
   /** A message to a thread whose machine is suspended wakes it first, so
@@ -590,28 +613,31 @@ export class Conversations {
       await this.activate(id);
     }
   }
-  /** Whether the thread already has the message `requestId` (a replay): read
-   * from its agent, opened if need be, which wakes nothing. Only a ready
-   * thread has an agent to ask. */
-  private async accepted(id: string, text: string, requestId: string): Promise<boolean> {
+  /** What the thread did with the message `requestId` if it already has it
+   * (a replay): read from its agent, opened if need be, which wakes nothing.
+   * Only a ready thread has an agent to ask. */
+  private async accepted(id: string, text: string, requestId: string): Promise<ThreadAcceptance | undefined> {
     const thread = this.registry.getThread(id);
-    if (!thread || thread.archived || thread.workspaceState !== "available" || this.downs.has(id) || releaseUnfinished(thread)) return false;
+    if (!thread || thread.archived || thread.workspaceState !== "available" || this.downs.has(id) || releaseUnfinished(thread)) return undefined;
     if (this.isClaude(id)) {
-      if (!this.claude) return false;
-      const prior = (await this.claudeAgent(id)).state().submissions.find(submission => submission.requestId === requestId);
-      if (prior && prior.text !== text) throw new Error("message request conflicts with the previous request");
-      return !!prior;
+      if (!this.claude) return undefined;
+      return (await this.claudeAgent(id)).request(requestId, text);
     }
     const prior = await this.priorInput(await this.agent(id), requestId);
     if (prior && (prior.type !== "input" || (prior.text !== undefined && prior.text !== text))) throw new Error("message request conflicts with the previous request");
-    return !!prior;
+    return prior?.accepted;
   }
-  private async priorInput({ conversation }: Agent, requestId: string): Promise<{ type: string; text: string | undefined } | undefined> {
+  private async priorInput({ conversation }: Agent, requestId: string): Promise<{ type: string; text: string | undefined; accepted: ThreadAcceptance } | undefined> {
     return conversation.commit(async tx => {
       const submission = await tx.submissionByRequest(conversation.id, requestId);
       if (!submission) return undefined;
       const entry = submission.type === "input" && submission.entry !== undefined ? await tx.entry(submission.entry) : undefined;
-      return { type: submission.type, text: entry?.model?.[0] ? messageText(entry.model[0]) : undefined };
+      // Pi's inbox holds a steer until a boundary places it (its text is
+      // there); a stop or a failed run withdraws it unplaced, text and all.
+      const queued = submission.status === "queued" ? (await tx.doc(InboxDoc, conversation.id)).items.find(item => item.id === submission.id) : undefined;
+      const text = entry?.model?.[0] ? messageText(entry.model[0]) : queued && queued.mode !== "write" ? inputText(queued.content as UserInput) : undefined;
+      const accepted = submission.status === "queued" ? "queued" : submission.entry === undefined ? "dropped" : "consumed";
+      return { type: submission.type, text, accepted };
     }, context);
   }
   /** Suspends the machines that have been idle for 5 minutes (B7-1; the
@@ -621,8 +647,8 @@ export class Conversations {
    * so a message waits for it and then wakes the machine. */
   suspendIdle(): Promise<void> {
     if (this.closing) return Promise.resolve();
-    this.suspendRound ??= Promise.all(this.registry.listThreads().map(thread => this.suspendOne(thread)))
-      .then(() => {}).finally(() => { this.suspendRound = null; });
+    this.suspendRound ??= this.round(Promise.all(this.registry.listThreads().map(thread => this.suspendOne(thread))))
+      .finally(() => { this.suspendRound = null; });
     return this.suspendRound;
   }
   private async suspendOne(thread: Thread): Promise<void> {
@@ -661,15 +687,14 @@ export class Conversations {
     if (pi && (await pi.harness.snapshot(LiveDoc, pi.conversation.id, context))?.run) return "the agent is working";
     return null;
   }
-  private async accept(id: string, text: string, requestId: string): Promise<{ runId: string }> {
+  private async accept(id: string, text: string, requestId: string, steer: boolean): Promise<ThreadAcceptance> {
     if (this.isClaude(id)) {
       const agent = await this.claudeAgent(id);
-      try { await agent.submit(requestId, text); }
+      try { return await agent.submit(requestId, text, { steer }); }
       catch (error) {
         if (error instanceof ClaudeBusy) throw new Error("thread is already working or message is invalid", { cause: error });
         throw error;
       }
-      return { runId: requestId };
     }
     const agent = await this.agent(id);
     const { conversation } = agent;
@@ -677,12 +702,21 @@ export class Conversations {
     // not stored in a second host workflow journal.
     const prior = await this.priorInput(agent, requestId);
     if (prior && (prior.type !== "input" || (prior.text !== undefined && prior.text !== text))) throw new Error("message request conflicts with the previous request");
-    try { await conversation.submit({ type: "input", content: text, requestId, whenBusy: "reject" }, context); }
+    if (prior) return prior.accepted;
+    // A steer is admitted into Pi's inbox in the same commit that finds the
+    // run: placed at the run's next tool boundary, or at its final one if
+    // the run is ending, which then goes on; an idle thread starts a run.
+    let submission;
+    try { submission = await conversation.submit({ type: "input", content: text, requestId, whenBusy: steer ? "steer" : "reject" }, context); }
     catch (error) {
       if (error instanceof ConversationBusy) throw new Error("thread is already working or message is invalid", { cause: error });
       throw error;
     }
-    return { runId: requestId };
+    if (!steer) return "started";
+    const record = await submission.status(context);
+    if (record.status === "queued") return "queued";
+    const live = await agent.harness.snapshot(LiveDoc, conversation.id, context);
+    return live?.run?.inputs[0] === submission.id ? "started" : record.status === "unanswered" && record.entry === undefined ? "dropped" : "consumed";
   }
   async model(id: string, selection?: ModelSelection): Promise<ModelSelection> {
     return this.command(id, async () => {
@@ -930,6 +964,10 @@ export class Conversations {
     // A machine still booting is left to boot; the next cubed attaches to it.
     // Its own cap, so the drain after it always gets its share.
     await within("thread machines", this.machines.close(), left(MACHINES_CLOSE_MS));
+    // A recovery round started before the close (cubed's boot) starts
+    // nothing more, and ends before the registry closes under it; past its
+    // bound it goes on, and its failures are not reported once closing.
+    await within("recovery rounds", Promise.all([...this.rounds]), left(COMMANDS_MS));
     const agents = [...this.agents];
     const out = await within("threads' requests out", Promise.all(agents.map(async ([, promise]) => (await promise.catch(() => null))?.drain(left(DRAIN_MS)) ?? true)), left(DRAIN_MS + 200));
     if (Array.isArray(out) && out.includes(false)) log.warn("a thread's request or summary was still out at the close: Pi's close aborts it, and the next open counts it and does not send it again", { threads: agents.filter((_, k) => out[k] === false).map(([id]) => id) });
@@ -939,6 +977,10 @@ export class Conversations {
     this.agents.clear(); this.claudes.clear();
     for (const id of [...this.workspaces.keys()]) this.closeWorkspace(id);
   }
+}
+
+function inputText(content: UserInput): string {
+  return typeof content === "string" ? content : content.map(part => part.type === "text" ? part.text : "").filter(Boolean).join("\n");
 }
 
 function messageText(message: Message): string {

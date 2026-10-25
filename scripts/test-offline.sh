@@ -49,6 +49,8 @@ OFFLINE_TESTS=(
   packages/server/test/vm-workspace-test.ts
   packages/server/test/lifecycle-test.ts
   packages/server/test/thread-down-test.ts
+  packages/server/test/thread-steer-test.ts
+  packages/server/test/cubed-boot-close-test.ts
   packages/server/test/vm-template-test.ts
   packages/server/test/vm-diagnostics-test.ts
   packages/server/test/startup-steps-test.ts

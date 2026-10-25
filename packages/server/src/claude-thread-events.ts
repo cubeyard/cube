@@ -2,7 +2,7 @@
  * cubed accepted and the stream-json messages Claude Code printed into the
  * same `ThreadTranscript` the Pi adapter produces. Subagent internals
  * (messages with a parent tool use) stay inside their Agent tool call. */
-import type { ClaudeAgent, ClaudeState, ClaudeSubmission } from "./claude-agent.ts";
+import { STEERED, type ClaudeAgent, type ClaudeState, type ClaudeSubmission } from "./claude-agent.ts";
 import type { MessageImage, ThreadAgent, ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
 import { imageNote, shownImage, THREAD_IMAGE_LIMITS } from "./thread-images.ts";
 
@@ -76,8 +76,10 @@ export const submissionEvent = (submission: Pick<ClaudeSubmission, "seq" | "text
 
 /** The events of one stored stream-json message. `names` maps tool use ids
  * to tool names: the message's calls are added, its results look up the
- * calls before them. */
+ * calls before them. A steer cubed recorded where Claude Code took it in is
+ * a user message there. */
 export function messageEvents(seq: number, data: Record<string, unknown>, names: Pick<Map<string, string>, "get" | "set">, shown: <T>(value: T) => T = value => value): ThreadEvent[] {
+  if (data.type === STEERED) return [{ type: "user-message", id: `m${seq}`, text: String(data.text ?? "") }];
   if (data.parent_tool_use_id != null) return [];
   const events: ThreadEvent[] = [];
   const message = data.message as { content?: unknown } | undefined;

@@ -129,6 +129,10 @@ function drain(memory: Memory, seen: string[][] = []): void {
   }
   assert.equal(runReport(status("completed"), "merged as abc123; nothing left"), "ended its turn; nothing of it runs now: merged as abc123; nothing left");
   assert.equal(runReport(status("completed"), " "), "ended its turn; nothing of it runs now without a reply");
+  // A completed run names a steered message that never reached it; no other error shows there.
+  const lost = "a message sent while it worked never reached it (claude code refused it); send it again if still needed";
+  assert.equal(runReport(status("completed", { error: lost }), "done"), `ended its turn; nothing of it runs now (${lost}): done`);
+  assert.equal(runReport(status("completed", { error: "the machine failed to wake" }), "done"), "ended its turn; nothing of it runs now: done");
   assert.equal(runReport(status("stopped", { error: "background agent \"x\" did not finish: stopped in cube" }), "half"), "stopped: background agent \"x\" did not finish: stopped in cube; last reply: half");
 }
 

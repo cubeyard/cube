@@ -16,7 +16,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import type { EntryRecord, SubmissionRecord } from "@earendil-works/pi-durable";
 import { messageEvents, status as claudeStatus, submissionEvent, virtualize } from "./claude-thread-events.ts";
 import { storedBackground, type ClaudeSubmission } from "./claude-agent.ts";
-import { entryEvents, settlement, withDropped } from "./pi-thread-events.ts";
+import { entryEvents, runStatus, withDropped } from "./pi-thread-events.ts";
 import { DROPPED_ENTRY } from "./pi-sends.ts";
 import type { ThreadAgent, ThreadEvent, ThreadStatus, ThreadTranscript } from "./thread-events.ts";
 
@@ -216,14 +216,15 @@ export async function readPiHistory(file: string, owner: ThreadAgent | null, fai
       growing.last = entry.id;
     });
     keep(file, identity, growing);
-    let last: SubmissionRecord | undefined;
+    // The newest inputs up to the newest one Pi placed or holds (runStatus).
+    const inputs: SubmissionRecord[] = [];
     for (const { record } of db.prepare("SELECT record FROM submissions WHERE conversation_id = ? ORDER BY id DESC").iterate(ROOT) as Iterable<{ record: string }>) {
       const submission = JSON.parse(record) as SubmissionRecord;
-      if (submission.type === "input") { last = submission; break; }
+      if (submission.type !== "input") continue;
+      inputs.push(submission);
+      if (submission.status !== "unanswered" || submission.entry !== undefined) break;
     }
-    const status: ThreadStatus = !last ? { state: "idle", run: null, error: null }
-      : last.status === "queued" || last.status === "placed" ? { state: "working", run: last.requestId ?? String(last.id), error: failure }
-      : withDropped({ run: last.requestId ?? String(last.id), ...settlement(last) },
+    const status: ThreadStatus = withDropped(runStatus(inputs, failure),
         (db.prepare("SELECT id, json_extract(record, '$.kind') AS kind FROM entries WHERE conversation_id = ? AND json_extract(record, '$.kind') IN ('pi.user', ?) ORDER BY id DESC LIMIT 2").all(ROOT, DROPPED_ENTRY) as Array<{ id: number; kind: string }>));
     const entry = db.prepare("SELECT record FROM entries WHERE id = ?");
     return assemble(growing, { agent: "pi", owner, status }, request,

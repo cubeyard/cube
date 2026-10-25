@@ -314,6 +314,30 @@ Bounds, so unattended work does not loop or spend without end:
   sent: … tell the user what it needs instead`, and the prompt forbids
   starting another thread to get around that. Only a tell the thread
   accepted counts, and a replayed call counts once.
+- A tell to a thread that is working is steered into its running turn,
+  never a second turn beside it, and the current tool call is not
+  interrupted. It answers `queued for [id] …`: accepted, not read yet (a
+  replay says `already has it in its conversation` once the agent has it).
+  A Pi thread's message waits in Pi's inbox and is placed at the next tool
+  boundary (`steeringMode: "all"`), or, when the run is ending, at its
+  final boundary, and the run goes on with it. A Pi run that fails first
+  (a provider error) withdraws it (`afterFailedRun: "withdraw"`): it never
+  rides along with a later message. Claude Code gets it on stdin with a
+  uuid; it takes it in after the next tool result, or starts the next turn
+  with it at once when the turn ends, which cubed records as that
+  message's run, so the thread never shows idle in between. cubed marks it
+  read only at Claude Code's `command_lifecycle` `started`; a next turn
+  that never starts fails after the continue grace (2 min). A message that
+  never reached the agent (a stop or a failed run withdrew it, Claude Code
+  ended or refused it, cubed stopped) is not resent; the run keeps its own
+  outcome and error, and its report adds `a message sent while it worked
+  never reached it (why)`. A tell while a Claude Code stop is under way is
+  refused. A Claude Code whose `system/init` lacks `msg_lifecycle_v1` and
+  `interrupt_cancel_queued_v1` is not steered: the tell is refused while
+  it works, saying so. Another text under a tell's request id is a
+  conflict, except for a Pi message a stop or failure withdrew (Pi keeps
+  no text of it; OptChat's request ids are one per call). The thread
+  page's own composer still waits for the run to end.
 - Background agents get at most 4 hours from the start of the oldest still
   running (`ClaudeRuntime.backgroundMs`). Then cubed ends Claude Code
   between turns, which ends all of them, and records them as one lost run.

@@ -28,6 +28,19 @@
  * messages Claude Code printed, its session id and the background agents a
  * turn left running.
  *
+ * A message steered into a running turn (OptChat's tell) is written to the
+ * child's stdin with a uuid of its own. Claude Code queues it and takes it
+ * in after the next tool result, within the turn; one it gets as the turn
+ * ends starts the next turn at once. Its `command_lifecycle` frames say
+ * which ('queued', then 'started' once the model gets it, or 'cancelled'),
+ * and cubed records the message as consumed only at 'started'. A turn that
+ * ends with one still queued goes on as that message's run, so the thread
+ * never shows idle in between. One that can no longer reach Claude Code (the
+ * child ended, cubed stopped, a stop withdrew it, Claude Code refused it) is
+ * recorded as dropped, and the run's outcome says so: nothing is resent on
+ * its own. A Claude Code whose `system/init` lacks `msg_lifecycle_v1` and
+ * `interrupt_cancel_queued_v1` reports neither, so cubed does not steer it.
+ *
  * Threads start no subagents (the mod refuses them), but a session that
  * started a background agent before keeps its record here. Such an agent goes
  * on after its turn's result. While one runs the child stays open, past the
@@ -45,6 +58,7 @@ import { DatabaseSync } from "node:sqlite";
 import { ALLOWED_TOOLS } from "../../claude-mod/hooks/tools.ts";
 import { expectReady } from "./claude-ready.ts";
 import type { ModelSelection } from "./models.ts";
+import type { ThreadAcceptance } from "./thread-events.ts";
 import type { Workspace, WorkspaceLease } from "./workspace.ts";
 
 export const CLAUDE_PROVIDER = "claude-code";
@@ -77,6 +91,10 @@ const IN_PROCESS_TOOLS = ALLOWED_TOOLS.filter(name => !["Bash", "Read", "Write",
 export const CLAUDE_SETTINGS = JSON.stringify({ hooks: { PreToolUse: [{ matcher: `^(?!(${IN_PROCESS_TOOLS.join("|")})$).*`, hooks: [{ type: "command", command: "exit 2" }] }] } });
 /** Why background agents are lost when cubed closes the agent. */
 const CLOSED = "cubed closed claude code while it ran (cubed stopped or restarted, or the thread was archived)";
+/** What Claude Code must say in `system/init` before cubed steers it: that
+ * it reports a queued message's fate, and that an interrupt can withdraw
+ * the queued ones (a stop would otherwise run them as a turn of their own). */
+export const STEERING_CAPABILITIES = ["msg_lifecycle_v1", "interrupt_cancel_queued_v1"] as const;
 
 export interface ClaudeRuntime {
   /** The argv that starts the `claude` binary (tests use a fake). */
@@ -124,6 +142,11 @@ export interface ClaudeSubmission {
   state: "running" | "completed" | "failed" | "stopped"; error: string | null;
 }
 export interface ClaudeMessage { seq: number; submission: number; data: Record<string, unknown> }
+/** A message steered into a running turn: `queued` until Claude Code says
+ * it started it, `consumed` from then, `dropped` (with why) once it can no
+ * longer reach Claude Code. `submission`: the run it belongs to. */
+export interface ClaudeSteer { requestId: string; uuid: string; text: string; submission: number; state: "queued" | "consumed" | "dropped"; detail: string | null }
+export type ClaudeAcceptance = ThreadAcceptance;
 /** The newest assistant message while it streams, by content block index. */
 export type ClaudePartial = Array<{ type: "text"; text: string } | { type: "thinking"; thinking: string } | { type: "tool_use"; id: string; name: string; json: string }>;
 /** `waiting`: the background agents running now, by description. */
@@ -142,8 +165,16 @@ export class ClaudeAgent {
   private readonly skills: string | null;
   private readonly submissions: ClaudeSubmission[];
   private readonly messages: ClaudeMessage[];
+  private readonly steers: ClaudeSteer[];
+  /** The runs whose prompt Claude Code already has: a steer waits for its
+   * run's, so stdin keeps the order cubed accepted them in. */
+  private readonly delivered = new Set<number>();
   private partial: ClaudePartial = [];
-  private child: { process: ChildProcessWithoutNullStreams; exited: Promise<void>; stderr: string[]; ready: Promise<"ready" | "exited" | "late">; attached: boolean; stopped?: boolean } | undefined;
+  private child: { process: ChildProcessWithoutNullStreams; exited: Promise<void>; stderr: string[]; ready: Promise<"ready" | "exited" | "late">; attached: boolean; stopped?: boolean;
+    /** What its `system/init` advertised; undefined until it printed one. */
+    capabilities?: string[]; version?: string;
+    /** The steers written to its stdin, by uuid. */
+    written: Set<string> } | undefined;
   private interrupt: { timer: NodeJS.Timeout; kill?: NodeJS.Timeout } | undefined;
   /** Bash calls Claude Code started whose results have not come back, by
    * tool_use_id: the mod runs each as `claude:<id>:bash` in the thread VM. */
@@ -171,6 +202,7 @@ export class ClaudeAgent {
     this.threadId = options.threadId; this.db = options.db; this.workspace = options.workspace;
     this.lease = options.lease; this.runtime = options.runtime; this.cwd = options.cwd; this.skills = options.skills;
     ({ submissions: this.submissions, messages: this.messages } = record(this.db));
+    this.steers = this.db.prepare("SELECT request_id AS requestId, uuid, text, submission, state, detail FROM steer ORDER BY rowid").all() as unknown as ClaudeSteer[];
   }
 
   /** The thread record from a thread directory alone, through a read-only
@@ -202,13 +234,18 @@ export class ClaudeAgent {
           state TEXT NOT NULL CHECK(state IN ('running','completed','failed','stopped')), error TEXT, created_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS message(seq INTEGER PRIMARY KEY AUTOINCREMENT, submission INTEGER NOT NULL REFERENCES submission(seq), data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS background(task_id TEXT PRIMARY KEY, submission INTEGER NOT NULL REFERENCES submission(seq), description TEXT NOT NULL,
-          state TEXT NOT NULL CHECK(state IN ('running','ended','lost')), detail TEXT, started_at INTEGER NOT NULL, ended_at INTEGER);`);
+          state TEXT NOT NULL CHECK(state IN ('running','ended','lost')), detail TEXT, started_at INTEGER NOT NULL, ended_at INTEGER);
+        CREATE TABLE IF NOT EXISTS steer(request_id TEXT PRIMARY KEY, uuid TEXT NOT NULL UNIQUE, text TEXT NOT NULL, submission INTEGER NOT NULL REFERENCES submission(seq),
+          state TEXT NOT NULL CHECK(state IN ('queued','consumed','dropped')), detail TEXT, created_at INTEGER NOT NULL);`);
       db.prepare("INSERT OR IGNORE INTO meta VALUES ('model', ?)").run(options.model);
       // A turn that was running when cubed stopped is over: Claude Code has
       // no checkpoint to continue it from, so its open guest commands are
       // cancelled too rather than left to finish unseen.
       const interrupted = new Set((db.prepare("SELECT seq FROM submission WHERE state='running'").all() as Array<{ seq: number }>).map(row => row.seq));
-      db.prepare("UPDATE submission SET state='failed', error=? WHERE state='running'").run(INTERRUPTED);
+      // Its steers went with the child; whether Claude Code took one in
+      // before cubed stopped is not known.
+      db.prepare("UPDATE steer SET state='dropped', detail=? WHERE state='queued'").run(RESTARTED);
+      for (const seq of interrupted) db.prepare("UPDATE submission SET state='failed', error=? WHERE seq=?").run(withDropped(INTERRUPTED, dropped(db, seq)), seq);
       const agent = new ClaudeAgent({ threadId: options.threadId, db, workspace: options.workspace, lease, runtime: options.runtime, cwd, skills: options.skills ?? null });
       for (const message of agent.messages) if (interrupted.has(message.submission)) agent.track(message.data);
       // Background agents ran in a child that ended with the cubed before.
@@ -238,16 +275,39 @@ export class ClaudeAgent {
     return () => { this.listeners.delete(listener); };
   }
 
-  /** Accept a prompt once per request id. A different text under a seen
-   * request id is a conflict; a prompt while a turn runs is refused. */
-  async submit(requestId: string, text: string): Promise<void> {
-    if (this.closing) throw new Error("host is stopping");
+  /** What the thread did with the message `requestId` (a prompt or a
+   * steer), if it has it. A different text under it is a conflict. */
+  request(requestId: string, text: string): ClaudeAcceptance | undefined {
     const prior = this.submissions.find(submission => submission.requestId === requestId);
-    if (prior) {
-      if (prior.text !== text) throw new Error("message request conflicts with the previous request");
-      return;
+    const steer = this.steers.find(candidate => candidate.requestId === requestId);
+    const known = prior ?? steer;
+    if (known && known.text !== text) throw new Error("message request conflicts with the previous request");
+    return steer?.state ?? (prior ? "started" : undefined);
+  }
+
+  /** Accept a prompt once per request id. A different text under a seen
+   * request id is a conflict. A prompt while a turn runs is refused, or
+   * with `steer` queued into that turn (see the header). */
+  async submit(requestId: string, text: string, options: { steer?: boolean } = {}): Promise<ClaudeAcceptance> {
+    if (this.closing) throw new Error("host is stopping");
+    const prior = this.request(requestId, text);
+    if (prior) return prior;
+    if (this.running) {
+      if (!options.steer || !this.child) throw new ClaudeBusy("thread is already working");
+      // A stop under way withdraws what is queued (cancel_queued); one sent
+      // after it could run as a turn of its own past the stop.
+      if (this.interrupt || this.child.stopped || this.ending?.state === "stopped") throw new Error(STOPPING);
+      // Before this child's init: what the one before it said, if any.
+      const known = this.child.capabilities ?? this.capabilities();
+      if (known && !steerable(known)) throw new Error(unsteerable(this.child.version ?? this.meta("version")));
+      const current = this.submissions.at(-1)!;
+      const steer: ClaudeSteer = { requestId, uuid: randomUUID(), text, submission: current.seq, state: "queued", detail: null };
+      this.db.prepare("INSERT INTO steer(request_id, uuid, text, submission, state, created_at) VALUES (?, ?, ?, ?, 'queued', ?)").run(requestId, steer.uuid, text, current.seq, Date.now());
+      this.steers.push(steer);
+      this.flushSteers();
+      this.changed();
+      return "queued";
     }
-    if (this.running) throw new ClaudeBusy("thread is already working");
     const child = this.spawn();
     const seq = Number(this.db.prepare("INSERT INTO submission(request_id, text, state, created_at) VALUES (?, ?, 'running', ?)").run(requestId, text, Date.now()).lastInsertRowid);
     const submission: ClaudeSubmission = { seq, requestId, text, state: "running", error: null };
@@ -258,10 +318,85 @@ export class ClaudeAgent {
       // A child that ended first has said why (its exit is the turn's failure);
       // a turn stopped or closed meanwhile is not sent.
       if (submission.state !== "running" || this.child !== child || ready === "exited" || this.interrupt || this.closing || child.stopped) return;
-      if (ready === "ready") { this.write(child.process, { type: "user", session_id: "", parent_tool_use_id: null, message: { role: "user", content: [{ type: "text", text }] } }); return; }
+      if (ready === "ready") {
+        this.write(child.process, { type: "user", session_id: "", parent_tool_use_id: null, message: { role: "user", content: [{ type: "text", text }] } });
+        this.delivered.add(seq);
+        this.flushSteers();
+        return;
+      }
       this.ending = { state: "failed", reason: MOD_MISSING };
       child.process.kill("SIGKILL");
     });
+    return "started";
+  }
+
+  /** Writes the running turn's queued steers the child has not got, once it
+   * has the turn's prompt and has said (in `system/init`) that it reports
+   * their fate. A child that says it does not drops them. */
+  private flushSteers(): void {
+    const child = this.child;
+    const current = this.submissions.at(-1);
+    if (!child?.capabilities || current?.state !== "running" || !this.delivered.has(current.seq)) return;
+    for (const steer of this.steers) {
+      if (steer.state !== "queued" || steer.submission !== current.seq || child.written.has(steer.uuid)) continue;
+      if (!steerable(child.capabilities)) { this.drop(steer, unsteerable(child.version ?? null)); continue; }
+      child.written.add(steer.uuid);
+      this.write(child.process, { type: "user", session_id: "", parent_tool_use_id: null, uuid: steer.uuid, message: { role: "user", content: [{ type: "text", text: steer.text }] } });
+    }
+  }
+
+  private drop(steer: ClaudeSteer, reason: string): void {
+    if (steer.state !== "queued") return;
+    this.db.prepare("UPDATE steer SET state='dropped', detail=? WHERE request_id=?").run(reason, steer.requestId);
+    steer.state = "dropped"; steer.detail = reason;
+  }
+
+  /** A steer's fate, from Claude Code's `command_lifecycle` frame.
+   * 'started': the model has it, in the running turn (a row shows it where
+   * it was taken in) or as a turn of its own. 'cancelled', 'discarded' or
+   * 'refused' before that: it never reached the model. */
+  private lifecycle(uuid: unknown, state: unknown): void {
+    const steer = this.steers.find(candidate => candidate.uuid === uuid);
+    if (!steer) return;
+    const current = this.submissions.at(-1);
+    if (state === "started") {
+      if (steer.state === "consumed") return;
+      this.db.prepare("UPDATE steer SET state='consumed', detail=NULL WHERE request_id=?").run(steer.requestId);
+      steer.state = "consumed"; steer.detail = null;
+      if (!this.running) {
+        this.continued(steer.requestId, steer.text);
+        if (this.submissions.at(-1)!.requestId === steer.requestId) this.moveSteer(steer);
+        return;
+      }
+      if (current!.requestId === steer.requestId) return;
+      this.moveSteer(steer);
+      const data = { type: STEERED, request_id: steer.requestId, text: steer.text };
+      const seq = Number(this.db.prepare("INSERT INTO message(submission, data) VALUES (?, ?)").run(current!.seq, JSON.stringify(data)).lastInsertRowid);
+      this.messages.push({ seq, submission: current!.seq, data });
+      return;
+    }
+    if (state !== "cancelled" && state !== "discarded" && state !== "refused") return;
+    this.drop(steer, this.interrupt ? "the stop withdrew it" : `claude code ${state} it`);
+    // The turn Claude Code was to take for it does not come.
+    if (this.running && current!.requestId === steer.requestId && steer.state === "dropped") {
+      this.settle("failed", null);
+      this.scheduleIdle();
+      this.armDeadline();
+    }
+  }
+
+  /** The steer belongs to the running turn from now on. */
+  private moveSteer(steer: ClaudeSteer): void {
+    const seq = this.submissions.at(-1)!.seq;
+    if (steer.submission === seq) return;
+    this.db.prepare("UPDATE steer SET submission=? WHERE request_id=?").run(seq, steer.requestId);
+    steer.submission = seq;
+  }
+
+  /** What the newest `system/init` advertised, of this child or one before. */
+  private capabilities(): string[] | undefined {
+    const stored = this.meta("capabilities");
+    return stored === null ? undefined : JSON.parse(stored) as string[];
   }
 
   /** Stop is an interrupt; a child that does not end the turn in time is killed. */
@@ -282,7 +417,9 @@ export class ClaudeAgent {
       child.process.kill("SIGKILL");
       return;
     }
-    this.write(child.process, { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } });
+    // cancel_queued: steers still queued are withdrawn, as Pi's abort
+    // withdraws its queued inputs, instead of running as a turn of their own.
+    this.write(child.process, { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt", cancel_queued: true } });
     // Claude Code answers an interrupt by rejecting the running tool use
     // without aborting the mod's hook, so the guest command would run on.
     // cubed cancels it itself.
@@ -355,7 +492,7 @@ export class ClaudeAgent {
     const ready = Promise.race([expected.ready.then(() => "ready" as const), exited.then(() => "exited" as const),
       new Promise<"late">(resolve => { timer = setTimeout(() => resolve("late"), this.runtime.modReadyMs ?? MOD_READY_MS); timer.unref(); })])
       .finally(() => { clearTimeout(timer); expected.cancel(); });
-    const current = { process: child, exited, stderr, ready, attached: false };
+    const current: NonNullable<ClaudeAgent["child"]> = { process: child, exited, stderr, ready, attached: false, written: new Set() };
     void ready.then(state => { current.attached = state === "ready"; });
     this.child = current;
     child.stdin.on("error", () => {});
@@ -372,9 +509,10 @@ export class ClaudeAgent {
       const exit = `claude code exited${child.exitCode === null ? "" : ` (${child.exitCode})`}${detail ? `: ${detail}` : ""}`;
       const ending = this.ending;
       this.ending = undefined;
-      if (this.closing) this.settle("failed", INTERRUPTED);
-      else if (this.interrupt || ending?.state === "stopped") this.settle("stopped", null);
-      else this.settle("failed", ending?.reason ?? exit);
+      const gone = this.closing ? "cubed closed claude code before it took it in" : "claude code ended before it took it in";
+      if (this.closing) this.settle("failed", INTERRUPTED, gone);
+      else if (this.interrupt || ending?.state === "stopped") this.settle("stopped", null, gone);
+      else this.settle("failed", ending?.reason ?? exit, gone);
       // Claude Code's background agents end with it.
       this.lose(ending?.reason ?? (this.closing ? CLOSED : exit), ending?.state);
       this.changed();
@@ -393,6 +531,7 @@ export class ClaudeAgent {
       return;
     }
     if (data.type === "control_response" || data.type === "keep_alive") return;
+    if (data.type === "command_lifecycle") { this.lifecycle(data.command_uuid, data.state); this.changed(); return; }
     // A turn nobody sent (Claude Code going on after a background agent's
     // notification) is a run of its own.
     const main = data.parent_tool_use_id == null;
@@ -405,6 +544,15 @@ export class ClaudeAgent {
     if (data.type === "system" && data.subtype === "init" && typeof data.session_id === "string") {
       this.db.prepare("INSERT INTO meta VALUES ('session', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(data.session_id);
     }
+    if (data.type === "system" && data.subtype === "init" && this.child) {
+      const capabilities = Array.isArray(data.capabilities) ? data.capabilities.filter((item): item is string => typeof item === "string") : [];
+      const version = typeof data.claude_code_version === "string" ? data.claude_code_version : undefined;
+      this.child.capabilities = capabilities;
+      this.child.version = version;
+      const upsert = this.db.prepare("INSERT INTO meta VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+      upsert.run("capabilities", JSON.stringify(capabilities));
+      if (version) upsert.run("version", version);
+    }
     const current = this.submissions.at(-1);
     if (current) {
       const seq = Number(this.db.prepare("INSERT INTO message(submission, data) VALUES (?, ?)").run(current.seq, line).lastInsertRowid);
@@ -416,11 +564,22 @@ export class ClaudeAgent {
       const failed = data.is_error === true || data.subtype !== "success";
       const detail = typeof data.result === "string" && data.result ? data.result
         : Array.isArray(data.errors) && data.errors.length ? data.errors.map(String).join("; ") : String(data.subtype ?? "claude code reported an error");
-      this.settle(this.interrupt ? "stopped" : failed ? "failed" : "completed", this.interrupt || !failed ? null : detail);
+      const ended = this.submissions.at(-1)!;
+      // A steer still queued as the turn ends starts the next turn at once
+      // (Claude Code takes it in after this result): the run goes on as the
+      // first one's, with the others behind it, never idle in between. A
+      // stop has withdrawn them instead.
+      const next = this.interrupt ? [] : this.steers.filter(steer => steer.state === "queued" && steer.submission === ended.seq && this.child?.written.has(steer.uuid));
+      this.settle(this.interrupt ? "stopped" : failed ? "failed" : "completed", this.interrupt || !failed ? null : detail, undefined, next);
       this.partial = [];
+      if (next.length) {
+        this.continued(next[0]!.requestId, next[0]!.text, Date.now(), next[0]);
+        for (const steer of next) this.moveSteer(steer);
+      }
       this.scheduleIdle();
       this.armDeadline();
     }
+    this.flushSteers();
     this.changed();
   }
 
@@ -446,9 +605,15 @@ export class ClaudeAgent {
     this.changed();
   }
 
-  private settle(state: Exclude<ClaudeSubmission["state"], "running">, error: string | null): void {
+  /** Ends the running turn. Its steers still queued are dropped (`gone`
+   * says why) but those in `keep` (the next turn takes them), and its
+   * outcome names every one it dropped. */
+  private settle(state: Exclude<ClaudeSubmission["state"], "running">, error: string | null, gone?: string, keep: readonly ClaudeSteer[] = []): void {
     const current = this.submissions.at(-1);
     if (!current || current.state !== "running") return;
+    const why = gone ?? (state === "stopped" ? "the stop withdrew it" : "the turn ended before claude code took it in");
+    for (const steer of this.steers) if (steer.submission === current.seq && !keep.includes(steer)) this.drop(steer, why);
+    error = withDropped(error, this.steers.filter(steer => steer.submission === current.seq && steer.state === "dropped"));
     this.db.prepare("UPDATE submission SET state=?, error=? WHERE seq=?").run(state, error, current.seq);
     current.state = state; current.error = error;
     if (this.interrupt) { clearTimeout(this.interrupt.timer); this.interrupt = undefined; }
@@ -457,12 +622,14 @@ export class ClaudeAgent {
 
   /** A run nobody sent: Claude Code going on by itself. `since`: when its
    * turn showed (now, for a notification whose turn has yet to show). */
-  private continued(requestId: string, text: string, since = Date.now()): void {
+  private continued(requestId: string, text: string, since = Date.now(), steer?: ClaudeSteer): void {
     if (this.running || this.submissions.some(submission => submission.requestId === requestId)) return;
     const seq = Number(this.db.prepare("INSERT INTO submission(request_id, text, state, created_at) VALUES (?, ?, 'running', ?)").run(requestId, text, Date.now()).lastInsertRowid);
     this.submissions.push({ seq, requestId, text, state: "running", error: null });
+    // Claude Code has what this run answers: steers may follow it.
+    this.delivered.add(seq);
     clearTimeout(this.idle);
-    this.armGrace(since);
+    this.armGrace(since, steer);
   }
 
   /** Claude Code's task messages: a backgrounded top-level task is waited
@@ -512,12 +679,20 @@ export class ClaudeAgent {
   }
 
   /** A follow-up turn that never shows is a failed run, not a silent wait. */
-  private armGrace(since: number): void {
+  /** `steer`: the run is that steer's, which Claude Code was to start as its
+   * next turn; it shows by Claude Code's 'started', not by its output. */
+  private armGrace(since: number, steer?: ClaudeSteer): void {
     clearTimeout(this.grace);
     const current = this.submissions.at(-1);
     this.grace = setTimeout(() => {
-      if (this.submissions.at(-1) !== current || !this.running || this.heard >= since) return;
-      this.settle("failed", "claude code was to go on by itself (a background agent finished), but did not — send a message to go on");
+      if (this.submissions.at(-1) !== current || !this.running) return;
+      if (steer) {
+        if (steer.state !== "queued") return;
+        this.settle("failed", null, "claude code did not start the turn it was to take for it");
+      } else {
+        if (this.heard >= since) return;
+        this.settle("failed", "claude code was to go on by itself (a background agent finished), but did not — send a message to go on");
+      }
       this.scheduleIdle();
       this.armDeadline();
       this.changed();
@@ -623,6 +798,26 @@ export function storedBackground(db: DatabaseSync): Array<{ taskId: string; desc
 export function agents(descriptions: readonly string[]): string {
   const quoted = descriptions.map(description => `"${description.replace(/\s+/g, " ").slice(0, 80)}"`);
   return quoted.length === 1 ? `background agent ${quoted[0]}` : `${quoted.length} background agents (${quoted.join(", ")})`;
+}
+
+/** A stored row of a steer Claude Code took in mid-turn (claude-thread-events.ts shows it). */
+export const STEERED = "cube_steered";
+const STOPPING = "the thread is being stopped, so cube does not send it into the turn: send it once the thread has stopped";
+const RESTARTED = "cubed stopped during the turn, so whether claude code took it in is not known";
+const steerable = (capabilities: readonly string[]) => STEERING_CAPABILITIES.every(name => capabilities.includes(name));
+const unsteerable = (version: string | null) => `this claude code${version ? ` (${version})` : ""} does not report when it takes in a message sent while it works, so cube does not send one then: send it once the thread's turn has ended`;
+
+function dropped(db: DatabaseSync, seq: number): Array<Pick<ClaudeSteer, "detail">> {
+  return db.prepare("SELECT detail FROM steer WHERE submission=? AND state='dropped' ORDER BY rowid").all(seq) as Array<Pick<ClaudeSteer, "detail">>;
+}
+
+/** A run's outcome, naming the steers it dropped. */
+function withDropped(error: string | null, steers: ReadonlyArray<Pick<ClaudeSteer, "detail">>): string | null {
+  if (!steers.length) return error;
+  const why = [...new Set(steers.map(steer => steer.detail ?? "not known why"))].join("; ");
+  const what = steers.length === 1 ? "a message sent while it worked never reached it" : `${steers.length} messages sent while it worked never reached it`;
+  const note = `${what} (${why}); send ${steers.length === 1 ? "it" : "them"} again if still needed`;
+  return error ? `${error}; ${note}` : note;
 }
 
 function duration(ms: number): string {

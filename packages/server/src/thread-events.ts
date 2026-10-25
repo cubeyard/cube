@@ -44,6 +44,14 @@ export type ThreadStatus = {
   waiting?: string[];
 };
 
+/** What a thread did with a message it accepted: started a run with it, or,
+ * steered into a running one, holds it until the agent takes it in after
+ * its current tool call (`queued`), has given it to the model (`consumed`),
+ * or lost the way to (`dropped`: the run's outcome says why). */
+export type ThreadAcceptance = "started" | "queued" | "consumed" | "dropped";
+/** How a run's `error` names its dropped steers (a completed run's too). */
+export const STEER_LOST = /\bsent while it worked never reached it\b/;
+
 export interface ThreadTranscript {
   agent: ThreadAgent;
   /** The current writable owner of the thread workspace, if any. */

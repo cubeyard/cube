@@ -86,7 +86,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       return { id: thread.id, title: thread.title ?? "untitled" };
     },
     async tell(id, text, requestId) {
-      await conversations.submit(id, text, requestId);
+      return (await conversations.submit(id, text, requestId, { steer: true })).accepted;
     },
     async archive(id) {
       const thread = registry.getThread(id);

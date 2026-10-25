@@ -77,15 +77,14 @@ export class PiThreadEvents implements ThreadEvents {
   /** The newest settled input decides the idle status. */
   private async lastRun(key: string): Promise<ThreadStatus> {
     if (this.settled?.key === key) return this.settled.status;
-    let last: SubmissionRecord | undefined;
+    const inputs: SubmissionRecord[] = [];
     let cursor;
     do {
       const page = await this.agent.storage.scanSubmissions({ conversationId: this.agent.conversation.id }, 256, cursor, context);
-      last = page.items.findLast(submission => submission.type === "input" && (submission.status === "done" || submission.status === "unanswered")) ?? last;
+      inputs.push(...page.items.filter(submission => submission.type === "input" && (submission.status === "done" || submission.status === "unanswered")));
       cursor = page.next;
     } while (cursor);
-    const status: ThreadStatus = !last ? { state: "idle", run: null, error: null }
-      : { run: last.requestId ?? String(last.id), ...settlement(last) };
+    const status = runStatus(inputs.reverse(), null);
     this.settled = { key, status };
     return status;
   }
@@ -102,22 +101,47 @@ export async function storedPiTranscript(storage: Pick<Storage, "scanEntries" | 
     entries.push(...page.items);
     cursor = page.next;
   } while (cursor);
-  let last: SubmissionRecord | undefined;
+  const inputs: SubmissionRecord[] = [];
   cursor = undefined;
   do {
     const page = await storage.scanSubmissions({ conversationId: ROOT_CONVERSATION_ID }, 256, cursor, context);
-    last = page.items.findLast(submission => submission.type === "input") ?? last;
+    inputs.push(...page.items.filter(submission => submission.type === "input"));
     cursor = page.next;
   } while (cursor);
-  const status: ThreadStatus = !last ? { state: "idle", run: null, error: null }
-    : last.status === "queued" || last.status === "placed" ? { state: "working", run: last.requestId ?? String(last.id), error: failure }
-    : withDropped({ run: last.requestId ?? String(last.id), ...settlement(last) }, entries);
+  const status = withDropped(runStatus(inputs.reverse(), failure), entries);
   return { agent: "pi", owner, status, events: entryEvents(entries.sort((a, b) => a.id - b.id)) };
 }
 
 /** A run stopped because its request was out at a stop says so (pi-sends.ts). */
 export function withDropped(status: ThreadStatus, entries: readonly { id: number; kind: string }[]): ThreadStatus {
-  return status.state === "stopped" && !status.error ? { ...status, error: droppedReason(entries) } : status;
+  if (status.state !== "stopped") return status;
+  return { ...status, error: [droppedReason(entries), status.error].filter(Boolean).join("; ") || null };
+}
+
+/** An input Pi never placed and settled: a message steered into a run that
+ * was withdrawn from Pi's inbox when the run was stopped (`aborted`) or
+ * failed (`run_failed`, `afterFailedRun: "withdraw"`, durable-agent.ts). */
+const withdrawn = (submission: SubmissionRecord) => submission.status === "unanswered" && submission.entry === undefined;
+const WHY: Record<string, string> = { aborted: "the stop withdrew it", run_failed: "the run failed before it read it" };
+
+/** The status the newest inputs (newest first) tell of: the newest one Pi
+ * placed or still holds decides it (working while queued or placed), as
+ * the run's own outcome, and the steers withdrawn after it are named in
+ * its error, so a failed run keeps its provider error. */
+export function runStatus(newestFirst: Iterable<SubmissionRecord>, failure: string | null): ThreadStatus {
+  const dropped: SubmissionRecord[] = [];
+  for (const submission of newestFirst) {
+    if (withdrawn(submission)) { dropped.push(submission); continue; }
+    const run = submission.requestId ?? String(submission.id);
+    if (submission.status === "queued" || submission.status === "placed") return { state: "working", run, error: failure };
+    const settled = settlement(submission);
+    if (!dropped.length) return { run, ...settled };
+    const why = [...new Set(dropped.map(item => WHY[item.reason ?? ""] ?? item.reason ?? "not known why"))].join("; ");
+    const what = dropped.length === 1 ? "a message sent while it worked never reached it" : `${dropped.length} messages sent while it worked never reached it`;
+    const note = `${what} (${why}); send ${dropped.length === 1 ? "it" : "them"} again if still needed`;
+    return { run, ...settled, error: settled.error ? `${settled.error}; ${note}` : note };
+  }
+  return { state: "idle", run: null, error: null };
 }
 
 export function settlement(submission: SubmissionRecord): Pick<ThreadStatus, "state" | "error"> {
