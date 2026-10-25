@@ -173,6 +173,13 @@ export class ScriptedHost {
         if (revision && artifact) {
           return json({ revision: { artifact: artifact.id, number: Number(revision[2]), title: artifact.title, body: this.bodies[artifact.id] ?? "", actions: [], provenance: { kind: "tool" }, createdAt: artifact.updatedAt, editor: artifact.author } });
         }
+        // One artifact as its page reads it: its newest revision, no comments or runs.
+        const viewed = request.method === "GET" ? /^\/api\/artifacts\/([^/]+)$/.exec(url.pathname) : null;
+        const item = viewed ? this.artifacts.find(entry => entry.id === decodeURIComponent(viewed[1]!)) : undefined;
+        if (viewed && item) {
+          const revisions = Array.from({ length: item.head }, (_, index) => ({ artifact: item.id, number: index + 1, title: item.title, createdAt: item.updatedAt, provenance: { kind: "tool" }, editor: item.author }));
+          return json({ artifact: item, revisions, comments: [], actionRuns: [], notices: [] });
+        }
         const image = request.method === "GET" && url.pathname.startsWith("/api/optchat/media/") ? this.media.get(decodeURIComponent(url.pathname.slice("/api/optchat/media/".length))) : undefined;
         if (!image) return json({ error: "not found" }, 404);
         response.writeHead(200, { "content-type": image.type });

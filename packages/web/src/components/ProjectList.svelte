@@ -59,6 +59,10 @@
 </script>
 
 <Header section="projects" />
+{#if !loaded && !unreachable && !error}
+  <!-- the first read: the same one line as every page's wait -->
+  <p class="loading" role="status">loading…</p>
+{:else}
 <main class="thread-list project-list">
   <div class="list-head">
     <div>
@@ -123,8 +127,9 @@
     </div>
   {:else if !loaded}
     <div class="empty-state" role="status">
-      <p class="hint">{unreachable ? "can't reach the host — it may be starting or restarting" : "reading projects…"}{#if unreachable}<br />retrying…{/if}</p>
+      <p class="hint">{unreachable ? "can't reach the host — it may be starting or restarting" : "loading…"}{#if unreachable}<br />retrying…{/if}</p>
       {#if unreachable || error}<button class="key" onclick={refresh}>retry now</button>{/if}
     </div>
   {/if}
 </main>
+{/if}

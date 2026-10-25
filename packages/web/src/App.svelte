@@ -211,7 +211,7 @@
     <button class="key" onclick={() => void refresh()}>retry now</button>
   </main>
 {:else if !daemon}
-  <p class="loading">loading…</p>
+  <p class="loading" role="status">loading…</p>
 {:else if settingsPage}
   <SettingsLayout page={settingsPage}>
     {#if settingsPage === "providers"}<ModelProviders />
@@ -245,7 +245,7 @@
       <ThreadView threadId={untrack(() => threadId!)} threads={activeThreads} {command} onConsume={consume} {onNewThread} />
     {/key}
   {:else if threadId}
-    <p class="loading">loading threads…</p>
+    <p class="loading" role="status">loading…</p>
   {:else if projectId}
     {#key projectId}
       <ProjectView {projectId} githubLogin={/^#\/projects\/[^/?]+\/github(?:[?]|$)/.test(hash)} {command} onConsume={consume} {onNewThread} />
@@ -264,6 +264,6 @@
       {onNewThread}
     />
   {:else}
-    <p class="loading">loading threads…</p>
+    <p class="loading" role="status">loading…</p>
   {/if}
 {/if}

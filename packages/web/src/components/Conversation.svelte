@@ -12,6 +12,7 @@
   import { tailStart, WINDOW_EVENTS } from "../../../server/src/transcript-window.ts";
   import type { TranscriptPage } from "../../../server/src/thread-events.ts";
   import Icon from "./Icon.svelte";
+  import ThinkingCube from "./ThinkingCube.svelte";
 
   let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread", images = null,
     sheet = false, onRows, toolLine, reportLabel, after, margin }: {
@@ -432,8 +433,12 @@
           {:else}<button class="key" type="button" onclick={() => void loadEarlier()}>show earlier messages</button>{/if}
         </div>
       {/if}
-      {#if loading}
-        <p class="conversation-empty">{waitingText ?? "reading thread…"}</p>
+      {#if loading || (waitingText && rows.length === 0)}
+        <!-- a machine starting or a wake waiting: the cube says it moves, the words say what -->
+        <div class="conversation-empty" class:machine={!!waitingText}>
+          {#if waitingText}<ThinkingCube state={waitingText.startsWith("waiting") ? "waiting" : "starting"} size={64} />{/if}
+          <p class="conversation-wait" role="status">{waitingText ?? "loading…"}</p>
+        </div>
       {:else if rows.length === 0}
         <div class="conversation-empty">
           <p>{empty?.title ?? "ready when you are"}</p>
@@ -479,9 +484,9 @@
           {@render after?.(row)}
         {/each}
         {#if working}
-          <div class="working-line" role="status">working…</div>
+          <div class="working-line" role="status"><ThinkingCube state="working" /><span>working…</span></div>
         {:else if waiting}
-          <div class="working-line" role="status">waiting on {status.waiting!.length === 1 ? "a background agent" : `${status.waiting!.length} background agents`}: {status.waiting!.map(description => description.length > 80 ? `${description.slice(0, 79)}…` : description).join(", ")}</div>
+          <div class="working-line" role="status"><ThinkingCube state="waiting" /><span>waiting on {status.waiting!.length === 1 ? "a background agent" : `${status.waiting!.length} background agents`}: {status.waiting!.map(description => description.length > 80 ? `${description.slice(0, 79)}…` : description).join(", ")}</span></div>
         {:else if status.state === "stopped"}
           <div class="working-line" role="status">stopped</div>
         {/if}

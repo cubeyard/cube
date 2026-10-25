@@ -34,24 +34,23 @@
 
 <style>
   .settings-shell { flex: 1; min-height: 0; display: grid; grid-template-columns: 15.5rem minmax(0, 1fr); }
-  /* the selector bank: a recessed well, the open page's key standing proud in it */
+  /* the selector bank: flush on the sheet, the open page on a soft face (as the chat's index rows) */
   .settings-rail {
     align-self: start; display: flex; flex-direction: column; gap: 2px;
-    margin: 2rem 0 2rem clamp(1rem, 2.4vw, 2rem); padding: 0.35rem;
-    background: var(--s1); border-radius: var(--r-well); box-shadow: var(--shadow-well);
+    margin: 2rem 0 2rem clamp(1rem, 2.4vw, 2rem); padding: 0;
   }
   .rail-item {
     display: flex; flex-direction: column; gap: 0.12rem; padding: 0.6rem 0.75rem;
     color: var(--ink-2); text-decoration: none; border: 1px solid transparent;
-    border-radius: calc(var(--r-well) - 5px);
+    border-radius: var(--r-key);
     transition: background-color 120ms ease, color 120ms ease;
   }
-  .rail-item:hover { background: color-mix(in srgb, var(--s3) 55%, transparent); color: var(--ink); }
-  .rail-item[aria-current="page"] { background: var(--s3); color: var(--ink); border-color: var(--line); box-shadow: var(--shadow-key); }
+  .rail-item:hover { background: color-mix(in srgb, var(--s3) 60%, transparent); color: var(--ink); }
+  .rail-item[aria-current="page"] { background: var(--s3); color: var(--ink); }
+  .rail-item[aria-current="page"] .rail-name { font-weight: 650; }
   .rail-name { font-size: 13px; font-weight: 550; letter-spacing: 0.01em; }
   .rail-short { display: none; }
   .rail-hint { font-size: 11px; font-weight: 450; color: var(--ink-3); line-height: 1.4; }
-  .rail-item[aria-current="page"]:hover { background: var(--s4); }
   .settings-pane { min-width: 0; overflow-y: auto; padding: 2rem clamp(1rem, 4vw, 4rem) 3rem clamp(1rem, 3vw, 2.6rem); }
   /* every page's title on the instrument's headline scale (DESIGN.md) */
   .settings-pane :global(h1) { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.3; margin: 0.35rem 0 0.8rem; }

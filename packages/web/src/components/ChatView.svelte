@@ -217,7 +217,7 @@
       placeholder="message optchat" {toolLine} {reportLabel} {after} margin={wide ? margin : undefined}
       empty={{ title: "one chat, every thread", hint: "Say what you want done: the chat starts threads in your projects, follows their reports and remembers everything you said. A thread needs a project; add one under projects." }} />
   {:else}
-    <p class="conversation-empty">{modelError ? "connect a model provider to start the chat" : "opening the chat…"}</p>
+    <div class="conversation-empty"><p class="conversation-wait" role="status">{modelError ? "connect a model provider to start the chat" : "loading…"}</p></div>
   {/if}
 </main>
 <ChatIndex bind:this={index} {work} settings={chatSettings} />

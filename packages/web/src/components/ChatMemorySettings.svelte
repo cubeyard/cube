@@ -120,7 +120,7 @@
   p { margin: 0; }
   .intro p, .hint { line-height: 1.6; color: var(--ink-2); }
   .intro strong { color: var(--ink); font-weight: 600; }
-  .settings-board { max-width: 52rem; padding: 1rem; background: var(--s1); border-radius: var(--r-well); box-shadow: var(--shadow-well); }
+  .settings-board { max-width: 52rem; padding: 1rem; border: 1px solid var(--line); border-radius: var(--r-well); }
   .readout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; border-top: 1px solid var(--line-2); border-bottom: 1px solid var(--line-2); }
   .readout div { min-width: 0; padding: 0.75rem; border-right: 1px solid var(--line); }
   .readout div:last-child { border-right: 0; }
@@ -142,7 +142,7 @@
     background-position: calc(100% - 12px) 50%, calc(100% - 8px) 50%;
     background-size: 4px 4px, 4px 4px; background-repeat: no-repeat;
   }
-  .field select option, .field select optgroup { background: var(--s2); color: var(--ink); }
+  .field select option, .field select optgroup { background: var(--s4); color: var(--ink); }
   .hint { max-width: 68ch; margin-top: 1rem; font-size: 13px; }
   .error { color: var(--bad); overflow-wrap: anywhere; margin-top: 0.75rem; }
   @media (max-width: 40rem) {
