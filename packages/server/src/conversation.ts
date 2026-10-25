@@ -269,7 +269,7 @@ export class Conversations {
   }
   /** Tells the listeners the thread's start failure if it changed since
    * this process last told it. Called after each of the thread's
-   * transitions here: an activation, a wake round, an agent opened, closed
+   * transitions here: an activation, a wake's end, an agent opened, closed
    * or down, an idle or recovery round, an archive. */
   private publish(id: string): void {
     if (!this.startFailureListeners.size) return;
@@ -326,7 +326,6 @@ export class Conversations {
           throw new Error(`the thread's machine is suspended and could not be resumed: ${why}`
             + (gaveUp ? "; this run already waited its whole time for it, a new message waits again" : ""));
         }
-        this.publish(id);
         await delay(this.patience.retryMs);
       }
     })().finally(() => { this.wakes.delete(id); this.publish(id); });
@@ -402,7 +401,9 @@ export class Conversations {
    * itself stands. */
   private countFailure(id: string, failure: Failure): void {
     try {
-      const retry = this.registry.applyPhase(id, { type: "tryFailed", failure, at: this.now() }).retry!;
+      const { retry } = this.registry.applyPhase(id, { type: "tryFailed", failure, at: this.now() });
+      // An archived thread's phase does not change: no try is counted.
+      if (!retry) return;
       if (retry.failures === START_TRIES && !releaseUnfinished(this.registry.getThread(id)!)) {
         log.warn("cube stops retrying the thread's start; a message to it tries once more", { thread: id, tries: retry.failures });
       }
@@ -767,8 +768,10 @@ export class Conversations {
   private async suspendIfIdle(thread: Thread): Promise<void> {
     const machines = this.machines;
     const id = thread.id;
-    const skip = (current: Thread | null) => !current || current.archived || current.workspaceState !== "available" || !!current.vm?.suspension || releaseUnfinished(current)
-      || this.wakes.has(id);
+    // A wake under way needs no check of its own: while it lasts the
+    // machine sleeps (skipped here) or its start runs (an activation, refused
+    // below; RunnerMachines' start, refused there).
+    const skip = (current: Thread | null) => !current || current.archived || current.workspaceState !== "available" || !!current.vm?.suspension || releaseUnfinished(current);
     if (skip(thread)) return;
     // The recovery loop's check of a machine that runs is not activity:
     // its end is waited for (B-207-1). A start is.

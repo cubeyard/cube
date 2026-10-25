@@ -238,7 +238,12 @@ machine's sleep (packages/web/src/lib/thread-state.ts).
 - `packages/server/test/start-failure-publication-test.ts`: an archive
   tells a failing thread's start failure ended as it begins, before its
   release finishes; a listener that subscribed later in the same process is
-  told a failure that came back.
+  told a failure that came back; while a wake waits for a slot, what a
+  listener was told is the start failure now between the wake's rounds.
+- `packages/server/test/wake-guards-test.ts`: an idle round while a wake's
+  start is under way suspends nothing; a call to a sleeping machine answers
+  within a bound (the wake's own activation's guest calls do not wait for
+  the wake).
 - `packages/server/test/thread-failure-test.ts`: each failure kind's words,
   read back to its kind, in a row an older cubed reads; an older row's
   failed release still retried.

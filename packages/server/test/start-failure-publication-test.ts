@@ -7,7 +7,11 @@
  *       never reported as a start that failed;
  *   P2  a listener that subscribes later in the same process is told a
  *       failure that came back, even if an earlier listener was told the
- *       same failure before it went away. */
+ *       same failure before it went away;
+ *   P3  while a wake waits for a slot (after a restart, its agent closed, a
+ *       failed wake on its row), what a listener was told, from its
+ *       subscription on, is the thread's start failure now between the
+ *       wake's rounds, and at its end. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -31,8 +35,8 @@ berth.session = () => {
     return inner.machine(request);
   } } as RunnerSession;
 };
-const cubed = life.start();
-const { conversations } = cubed;
+let cubed = life.start();
+let { conversations } = cubed;
 try {
   // ---------------------------------------------------------------- P1
   {
@@ -56,8 +60,9 @@ try {
   }
 
   // ---------------------------------------------------------------- P2
+  const p2 = life.thread();
   {
-    const thread = life.thread();
+    const thread = p2;
     registry.applyPhase(thread.id, { type: "failed", failure: allocationFailed("the guest is unreachable") });
     const failure = { failure: "workspace allocation failed: the guest is unreachable", episode: null, retrying: true, waking: false };
     // An idle round tells every thread's start failure that changed.
@@ -78,6 +83,51 @@ try {
     await conversations.suspendIdle();
     assert.deepEqual(second.at(-1), failure, "a failure that came back is told to a listener that subscribed since");
     console.log("ok: P2 a listener that subscribed later in the same process is told a failure that came back, though an earlier one was told it");
+  }
+
+  // ---------------------------------------------------------------- P3
+  {
+    const c = life.thread();
+    await conversations.activate(c.id);
+    await until("c settles", async () => {
+      const status = (await conversations.storedHistory(c.id, { limit: 1 }))?.status;
+      return !!status && status.state !== "working" && status.state !== "idle";
+    });
+    life.clock.now += 40 * 60_000;
+    for (let round = 0; round < 3; round++) await conversations.suspendIdle();
+    assert.equal(fresh(c.id).vm?.suspension?.state, "suspended", "c sleeps");
+    berth.failResumes.set(vmOf(c.id), "the snapshot could not be restored");
+    await conversations.submit(c.id, "more", "tell-c").catch(() => {});
+    assert.equal(fresh(c.id).retry?.failures, 1, "one failed wake on c's row");
+    berth.failResumes.delete(vmOf(c.id));
+    await cubed.close();
+    cubed = life.start();
+    ({ conversations } = cubed);
+    // The wake the restart cut short is read back, as the recovery loop does.
+    await cubed.machines.settleWake(fresh(c.id));
+    assert.equal(fresh(c.id).vm?.suspension?.state, "suspended");
+    // The runner is full: two new threads hold its two slots.
+    await conversations.archive(p2.id);
+    await conversations.activate(life.thread().id);
+    await conversations.activate(life.thread().id);
+    let told: string | undefined;
+    conversations.onStartFailure((id, failure) => { if (id === c.id) told = JSON.stringify(failure); });
+    told = JSON.stringify(conversations.startFailure(c.id));
+    assert.match(told, /the snapshot could not be restored/, "after the restart c's row says its wake failed");
+    const waking = conversations.wake(c.id).then(() => "resumed", (error: Error) => error.message);
+    let compared = 0;
+    for (const deadline = Date.now() + 300; Date.now() < deadline;) {
+      await new Promise(resolve => setTimeout(resolve, 15));
+      if (conversations.starting(c.id)) continue;
+      assert.equal(told, JSON.stringify(conversations.startFailure(c.id)), "between the wake's rounds the told start failure is the one now");
+      compared++;
+    }
+    assert.ok(compared >= 5, `compared between rounds: ${compared}`);
+    assert.ok(conversations.owns(fresh(c.id)) && fresh(c.id).vm?.suspension, "the wake still waits for a slot");
+    // Its patience ends (600 ms here): the wake gives up, the machine asleep.
+    assert.match(await waking, /^the thread's machine is suspended and could not be resumed: waiting for a free slot/);
+    assert.equal(told, JSON.stringify(conversations.startFailure(c.id)), "at the wake's end too");
+    console.log(`ok: P3 a wake that waits for a slot keeps what a listener was told the thread's start failure now (${compared} reads between rounds) and at its end`);
   }
 } finally {
   letGo();
