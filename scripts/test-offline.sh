@@ -22,6 +22,7 @@ OFFLINE_TESTS=(
   packages/server/test/wake-guards-test.ts
   packages/server/test/optchat-run-feed-test.ts
   packages/server/test/optchat-run-watch-test.ts
+  packages/server/test/archive-timing-test.ts
   packages/server/test/runner-suspend-test.ts
   packages/server/test/thread-lifecycle-test.ts
   packages/server/test/lifecycle-model-test.ts

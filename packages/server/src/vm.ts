@@ -443,12 +443,20 @@ export function releaseCheckScript(allocation: WorkspaceAllocation): string {
 /** Runs one of cubed's own commands in the thread workspace under a fresh
  * lease and a fixed key; reattaches to it when the key already ran. These
  * are not the agent's changes. */
-async function own(workspace: VmWorkspace, owner: WorkspaceOwner, key: string | ((epoch: number) => string), command: string, timeoutMs: number) {
+/** How long a command's `exec` took to be accepted, and then the wait for
+ * its end (the command's run and the polls that saw it end), in ms. */
+export interface CommandTiming { execMs?: number; waitMs?: number }
+
+async function own(workspace: VmWorkspace, owner: WorkspaceOwner, key: string | ((epoch: number) => string), command: string, timeoutMs: number, timing?: CommandTiming) {
   const lease = await workspace.lease({ owner });
   try {
     if (typeof key !== "string") key = key(lease.epoch);
+    const sent = performance.now();
     await workspace.execOwn(lease.token, key, { command, timeoutMs });
-    return await settleOperation(workspace, lease.token, key);
+    const accepted = performance.now();
+    if (timing) timing.execMs = accepted - sent;
+    try { return await settleOperation(workspace, lease.token, key); }
+    finally { if (timing) timing.waitMs = performance.now() - accepted; }
   } finally { await workspace.release(lease.token).catch(() => {}); }
 }
 
@@ -517,8 +525,8 @@ export async function refreshGuest(workspace: VmWorkspace, portal: GuestPortal):
 
 /** What the machine reports about its work at archive: `clean` releases the
  * disk, any other answer keeps it (see Conversations.archive). */
-export async function releaseCheck(workspace: VmWorkspace, owner: WorkspaceOwner, allocation: WorkspaceAllocation): Promise<{ clean: boolean; reason: string }> {
-  const state = await own(workspace, owner, epoch => `cube:release-check:${epoch}`, releaseCheckScript(allocation), 120000);
+export async function releaseCheck(workspace: VmWorkspace, owner: WorkspaceOwner, allocation: WorkspaceAllocation, timing?: CommandTiming): Promise<{ clean: boolean; reason: string }> {
+  const state = await own(workspace, owner, epoch => `cube:release-check:${epoch}`, releaseCheckScript(allocation), 120000, timing);
   if (state.state !== "succeeded" || state.exitCode !== 0) return { clean: false, reason: `the release check did not finish (${state.state})` };
   const output = Buffer.from(state.output).toString("utf8").trim();
   return output === "clean" ? { clean: true, reason: "clean" } : { clean: false, reason: output.replace(/^dirty: /, "") || "unknown" };

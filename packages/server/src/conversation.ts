@@ -18,7 +18,7 @@ import type { WindowQuery } from "./transcript-window.ts";
 import { readClaudeHistory, readPiHistory, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { isThreadImageRef, readThreadImage } from "./thread-images.ts";
 import { Registry, threadAgent, type HookOutcome, type Thread } from "./registry.ts";
-import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWorkspace, RunnerWait, StepFailure, stepLog, type PreparationOutcome,
+import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWorkspace, RunnerWait, StepFailure, stepLog, type CommandTiming, type PreparationOutcome,
   type ThreadMachines } from "./vm.ts";
 import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
@@ -56,6 +56,32 @@ const DRAIN_MS = 5_000;
 /** How long the close waits for the commands still running. */
 const COMMANDS_MS = 2_000;
 const RUNNER_KEPT = "the release check was clean, but the runner kept the disk (a machine that did not stop in time or failed, or a host runner's directory)";
+type ArchivePhase = "settleMs" | "agentMs" | "closeMs" | "wakeMs" | "checkMs" | "releaseMs";
+/** Where one archive's time went (docs/thread-lifecycle.md, "Archive
+ * timing"): each phase it ran, in ms, measured at its own boundary. */
+interface ArchiveTiming extends Partial<Record<ArchivePhase, number>> {
+  began: number;
+  /** The wait for another command on the thread (an archive, a message) to end. */
+  queueMs?: number;
+  /** The agent the working check found: open, opened for it, unopened (it
+   * could not open), or down (not opened: it runs nothing). */
+  agent?: "open" | "opened" | "unopened" | "down";
+  /** A sleeping machine: woken for the release check, or its disk kept unchecked. */
+  wake?: "woken" | "kept unchecked";
+  checkExecMs?: number;
+  checkWaitMs?: number;
+}
+/** One line per archive: its outcome and where its time went. Words from
+ * the thread's own state only (no secrets): the release check's or the
+ * refusal's reason, cut short. */
+function logArchive(thread: string, timing: ArchiveTiming, outcome: "archived" | "already" | "refused" | "failed", fields: { disk?: string; reason: string }): void {
+  const ms = (value: number | undefined) => value === undefined ? undefined : Math.round(value);
+  const line = { thread, outcome, ...fields.disk ? { disk: fields.disk } : {}, reason: fields.reason.slice(0, 200), ms: ms(performance.now() - timing.began),
+    queueMs: ms(timing.queueMs), settleMs: ms(timing.settleMs), agent: timing.agent, agentMs: ms(timing.agentMs), closeMs: ms(timing.closeMs),
+    wake: timing.wake, wakeMs: ms(timing.wakeMs), checkMs: ms(timing.checkMs), checkExecMs: ms(timing.checkExecMs), checkWaitMs: ms(timing.checkWaitMs),
+    releaseMs: ms(timing.releaseMs) };
+  if (outcome === "failed") log.warn("archive failed", line); else log.info(outcome === "refused" ? "archive refused" : "archive", line);
+}
 /** What a reader of threads may use: only what reads cubed's own state,
  * an agent already open, or a thread's store. None of it starts or wakes a
  * machine, opens an agent or waits for an activation, so code given only a
@@ -957,18 +983,32 @@ export class Conversations {
    * A thread whose run goes on is refused (ThreadWorking), never stopped. A
    * thread an earlier archive already archived is left as it is (`already`). */
   async archive(id: string): Promise<{ retained: boolean; reason: string; already?: true }> {
-    return this.command(id, async () => {
-    // No activation starts from here on; the one under way is waited for.
-    // An activation beside the release check or the release would start the
-    // machine or take its lease while it is being released.
-    this.archiveHolds.add(id);
-    this.publish(id);
-    try { return await this.archiveHeld(id); }
-    finally { this.archiveHolds.delete(id); this.publish(id); }
-    });
+    const timing: ArchiveTiming = { began: performance.now() };
+    try {
+      const result = await this.command(id, async () => {
+        timing.queueMs = performance.now() - timing.began;
+        // No activation starts from here on; the one under way is waited for.
+        // An activation beside the release check or the release would start the
+        // machine or take its lease while it is being released.
+        this.archiveHolds.add(id);
+        this.publish(id);
+        try { return await this.archiveHeld(id, timing); }
+        finally { this.archiveHolds.delete(id); this.publish(id); }
+      });
+      logArchive(id, timing, result.already ? "already" : "archived", { disk: result.retained ? "retained" : "deleted", reason: result.reason });
+      return result;
+    } catch (error) {
+      const refused = error instanceof ThreadWorking || error instanceof ThreadArchiving;
+      logArchive(id, timing, refused ? "refused" : "failed", { reason: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
   }
-  private async archiveHeld(id: string): Promise<{ retained: boolean; reason: string; already?: true }> {
-    await this.settled(id);
+  private async archiveHeld(id: string, timing: ArchiveTiming): Promise<{ retained: boolean; reason: string; already?: true }> {
+    const phase = async <T>(name: ArchivePhase, work: () => Promise<T>): Promise<T> => {
+      const start = performance.now();
+      try { return await work(); } finally { timing[name] = (timing[name] ?? 0) + performance.now() - start; }
+    };
+    await phase("settleMs", () => this.settled(id));
     const thread = this.registry.getThread(id);
     if (!thread) throw new Error("thread not found");
     // Archives queue behind each other: the second finds the first's result
@@ -983,32 +1023,39 @@ export class Conversations {
     let unopened: string | null = null;
     // A down agent runs nothing (Pi ended every task); it is not opened again.
     if (!failed && !this.downs.has(id)) {
+      timing.agent = this.agentOpen(id) ? "open" : "opened";
       // Only opening is caught: an open agent whose state cannot be read is not archived.
-      const opened = await (this.isClaude(id) ? this.claudeAgent(id) : this.agent(id)).catch((error: unknown) => {
+      const opened = await phase<ClaudeAgent | Agent | null>("agentMs", () => (this.isClaude(id) ? this.claudeAgent(id) : this.agent(id)).catch((error: unknown) => {
         if (this.closing) throw error;
         unopened = error instanceof Error ? error.message : String(error);
+        timing.agent = "unopened";
         return null;
-      });
-      if (opened instanceof ClaudeAgent ? opened.running : opened && (await opened.harness.snapshot(LiveDoc, opened.conversation.id, context))?.run) throw new ThreadWorking();
+      }));
+      if (opened instanceof ClaudeAgent ? opened.running : opened && (await phase("agentMs", () => opened.harness.snapshot(LiveDoc, opened.conversation.id, context)))?.run) throw new ThreadWorking();
       // Closing the agent would end its background agents.
       if (opened instanceof ClaudeAgent && opened.waiting.length) throw new ThreadWorking(true);
     }
+    else if (!failed) timing.agent = "down";
     // From here until the release ends nothing reopens the thread.
     return this.withArchiving(id, async () => {
       let decision: { clean: boolean; reason: string };
       if (failed) decision = { clean: false, reason: thread.workspaceError ?? "the thread machine was not ready" };
       else if (unopened) decision = { clean: false, reason: `the agent could not open: ${unopened}` };
       else {
-        await this.closeAgents(id);
+        await phase("closeMs", () => this.closeAgents(id));
         // A suspended machine is woken for the check only if its runner has
         // a slot free now; otherwise its disk is kept unchecked at once
         // rather than the archive waiting for a slot (nothing is lost).
-        const asleep = await this.wakeForCheck(id);
+        const sleeping = !!this.registry.getThread(id)?.vm?.suspension;
+        const asleep = await phase("wakeMs", () => this.wakeForCheck(id));
+        if (sleeping) timing.wake = asleep ? "kept unchecked" : "woken";
         if (asleep) decision = { clean: false, reason: `its machine is suspended and was not woken to check it (${asleep}); its disk is kept unchecked` };
         else {
           const workspace = this.openWorkspace(id);
-          try { decision = await releaseCheck(workspace, threadAgent(thread), thread.allocation); }
+          const check: CommandTiming = {};
+          try { decision = await phase("checkMs", () => releaseCheck(workspace, threadAgent(thread), thread.allocation, check)); }
           catch (error) { decision = { clean: false, reason: `the thread machine could not be checked: ${error instanceof Error ? error.message : String(error)}` }; }
+          finally { timing.checkExecMs = check.execMs; timing.checkWaitMs = check.waitMs; }
           if (decision.clean && workspace.agentChanged()) decision = { clean: true, reason: "clean: the agent's work is committed and pushed" };
         }
       }
@@ -1017,7 +1064,7 @@ export class Conversations {
       if (again) decision = { clean: thread.vm?.retain === false, reason: thread.vm?.retainReason ?? decision.reason };
       else if (thread.vm) this.registry.updateThreadVm(id, { retain: !decision.clean, retainReason: decision.reason });
       this.registry.applyPhase(id, { type: "releaseBegan" });
-      const released = await this.release(id);
+      const released = await phase("releaseMs", () => this.release(id));
       return { retained: released.retained, reason: released.retained && decision.clean ? RUNNER_KEPT : decision.reason };
     });
   }
