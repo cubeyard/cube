@@ -1466,36 +1466,46 @@ export class OptChat {
    * thread is attached again when its feed opens. */
   private attach(id: string): void {
     if (this.closing || this.watchers.has(id)) return;
-    const watching = (async () => {
+    // Only this attach's entry is removed: an older watch that ends after a
+    // newer attach leaves the newer one in place.
+    const drop = () => { if (this.watchers.get(id) === watching) this.watchers.delete(id); };
+    // Looked at again on the next round (every watchMs), never at once.
+    const again = (why: string, error?: unknown) => {
+      drop();
+      if (this.closing) return;
+      if (error !== undefined) log.warn(why, { thread: id, error: error instanceof Error ? error.message : String(error) });
+      this.reattach.add(id);
+    };
+    const watching: Promise<ThreadWatch | null> = (async () => {
       let events: ThreadEvents | null | "archiving" | "stored";
       try { events = await this.options.threads.events(id); }
-      catch (error) {
-        if (!this.closing) log.warn("watching a thread failed; the next round looks again", { thread: id, error: error instanceof Error ? error.message : String(error) });
-        this.watchers.delete(id);
-        this.reattach.add(id);
-        return null;
-      }
+      catch (error) { again("watching a thread failed; the next round looks again", error); return null; }
       // An archive may still be refused: the next round looks again.
-      if (events === "archiving") { this.watchers.delete(id); this.reattach.add(id); return null; }
+      if (events === "archiving") { again("archiving"); return null; }
       // Archived or gone: its feed's close was told, and read, when it closed.
-      if (!events) { this.watchers.delete(id); return null; }
+      if (!events) { drop(); return null; }
       // A thread is not started or woken to be watched: its stored run, if
       // it settled, reports (once: the report's request id); its feed's
       // opening attaches it again.
       if (events === "stored") {
-        this.watchers.delete(id);
+        drop();
         await this.reportStored(id);
         return null;
       }
-      if (this.closing) return null;
-      // A watch that ends (its feed closed, or failed) is attached again next round.
-      const ended = () => { this.watchers.delete(id); if (!this.closing) this.reattach.add(id); };
-      const watch = await events.watch(transcript => this.observe(id, transcript), { onEnd: ended });
-      void watch.closed.then(ended);
+      if (this.closing) { drop(); return null; }
+      // A watch that ends (its feed closed, or failed) or cannot begin (its
+      // feed could not be read) is attached again on the next round.
+      let watch: ThreadWatch;
+      try { watch = await events.watch(transcript => this.observe(id, transcript), { onEnd: () => again("ended") }); }
+      catch (error) { again("a thread's watch could not begin; the next round looks again", error); return null; }
+      void watch.closed.then(() => again("ended"), () => again("ended"));
       return watch;
     })();
     this.watchers.set(id, watching);
+    // Nothing above rejects; should it, the thread is looked at again.
+    void watching.catch(error => again("watching a thread failed; the next round looks again", error));
   }
+
 
   /** cubed told a thread's start failure (null: it ended, by a start, an
    * archive or the thread's end): a later failure's grace starts again. */

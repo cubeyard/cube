@@ -392,9 +392,10 @@ Restarts and failures:
   only in an open feed, Pi's or Claude Code's), and the watcher attaches a
   feed that opens and reads the stored run of one that closes. When the
   chat opens it attaches each of its threads once, which reports what
-  settled before; a watch that ended (or failed) is attached again on the
-  next round (15 s), which also sends again a report the chat could not
-  take. A run that settled while the chat was closed and whose thread was
+  settled before; a watch that ended, failed or could not begin (its feed's
+  first read failed) is attached again on the next round (15 s), never at
+  once, and only its own entry is dropped; the round also sends again a
+  report the chat could not take. A run that settled while the chat was closed and whose thread was
   archived before it opened again is not reported (it was not before
   either). Machines start for explicit work (`spawn`,
   `tell`, the user's message, an archive's check of the disk when its
