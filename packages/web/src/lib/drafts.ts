@@ -1,9 +1,10 @@
 /** A conversation's unsent draft, by its API base, for the session: a thread
  * opened in the panel over the chat leaves the page when the panel closes,
- * and its draft must be there when it opens again. Kept with it: the send
- * being made (its request id and count, so a retry of the same words is
- * the same request, as in a view that stayed) and the note of a send that
- * failed. A send that fails after its view has gone is recovered: into the
+ * and its draft must be there when it opens again. Kept with it: a send
+ * that failed, with its note and its request id and count (so a retry of
+ * the same words is the same request, as in a view that stayed). A send
+ * still on its way is never kept: a later view must not reuse its id once
+ * it has gone through, or a repeat of the same words would read as a replay. A send that fails after its view has gone is recovered: into the
  * view open now, if one is (before what was typed there since), else into
  * the kept text. Only text: images being attached are not kept. Memory
  * only; a reload starts clean. */

@@ -78,7 +78,8 @@
   // its send's identity and a failure's note for the next visit.
   const start = untrack(() => keptOf(base));
   let prompt = $state(start.text);
-  $effect(() => { keep(base, { text: prompt }); });
+  // A field emptied by hand drops a failure's note: "back in the field" no longer holds.
+  $effect(() => { keep(base, prompt.trim() ? { text: prompt } : { text: prompt, note: null }); });
   let loading = $state(true);
   let error = $state<string | null>(start.note);
   let historyError = $state<string | null>(null);
@@ -91,7 +92,13 @@
   /** The send being made: a retry of the same message is the same request,
    * counted as the first attempt was (see `echo`). */
   let pending: Pending | null = start.pending;
-  function setPending(next: Pending | null): void { pending = next; keep(base, { pending: next }); }
+  /** `pending` came from the store (a failure kept for this thread), not from a send of this view. */
+  let pendingKept = !!start.pending;
+  // Only a send that failed carries its request to a later view (so a retry
+  // of the same words is the same request); one still on its way stays this
+  // view's own, or a later view would reuse its id for a repeat after it
+  // succeeded, and the host would take the repeat for a replay.
+  function failedPending(failed: Pending): void { pending = failed; pendingKept = true; keep(base, { pending: failed }); }
   /** Images attached to the draft: uploaded at once, sent with the message. */
   type Attachment = { key: string; name: string; preview: string; id: string | null; mimeType: string | null; error: string | null };
   let attachments = $state<Attachment[]>([]);
@@ -224,7 +231,7 @@
     const unlisten = listen(base, recovery => {
       prompt = prompt.trim() ? `${recovery.text}\n${prompt}` : recovery.text;
       error = recovery.note;
-      if (recovery.pending) setPending(recovery.pending);
+      if (recovery.pending) failedPending(recovery.pending);
       keep(base, { note: recovery.note });
       void tick().then(resizeComposer);
     });
@@ -374,12 +381,19 @@
     const sent = attachments.filter(item => item.id);
     const ids = sent.map(item => item.id!);
     const key = JSON.stringify([text, ids]);
-    if (pending?.key !== key) setPending({ key, requestId: uid(), seen: null });
+    // a kept failure that a retry elsewhere has since delivered is no longer a request to reuse
+    if (pending && pendingKept && keptOf(base).pending?.requestId !== pending.requestId) pending = null;
+    pendingKept = false;
+    if (pending?.key !== key) {
+      pending = { key, requestId: uid(), seen: null };
+      // other words: an earlier failure's request is not this message's
+      keep(base, { pending: null });
+    }
     const requestId = pending!.requestId;
     // The message leaves the field for the transcript at once; a failed
     // send puts it back, before anything typed meanwhile.
     const made = echo(transcript, echoes, requestId, text, sent.map(item => ({ id: item.id!, mimeType: item.mimeType ?? "" })), pending!.seen ?? undefined);
-    setPending({ ...pending!, seen: made.seen });
+    pending = { ...pending!, seen: made.seen };
     const tried = pending!;
     echoes = [...echoes, made];
     attachments = attachments.filter(item => !sent.includes(item));
@@ -415,7 +429,7 @@
       await tick();
       resizeComposer();
       error = errorText(cause);
-      keep(base, { note: `not sent: ${error}` });
+      keep(base, { note: `not sent: ${error}`, pending: tried });
     } finally {
       sending = false;
       composer?.focus();
