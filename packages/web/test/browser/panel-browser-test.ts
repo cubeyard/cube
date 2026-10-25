@@ -18,7 +18,8 @@ import { gate, ScriptedHost, type Prompt } from "./scripted-host.ts";
 const host = await ScriptedHost.start();
 host.transcript = { ...host.transcript, status: { state: "completed", run: "r", error: null }, events: chatEvents() };
 host.thread = { ...threads[0]!, id: "t1" };
-host.chat = { ...host.transcript };
+// the chat underneath has history enough that a reader can be well away from its end
+host.chat = { ...host.transcript, events: chatEvents({ filler: 4 }) };
 host.transcript = { ...host.transcript, events: chatEvents().slice(0, 4) };
 host.threads = threads.slice(1);
 host.artifacts = artifacts;
@@ -67,6 +68,8 @@ try {
     const scroller = page.locator(".chat-sheet .transcript");
     await scroller.evaluate(element => { element.scrollTop = 120; });
     const scrolled = await scroller.evaluate(element => element.scrollTop);
+    // away from the end: within 120px of it the chat follows its end (Conversation's atBottom), and any resize pins it there
+    assert.ok(await scroller.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight) >= 240, `${size.name}: the scroll is well away from the chat's end`);
 
     // a place opens over the chat: modal, named, focus inside, the chat inert and still there
     await page.evaluate(() => { location.hash = "#/threads"; });
