@@ -131,6 +131,8 @@ small offset shadow and travel down when pressed. State is printed, never
 lit: a quiet word in silkscreen ink (`working`, `suspended`, `turn ended`),
 a failure in `--bad` ink, and nothing at all for the ready default. There
 are no status lamps, glows, halos or blinking anywhere (the user's call).
+The one thing that moves is the **thinking cube** (below): square ink dots
+in a cube beside the words of work in progress, never instead of them.
 Code lives behind dark glass in both themes, like a display window set into
 the panel.
 
@@ -139,8 +141,9 @@ the enclosure is anodized (the surface ramp inverts around a reading field
 that goes darker than the enclosure), the silkscreen goes pale, the signal
 warms up to `#ff5a14`, and the glass stays glass. Motion is mechanical and
 small: 120ms state changes, 80ms key travel and 140ms settle-in entrances —
-all silenced under `prefers-reduced-motion`. Nothing repeats: no motion
-says a state.
+all silenced under `prefers-reduced-motion`. Nothing else repeats: only
+the thinking cube moves while work is in progress, and it is still under
+reduced motion.
 
 **The sheet (OptChat, cube's home).** The user chose direction **A+ · ark
 med marg** for the chat: one quiet sheet on the reading field where the
@@ -148,7 +151,11 @@ conversation has the screen, what it started or named stands in a margin
 beside the message that says so, and everything else is one step away in an
 index. The chat sheds the instrument's physical costume (decks, seams,
 rails, raised strips, labels) but keeps its tokens, type and one
-signal; the other pages keep the bench instrument until they move too. Its
+signal. **Every other page is on the same sheet** (the user's call, after
+threads stopped looking like the chat): the reading field (`--s4`) edge to
+edge, the header as one quiet row, hairline frames instead of recessed
+wells, soft `--s3` faces for what is selected or yours, a thread's
+conversation and composer exactly as the chat's. Its
 contract is the chat's surface brief
 (`packages/web/.impeccable/surfaces/packages-web-src-components-chatview-svelte.md`)
 and the Sheet components below.
@@ -157,7 +164,7 @@ and the Sheet components below.
 - Warm putty enclosure on a numbered five-step surface ramp; no surface outside it
 - One signal orange, theme-tuned, reserved for what the user can touch
 - States in print: quiet words, failure in error ink, ready says nothing; no lamps or blinking
-- Physical depth: raised keys with real press travel, recessed wells, machined seams
+- One sheet: the reading field everywhere; hairline frames and soft faces, not wells and seams; keys keep a soft drop and real press travel
 - Dark-glass code windows that stay dark glass in both themes
 - Lowercase silkscreen labels (11px, tracked); Archivo for the enclosure, JetBrains Mono for machine truth
 - The black edition: dark mode as the same instrument anodized, not redesigned
@@ -227,7 +234,10 @@ act on, and each theme pairs it with its own `--signal-ink`. Never use the
 signal for state, and never use a state ink on a clickable affordance.
 
 **The Printed State Rule.** A state is a word, never a light. No status
-dots, glows, halos, pulses or blinking, anywhere. Moving states (`working…`,
+dots, glows, halos, pulses or blinking, anywhere. The thinking cube is the
+one sanctioned movement: it stands beside a moving state's words (never
+alone, never in a list, never for ready, done or failed), is hidden from
+screen readers and is still under reduced motion. Moving states (`working…`,
 `running`, `starting the thread's machine`) are quiet silkscreen words; a
 failure is the same word in `--bad` ink with its full text where the Full
 Failure Rule applies; ready, done and signed in are the default and say
@@ -278,7 +288,12 @@ cells). A timestamp ticking from "2m" to "12m" must not shift the row.
 
 ## Layout
 
-The app is a full-height flex column (`100dvh`). The thread list keeps the
+The app is a full-height flex column (`100dvh`) on the reading field
+(`--s4`; `index.html`'s theme colors are the same). A page waiting for its
+first answer prints one line, `loading…`, in `--ink-2` in the middle of the
+room it will fill; the shell, the view and its conversation each use that
+same line, so their waits in turn read as one (no other wording, no blank
+step, no surface change between them). The thread list keeps the
 centered **47rem** reading measure (`--col`). One thin desktop rail spans the
 sidebar, conversation and changes, with no extra global row above it.
 Global navigation lives at the top of the sidebar; `projects` remains a direct
@@ -357,15 +372,14 @@ ambient glows. The only "elevation" in the classic sense, `--shadow-float`,
 belongs to true overlays: the folded menu and the chat's index dialog.
 
 ### Shadow Vocabulary
-- **Key** (`--shadow-key`: `0 1px 0 rgba(255,255,255,0.7) inset, 0 1px 2px
-  rgba(38,32,18,0.22)` light): a top inner highlight plus a short drop — a key
-  standing proud of the panel. Also on user message strips.
-- **Key down** (`--shadow-key-down`): the pressed key — highlight dimmed, drop
-  collapsed to a 1px blur. Applied with 1px `translateY` on `:active` and on
+- **Key** (`--shadow-key`: `0 1px 2px rgba(38,32,18,0.1)` light): a short
+  soft drop — a key resting on the sheet. No machined inner highlight.
+- **Key down** (`--shadow-key-down`): the pressed key — the drop collapsed
+  to a 1px blur. Applied with 1px `translateY` on `:active` and on
   held toggles (`.key.held`, which also drops to `--s1`).
-- **Well** (`--shadow-well`: inset 1px 3px + inset 1px ring, light): recessed
-  surfaces — the thread-list well, the files shelf, the code window (combined
-  with its glass ring).
+- **Well** (`--shadow-well`: inset 1px 3px + inset 1px ring, light): only the
+  code window's glass and the diff editor now; lists, boards and the
+  comments bank are hairline frames on the sheet.
 - **Seams**: the header's machined double seam (1px `--line-2` border plus two
   layered `box-shadow` lines: an `--s4` highlight over a `--line` groove) and
   the composer's answering single inset highlight above its `--line-2` border.
@@ -377,9 +391,10 @@ belongs to true overlays: the folded menu and the chat's index dialog.
 key 1px down and swaps `--shadow-key` for `--shadow-key-down` at 80ms. Hover
 brightens the face (`--s3` → `--s4`) and never moves the key.
 
-**The Machined Seam Rule.** Seams belong to the full-width decks only — the
-header's double seam and the composer's inset highlight. In-flow components
-get hairlines and ramp steps, never seams.
+**The Hairline Rule.** On the sheet, structure is a 1px `--line`: under a
+pane's rail (a thread's strip, an artifact's strip, the comments head),
+beside the thread sidebar and the comments bank, around a list or board
+(well radius). No seams, decks or recesses.
 
 ## Shapes
 
@@ -423,20 +438,27 @@ The last setup step may offer one host choice in the same quiet voice (chat
 memory: a label, a sentence and a native select, defaulting to the safe
 choice); it is never required to finish.
 
+### Header
+One quiet row on the sheet: the wordmark, the places as plain 13px words
+(the open one on a soft `--s3` face, hover washes the same face), auth at
+the end. No deck, seam or signal underline. On a phone the places fold
+behind one menu key; the menu is a true overlay (`--s4`, well radius,
+`--shadow-float`).
+
 ### Settings
 One header entry, `settings`, opens host-wide pages: model providers, chat
-memory, system. Beside the page sits a **selector bank**: a recessed well
-(`--s1`, `--shadow-well`) holding one item per page, each a name (key type)
-over a silkscreen hint. The open page's item stands proud as a key face
-(`--s3`, `--line` border, `--shadow-key`) with `aria-current="page"`; the
-others are flush and wash on hover. No signal colour or side stripe
+memory, system. Beside the page sits a **selector bank**: flush on the
+sheet, one item per page, each a name (key type) over a silkscreen hint.
+The open page's item sits on a soft `--s3` face with its name in 650 and
+`aria-current="page"`; the others wash on hover. Boards inside a page are
+hairline frames. No signal colour or side stripe
 marks the selection. At 46rem and below the bank lies flat above the page as
 one row of equal keys carrying short names (the full name stays the link's
 accessible name). Each page keeps one headline
 (20px/650) and its own controls; one primary key per page at most.
 
 ### Keys (buttons)
-- **Shape:** raised key, 9px radius, 1px `--line` border, `--shadow-key`.
+- **Shape:** key, 6px radius, 1px `--line` border, `--shadow-key` (a soft drop).
 - **Default:** `--s3` face, `--ink-2` label (13px/550); hover lifts to `--s4`
   face and `--ink` label. Press: 1px travel + `--shadow-key-down`.
 - **Primary:** `--signal` face, `--signal-ink` legend, border darkened to 80%
@@ -445,8 +467,8 @@ accessible name). Each page keeps one headline
 - **Icon key** (`.key.icon`): square-ish padding, always `title` + `aria-label`.
 - **Round key** (`.key.round`): a 2.4rem circular signal key. The composer's
   send key (`.send-key`) is the same circle at one text line's height.
-- **Held toggle** (`.key.held`): pressed-in look (`--s1` face, down shadow) for
-  the open files-shelf key, with `aria-expanded`.
+- **Held toggle** (`.key.held`): pressed-in look (down shadow) for an open
+  toggle, with `aria-expanded`.
 - **Danger hover** (`.key.danger`): `--bad` ink on `--bad-soft` wash.
 - **Disabled:** 0.45 opacity, cursor default.
 
@@ -456,22 +478,39 @@ thread's machine`, `waking…`, `waiting for a free slot`, `suspended`, `error`
 (in `--bad`); ready prints nothing. Tools and startup steps: a quiet
 `.tool-state` word after the summary — `running`, `waiting`, `no result`,
 `interrupted`, and `error` / `failed` in `--bad`; done and ok print nothing
-(an `sr-only` word keeps the accessible name). Projects, repositories and
+(an `sr-only` word keeps the accessible name). While a run is on, the
+conversation's `working…` (and `waiting on …` for background agents) has
+the thinking cube before it; a thread whose machine starts, wakes or waits
+for a slot shows the large cube over those words in its empty conversation.
+
+### Thinking cube
+`ThinkingCube.svelte` draws `lib/thinking-cube.ts`: a cube of square dots
+(4 per edge at 20px, 6 at 64px) on a 2D canvas, the libraries.dev "thinking
+orbs" idea made cube's own: squares, not round dots; a cube, not a sphere;
+ink (`--ink-2`), never the signal. Three states, each one movement:
+`working`, a slow turn while one third of the cube makes a quarter turn and
+clicks back into the lattice, as a puzzle cube does; `starting`, the dots
+gather from a loose cloud into the cube, hold and let go (a machine being
+put together); `waiting`, a slow turn with a soft band passing through
+the layers. 20px beside a line of text, 64px over a centred wait; never in
+lists or for ready, done or failed. All cubes share one clock, pause
+offscreen and in a hidden tab, and show one still frame (the cube whole)
+under `prefers-reduced-motion`. The words beside it carry the state and its
+accessible name; the canvas is `aria-hidden`. Projects, repositories and
 runners print their status word (`checking`, `ready`, `unreachable` in
 `--bad`). The conversation's busy line is `working…`, static. Auth is the
 quiet word `signed in` (`ok` on a phone) or the red-ink `connect provider`
 chip.
 
 ### Thread Module Well
-The list is one recessed well (`--s1`, 14px radius, `--shadow-well`, 0.35rem
-padding) holding one module per thread, separated by `--line` hairlines. A
+The list is one hairline frame (1px `--line`, well radius, 0.35rem
+padding) on the sheet, holding one module per thread, separated by `--line` hairlines. A
 module face is the whole link: title, tabular meta (relative time, state
 label, project attribution, error preview). The thread list is global by
 default and its compact project select writes the filter into the hash URL;
 project context never becomes a separate thread silo. Rest face is
-`--face-rest` (transparent on putty, a
-0.035 white lift on the black edition so panel anatomy survives anodizing);
-hover washes in 55% `--s3`. Rename swaps the title for an engraved input —
+`--face-rest`; hover washes in `--s3`; the module's own keys are flush and
+wash in `--s3` on approach. Rename swaps the title for an engraved input —
 borderless, 2px `--signal` bottom rule. Empty list: centered hint with the one
 primary key (the header key is suppressed so there is exactly one way to act).
 
@@ -502,7 +541,8 @@ worker's scoped host tools; the web UI has no publication panel, fixed runbook,
 or push-all control.
 
 ### Composer
-Full-bleed `--s2` deck with the answering seam. Its field and keys sit in the
+On the sheet in both the chat and a thread (`.conversation.sheet`): no deck
+or seam, the field with the well radius and a soft 1px-offset shadow. Its field and keys sit in the
 transcript's reading measure, centred under the text with the same side
 padding, so a draft starts where the conversation does. One wide `--s4` field,
 radius a key's plus its padding, shallow inset shadow: the text auto-grows to
@@ -546,7 +586,7 @@ way.
 
 ### Machine Startup
 While a thread's machine starts (and after a start that failed) a panel sits
-under the thread strip on the `--s2` enclosure, capped at 45dvh (38dvh on a
+under the thread strip on the sheet, capped at 45dvh (38dvh on a
 phone) so the composer stays on screen: a silkscreen head (`machine startup`,
 the running total in tabular mono, a quiet link to the project's hooks and
 machine size) over one tool strip per step — mono step name, the detail cut
@@ -657,6 +697,35 @@ visual viewport's, followed as it changes, so while the user types into the
 filter the on-screen keyboard covers neither the filter nor the results
 (iOS keeps the layout viewport whole under its keyboard).
 
+### The panel (every place over the chat)
+The chat is home and stays mounted. Every other place (threads, a thread,
+artifacts, projects, settings) opens over it in one modal panel
+(`PagePanel.svelte`, a `<dialog>` shown modal): a sheet from the right on a
+wide screen (up to 66rem, the chat showing beside it under a putty wash),
+the whole screen at 52rem and below, its height the visual viewport's under
+an iOS keyboard. The place keeps its own address (deep links, back and
+forward work) and its own header row, which ends with a close key (a
+thread's in its strip); the wordmark and `chat` also close it. Escape closes
+it unless a field holds the focus (a draft is never lost to escape); a
+press on the chat beside it closes it. Closing goes to `#/chat` with the
+chat exactly as it was (draft, scroll); focus goes back where it was.
+While a place is open, the chat's own keys (`/`, ctrl/⌘ k) are off; a place
+opened from the chat's index closes the index. One panel at a time: a
+place opened from another replaces it; only a true dialog of the place (new
+thread, an action's confirmation) stacks above it. This is a bounded step;
+the structure around the chat may change again.
+
+### A thread (the sheet beside its sidebar)
+A thread's page is the chat's sheet with a sidebar: the sidebar flush on
+`--s4` with one hairline beside it (global navigation at its top, projects
+as quiet heads with their plus, the open thread on a soft `--s3` face), the
+thread's strip a rail with a hairline under it, then the conversation
+exactly as the chat's (no "you"/"agent" labels, user words on a soft face,
+quiet tool lines, a report's name over its words) and the chat's composer.
+An artifact's page is the same: document and comments bank on one sheet,
+a hairline between, sent comments on soft faces, actions on a soft face in
+a hairline frame.
+
 ### Named Rules
 **The Actions-In-The-Module Rule.** A module's controls live inside it, on its
 right edge as a flush, hairline-divided `--s3` control bank. The bank remains
@@ -678,7 +747,7 @@ story — the command or the path — never raw JSON when a primary argument exi
 - **Do** define both theme values for any new token — except glass and syntax,
   which are defined once and never re-themed.
 - **Do** keep the out-of-CSS literals in sync when tokens change: `index.html`
-  theme-colors (#17171b / #ece8df = `s2`), the manifest colors (#ece8df), and
+  theme-colors (#101013 / #fbfaf6 = `s4`, the sheet), the manifest colors (#ece8df, the icons' ground), and
   the raster icons (#cc3f00 on #ece8df, regenerated via
   `packages/web/scripts/make-icons.mjs` with `icons.provenance.json` updated).
 - **Do** author new icons in `Icon.svelte`'s 2px round-cap/round-join 24-box
@@ -702,7 +771,8 @@ story — the command or the path — never raw JSON when a primary argument exi
 - **Don't** add a second accent, use the signal for state, or put a state
   ink on a clickable affordance.
 - **Don't** bring back status lamps: no dots, glows, halos, pulses or
-  blinking to say a state.
+  blinking to say a state. The thinking cube is not a lamp: it never stands
+  for a state alone and never sits in a list.
 - **Don't** theme the code window; glass is one material in both themes.
 - **Don't** introduce cool grays into the enclosure: light-theme neutrals live
   at OKLCH hue 87–95°. Audit: a new putty neutral within ~10° of hue 90.

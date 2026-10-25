@@ -133,7 +133,7 @@
   .provider-row { justify-content: space-between; flex-wrap: wrap; }
   .provider-title { min-width: 0; overflow-wrap: anywhere; }
   .actions { flex-wrap: wrap; }
-  .login { margin-top: 1rem; padding: 1rem; background: var(--s1); max-width: 42rem; }
+  .login { margin-top: 1rem; padding: 1rem; border: 1px solid var(--line); border-radius: var(--r-well); max-width: 42rem; }
   form { display: grid; gap: 0.75rem; }
   form .key { justify-self: start; }
   .device-code { font: 600 24px var(--font-mono); user-select: all; }

@@ -105,7 +105,7 @@
   .intro { max-width: 65ch; margin-bottom: 1.5rem; }
   h2, h3, p { margin: 0; }
   .intro p, .boundary { line-height: 1.6; color: var(--ink-2); }
-  .update-board { max-width: 52rem; padding: 1rem; background: var(--s1); border-radius: var(--r-well); box-shadow: var(--shadow-well); }
+  .update-board { max-width: 52rem; padding: 1rem; border: 1px solid var(--line); border-radius: var(--r-well); }
   .board-head { display: flex; align-items: center; gap: 0.75rem; }
   .board-head h2 { font-size: 15px; }
   .status-line { color: var(--ink-3); font-size: 13px; overflow-wrap: anywhere; }

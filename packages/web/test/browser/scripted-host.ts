@@ -17,6 +17,8 @@ export type Prompt = { text: string; requestId: string; images?: string[] };
 export class ScriptedHost {
   url = "";
   transcript: ThreadTranscript = { agent: "pi", owner: null, status: { state: "idle", run: null, error: null }, events: [] };
+  /** The chat's own transcript while a thread is open over it; by default the chat shows `transcript` too. */
+  chat: ThreadTranscript | null = null;
   prompts: Prompt[] = [];
   /** The chat's threads as the panel reads them. */
   overview: ThreadOverview = { threads: [], archived: { shown: 0, total: 0 }, unknown: 0 };
@@ -114,6 +116,14 @@ export class ScriptedHost {
     this.queries.push(`${request.method} ${url.pathname}${url.search}`);
     // The thread's conversation routes are the chat's.
     const threadPrefix = this.thread ? `/api/threads/${encodeURIComponent(this.thread.id)}/` : null;
+    // the chat underneath a thread, when it has a transcript of its own
+    if (this.chat && (url.pathname === "/api/optchat/history" || url.pathname === "/api/optchat/stream")) {
+      const chat = this.chat;
+      if (url.pathname.endsWith("history")) return json(windowed(chat, url.searchParams));
+      response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      response.write(`data: ${JSON.stringify(streamWindow(windowQuery(url.searchParams))(chat))}\n\n`);
+      return;
+    }
     if (threadPrefix && url.pathname.startsWith(threadPrefix)) {
       const rest = url.pathname.slice(threadPrefix.length);
       if (rest === "usage") return json({ error: "not found" }, 404);
@@ -172,6 +182,13 @@ export class ScriptedHost {
         const artifact = revision ? this.artifacts.find(item => item.id === decodeURIComponent(revision[1]!)) : undefined;
         if (revision && artifact) {
           return json({ revision: { artifact: artifact.id, number: Number(revision[2]), title: artifact.title, body: this.bodies[artifact.id] ?? "", actions: [], provenance: { kind: "tool" }, createdAt: artifact.updatedAt, editor: artifact.author } });
+        }
+        // One artifact as its page reads it: its newest revision, no comments or runs.
+        const viewed = request.method === "GET" ? /^\/api\/artifacts\/([^/]+)$/.exec(url.pathname) : null;
+        const item = viewed ? this.artifacts.find(entry => entry.id === decodeURIComponent(viewed[1]!)) : undefined;
+        if (viewed && item) {
+          const revisions = Array.from({ length: item.head }, (_, index) => ({ artifact: item.id, number: index + 1, title: item.title, createdAt: item.updatedAt, provenance: { kind: "tool" }, editor: item.author }));
+          return json({ artifact: item, revisions, comments: [], actionRuns: [], notices: [] });
         }
         const image = request.method === "GET" && url.pathname.startsWith("/api/optchat/media/") ? this.media.get(decodeURIComponent(url.pathname.slice("/api/optchat/media/".length))) : undefined;
         if (!image) return json({ error: "not found" }, 404);

@@ -354,8 +354,9 @@
   <main class="artifact-missing"><p>this artifact does not exist on this host.</p><a class="key" href="#/artifacts">all artifacts</a></main>
 {:else if loadError && !view}
   <main class="artifact-missing" role="alert"><p>{loadError}</p><button class="key" onclick={load}>retry</button></main>
-{:else if !view || !artifact}
-  <p class="loading">loading artifact…</p>
+{:else if !view || !artifact || (!shown && !shownError)}
+  <!-- until the document itself is here: no strip over an empty page first -->
+  <p class="loading" role="status">loading…</p>
 {:else}
   <main class="artifact-workspace">
     <section class="artifact-pane" aria-label="document">

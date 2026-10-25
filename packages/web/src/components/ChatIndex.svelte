@@ -66,6 +66,13 @@
     void work.load();
   }
   export function close(): void { dialog?.close(); }
+  /** A place opened over the chat (a row, back, a typed address): the index
+   * goes, and focus goes with the reader to that place, not back to its key. */
+  export function leave(): void {
+    if (!dialog?.open) return;
+    opener = null;
+    dialog.close();
+  }
 
   const words = $derived(filter.trim().toLowerCase());
   const matches = (...texts: Array<string | null | undefined>) => !words || texts.some(text => text?.toLowerCase().includes(words));

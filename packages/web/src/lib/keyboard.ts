@@ -47,6 +47,9 @@ export function pinToVisualViewport(app: HTMLElement): void {
     const unzoomed = Math.abs(vv.scale - 1) < 0.01;
     const keyboardOpen = unzoomed && vv.height < window.innerHeight - 50;
     app.style.height = keyboardOpen ? `${vv.height}px` : "";
+    // the panel over the chat (a top-layer dialog, outside #app) follows the same room
+    if (keyboardOpen) root.style.setProperty("--app-height", `${vv.height}px`);
+    else root.style.removeProperty("--app-height");
     if (keyboardOpen && (window.scrollY !== 0 || vv.offsetTop !== 0)) window.scrollTo(0, 0);
 
     // A fine pointer has no on-screen keyboard (a narrow desktop window

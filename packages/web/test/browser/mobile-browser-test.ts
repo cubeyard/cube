@@ -14,6 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { chromium, webkit, type Browser, type BrowserType, type Page } from "playwright";
 import type { ThreadEvent, ThreadSummary } from "../../src/lib/types.ts";
+import { ACTIVE } from "./monitor.ts";
 import { ScriptedHost } from "./scripted-host.ts";
 
 const shots = process.env.CUBE_SCREENSHOTS ?? null;
@@ -53,11 +54,13 @@ function fakeVisualViewport(): void {
 }
 
 type Box = { top: number; bottom: number; left: number; right: number; height: number; width: number };
-const box = (page: Page, selector: string): Promise<Box> => page.locator(selector).first().evaluate(element => {
+/** A selector within the place the reader is in (the panel over the chat, else the chat); the app itself as it is. */
+const inView = (selector: string) => /^(#app|:root|html|body)\b/.test(selector) ? selector : `${ACTIVE} ${selector}`;
+const box = (page: Page, selector: string): Promise<Box> => page.locator(inView(selector)).first().evaluate(element => {
   const { top, bottom, left, right, height, width } = element.getBoundingClientRect();
   return { top, bottom, left, right, height, width };
 });
-const visible = (page: Page, selector: string) => page.locator(selector).first().isVisible();
+const visible = (page: Page, selector: string) => page.locator(inView(selector)).first().isVisible();
 const settle = (page: Page) => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 const keyboard = (page: Page) => page.evaluate(() => document.documentElement.dataset.keyboard ?? null);
 /** With `room`, only what is above a keyboard that only the visual viewport knows of. */
@@ -67,7 +70,7 @@ const shoot = async (page: Page, engine: string, name: string, room?: number) =>
 
 /** A fingertip lands anywhere within 2.75rem (44px) centred on the key. */
 async function assertHitArea(page: Page, selector: string): Promise<void> {
-  const misses = await page.locator(selector).first().evaluate(element => {
+  const misses = await page.locator(inView(selector)).first().evaluate(element => {
     const { left, top, width, height } = element.getBoundingClientRect();
     const [x, y] = [left + width / 2, top + height / 2];
     const out: string[] = [];
@@ -108,9 +111,9 @@ async function scenario(browser: Browser, engine: string, name: string, size: { 
   try {
     await page.goto(`${host.url}/#/${route}`);
     if (route === "chat" || route.startsWith("t/")) {
-      await page.locator(".composer textarea").waitFor();
-      await page.getByText("a path with no break").waitFor();
-    } else await page.locator("main h1").waitFor();
+      await page.locator(`${ACTIVE} .composer textarea`).waitFor();
+      await page.locator(ACTIVE).getByText("a path with no break").waitFor();
+    } else await page.locator(`${ACTIVE} main h1`).waitFor();
     await page.evaluate(() => document.fonts.ready);
     await settle(page);
     await run(page, host);
@@ -128,13 +131,13 @@ async function scenario(browser: Browser, engine: string, name: string, size: { 
 /** Focuses the composer and shrinks the room as a keyboard does: the whole
  * viewport (Android) or only the visual viewport (iOS). */
 async function openKeyboard(page: Page, size: { width: number; height: number; ios?: boolean }, room: number): Promise<void> {
-  await page.locator(".composer textarea").focus();
+  await page.locator(`${ACTIVE} .composer textarea`).focus();
   if (size.ios) await page.evaluate(height => (window.visualViewport as unknown as { set: (h: number) => void }).set(height), room);
   else await page.setViewportSize({ width: size.width, height: room });
   await settle(page);
 }
 async function closeKeyboard(page: Page, size: { width: number; height: number; ios?: boolean }): Promise<void> {
-  await page.locator(".composer textarea").blur();
+  await page.locator(`${ACTIVE} .composer textarea`).blur();
   await settle(page);
   assert.equal(await keyboard(page), null, "leaving the field ends typing before the keyboard has gone");
   if (size.ios) await page.evaluate(() => (window.visualViewport as unknown as { set: (h: null) => void }).set(null));
@@ -149,20 +152,20 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
   for (const phone of phones) {
     const tag = `${phone.width}x${phone.height}`;
     await scenario(browser, engine, "the chat on a phone: one quiet row above the conversation, the index a key away", phone, "chat", async page => {
-      assert.equal(await page.locator(".thread-strip, .work-panel, header nav, .nav-menu-key").count(), 0, "no strip, panel, menu or destinations");
+      assert.equal(await page.locator(`${ACTIVE} .thread-strip, .work-panel, header nav, .nav-menu-key`).count(), 0, "no strip, panel, menu or destinations");
       const bar = await box(page, ".sheet-bar");
       assert.ok(bar.height <= 50, `one quiet row: ${bar.height}`);
       const transcript = await box(page, ".transcript");
       assert.ok(transcript.height >= phone.height * 0.65, `the conversation has the screen: ${transcript.height}`);
       for (const key of [".sheet-bar .name-key", ".composer .attach-key", ".composer .send-key"]) await assertHitArea(page, key);
-      assert.equal(await page.locator(".composer-row > *").count(), 1, "nothing beside the field: no key or count before it");
+      assert.equal(await page.locator(`${ACTIVE} .composer-row > *`).count(), 1, "nothing beside the field: no key or count before it");
       assert.ok(Math.abs((await box(page, ".composer-field")).left - (await box(page, ".transcript-column")).left) <= 0.5, "the field keeps the column's line");
       await assertNoSideways(page);
       await shoot(page, engine, `chat-${tag}`);
     });
 
     await scenario(browser, engine, "elsewhere the menu opens, lists every destination at a fingertip's height and closes", phone, "threads", async page => {
-      const key = page.locator(".nav-menu-key");
+      const key = page.locator(`${ACTIVE} .nav-menu-key`);
       await key.tap();
       assert.equal(await key.getAttribute("aria-expanded"), "true");
       const links = page.locator("header nav a");
@@ -183,14 +186,14 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       await key.tap();
       await page.locator("header nav a", { hasText: "projects" }).tap();
       await page.waitForURL(/#\/projects$/);
-      assert.equal(await page.locator(".nav-menu-key").getAttribute("aria-expanded"), "false", "a choice closes it");
+      assert.equal(await page.locator(`${ACTIVE} .nav-menu-key`).getAttribute("aria-expanded"), "false", "a choice closes it");
     });
   }
 
   const phone = { width: 375, height: 667 };
   await scenario(browser, engine, "the wordmark raises the index over the whole screen: threads, places, model and memory at a fingertip", phone, "chat", async (page, host) => {
-    await page.locator(".sheet-bar .name-key").tap();
-    const index = page.locator(".chat-index");
+    await page.locator(`${ACTIVE} .sheet-bar .name-key`).tap();
+    const index = page.locator(`${ACTIVE} .chat-index`);
     await index.locator(".index-row").first().waitFor();
     await settle(page);
     assert.equal(await page.evaluate(() => document.activeElement?.tagName), "DIALOG", "a tap gives the sheet focus, not the filter");
@@ -236,12 +239,12 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
         assert.ok(transcript.height >= room - 130, `the conversation keeps the room: ${transcript.height} of ${room}`);
         await atEnd(page, "and still shows the end");
         await page.keyboard.type("a draft");
-        assert.ok(await page.locator(".composer textarea").evaluate(el => el === document.activeElement), "the field keeps focus");
+        assert.ok(await page.locator(`${ACTIVE} .composer textarea`).evaluate(el => el === document.activeElement), "the field keeps focus");
         await shoot(page, engine, `chat-keyboard-${ios ? "ios" : "android"}-${size.width}x${size.height}`, room);
         await closeKeyboard(page, size);
         assert.equal(await keyboard(page), null);
         assert.ok(await visible(page, "header"), "the header comes back");
-        assert.equal(await page.locator(".composer textarea").inputValue(), "a draft", "the draft stays");
+        assert.equal(await page.locator(`${ACTIVE} .composer textarea`).inputValue(), "a draft", "the draft stays");
       });
     }
     await scenario(browser, engine, `typing in a thread: the keyboard takes the ${way}`, { ...phone, ios }, "t/t1", async page => {
@@ -265,14 +268,14 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     for (const selector of [".mobile-thread-switch", ".thread-pane .strip-details-key", ".composer .send-key"]) await assertHitArea(page, selector);
     await assertNoSideways(page);
     await shoot(page, engine, "thread-375x667");
-    await page.locator(".thread-pane .strip-details-key").tap();
+    await page.locator(`${ACTIVE} .thread-pane .strip-details-key`).tap();
     for (const shown of [".strip-project", ".strip-model", ".thread-strip .key-bank"]) assert.ok(await visible(page, shown), `${shown} shows`);
     assert.ok((await box(page, ".strip-model")).top >= key.bottom, "the details take the row under the title");
     await assertNoSideways(page);
     await shoot(page, engine, "thread-details-375x667");
     // the thread drawer still opens from the title and carries the destinations
-    await page.locator(".mobile-thread-switch").tap();
-    await page.locator(".thread-sidebar.open").waitFor();
+    await page.locator(`${ACTIVE} .mobile-thread-switch`).tap();
+    await page.locator(`${ACTIVE} .thread-sidebar.open`).waitFor();
     assert.ok(await visible(page, ".thread-navigation header nav"), "the drawer shows its destinations inline");
     assert.equal(await visible(page, ".thread-navigation .nav-menu-key"), false);
   });
@@ -284,9 +287,9 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
   }, "error");
 
   await scenario(browser, engine, "an attached image shows above a compact composer, keys in reach", phone, "chat", async page => {
-    await page.locator(".composer input[type=file]").setInputFiles({ name: "shot.png", mimeType: "image/png", buffer: PNG });
-    await page.locator(".attachment img").waitFor();
-    await page.locator(".attachment-state", { hasText: "ready" }).waitFor();
+    await page.locator(`${ACTIVE} .composer input[type=file]`).setInputFiles({ name: "shot.png", mimeType: "image/png", buffer: PNG });
+    await page.locator(`${ACTIVE} .attachment img`).waitFor();
+    await page.locator(`${ACTIVE} .attachment-state`, { hasText: "ready" }).waitFor();
     await openKeyboard(page, phone, 347);
     const attachment = await box(page, ".attachment");
     const field = await box(page, ".composer-field");
@@ -324,8 +327,8 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       // enough threads that the results outgrow the room the keyboard leaves
       host.overview = { threads: Array.from({ length: 14 }, (_, n) => ({ id: `t${n}`, title: n === 3 ? "fix the flaky artifact test" : `thread number ${n} about the gateway`, state: n % 3 ? "completed" : "working",
         project: { id: "p1", name: "cube" }, archived: false, spawned: null })), archived: { shown: 0, total: 0 }, unknown: 0 };
-      await page.locator(".sheet-bar .name-key").tap();
-      const index = page.locator(".chat-index");
+      await page.locator(`${ACTIVE} .sheet-bar .name-key`).tap();
+      const index = page.locator(`${ACTIVE} .chat-index`);
       await index.locator(".index-row").nth(13).waitFor({ state: "attached" });
       const filter = index.locator("input[type=search]");
       await filter.tap();
@@ -348,7 +351,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       assert.ok(first.top >= field.bottom && first.bottom <= room, `the first result is in view: ${first.top}–${first.bottom} of ${room}`);
       assert.equal(await index.locator(".index-row[href^='#/t/']").count(), 13, "the filter narrows the results");
       // the results scroll on their own; the filter and the page stay put
-      const scrolled = await page.locator(".chat-index .index-body").evaluate(body => { body.scrollTop = body.scrollHeight; return { top: body.scrollTop, room: body.scrollHeight - body.clientHeight }; });
+      const scrolled = await page.locator(`${ACTIVE} .chat-index .index-body`).evaluate(body => { body.scrollTop = body.scrollHeight; return { top: body.scrollTop, room: body.scrollHeight - body.clientHeight }; });
       assert.ok(scrolled.room > 0 && scrolled.top > 0, `the results scroll: ${JSON.stringify(scrolled)}`);
       await settle(page);
       assert.deepEqual(await box(page, ".chat-index input[type=search]"), field, "the filter stays where it is");
@@ -356,7 +359,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       await assertNoSideways(page);
       await shoot(page, engine, `index-filter-keyboard-${ios ? "ios" : "android"}-375x667`, room);
       // closing gives focus back to the key that opened it
-      await page.locator(".chat-index .index-close").tap();
+      await page.locator(`${ACTIVE} .chat-index .index-close`).tap();
       await index.waitFor({ state: "hidden" });
       await page.waitForFunction(() => document.activeElement?.classList.contains("name-key"));
       if (ios) await page.evaluate(() => (window.visualViewport as unknown as { set: (h: null) => void }).set(null));
@@ -393,29 +396,29 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     const listeners = () => page.evaluate(() => (window as unknown as { liveListeners: () => string[] }).liveListeners());
     // history: chat, threads, chat
     await page.evaluate(() => { location.hash = "#/threads"; });
-    await page.locator("main h1").waitFor();
+    await page.locator(`${ACTIVE} main h1`).waitFor();
     await page.evaluate(() => { location.hash = "#/chat"; });
-    await page.locator(".sheet-bar .name-key").waitFor();
+    await page.locator(`${ACTIVE} .sheet-bar .name-key`).waitFor();
     for (const leave of ["back", "route"] as const) {
       const before = new Set(await listeners());
-      await page.locator(".sheet-bar .name-key").tap();
-      await page.locator(".chat-index .index-row").first().waitFor();
+      await page.locator(`${ACTIVE} .sheet-bar .name-key`).tap();
+      await page.locator(`${ACTIVE} .chat-index .index-row`).first().waitFor();
       const opened = (await listeners()).filter(item => !before.has(item));
       assert.equal(opened.length, 3, `the open index follows the viewport: ${opened.join(" ")}`);
       if (leave === "back") await page.goBack();
       else await page.evaluate(() => { location.hash = "#/projects"; });
-      await page.locator("main h1").waitFor();
+      await page.locator(`${ACTIVE} main h1`).waitFor();
       await settle(page);
-      assert.equal(await page.locator(".chat-index").count(), 0, "the index went with the chat");
+      assert.equal(await page.locator(`${ACTIVE} .chat-index`).count(), 0, "the index went with the chat");
       const left = (await listeners()).filter(item => opened.includes(item));
       assert.deepEqual(left, [], `after ${leave === "back" ? "going back" : "a route change"} none of the index's listeners is left`);
-      if (leave === "back") { await page.goForward(); await page.locator(".sheet-bar .name-key").waitFor(); }
+      if (leave === "back") { await page.goForward(); await page.locator(`${ACTIVE} .sheet-bar .name-key`).waitFor(); }
     }
   });
 
   await scenario(browser, engine, "the index's model choice is no keyboard", phone, "chat", async page => {
-    await page.locator(".sheet-bar .name-key").tap();
-    await page.locator(".chat-index select[aria-label=model]").focus();
+    await page.locator(`${ACTIVE} .sheet-bar .name-key`).tap();
+    await page.locator(`${ACTIVE} .chat-index select[aria-label=model]`).focus();
     await page.setViewportSize({ width: 375, height: 347 });
     await settle(page);
     assert.equal(await keyboard(page), null, "a focused select is not typing");
@@ -425,17 +428,17 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
   });
 
   await scenario(browser, engine, "Tab out of the open menu closes it", phone, "threads", async page => {
-    const key = page.locator(".nav-menu-key");
+    const key = page.locator(`${ACTIVE} .nav-menu-key`);
     await key.tap();
     const last = page.locator("header nav a").last();
     await last.focus();
     await page.keyboard.press("Tab");
-    assert.equal(await page.evaluate(() => !!document.activeElement?.closest("header")), false, "focus left the header");
+    assert.equal(await page.evaluate(() => !!document.activeElement?.closest("header nav")), false, "focus left the menu");
     assert.equal(await key.getAttribute("aria-expanded"), "false");
   });
 
   await scenario(browser, engine, "focus never stays on a destination the menu folded away", phone, "threads", async page => {
-    const key = page.locator(".nav-menu-key");
+    const key = page.locator(`${ACTIVE} .nav-menu-key`);
     await key.tap();
     await page.locator("header nav a", { hasText: "projects" }).focus();
     const main = await box(page, "main");
@@ -476,9 +479,9 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     await page.setViewportSize({ width: 667, height: 375 });
     await settle(page);
     assert.equal(await keyboard(page), "open", "no measure yet at this width");
-    await page.locator(".composer textarea").blur();
+    await page.locator(`${ACTIVE} .composer textarea`).blur();
     await page.waitForTimeout(800);
-    await page.locator(".composer textarea").focus();
+    await page.locator(`${ACTIVE} .composer textarea`).focus();
     await settle(page);
     assert.equal(await keyboard(page), null, "the room it showed with no keyboard is the measure");
     assert.ok(await visible(page, "header"));
@@ -489,10 +492,10 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     await page.setViewportSize({ width: 667, height: 175 });
     await settle(page);
     assert.equal(await keyboard(page), "tight");
-    await page.locator(".composer textarea").blur();
+    await page.locator(`${ACTIVE} .composer textarea`).blur();
     await settle(page);
     assert.equal(await keyboard(page), null, "no field, no typing");
-    await page.locator(".composer textarea").focus();
+    await page.locator(`${ACTIVE} .composer textarea`).focus();
     await settle(page);
     assert.equal(await keyboard(page), "tight", "the keyboard never went down");
   });
@@ -502,7 +505,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.equal(await keyboard(page), "open");
     await page.evaluate(() => (window.visualViewport as unknown as { zoom: (s: number) => void }).zoom(1.6));
     assert.equal(await keyboard(page), "open", "zooming in alone keeps typing");
-    await page.locator(".composer textarea").blur();
+    await page.locator(`${ACTIVE} .composer textarea`).blur();
     await settle(page);
     assert.equal(await keyboard(page), null);
     assert.ok(await visible(page, "header"));
@@ -510,7 +513,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
 
   await scenario(browser, engine, "a narrow desktop window shortened by hand is not a keyboard", { width: 600, height: 800, touch: false }, "chat", async page => {
     assert.ok(await visible(page, ".sheet-bar"), "a narrow window keeps its one row");
-    await page.locator(".composer textarea").focus();
+    await page.locator(`${ACTIVE} .composer textarea`).focus();
     await page.setViewportSize({ width: 600, height: 650 });
     await settle(page);
     assert.equal(await keyboard(page), null);
@@ -519,8 +522,8 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
 
   await scenario(browser, engine, "the desktop: the sheet and its margin, no menu or details keys", { width: 1280, height: 800, touch: false }, "chat", async page => {
     assert.ok(await visible(page, ".sheet-margin"), "the margin is drawn");
-    assert.equal(await page.locator(".nav-menu-key, .strip-details-key, header nav").count(), 0);
-    await page.locator(".composer textarea").focus();
+    assert.equal(await page.locator(`${ACTIVE} .nav-menu-key, .strip-details-key, header nav`).count(), 0);
+    await page.locator(`${ACTIVE} .composer textarea`).focus();
     await settle(page);
     assert.equal(await keyboard(page), null, "a focused field without a keyboard changes nothing");
     assert.ok(await visible(page, "header"));

@@ -150,6 +150,8 @@
   /** `/` (outside a field) and ctrl/⌘ k open the index. */
   function onKeydown(event: KeyboardEvent): void {
     if (event.defaultPrevented || event.altKey) return;
+    // a place open over the chat keeps its keys; the index is the chat's own
+    if (document.querySelector("dialog.page-panel[open]")) return;
     const target = event.target as HTMLElement | null;
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k" && !event.shiftKey) {
       event.preventDefault();
@@ -181,7 +183,7 @@
   });
 </script>
 
-<svelte:window onkeydown={onKeydown} onpointerdowncapture={(event) => { lastDown = { type: event.pointerType, at: event.timeStamp }; }} />
+<svelte:window onkeydown={onKeydown} onhashchange={() => { if (!/^(#\/chat|#\/?)?$/.test(location.hash)) index?.leave(); }} onpointerdowncapture={(event) => { lastDown = { type: event.pointerType, at: event.timeStamp }; }} />
 
 <header class="sheet-bar">
   <Wordmark onclick={(event) => void index?.show({ touch: tapped(event) })} label="cube · index: threads, artifacts and settings · press /" />
@@ -217,7 +219,7 @@
       placeholder="message optchat" {toolLine} {reportLabel} {after} margin={wide ? margin : undefined}
       empty={{ title: "one chat, every thread", hint: "Say what you want done: the chat starts threads in your projects, follows their reports and remembers everything you said. A thread needs a project; add one under projects." }} />
   {:else}
-    <p class="conversation-empty">{modelError ? "connect a model provider to start the chat" : "opening the chat…"}</p>
+    <div class="conversation-empty"><p class="conversation-wait" role="status">{modelError ? "connect a model provider to start the chat" : "loading…"}</p></div>
   {/if}
 </main>
 <ChatIndex bind:this={index} {work} settings={chatSettings} />

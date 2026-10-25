@@ -249,7 +249,7 @@
   <div class="detail-back"><a href="#/projects">← projects</a></div>
 
   {#if !loaded}
-    <p class="loading">loading…</p>
+    <p class="loading" role="status">loading…</p>
   {:else if notFound}
     <!-- gone is gone, whether it vanished before or after the first load:
          nothing here may be saved, checked, started or deleted any more -->

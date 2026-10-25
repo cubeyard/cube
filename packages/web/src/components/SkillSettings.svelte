@@ -204,7 +204,7 @@
   p { margin: 0; }
   .intro p, .hint { line-height: 1.6; color: var(--ink-2); }
   .intro strong { color: var(--ink); font-weight: 600; }
-  .settings-board { max-width: 52rem; padding: 1rem; background: var(--s1); border-radius: var(--r-well); box-shadow: var(--shadow-well); }
+  .settings-board { max-width: 52rem; padding: 1rem; border: 1px solid var(--line); border-radius: var(--r-well); }
   h2 { margin: 1.4rem 0 0.5rem; color: var(--ink-3); font-size: 11px; font-weight: 550; letter-spacing: 0.08em; }
   h2:first-child { margin-top: 0; }
   .hint { max-width: 68ch; font-size: 13px; }

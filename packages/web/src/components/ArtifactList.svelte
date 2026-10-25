@@ -33,12 +33,16 @@
 </script>
 
 <Header section="artifacts" />
+{#if !artifacts && !error}
+  <!-- the first read: the same one line as every page's wait -->
+  <p class="loading" role="status">loading…</p>
+{:else}
 <main class="artifact-list-page">
   <h1>artifacts</h1>
   <p class="artifact-list-lede">documents optchat and threads wrote for you: reviews, plans, reports. Select text in one to comment; comments go back to its author.</p>
   {#if error}<p class="work-error" role="alert">{error} <button class="key" onclick={load}>retry</button></p>{/if}
   {#if !artifacts}
-    <p class="loading">loading artifacts…</p>
+    <!-- the list could not be read: the error above says why -->
   {:else if !artifacts.length}
     <p class="artifact-list-empty">none yet. Ask in the chat for a review or a plan as an artifact.</p>
   {:else}
@@ -52,3 +56,4 @@
     </ul>
   {/if}
 </main>
+{/if}

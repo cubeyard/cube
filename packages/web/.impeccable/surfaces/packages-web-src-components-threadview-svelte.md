@@ -5,6 +5,14 @@ primary_target: "packages/web/src/components/ThreadView.svelte"
 related_targets: ["packages/web/src/components/ChangesPane.svelte","packages/web/src/components/Header.svelte","packages/web/src/components/Icon.svelte","packages/web/src/components/Terminal.svelte","packages/web/src/app.css"]
 ---
 
+## Current direction (2026-10-25)
+
+The thread is on the chat's sheet (DESIGN.md, "A thread (the sheet beside
+its sidebar)"): the conversation and composer are the chat's, the sidebar
+and strip are flush on the reading field with hairlines, and a moving state
+has the thinking cube beside its words. The terminal, changes bay and files
+shelf described below are gone from this page; read the rest as history.
+
 ## Scope and mode
 
 The thread view at `#/t/<id>` — where work is watched and reviewed. **Operate**:
