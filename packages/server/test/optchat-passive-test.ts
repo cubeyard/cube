@@ -195,7 +195,7 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
   const conversations = {
     activate: async (id: string) => { activated.push(id); open.add(id); },
     agentOpen: (id: string) => open.has(id),
-    condition: (thread: Thread) => threadCondition(thread, { archiving: false, starting: false, agentOpen: open.has(thread.id), error: null, down: null, waiting: null }),
+    condition: (thread: Thread) => threadCondition(thread, { archiving: false, starting: false, agentOpen: open.has(thread.id), failure: null, down: null, waiting: null }),
     owner: () => null,
     storedHistory: async (id: string) => page(id),
     history: async (id: string) => transcriptOf(id),

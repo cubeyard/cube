@@ -23,6 +23,7 @@ import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWork
 import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import { threadCondition, type ThreadCondition } from "./thread-condition.ts";
+import { allocationFailed, FailedTry, readFailure, releaseFailed, startFailed, type Failure } from "./thread-failure.ts";
 import { needsDemand, recoveryStep, releaseUnfinished, retriesExhausted, START_TRIES } from "./thread-recovery.ts";
 import type { ModelSelection } from "./models.ts";
 
@@ -77,7 +78,7 @@ export class Conversations {
   private readonly machines: ThreadMachines;
   private readonly agents = new Map<string, Promise<Agent>>();
   private readonly workspaces = new Map<string, { workspace: VmWorkspace; leases: LeaseStore }>();
-  private readonly failures = new Map<string, string>();
+  private readonly failures = new Map<string, Failure>();
   /** Threads this process has tried to start or wake: until then, the try
    * that failed before a restart (`retry`) is still their last one. */
   private readonly tried = new Set<string>();
@@ -185,12 +186,15 @@ export class Conversations {
   /** Why the thread's last try failed, also one before a restart until
    * this process tries again; once the recovery loop stopped trying
    * (START_TRIES), that too. */
-  error(id: string): string | null {
+  failure(id: string): Failure | null {
     const thread = this.registry.getThread(id);
-    const failure = this.failures.get(id) ?? (this.tried.has(id) ? null : thread?.retry?.error ?? null);
+    const failure = this.failures.get(id) ?? (this.tried.has(id) || !thread?.retry ? null : readFailure(thread.retry.error));
     if (!thread?.retry || !retriesExhausted(thread)) return failure;
-    return `${failure ?? thread.retry.error}; cube stopped retrying after ${thread.retry.failures} tries in a row, a message to the thread tries once more`;
+    const last = failure ?? readFailure(thread.retry.error);
+    return { kind: last.kind, text: `${last.text}; cube stopped retrying after ${thread.retry.failures} tries in a row, a message to the thread tries once more` };
   }
+  /** `failure`'s words. */
+  error(id: string): string | null { return this.failure(id)?.text ?? null; }
   /** Why the thread's Pi agent is down (its Session failed), if it is. */
   down(id: string): string | null { return this.downs.get(id) ?? null; }
   /** Why the thread's machine waits for a runner, if it does. */
@@ -204,7 +208,7 @@ export class Conversations {
   condition(thread: Thread): ThreadCondition {
     const id = thread.id;
     return threadCondition(thread, { archiving: this.archivingNow(id), starting: this.starting(id), agentOpen: this.agentOpen(id),
-      error: this.error(id), down: this.down(id), waiting: this.waiting(id) });
+      failure: this.failure(id), down: this.down(id), waiting: this.waiting(id) });
   }
   /** Boots the thread's machine, provisions it once and opens its agent.
    * Concurrent calls share one activation. */
@@ -239,8 +243,8 @@ export class Conversations {
         // not answer for RUNNER_WAIT_MS; after that each try is a failed
         // one, with the recovery loop's pause and limit. A ready thread
         // (checked, or opened again after a restart) waits as long as it takes.
-        const unanswered = error instanceof RunnerWait && error.unanswered && !this.checks.has(id)
-          && this.registry.getThread(id)?.workspaceState !== "available";
+        const unanswered = error instanceof RunnerWait && !this.checks.has(id) && this.registry.getThread(id)?.workspaceState !== "available"
+          ? error.unanswered : null;
         if (!unanswered) this.unansweredSince.delete(id);
         else if (!this.unansweredSince.has(id)) this.unansweredSince.set(id, this.now());
         const waited = unanswered ? this.now() - this.unansweredSince.get(id)! : 0;
@@ -250,18 +254,19 @@ export class Conversations {
           this.failures.delete(id);
           return;
         }
-        if (waited) {
+        if (unanswered && waited) {
           this.waits.delete(id);
-          const failure = `${message.replace(/^waiting for runner (\S+): it does not answer/, "runner $1 has not answered for " + Math.round(RUNNER_WAIT_MS / 60_000) + " min")}`;
-          if (this.failures.get(id) !== failure) log.warn("activation failed", { thread: id, error: failure });
+          const failure: Failure = { kind: "start", text: `runner ${unanswered.runner} has not answered for ${Math.round(RUNNER_WAIT_MS / 60_000)} min; ${unanswered.stays}` };
+          if (this.failures.get(id)?.text !== failure.text) log.warn("activation failed", { thread: id, error: failure.text });
           this.failures.set(id, failure);
           this.countFailure(id, failure);
           return;
         }
         this.waits.delete(id);
-        if (this.failures.get(id) !== message) log.warn("activation failed", { thread: id, error: message });
-        this.failures.set(id, message);
-        this.countFailure(id, message);
+        const failure = error instanceof FailedTry ? error.failure : startFailed(error);
+        if (this.failures.get(id)?.text !== failure.text) log.warn("activation failed", { thread: id, error: failure.text });
+        this.failures.set(id, failure);
+        this.countFailure(id, failure);
       }
     })().finally(() => { this.activations.delete(id); this.checks.delete(id); });
     this.activations.set(id, activation);
@@ -270,9 +275,9 @@ export class Conversations {
   /** Counts a failed try for the recovery loop's pause and limit. A
    * registry that cannot record it only loses the pause: the try's failure
    * itself stands. */
-  private countFailure(id: string, message: string): void {
+  private countFailure(id: string, failure: Failure): void {
     try {
-      const retry = this.registry.recordFailure(id, message, this.now());
+      const retry = this.registry.recordFailure(id, failure, this.now());
       if (retry.failures === START_TRIES && !releaseUnfinished(this.registry.getThread(id)!)) {
         log.warn("cube stops retrying the thread's start; a message to it tries once more", { thread: id, tries: retry.failures });
       }
@@ -379,9 +384,9 @@ export class Conversations {
     } catch (error) {
       // Nothing failed: the machine waits for a runner, still allocating.
       if (error instanceof RunnerWait) throw error;
-      const message = `workspace allocation failed: ${error instanceof Error ? error.message : String(error)}`;
-      this.registry.markWorkspaceFailed(id, message);
-      throw new Error(message, { cause: error });
+      const failure = allocationFailed(error);
+      this.registry.markWorkspaceFailed(id, failure);
+      throw new FailedTry(failure, { cause: error });
     }
   }
   /** Records how a preparation try ended (`vm.steps`); `late`: only if it
@@ -524,9 +529,9 @@ export class Conversations {
    * its first turn must not run before the checkouts exist. A reader waiting
    * on a failed activation gets the failure instead. */
   private ready(thread: Thread): void {
-    if (releaseUnfinished(thread)) throw new Error(this.failures.get(thread.id) ?? "thread workspace is releasing");
+    if (releaseUnfinished(thread)) throw new Error(this.failures.get(thread.id)?.text ?? "thread workspace is releasing");
     if (thread.workspaceState !== "available") {
-      throw new Error(this.failures.get(thread.id) ?? this.waits.get(thread.id) ?? thread.workspaceError ?? "the thread machine is not ready");
+      throw new Error(this.failures.get(thread.id)?.text ?? this.waits.get(thread.id) ?? thread.workspaceError ?? "the thread machine is not ready");
     }
   }
   async claudeAgent(id: string): Promise<ClaudeAgent> {
@@ -726,7 +731,7 @@ export class Conversations {
   private piFeed(id: string, agent: Agent): ThreadEvents {
     let events = this.feeds.get(agent);
     if (!events) {
-      events = new PiThreadEvents({ agent, owner: () => this.owner(id), failure: () => this.failures.get(id) ?? null });
+      events = new PiThreadEvents({ agent, owner: () => this.owner(id), failure: () => this.failures.get(id)?.text ?? null });
       this.feeds.set(agent, events);
     }
     return events;
@@ -734,7 +739,7 @@ export class Conversations {
   private claudeFeed(id: string, agent: ClaudeAgent): ThreadEvents {
     let events = this.claudeFeeds.get(agent);
     if (!events) {
-      events = new ClaudeThreadEvents({ agent, owner: () => this.owner(id), failure: () => this.failures.get(id) ?? null });
+      events = new ClaudeThreadEvents({ agent, owner: () => this.owner(id), failure: () => this.failures.get(id)?.text ?? null });
       this.claudeFeeds.set(agent, events);
     }
     return events;
@@ -756,7 +761,7 @@ export class Conversations {
     const thread = this.registry.getThread(id);
     if (!thread) throw new Error("thread not found");
     const directory = path.join(this.directory, id);
-    const failure = this.failures.get(id) ?? this.downs.get(id) ?? null;
+    const failure = this.failures.get(id)?.text ?? this.downs.get(id) ?? null;
     if (threadAgent(thread) === "claude-code") {
       return readClaudeHistory(path.join(directory, "claude.sqlite"), path.join(directory, "claude"), this.owner(id), failure, request);
     }
@@ -892,12 +897,12 @@ export class Conversations {
       this.unansweredSince.delete(id);
       return released;
     } catch (error) {
-      const message = `workspace release failed: ${error instanceof Error ? error.message : String(error)}`;
-      this.registry.markWorkspaceFailed(id, message);
-      this.failures.set(id, message);
+      const failure = releaseFailed(error);
+      this.registry.markWorkspaceFailed(id, failure);
+      this.failures.set(id, failure);
       // Retried after a pause, for as long as it fails: never given up.
-      this.countFailure(id, message);
-      throw new Error(message, { cause: error });
+      this.countFailure(id, failure);
+      throw new FailedTry(failure, { cause: error });
     }
   }
   async stop(id: string): Promise<void> {

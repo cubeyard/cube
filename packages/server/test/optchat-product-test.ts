@@ -11,6 +11,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
+import { allocationFailed } from "../src/thread-failure.ts";
 import { formatHistory, THREAD_NOTE } from "../src/optchat.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
 import { observeRunners } from "../src/runner-observe.ts";
@@ -158,7 +159,7 @@ try {
   assert.match(formatHistory(thread.id, open, "delivered"), /\nlatest answer #3: the repository has 1 file\n/);
   const workspaceBase = app.registry.getThread(thread.id)!.workspaceBase;
   const failure = "workspace allocation failed: thread workspace already has a writable owner";
-  app.registry.markWorkspaceFailed(thread.id, failure);
+  app.registry.markWorkspaceFailed(thread.id, allocationFailed("thread workspace already has a writable owner"));
   const diverged = (await adapter.history(thread.id))!;
   assert.equal(diverged.failure, failure);
   assert.match(formatHistory(thread.id, diverged, "delivered"), /\nnote: cubed records a failure \(workspace allocation failed: thread workspace already has a writable owner\) while the stored history shows the agent ran \(run completed\);/);
@@ -189,7 +190,7 @@ try {
 
   // A thread whose machine failed is archived too, its disk kept; that
   // frees the slot the next thread takes.
-  app.registry.markWorkspaceFailed(quiet.id, "workspace allocation failed: boom");
+  app.registry.markWorkspaceFailed(quiet.id, allocationFailed("boom"));
   const failed = (await adapter.archive!(quiet.id))!;
   assert.equal(failed.already, false);
   assert.equal(failed.disk, "machine disk retained (workspace allocation failed: boom)");

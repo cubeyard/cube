@@ -6,6 +6,7 @@
  * (docs/thread-lifecycle.md, "Reading a thread"). */
 import type { MachineSleep } from "./machine-sleep.ts";
 import type { Thread } from "./registry.ts";
+import { readFailure, type Failure } from "./thread-failure.ts";
 import { releaseUnfinished } from "./thread-recovery.ts";
 
 /** What this process knows of a thread beside its row (Conversations' maps). */
@@ -16,7 +17,7 @@ export interface ThreadRuntime {
   starting: boolean;
   agentOpen: boolean;
   /** Why the last try failed (also the stop after START_TRIES). */
-  error: string | null;
+  failure: Failure | null;
   /** Why the Pi agent is down (its Session failed). */
   down: string | null;
   /** Why the machine waits for a runner. */
@@ -26,30 +27,30 @@ export interface ThreadRuntime {
 /** `failure`: why the last try failed; `waiting`: why it waits for a
  * runner; `sleep`: the machine's sleep, if it sleeps. */
 export type ThreadCondition =
-  | { kind: "archived"; failure: string | null }
-  | { kind: "archiving"; failure: string | null }
-  | { kind: "down"; failure: string }
+  | { kind: "archived"; failure: Failure | null }
+  | { kind: "archiving"; failure: Failure | null }
+  | { kind: "down"; failure: Failure }
   /** No agent goes on: its machine failed, or failed to wake. */
-  | { kind: "failed"; failure: string; sleep: MachineSleep | null }
-  | { kind: "starting"; failure: string | null; waiting: string | null; sleep: MachineSleep | null }
+  | { kind: "failed"; failure: Failure; sleep: MachineSleep | null }
+  | { kind: "starting"; failure: Failure | null; waiting: string | null; sleep: MachineSleep | null }
   /** Waits for a runner, with no activation under way and no agent open. */
   | { kind: "waiting"; waiting: string; sleep: MachineSleep | null }
   /** Its agent is open, or its machine is ready (or sleeps); `failure`
    * and `waiting` are a later check's, under an open agent. */
-  | { kind: "ready"; failure: string | null; waiting: string | null; sleep: MachineSleep | null }
+  | { kind: "ready"; failure: Failure | null; waiting: string | null; sleep: MachineSleep | null }
   /** Its machine was never made, and no start is under way. */
   | { kind: "new" };
 
 export function threadCondition(thread: Thread, runtime: ThreadRuntime): ThreadCondition {
-  if (thread.archived) return { kind: "archived", failure: thread.workspaceState === "failed" ? thread.workspaceError : null };
+  if (thread.archived) return { kind: "archived", failure: thread.workspaceState === "failed" && thread.workspaceError ? readFailure(thread.workspaceError) : null };
   // The row keeps a failure across a restart, until a try succeeds.
-  const failure = runtime.error ?? (thread.workspaceState === "failed" ? thread.workspaceError ?? "the thread machine failed" : null);
+  const failure = runtime.failure ?? (thread.workspaceState === "failed" ? readFailure(thread.workspaceError ?? "the thread machine failed") : null);
   // An unfinished release is retried until it succeeds: the thread is on
   // its way out, whatever else failed.
   if (runtime.archiving || releaseUnfinished(thread)) return { kind: "archiving", failure };
   // A down agent is the whole story until cubed restarts: no try or wait
   // of its machine lets it go on.
-  if (runtime.down) return { kind: "down", failure: runtime.down };
+  if (runtime.down) return { kind: "down", failure: { kind: "down", text: runtime.down } };
   const sleep = thread.vm?.suspension ?? null;
   if (runtime.starting) return { kind: "starting", failure, waiting: runtime.waiting, sleep };
   // An open agent goes on with its run after a later check failed; a
@@ -62,7 +63,7 @@ export function threadCondition(thread: Thread, runtime: ThreadRuntime): ThreadC
 }
 
 /** Why the thread's last try failed, or its agent is down. */
-export const failureOf = (condition: ThreadCondition): string | null => condition.kind === "new" || condition.kind === "waiting" ? null : condition.failure;
+export const failureOf = (condition: ThreadCondition): Failure | null => condition.kind === "new" || condition.kind === "waiting" ? null : condition.failure;
 
 /** Why the thread's machine waits for a runner. */
 export const waitingOf = (condition: ThreadCondition): string | null =>
@@ -79,6 +80,9 @@ export function rowState(condition: ThreadCondition): "error" | "starting" | "re
   }
 }
 
-/** The condition's part of the API's thread row. */
-export const threadRow = (condition: ThreadCondition) =>
-  ({ state: rowState(condition), error: failureOf(condition), waiting: waitingOf(condition) });
+/** The condition's part of the API's thread row: `error` in words, and
+ * `failureKind` for a reader that decides by it (the web). */
+export const threadRow = (condition: ThreadCondition) => {
+  const failure = failureOf(condition);
+  return { state: rowState(condition), error: failure?.text ?? null, failureKind: failure?.kind ?? null, waiting: waitingOf(condition) };
+};

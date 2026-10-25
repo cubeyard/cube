@@ -722,7 +722,8 @@ sleep (`vm.suspension`) changes only by a typed event through
 `Registry.applySleep`, whose transitions and slot rule are
 `machine-sleep.ts`. Every reader of a thread (the API's row, OptChat's
 `threads`, `history`, overview and watcher) renders one `ThreadCondition`
-(`thread-condition.ts`); none ranks the thread's facts itself.
+(`thread-condition.ts`); none ranks the thread's facts itself. A failure
+carries its kind as data (`thread-failure.ts`); no decision reads its words.
 
 ## Machine templates and hooks
 

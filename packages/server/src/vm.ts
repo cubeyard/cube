@@ -157,10 +157,13 @@ export function currentMachineEpoch(directory: string): number {
  * failure of the thread; cubed's recovery loop tries again. */
 export class RunnerWait extends Error {
   /** A VM runner does not answer (rather than being full): a new thread's
-   * start waits for it only so long (Conversations, RUNNER_WAIT_MS). A host
+   * start waits for it only so long (Conversations, RUNNER_WAIT_MS), then
+   * fails saying which runner and why the thread stays on it. A host
    * runner runs only while someone runs it; its threads wait (AGENTS.md). */
-  readonly unanswered: boolean;
-  constructor(message: string, options?: ErrorOptions & { unanswered?: boolean }) { super(message, options); this.name = "RunnerWait"; this.unanswered = !!options?.unanswered; }
+  readonly unanswered: { runner: string; stays: string } | null;
+  constructor(message: string, options?: ErrorOptions & { unanswered?: { runner: string; stays: string } }) {
+    super(message, options); this.name = "RunnerWait"; this.unanswered = options?.unanswered ?? null;
+  }
 }
 /** An error as a runner observation records it. */
 export function errorText(error: unknown): string {

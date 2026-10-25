@@ -13,6 +13,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
+import { allocationFailed } from "../src/thread-failure.ts";
 import { Registry, type Project, type Thread } from "../src/registry.ts";
 import { LocalMachines } from "./local-guest.ts";
 
@@ -48,7 +49,7 @@ try {
 
   // A failed machine keeps its slot (its disk may exist) until archived.
   registry.markWorkspaceAvailable(a.id);
-  registry.markWorkspaceFailed(b.id, "workspace allocation failed: boom");
+  registry.markWorkspaceFailed(b.id, allocationFailed("boom"));
   assert.deepEqual(registry.runnerCapacity().errors, ["workspace allocation failed: boom"]);
   assert.equal(status().allocationState, "failed");
   assert.throws(() => registry.createThread("p", "c", model, "c"), /no free thread machine/);
@@ -63,7 +64,7 @@ try {
   const d = registry.createThread("p", "d", model, "d");
   assert.equal(d.runnerId, "other", "the least loaded runner is chosen");
   archive(registry, a.id); archive(registry, c.id);
-  registry.markWorkspaceFailed(d.id, "workspace allocation failed: runner broken");
+  registry.markWorkspaceFailed(d.id, allocationFailed("runner broken"));
   assert.equal(registry.createThread("p", "e", model, "e").runnerId, "wide", "a runner with a failed machine is chosen last");
 
   // The runner's own bound wins: lowering it stops new allocations only.

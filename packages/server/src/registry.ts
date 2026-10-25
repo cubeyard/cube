@@ -9,6 +9,7 @@ import type { ThreadAgent } from "./thread-events.ts";
 import type { ThreadSkills } from "./skills.ts";
 import { newPlaceholder } from "./egress-policy.ts";
 import { HOLDS_SLOT_SQL, nextSleep, type MachineSleep, type SleepEvent } from "./machine-sleep.ts";
+import type { Failure } from "./thread-failure.ts";
 
 /** The registry schema; older registries are refused (fresh CUBED_STATE). */
 export const REGISTRY_SCHEMA = 102;
@@ -765,24 +766,25 @@ export class Registry {
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
-  markWorkspaceFailed(threadId: string, error: string): void {
+  /** The row keeps the failure's text only (readFailure parses it back). */
+  markWorkspaceFailed(threadId: string, failure: Failure): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const thread = this.getThread(threadId);
       if (!thread) throw new Error("thread not found");
-      this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, workspaceState: "failed", workspaceError: error }), threadId);
+      this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, workspaceState: "failed", workspaceError: failure.text }), threadId);
       this.syncRunner(thread.runnerId);
       this.db.exec("COMMIT");
     } catch (cause) { this.db.exec("ROLLBACK"); throw cause; }
   }
   /** Counts a failed try of the thread's start or release (`retry`). */
-  recordFailure(threadId: string, error: string, at = Date.now()): NonNullable<Thread["retry"]> {
+  recordFailure(threadId: string, failure: Failure, at = Date.now()): NonNullable<Thread["retry"]> {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const thread = this.getThread(threadId);
       if (!thread) throw new Error("thread not found");
       // A row older than `since` takes its last try's time as the first.
-      const retry = { failures: (thread.retry?.failures ?? 0) + 1, at, since: thread.retry ? thread.retry.since ?? thread.retry.at : at, error: error.slice(0, 1024) };
+      const retry = { failures: (thread.retry?.failures ?? 0) + 1, at, since: thread.retry ? thread.retry.since ?? thread.retry.at : at, error: failure.text.slice(0, 1024) };
       this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, retry }), threadId);
       this.db.exec("COMMIT");
       return retry;
