@@ -235,6 +235,10 @@ machine's sleep (packages/web/src/lib/thread-state.ts).
   table above, `archived` terminal, and through a real Registry the fields
   each event writes (those the old writers wrote), the slot freed on
   `released`, no write when nothing changes; (typecheck) no other writer.
+- `packages/server/test/start-failure-publication-test.ts`: an archive
+  tells a failing thread's start failure ended as it begins, before its
+  release finishes; a listener that subscribed later in the same process is
+  told a failure that came back.
 - `packages/server/test/thread-failure-test.ts`: each failure kind's words,
   read back to its kind, in a row an older cubed reads; an older row's
   failed release still retried.
