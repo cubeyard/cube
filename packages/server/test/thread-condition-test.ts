@@ -5,10 +5,9 @@
  * `threadCondition`) say these literal words. The rows marked "was" are
  * where the readers disagreed before each ranked the facts itself. */
 import assert from "node:assert/strict";
-import { ThreadFailure } from "../src/optchat.ts";
 import { readThreads } from "../src/optchat-threads.ts";
 import type { Registry, Thread } from "../src/registry.ts";
-import { threadCondition, threadRow, type ThreadRuntime } from "../src/thread-condition.ts";
+import { startFailureOf, threadCondition, threadRow, type ThreadRuntime } from "../src/thread-condition.ts";
 import { releaseFailed, startFailed } from "../src/thread-failure.ts";
 
 const E = "the runner cannot make its disk";
@@ -50,7 +49,9 @@ const cases: Array<{ name: string; thread?: Partial<Thread>; runtime?: Partial<T
       machine: "ready (a later check of its machine failed: workspace allocation failed: boom)", overview: "completed", watcher: "stored" } },
   { name: "agent down", runtime: { agentOpen: true, down: D },
     // was: the row said "error", `threads` "ready", the overview the stored run
-    expect: { kind: "down", row: { state: "error", error: D, failureKind: "down", waiting: null }, threads: `error: ${D}`, machine: `error: ${D}`, overview: "agent error", watcher: "stored" } },
+    // was: the watcher read it from an exception and said cubed keeps retrying
+    expect: { kind: "down", row: { state: "error", error: D, failureKind: "down", waiting: null }, threads: `error: ${D}`, machine: `error: ${D}`, overview: "agent error",
+      watcher: { failure: D, waking: false, episode: null, retrying: false } } },
   { name: "agent down, after a reboot", runtime: { down: D, failure: startFailed(D) },
     expect: { kind: "down", row: { state: "error", error: D, failureKind: "down", waiting: null }, threads: `error: ${D}`, machine: `error: ${D}`, overview: "agent error",
       // was: the watcher said cubed keeps retrying; nothing retries a down agent before a restart
@@ -103,6 +104,7 @@ for (const [n, item] of cases.entries()) {
   const registry = { getThread: (id: string) => id === t.id ? t : null, getProject: () => ({ name: "web" }) } as unknown as Registry;
   const reader = {
     condition: (row: Thread) => threadCondition(row, runtime), agentOpen: () => runtime.agentOpen, owner: () => null, live: async () => null,
+    startFailure: () => startFailureOf(t, threadCondition(t, runtime), runtime.agentOpen), onStartFailure: () => () => {},
     async storedHistory() { return t.workspaceState === "allocating" ? null : { status: { state: "completed", run: "r", error: null } }; },
   } as unknown as Parameters<typeof readThreads>[0]["conversations"];
   const reads = readThreads({ registry, conversations: reader });
@@ -114,8 +116,8 @@ for (const [n, item] of cases.entries()) {
   assert.equal(record.machine, item.expect.machine, `${item.name}: history's machine`);
   assert.equal(record.failure, item.expect.row.error, `${item.name}: history's failure is the row's error`);
   assert.equal((await reads.observe([t.id])).get(t.id)?.state, item.expect.overview, `${item.name}: the overview`);
-  const watched = await reads.events(t.id).then(events => events === "stored" || events === "archiving" || events === null ? events : "live",
-    (error: unknown) => error instanceof ThreadFailure ? { failure: error.message, waking: error.waking, episode: error.episode, retrying: error.retrying } : String(error));
+  // What OptChat's watcher learns: the start failure cubed tells, else the events.
+  const watched = reads.startFailure(t.id) ?? await reads.events(t.id).then(events => events === "stored" || events === "archiving" || events === null ? events : "live");
   assert.deepEqual(watched, item.expect.watcher, `${item.name}: the watcher`);
 }
 console.log(`ok: ${cases.length} kinds of thread: the API's row, threads, history, the overview and the watcher render one condition, in these words`);
@@ -130,5 +132,6 @@ console.log(`ok: ${cases.length} kinds of thread: the API's row, threads, histor
   assert.equal((await reads.history(t.id))!.failure, R, "an archived thread's failure is its release's");
   assert.equal((await reads.observe([t.id])).get(t.id)?.state, "archived");
   assert.equal(await reads.events(t.id), null, "the watcher of an archived thread stops");
+  assert.equal(startFailureOf(t, threadCondition(t, { ...idle, failure: startFailed("an old try's failure") }), false), null, "an archived thread has no start failure");
   console.log("ok: an archived thread reads as archived, with its release's failure only");
 }

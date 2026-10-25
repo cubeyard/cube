@@ -371,10 +371,15 @@ Restarts and failures:
   and sent again in a later round; a thread archived (in the UI, say)
   before a round saw its last run settle reports that run from its store.
 - **A thread whose machine is unavailable** reports a failure to start
-  once, after the start grace, saying whether cubed keeps retrying; see
-  "Archiving". A sleeping machine whose wake fails reports each episode
-  of failed tries in a row once (`report:<thread>:failure:<first try>`),
-  also after a restart.
+  once, after the start grace, saying whether cubed keeps retrying (a down
+  agent: no); see "Archiving". A sleeping machine whose wake fails reports
+  each episode of failed tries in a row once
+  (`report:<thread>:failure:<first try>`), also after a restart. cubed
+  tells the start failure as a fact when it changes
+  (`Conversations.onStartFailure`, `startFailureOf` in
+  thread-condition.ts), and the chat reads each of its threads' once when
+  it opens; the watcher's round reports one that lasted the grace. No
+  watch infers it from an error.
 - **The chat's own observation starts nothing**: neither a thread's
   watcher, nor `threads`, nor `history` starts its machine, wakes a
   suspended one or opens its agent. With the agent open in cubed, the

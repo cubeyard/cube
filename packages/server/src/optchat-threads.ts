@@ -4,14 +4,13 @@
 import { agents, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { ThreadWorking, type Conversations, type ThreadReader } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
-import { ARCHIVED_MAX, ARCHIVED_PAGE, THREAD_NOTE, ThreadFailure, type ObservedThread, type OptThreads } from "./optchat.ts";
+import { ARCHIVED_MAX, ARCHIVED_PAGE, THREAD_NOTE, type ObservedThread, type OptThreads } from "./optchat.ts";
 import { describeProjectHooks, findProject, writeProjectHooks } from "./project-hooks.ts";
 import { threadAgent, type Project, type Registry, type ResolvedRepositories, type Thread } from "./registry.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
 import type { MachineSleep } from "./machine-sleep.ts";
 import { failureOf, type ThreadCondition } from "./thread-condition.ts";
 import type { Failure } from "./thread-failure.ts";
-import { retriesExhausted } from "./thread-recovery.ts";
 
 /** How long the overview waits for one thread's stored state. */
 const OBSERVE_MS = 2000;
@@ -114,7 +113,7 @@ const disk = (vm: Thread["vm"]) => !vm ? "no machine disk" : vm.discarded ? "mac
  * ThreadReader, they cannot start or wake a machine, open an agent or wait
  * for an activation: they read cubed's own state, an agent already open, or
  * the thread's store. */
-export function readThreads(options: { registry: Registry; conversations: ThreadReader }): Required<Pick<OptThreads, "describe" | "observe" | "history" | "events">> {
+export function readThreads(options: { registry: Registry; conversations: ThreadReader }): Required<Pick<OptThreads, "describe" | "observe" | "history" | "events" | "startFailure" | "onStartFailure">> {
   const { registry, conversations } = options;
   return {
     async describe(ids, request) {
@@ -220,33 +219,20 @@ export function readThreads(options: { registry: Registry; conversations: Thread
       // resume a machine an idle round had just suspended. With the agent
       // open its own events are watched, whatever a later check of the
       // machine found; without, the watcher reads the stored run and looks
-      // again next round.
-      if (!conversations.agentOpen(id)) {
-        const thread = registry.getThread(id);
-        const condition = thread && conversations.condition(thread);
-        const failure = condition && startFailure(condition);
-        if (!thread || !condition || !failure) return "stored";
-        const now = gone();
-        if (now !== false) return now;
-        // A sleeping machine's wake fails again and again over a thread's
-        // life: its counted tries (`retry`) are one episode until a try
-        // succeeds. A start's failure keeps the one report it always had.
-        const sleep = sleepOf(condition);
-        const since = sleep && failureOf(condition) && thread.retry?.since;
-        // A down agent is not tried again until cubed restarts.
-        throw new ThreadFailure(failure, since ? String(since) : null, condition.kind !== "down" && !retriesExhausted(thread), !!sleep);
-      }
+      // again next round. A start that fails is told by onStartFailure.
+      if (!conversations.agentOpen(id)) return "stored";
+      // A down agent's events cannot be read: its stored run is.
       try { return await conversations.live(id) ?? "stored"; }
-      catch (error) {
+      catch {
         const now = gone();
-        if (now !== false) return now;
-        throw error;
+        return now !== false ? now : "stored";
       }
     },
+    startFailure: id => conversations.startFailure(id),
+    onStartFailure: listener => conversations.onStartFailure(listener),
   };
 }
 
-const sleepOf = (condition: ThreadCondition): MachineSleep | null => "sleep" in condition ? condition.sleep : null;
 
 /** A machine that is suspended, or being woken (by a message, a portal
  * connection, an archive's check of its disk, or the recovery loop for a
@@ -286,18 +272,5 @@ function observedText(condition: ThreadCondition): string | null {
     case "starting": return "starting";
     case "waiting": return "waiting for a runner";
     case "ready": case "new": return null;
-  }
-}
-
-/** What the watcher reports as a start that failed, for a thread whose
- * agent is not open. A wait for a runner counts as a start not made yet:
- * reported once it lasts. A sleeping machine's wait for a slot is not one;
- * a wake that failed is. */
-function startFailure(condition: ThreadCondition): string | null {
-  switch (condition.kind) {
-    case "down": case "failed": return condition.failure.text;
-    case "starting": return condition.failure?.text ?? (condition.sleep ? null : condition.waiting);
-    case "waiting": return condition.sleep ? null : condition.waiting;
-    case "archived": case "archiving": case "ready": case "new": return null;
   }
 }

@@ -7,7 +7,7 @@
 import type { MachineSleep } from "./machine-sleep.ts";
 import type { Thread } from "./registry.ts";
 import { readFailure, type Failure } from "./thread-failure.ts";
-import { releaseUnfinished } from "./thread-recovery.ts";
+import { releaseUnfinished, retriesExhausted } from "./thread-recovery.ts";
 
 /** What this process knows of a thread beside its row (Conversations' maps). */
 export interface ThreadRuntime {
@@ -86,3 +86,34 @@ export const threadRow = (condition: ThreadCondition) => {
   const failure = failureOf(condition);
   return { state: rowState(condition), error: failure?.text ?? null, failureKind: failure?.kind ?? null, waiting: waitingOf(condition) };
 };
+
+/** A thread whose start or wake does not succeed now, as OptChat reports it
+ * once it lasts: the fact Conversations publishes (`onStartFailure`) when
+ * it changes. `episode`: the first failed try of a sleeping machine's
+ * failed wakes in a row (one report each); null: one report per thread.
+ * `retrying`: cubed tries it again (not a down agent, nor once the
+ * recovery loop stopped). `waking`: its machine sleeps. */
+export interface StartFailure { failure: string; episode: string | null; retrying: boolean; waking: boolean }
+
+/** The thread's start failure now, or null. A thread whose agent is open
+ * goes on with its run whatever a later check found, so it has none,
+ * unless its agent is down. A wait for a runner counts as a start not made
+ * yet; a sleeping machine's wait for a slot does not; a wake that failed
+ * does. An archive (or a release left unfinished) is not one. */
+export function startFailureOf(thread: Thread, condition: ThreadCondition, agentOpen: boolean): StartFailure | null {
+  if (condition.kind !== "down" && agentOpen) return null;
+  const failure = startFailureText(condition);
+  if (!failure) return null;
+  const sleep = "sleep" in condition ? condition.sleep : null;
+  const since = sleep && failureOf(condition) && thread.retry?.since;
+  return { failure, episode: since ? String(since) : null, retrying: condition.kind !== "down" && !retriesExhausted(thread), waking: !!sleep };
+}
+
+function startFailureText(condition: ThreadCondition): string | null {
+  switch (condition.kind) {
+    case "down": case "failed": return condition.failure.text;
+    case "starting": return condition.failure?.text ?? (condition.sleep ? null : condition.waiting);
+    case "waiting": return condition.sleep ? null : condition.waiting;
+    case "archived": case "archiving": case "ready": case "new": return null;
+  }
+}

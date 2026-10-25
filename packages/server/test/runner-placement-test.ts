@@ -136,11 +136,14 @@ try {
       const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [], runners: () => { throw new Error("unused"); }, latestCommits: () => { throw new Error("unused"); } });
       assert.match(await adapter.describe([thread.id]), /starting its machine, waiting for a runner: node-a does not answer/);
       assert.equal((await adapter.observe!([thread.id])).get(thread.id)!.state, "waiting for a runner");
-      await assert.rejects(adapter.events(thread.id), /waiting for a runner/, "OptChat's watcher counts it as a start not made yet");
+      assert.match(adapter.startFailure(thread.id)?.failure ?? "", /waiting for a runner/, "cubed tells OptChat a start not made yet");
+      assert.equal(adapter.startFailure(thread.id)?.retrying, true);
+      assert.equal(await adapter.events(thread.id), "stored");
       // The runner comes back: the next try starts the thread and the wait is gone.
       await app.conversations.activate(thread.id);
       assert.equal(app.conversations.waiting(thread.id), null);
       assert.equal(app.registry.getThread(thread.id)!.workspaceState, "available");
+      assert.equal(adapter.startFailure(thread.id), null, "and its start failure ended");
       for (let k = 0; (await app.conversations.history(thread.id)).status.state !== "completed"; k++) { assert.ok(k < 400); await delay(25); }
     } finally {
       await app.close();

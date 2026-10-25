@@ -54,7 +54,7 @@ try {
   const asked: string[] = [];
   const listed: Array<[readonly string[], ThreadListRequest | undefined]> = [];
   let spawns = 0;
-  const threads: OptThreads = {
+  const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {},
     async projects() { return "projects: cube"; },
     async runners() { return "no runners"; },
     async spawn() { return spawns++ ? { id: BUSY, title: "busy" } : { id: DONE, title: "done" }; },

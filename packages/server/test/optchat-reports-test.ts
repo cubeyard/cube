@@ -110,7 +110,7 @@ const READER = ["live", "storedHistory", "agentOpen", "condition", "owner"];
     return status ? { agent: "pi", owner: null, status, total: 2, answer: { index: 1, text: `${id.slice(0, 2)} did it` }, asked: 0, start: 0, events: [] } : null;
   };
   let spawned = 0;
-  const threads: OptThreads = {
+  const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {},
     projects: async () => "", runners: async () => "", describe: async () => "", tell: async () => {},
     spawn: async () => { const id = ids[spawned++]!; return { id, title: id.slice(0, 8) }; },
     // Their agents never open here: the watcher reads their stores.

@@ -230,7 +230,7 @@ try {
     const models = createModels();
     models.setProvider(faux.provider);
     const diagnosed: string[] = [];
-    const threads: OptThreads = {
+    const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {},
       async projects() { return "projects: cube"; },
       async runners() { return "no runners"; },
       async spawn() { return { id: ID, title: "remove a task" }; },

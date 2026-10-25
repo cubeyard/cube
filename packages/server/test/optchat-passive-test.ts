@@ -104,12 +104,16 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
   assert.equal(await threads.events(awake.id), "stored");
   assert.equal(conversations.agentOpen(awake.id), false, "watching an awake thread opens no agent");
   assert.deepEqual([starts, guests], [[], []], "watching an awake thread starts nothing");
-  // Control: an explicit start is counted, and its failure is the watcher's
-  // failure to start, without a start of its own.
+  // Control: an explicit start is counted, and cubed tells its failure as
+  // the thread's start failure; the watcher starts nothing of its own.
+  const told: Array<[string, unknown]> = [];
+  const unsubscribe = threads.onStartFailure((id, failure) => told.push([id, failure]));
   await conversations.activate(awake.id);
   assert.deepEqual(starts, [awake.id], "the counter counts an explicit start");
-  await assert.rejects(threads.events(awake.id), /no machine in this test/, "a failed start is the watcher's failure to start");
+  assert.deepEqual(told.at(-1), [awake.id, { failure: "no machine in this test", episode: null, retrying: true, waking: false }], "a failed start is told as the thread's start failure");
+  assert.equal(await threads.events(awake.id), "stored", "the watcher reads the stored run");
   assert.deepEqual(starts, [awake.id], "the watcher did not start it again");
+  unsubscribe();
   await conversations.close();
   console.log("ok: cubeThreads: watching, listing and reading a suspended, waking or awake thread start no machine, call no guest and open no agent; the old listing opened the agent; a failed explicit start is still reported");
 }
@@ -196,6 +200,7 @@ const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as
     activate: async (id: string) => { activated.push(id); open.add(id); },
     agentOpen: (id: string) => open.has(id),
     condition: (thread: Thread) => threadCondition(thread, { archiving: false, starting: false, agentOpen: open.has(thread.id), failure: null, down: null, waiting: null }),
+    startFailure: () => null, onStartFailure: () => () => {},
     owner: () => null,
     storedHistory: async (id: string) => page(id),
     history: async (id: string) => transcriptOf(id),
