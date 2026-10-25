@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { onMount, tick, type Snippet } from "svelte";
+  import { onMount, tick, untrack, type Snippet } from "svelte";
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { errorText, imageUrl, sendPrompt, stopThread, threadBase, threadEvents, uploadImage } from "../lib/api.ts";
   import { ACCEPT, MEDIA_LIMITS, pastedImages, prepareImage } from "../lib/images.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
+  import { keep, keptOf, listen, recover, type Pending } from "../lib/drafts.ts";
   import { echo, echoRows, unanswered, unlogged, type Echo } from "../lib/outbox.ts";
   import { keepRows, picturePath, toolOpen, transcriptRows, type ToolState, type TranscriptRow } from "../lib/transcript.ts";
   import { rowKey } from "../lib/provenance.ts";
@@ -73,9 +74,14 @@
   });
   const status = $derived<ThreadStatus>(transcript.status);
   $effect(() => { onRows?.(rows); });
-  let prompt = $state("");
+  // The draft outlives the view: closing the panel a thread is in keeps it,
+  // its send's identity and a failure's note for the next visit.
+  const start = untrack(() => keptOf(base));
+  let prompt = $state(start.text);
+  // A field emptied by hand drops a failure's note: "back in the field" no longer holds.
+  $effect(() => { keep(base, prompt.trim() ? { text: prompt } : { text: prompt, note: null }); });
   let loading = $state(true);
-  let error = $state<string | null>(null);
+  let error = $state<string | null>(start.note);
   let historyError = $state<string | null>(null);
   let reconnecting = $state(false);
   let stopping = $state(false);
@@ -85,7 +91,14 @@
   let sending = $state(false);
   /** The send being made: a retry of the same message is the same request,
    * counted as the first attempt was (see `echo`). */
-  let pending: { key: string; requestId: string; seen: number | null } | null = null;
+  let pending: Pending | null = start.pending;
+  /** `pending` came from the store (a failure kept for this thread), not from a send of this view. */
+  let pendingKept = !!start.pending;
+  // Only a send that failed carries its request to a later view (so a retry
+  // of the same words is the same request); one still on its way stays this
+  // view's own, or a later view would reuse its id for a repeat after it
+  // succeeded, and the host would take the repeat for a replay.
+  function failedPending(failed: Pending): void { pending = failed; pendingKept = true; keep(base, { pending: failed }); }
   /** Images attached to the draft: uploaded at once, sent with the message. */
   type Attachment = { key: string; name: string; preview: string; id: string | null; mimeType: string | null; error: string | null };
   let attachments = $state<Attachment[]>([]);
@@ -211,6 +224,17 @@
   }
 
   onMount(() => {
+    // a draft kept from an earlier visit: the field grows to hold it
+    if (prompt) void tick().then(resizeComposer);
+    // a send from an earlier visit that fails now: its words come back here,
+    // before what was typed since, with its note and its request
+    const unlisten = listen(base, recovery => {
+      prompt = prompt.trim() ? `${recovery.text}\n${prompt}` : recovery.text;
+      error = recovery.note;
+      if (recovery.pending) failedPending(recovery.pending);
+      keep(base, { note: recovery.note });
+      void tick().then(resizeComposer);
+    });
     const watching = events.watch(onFrame, {
       onInterrupt: () => {
         if (disposed) return;
@@ -233,6 +257,7 @@
     settle.observe(scroller);
     return () => {
       disposed = true;
+      unlisten();
       for (const item of attachments) URL.revokeObjectURL(item.preview);
       scroller.removeEventListener("scroll", onScroll);
       column.removeEventListener("error", onImageError, true);
@@ -352,15 +377,24 @@
     if (!canSend || !model) return;
     sending = true;
     error = null;
+    keep(base, { note: null });
     const sent = attachments.filter(item => item.id);
     const ids = sent.map(item => item.id!);
     const key = JSON.stringify([text, ids]);
-    if (pending?.key !== key) pending = { key, requestId: uid(), seen: null };
-    const requestId = pending.requestId;
+    // a kept failure that a retry elsewhere has since delivered is no longer a request to reuse
+    if (pending && pendingKept && keptOf(base).pending?.requestId !== pending.requestId) pending = null;
+    pendingKept = false;
+    if (pending?.key !== key) {
+      pending = { key, requestId: uid(), seen: null };
+      // other words: an earlier failure's request is not this message's
+      keep(base, { pending: null });
+    }
+    const requestId = pending!.requestId;
     // The message leaves the field for the transcript at once; a failed
     // send puts it back, before anything typed meanwhile.
-    const made = echo(transcript, echoes, requestId, text, sent.map(item => ({ id: item.id!, mimeType: item.mimeType ?? "" })), pending.seen ?? undefined);
-    pending.seen = made.seen;
+    const made = echo(transcript, echoes, requestId, text, sent.map(item => ({ id: item.id!, mimeType: item.mimeType ?? "" })), pending!.seen ?? undefined);
+    pending = { ...pending!, seen: made.seen };
+    const tried = pending!;
     echoes = [...echoes, made];
     attachments = attachments.filter(item => !sent.includes(item));
     prompt = "";
@@ -370,20 +404,32 @@
     toBottom();
     try {
       await sendPrompt(base, text, model, requestId, ids);
-      pending = null;
+      // done: also for a view open now, if this one went meanwhile
+      if (keptOf(base).pending?.requestId === requestId) keep(base, { pending: null });
+      if (!disposed) pending = null;
       echoes = echoes.map(item => item.key === requestId ? { ...item, accepted: true } : item);
       for (const item of sent) URL.revokeObjectURL(item.preview);
       await refresh();
     } catch (cause) {
       echoes = echoes.filter(item => item.key !== requestId);
-      if (disposed) for (const item of sent) URL.revokeObjectURL(item.preview);
-      else {
-        prompt = prompt.trim() ? `${text}\n${prompt}` : text;
-        attachments = [...sent, ...attachments];
-        await tick();
-        resizeComposer();
+      if (disposed) {
+        for (const item of sent) URL.revokeObjectURL(item.preview);
+        // Gone meanwhile: the words go to the view open now, or wait for the
+        // next. Without its images it is another message, so another request;
+        // the same words alone keep this one's id, so a retry cannot post twice.
+        recover(base, {
+          text,
+          note: `not sent: ${errorText(cause)} — your message is back in the field${ids.length ? "; its images were not kept, attach them again" : ""}`,
+          pending: ids.length ? null : tried,
+        });
+        return;
       }
+      prompt = prompt.trim() ? `${text}\n${prompt}` : text;
+      attachments = [...sent, ...attachments];
+      await tick();
+      resizeComposer();
       error = errorText(cause);
+      keep(base, { note: `not sent: ${error}`, pending: tried });
     } finally {
       sending = false;
       composer?.focus();
