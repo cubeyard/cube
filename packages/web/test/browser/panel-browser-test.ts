@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { chromium, webkit, type Browser, type Page } from "playwright";
 import { artifacts, bodies, chatEvents, overview, threads } from "./chat-sheet-data.ts";
-import { ScriptedHost } from "./scripted-host.ts";
+import { gate, ScriptedHost, type Prompt } from "./scripted-host.ts";
 
 const host = await ScriptedHost.start();
 host.transcript = { ...host.transcript, status: { state: "completed", run: "r", error: null }, events: chatEvents() };
@@ -30,6 +30,7 @@ const chatDraft = (page: Page) => page.locator(".chat-sheet .composer textarea")
 const until = async (check: () => boolean, what: string) => {
   for (const deadline = Date.now() + 10_000; !check(); await new Promise(resolve => setTimeout(resolve, 50))) assert.ok(Date.now() < deadline, `waiting for ${what}`);
 };
+const ACTIVE_NOTE = "dialog.page-panel .conversation-error";
 const inPanel = (page: Page) => page.evaluate(() => !!document.activeElement?.closest("dialog.page-panel"));
 /** What has focus, in words: its text and whether it is the element marked `data-opener`. */
 const focused = (page: Page) => page.evaluate(() => ({ opener: document.activeElement?.hasAttribute("data-opener") ?? false, what: `${document.activeElement?.tagName} ${document.activeElement?.textContent?.trim().slice(0, 30)}` }));
@@ -177,6 +178,59 @@ try {
     await page.evaluate(() => { location.hash = "#/chat"; });
     await panel(page).waitFor({ state: "detached" });
     assert.equal(await chatDraft(page).inputValue(), "a draft the chat keeps", `${size.name}: the chat's own draft is untouched`);
+
+    // A send that fails after the panel closed. Each send is held until the
+    // test lets it fail; `tries` records every request the host saw.
+    const tries: Prompt[] = [];
+    const failLater = () => { const held = gate(); host.onPrompt = async prompt => { tries.push(prompt); await held.promise; throw new Error("the host refused it"); }; return held; };
+    const openThread = async () => { await page.evaluate(() => { location.hash = "#/t/t1"; }); await panel(page).locator(".composer textarea").waitFor(); return panel(page).locator(".composer textarea"); };
+    const toChat = async () => { await page.evaluate(() => { location.hash = "#/chat"; }); await panel(page).waitFor({ state: "detached" }); };
+    const note = () => panel(page).locator(".conversation-error");
+
+    // 1 · it fails while the thread is closed: the words and a note wait for the next visit
+    let held = failLater();
+    let late = await openThread();
+    await late.fill(`late A ${size.name}`);
+    await late.press("Enter");
+    await until(() => tries.length === 1, "the send reached the host");
+    await toChat();
+    held.open();
+    await page.waitForTimeout(300);
+    late = await openThread();
+    assert.equal(await late.inputValue(), `late A ${size.name}`, `${size.name}: a send that failed after the panel closed comes back on the next visit`);
+    assert.match(await note().textContent() ?? "", /^not sent: .*back in the field/, `${size.name}: and says it was not sent`);
+    // its retry is the same request: one id, so it cannot post twice
+    host.onPrompt = prompt => { tries.push(prompt); };
+    await late.press("Enter");
+    await until(() => tries.length === 2, "the retry reached the host");
+    assert.equal(tries[1]!.requestId, tries[0]!.requestId, `${size.name}: the retry of the recovered words keeps the first request's id`);
+    await page.waitForTimeout(200);
+    assert.equal(await note().count(), 0, `${size.name}: a sent retry clears the note`);
+    await toChat();
+
+    // 2 · it fails while the thread is open again with newer typing: the words come back before it, nothing is overwritten
+    held = failLater();
+    late = await openThread();
+    await late.fill(`late B ${size.name}`);
+    await late.press("Enter");
+    await until(() => tries.length === 3, "the send reached the host");
+    await toChat();
+    late = await openThread();
+    assert.equal(await late.inputValue(), "", `${size.name}: the send is still on its way`);
+    await late.fill("newer typing");
+    held.open();
+    await page.locator(ACTIVE_NOTE).waitFor();
+    assert.equal(await late.inputValue(), `late B ${size.name}\nnewer typing`, `${size.name}: a late failure lands in the open view before what was typed since`);
+    assert.match(await note().textContent() ?? "", /^not sent: /, `${size.name}: with its note`);
+    await late.press("End");
+    await late.type(" and more");
+    await toChat();
+    late = await openThread();
+    assert.equal(await late.inputValue(), `late B ${size.name}\nnewer typing and more`, `${size.name}: typing after the recovery is kept, nothing overwrote it`);
+    assert.match(await note().textContent() ?? "", /^not sent: /, `${size.name}: the note stays until a send goes through`);
+    await late.fill("");
+    await toChat();
+    host.onPrompt = () => {};
 
     // a deep link opens the place over the chat at once
     await page.goto(`${host.url}/#/artifacts`);
