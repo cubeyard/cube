@@ -227,8 +227,10 @@ async function turn(text: string, prompted = true): Promise<void> {
     emit({ type: "result", subtype: "success", is_error: false, result: prompted ? `done with ${model}` : "", duration_ms: Date.now() - started, ...usage() });
   } finally {
     if (current === controller) current = undefined;
-    // Still queued at the result: a turn of its own, right after it.
+    // Still queued at the result: a turn of its own, right after it
+    // (FAKE_CLAUDE_STEER=stall: never, and no word of it).
     const next = queued.splice(0);
+    if (env.FAKE_CLAUDE_STEER === "stall") next.length = 0;
     if (next.length) queue = queue.then(() => { for (const item of next) lifecycle(item.uuid, "started"); return turn(next.map(item => item.text).join("\n")); });
   }
 }

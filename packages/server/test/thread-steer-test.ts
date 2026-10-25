@@ -4,8 +4,10 @@
  * second turn beside the running one, and reaches the agent after the
  * current tool call, which runs to its end. A message that arrives as the
  * run ends continues it; a stop withdraws it and says so; an idle thread
- * still starts a run; an archived one refuses; a cubed restart keeps Pi's
- * queued message and ends Claude Code's with its reason. Offline: faux model, local guests,
+ * still starts a run; an archived one refuses; a run that fails withdraws
+ * Pi's queued message and says so; a tell during a Claude stop is refused;
+ * a cubed restart keeps Pi's queued message and ends Claude Code's with
+ * its reason. Offline: faux model, local guests,
  * the fake CLI (fake-claude.ts), disposable state. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -17,7 +19,6 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Me
 import { LiveDoc } from "@earendil-works/pi-durable";
 import { createCubed } from "../src/index.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
-import { WITHDRAWN } from "../src/pi-thread-events.ts";
 import type { ThreadStatus } from "../src/thread-events.ts";
 import { LocalMachines } from "./local-guest.ts";
 
@@ -44,6 +45,11 @@ faux.setResponses(Array.from({ length: 200 }, () => async (request: { messages: 
   }
   // A generation held open: a message sent meanwhile arrives as the run ends.
   if (first === "pi-finish" && n === 1) await gates.get("pi-finish");
+  // A provider that fails (every retry too) until a later message comes.
+  if (first === "pi-fail" && !request.messages.some(message => textOf(message) === "later")) {
+    await gates.get("pi-fail");
+    return fauxAssistantMessage("", { stopReason: "error", errorMessage: "provider down" });
+  }
   return fauxAssistantMessage(`reply ${n} to ${textOf(request.messages.at(-1)!)}`);
 }));
 const models = createModels();
@@ -90,7 +96,7 @@ const toolRunning = async (id: string) => !!(await (await app.conversations.agen
 
 try {
   // One machine slot each: a thread of its own per runner.
-  for (const n of [1, 2, 3, 4, 5]) app.registry.enrollRunner({ nodeId: `node-r${n}`, threadId: `r${n}`, environmentId: n, configPath: `/private/r${n}.json`, configHash: `r${n}`, protocol: 4, kind: "vm" });
+  for (const n of [1, 2, 3, 4, 5, 6]) app.registry.enrollRunner({ nodeId: `node-r${n}`, threadId: `r${n}`, environmentId: n, configPath: `/private/r${n}.json`, configHash: `r${n}`, protocol: 4, kind: "vm" });
   app.registry.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
 
   // --- Pi -------------------------------------------------------------------
@@ -102,6 +108,8 @@ try {
     await until(() => toolRunning(id).catch(() => false), Boolean, "the pi thread's tool runs");
     const run = (await history(id)).status.run;
     assert.equal(await threads.tell(id, "steer A", "optchat:a"), "queued");
+    // Another text under the same request id while it waits in Pi's inbox: a conflict.
+    await assert.rejects(threads.tell(id, "other", "optchat:a"), /conflicts/);
     assert.equal((await history(id)).status.state, "working", "still the one run");
     const done = await settled(id);
     assert.equal(done.status.state, "completed");
@@ -154,12 +162,37 @@ try {
     await app.conversations.stop(id);
     const done = await settled(id);
     assert.equal(done.status.state, "stopped");
-    assert.equal(done.status.error, WITHDRAWN);
+    assert.equal(done.status.run, "cube:initial", "the stopped run is the one reported, not the withdrawn message");
+    assert.equal(done.status.error, "a message sent while it worked never reached it (the stop withdrew it); send it again if still needed");
     assert.equal(await threads.tell(id, "steer C", "optchat:e"), "dropped", "a replay says it never reached the agent");
     await delay(200);
     assert.ok(requests.get("pi-stop")!.every(messages => !messages.some(message => textOf(message) === "steer C")), "the model never got it");
   }
 
+  {
+    // A run that fails before a tool boundary (the provider fails, every
+    // retry too): the queued message is withdrawn, not kept for a later
+    // one, and the run's outcome keeps the provider's error and names it.
+    hold("pi-fail");
+    const id = create("pi-fail", "pi-fail");
+    await until(() => requests.get("pi-fail")?.length ?? 0, n => n >= 1, "the generation is out");
+    assert.equal(await threads.tell(id, "steer X", "optchat:x"), "queued");
+    release["pi-fail"]!();
+    const done = await settled(id);
+    assert.equal(done.status.state, "failed");
+    assert.equal(done.status.run, "cube:initial", "the failed run, not the withdrawn message");
+    assert.match(done.status.error ?? "", /^provider down; a message sent while it worked never reached it \(the run failed before it read it\); send it again if still needed$/);
+    assert.equal(await threads.tell(id, "steer X", "optchat:x"), "dropped", "a replay says it never reached the agent");
+    // The stored record (OptChat's history, a reader without the agent) says the same, not working.
+    const stored = await app.conversations.storedHistory(id, { limit: 5 });
+    assert.deepEqual(stored?.status, done.status);
+    const before = requests.get("pi-fail")!.length;
+    assert.equal(await threads.tell(id, "later", "optchat:y"), "started", "a new message starts a run of its own");
+    await until(() => history(id), value => value.status.state === "completed" && value.status.run === "optchat:y", "the later run");
+    const sent = requests.get("pi-fail")!.slice(before);
+    assert.ok(sent.length >= 1 && sent.every(messages => !messages.some(message => textOf(message) === "steer X")), "the withdrawn message never rides along");
+    assert.ok(requests.get("pi-fail")!.every(messages => !messages.some(message => textOf(message) === "steer X")), "the model never got it");
+  }
   {
     // cubed stops with one queued in Pi's inbox: after the restart the run
     // goes on, and the model gets the message once, after the tool's result.
@@ -228,6 +261,17 @@ try {
     assert.equal(await threads.tell(claude, "say never", "optchat:j"), "dropped");
     await delay(300);
     assert.ok(!(await transcriptOf(claude)).some(line => line.includes("never")), "it never ran");
+  }
+  {
+    // A tell while a stop is under way (the interrupt not answered yet) is
+    // refused, not queued to run past the stop.
+    assert.equal(await threads.tell(claude, "ignore-interrupt\nslow sleep 5", "optchat:p"), "started");
+    await until(() => history(claude), value => value.status.run === "optchat:p" && value.events.some(event => event.type === "tool-call" && JSON.stringify(event.input).includes("sleep 5")), "the Bash runs");
+    await app.conversations.stop(claude);
+    await assert.rejects(threads.tell(claude, "say past the stop", "optchat:q"), /the thread is being stopped/);
+    const done = await settled(claude, "optchat:p");
+    assert.equal(done.status.state, "stopped");
+    assert.ok(!(await transcriptOf(claude)).some(line => line.includes("past the stop")));
   }
   {
     // Claude Code ends before it took one in: the failed run says so.

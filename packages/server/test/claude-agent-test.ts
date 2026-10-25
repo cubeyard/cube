@@ -272,7 +272,24 @@ try {
       assert.equal(old.request("steer", "say no"), undefined, "nothing was kept");
     } finally { await old.close(); }
   }
-  console.log("ok: steers across a cubed crash, and a claude code that cannot be steered");
+  // A steer still queued at the result is the next turn's; a Claude Code
+  // that never starts it (no 'started', no word of it) fails that run
+  // after the grace, naming the message, instead of leaving it working.
+  {
+    const stalled = await ClaudeAgent.open({ directory: path.join(root, "stalled-steer"), threadId: "t1", workspace, model: "sonnet",
+      runtime: { ...runtime, continueGraceMs: 400, env: { ...runtime.env, FAKE_CLAUDE_STEER: "stall" } } });
+    try {
+      await stalled.submit("turn", "think 400");
+      await until(() => stalled.running && stalled.state().messages.length > 0, "the turn runs");
+      assert.equal(await stalled.submit("steer", "say late", { steer: true }), "queued");
+      await until(() => stalled.state().submissions.at(-1)?.requestId === "steer", "the steer's run follows the turn");
+      const run = await until(() => { const last = stalled.state().submissions.at(-1)!; return last.state !== "running" && last; }, "the steer's run ends");
+      assert.equal(run.state, "failed");
+      assert.equal(run.error, "a message sent while it worked never reached it (claude code did not start the turn it was to take for it); send it again if still needed");
+      assert.equal(stalled.request("steer", "say late"), "dropped");
+    } finally { await stalled.close(); }
+  }
+  console.log("ok: steers across a cubed crash, a claude code that cannot be steered, and one that never starts a steer's turn");
 
   // Claude Code without the mod (it could not load it, or the mod's word is
   // forged): no prompt reaches it, so nothing runs on the host.

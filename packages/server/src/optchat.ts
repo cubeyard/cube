@@ -1656,7 +1656,7 @@ export class OptChat {
         }, callContext);
         const report = `its report comes back as a message starting "[${short(id)}] "`;
         if (accepted === "queued") return text(`queued for [${short(id)}], which is working: it has not read it yet, and reads it after its current tool call, in this turn; ${report}`);
-        if (accepted === "consumed") return text(`[${short(id)}] already has it and has read it; ${report}`);
+        if (accepted === "consumed") return text(`[${short(id)}] already has it in its conversation; ${report}`);
         if (accepted === "dropped") return text(`[${short(id)}] took it while working, but it never reached the agent; ${report}, saying why`);
         return text(`sent to [${short(id)}]; ${report}`);
       },

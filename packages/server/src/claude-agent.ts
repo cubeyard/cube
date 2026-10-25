@@ -294,6 +294,9 @@ export class ClaudeAgent {
     if (prior) return prior;
     if (this.running) {
       if (!options.steer || !this.child) throw new ClaudeBusy("thread is already working");
+      // A stop under way withdraws what is queued (cancel_queued); one sent
+      // after it could run as a turn of its own past the stop.
+      if (this.interrupt || this.child.stopped || this.ending?.state === "stopped") throw new Error(STOPPING);
       // Before this child's init: what the one before it said, if any.
       const known = this.child.capabilities ?? this.capabilities();
       if (known && !steerable(known)) throw new Error(unsteerable(this.child.version ?? this.meta("version")));
@@ -570,7 +573,7 @@ export class ClaudeAgent {
       this.settle(this.interrupt ? "stopped" : failed ? "failed" : "completed", this.interrupt || !failed ? null : detail, undefined, next);
       this.partial = [];
       if (next.length) {
-        this.continued(next[0]!.requestId, next[0]!.text);
+        this.continued(next[0]!.requestId, next[0]!.text, Date.now(), next[0]);
         for (const steer of next) this.moveSteer(steer);
       }
       this.scheduleIdle();
@@ -619,14 +622,14 @@ export class ClaudeAgent {
 
   /** A run nobody sent: Claude Code going on by itself. `since`: when its
    * turn showed (now, for a notification whose turn has yet to show). */
-  private continued(requestId: string, text: string, since = Date.now()): void {
+  private continued(requestId: string, text: string, since = Date.now(), steer?: ClaudeSteer): void {
     if (this.running || this.submissions.some(submission => submission.requestId === requestId)) return;
     const seq = Number(this.db.prepare("INSERT INTO submission(request_id, text, state, created_at) VALUES (?, ?, 'running', ?)").run(requestId, text, Date.now()).lastInsertRowid);
     this.submissions.push({ seq, requestId, text, state: "running", error: null });
     // Claude Code has what this run answers: steers may follow it.
     this.delivered.add(seq);
     clearTimeout(this.idle);
-    this.armGrace(since);
+    this.armGrace(since, steer);
   }
 
   /** Claude Code's task messages: a backgrounded top-level task is waited
@@ -676,12 +679,20 @@ export class ClaudeAgent {
   }
 
   /** A follow-up turn that never shows is a failed run, not a silent wait. */
-  private armGrace(since: number): void {
+  /** `steer`: the run is that steer's, which Claude Code was to start as its
+   * next turn; it shows by Claude Code's 'started', not by its output. */
+  private armGrace(since: number, steer?: ClaudeSteer): void {
     clearTimeout(this.grace);
     const current = this.submissions.at(-1);
     this.grace = setTimeout(() => {
-      if (this.submissions.at(-1) !== current || !this.running || this.heard >= since) return;
-      this.settle("failed", "claude code was to go on by itself (a background agent finished), but did not — send a message to go on");
+      if (this.submissions.at(-1) !== current || !this.running) return;
+      if (steer) {
+        if (steer.state !== "queued") return;
+        this.settle("failed", null, "claude code did not start the turn it was to take for it");
+      } else {
+        if (this.heard >= since) return;
+        this.settle("failed", "claude code was to go on by itself (a background agent finished), but did not — send a message to go on");
+      }
       this.scheduleIdle();
       this.armDeadline();
       this.changed();
@@ -791,6 +802,7 @@ export function agents(descriptions: readonly string[]): string {
 
 /** A stored row of a steer Claude Code took in mid-turn (claude-thread-events.ts shows it). */
 export const STEERED = "cube_steered";
+const STOPPING = "the thread is being stopped, so cube does not send it into the turn: send it once the thread has stopped";
 const RESTARTED = "cubed stopped during the turn, so whether claude code took it in is not known";
 const steerable = (capabilities: readonly string[]) => STEERING_CAPABILITIES.every(name => capabilities.includes(name));
 const unsteerable = (version: string | null) => `this claude code${version ? ` (${version})` : ""} does not report when it takes in a message sent while it works, so cube does not send one then: send it once the thread's turn has ended`;
