@@ -5,7 +5,9 @@
  * closes it unless a field holds text; its close key and back close it; a
  * place opened from the chat's index closes the index; the chat's own keys
  * stay off while a place is open. Desktop (a sheet from the right, the chat
- * beside it) and phone (the whole screen). Needs a built UI (pnpm build)
+ * beside it) and phone (the whole screen). An unsent thread draft
+ * survives every way the panel closes and is there when the thread opens
+ * again; a sent one is not. Needs a built UI (pnpm build)
  * and Playwright's Chromium. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -25,6 +27,9 @@ host.overview = overview();
 const errors: string[] = [];
 const panel = (page: Page) => page.locator("dialog.page-panel");
 const chatDraft = (page: Page) => page.locator(".chat-sheet .composer textarea");
+const until = async (check: () => boolean, what: string) => {
+  for (const deadline = Date.now() + 10_000; !check(); await new Promise(resolve => setTimeout(resolve, 50))) assert.ok(Date.now() < deadline, `waiting for ${what}`);
+};
 const inPanel = (page: Page) => page.evaluate(() => !!document.activeElement?.closest("dialog.page-panel"));
 /** What has focus, in words: its text and whether it is the element marked `data-opener`. */
 const focused = (page: Page) => page.evaluate(() => ({ opener: document.activeElement?.hasAttribute("data-opener") ?? false, what: `${document.activeElement?.tagName} ${document.activeElement?.textContent?.trim().slice(0, 30)}` }));
@@ -133,6 +138,45 @@ try {
     await page.goForward();
     await panel(page).waitFor({ state: "detached" });
     assert.equal(await chatDraft(page).inputValue(), "a draft the chat keeps", `${size.name}: the draft outlives every visit`);
+
+    // an unsent thread draft outlives every way the panel closes, and comes back when the thread opens again
+    const paths: Array<[string, () => Promise<void>]> = [
+      ["the close key", async () => { const key = panel(page).locator(".strip-close"); await (size.touch ? key.tap() : key.click()); }],
+      ["escape from outside the field", async () => { await panel(page).locator(".strip-title, .mobile-thread-switch").first().evaluate(element => (element as HTMLElement).blur()); await page.locator("dialog.page-panel").focus(); await page.keyboard.press("Escape"); }],
+      ["back", async () => { await page.goBack(); }],
+      ...size.touch ? [] : [["a press on the backdrop", async () => { await page.mouse.click(40, 400); }] as [string, () => Promise<void>]],
+    ];
+    for (const [index, [how, leave]] of paths.entries()) {
+      const words = `draft ${index}: kept when the panel closes by ${how}\nsecond line`;
+      await page.evaluate(() => { location.hash = "#/t/t1"; });
+      const field = panel(page).locator(".composer textarea");
+      await field.waitFor();
+      await field.fill(words);
+      await leave();
+      await panel(page).waitFor({ state: "detached" });
+      await page.evaluate(() => { location.hash = "#/t/t1"; });
+      await panel(page).locator(".composer textarea").waitFor();
+      assert.equal(await panel(page).locator(".composer textarea").inputValue(), words, `${size.name}: the draft comes back after closing by ${how}`);
+      assert.ok(await panel(page).locator(".composer textarea").evaluate(element => element.scrollHeight <= element.clientHeight + 2), `${size.name}: the field holds the kept draft without a scrollbar`);
+      await page.evaluate(() => { location.hash = "#/chat"; });
+      await panel(page).waitFor({ state: "detached" });
+    }
+    // a sent draft is gone: the next visit starts empty
+    await page.evaluate(() => { location.hash = "#/t/t1"; });
+    const field = panel(page).locator(".composer textarea");
+    await field.waitFor();
+    await field.fill(`sent from ${size.name}`);
+    await field.press("Enter");
+    await until(() => host.prompts.some(prompt => prompt.text === `sent from ${size.name}`), "the message was sent");
+    assert.equal(await field.inputValue(), "");
+    await page.evaluate(() => { location.hash = "#/chat"; });
+    await panel(page).waitFor({ state: "detached" });
+    await page.evaluate(() => { location.hash = "#/t/t1"; });
+    await panel(page).locator(".composer textarea").waitFor();
+    assert.equal(await panel(page).locator(".composer textarea").inputValue(), "", `${size.name}: a sent message does not come back as a draft`);
+    await page.evaluate(() => { location.hash = "#/chat"; });
+    await panel(page).waitFor({ state: "detached" });
+    assert.equal(await chatDraft(page).inputValue(), "a draft the chat keeps", `${size.name}: the chat's own draft is untouched`);
 
     // a deep link opens the place over the chat at once
     await page.goto(`${host.url}/#/artifacts`);

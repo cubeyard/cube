@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { onMount, tick, type Snippet } from "svelte";
+  import { onMount, tick, untrack, type Snippet } from "svelte";
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { errorText, imageUrl, sendPrompt, stopThread, threadBase, threadEvents, uploadImage } from "../lib/api.ts";
   import { ACCEPT, MEDIA_LIMITS, pastedImages, prepareImage } from "../lib/images.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
+  import { draftOf, keepDraft } from "../lib/drafts.ts";
   import { echo, echoRows, unanswered, unlogged, type Echo } from "../lib/outbox.ts";
   import { keepRows, picturePath, toolOpen, transcriptRows, type ToolState, type TranscriptRow } from "../lib/transcript.ts";
   import { rowKey } from "../lib/provenance.ts";
@@ -73,7 +74,9 @@
   });
   const status = $derived<ThreadStatus>(transcript.status);
   $effect(() => { onRows?.(rows); });
-  let prompt = $state("");
+  // The draft outlives the view: closing the panel a thread is in keeps it for the next visit.
+  let prompt = $state(untrack(() => draftOf(base)));
+  $effect(() => { keepDraft(base, prompt); });
   let loading = $state(true);
   let error = $state<string | null>(null);
   let historyError = $state<string | null>(null);
@@ -211,6 +214,8 @@
   }
 
   onMount(() => {
+    // a draft kept from an earlier visit: the field grows to hold it
+    if (prompt) void tick().then(resizeComposer);
     const watching = events.watch(onFrame, {
       onInterrupt: () => {
         if (disposed) return;
@@ -376,7 +381,12 @@
       await refresh();
     } catch (cause) {
       echoes = echoes.filter(item => item.key !== requestId);
-      if (disposed) for (const item of sent) URL.revokeObjectURL(item.preview);
+      if (disposed) {
+        for (const item of sent) URL.revokeObjectURL(item.preview);
+        // gone meanwhile: the unsent words wait for the next visit
+        const kept = draftOf(base);
+        keepDraft(base, kept.trim() ? `${text}\n${kept}` : text);
+      }
       else {
         prompt = prompt.trim() ? `${text}\n${prompt}` : text;
         attachments = [...sent, ...attachments];
