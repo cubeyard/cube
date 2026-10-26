@@ -72,11 +72,12 @@ and settings.
 - **The index.** The wordmark, `/` outside a field and ctrl/⌘ k open one dialog that rises from the composer (on a phone the whole
   screen, sized to the visual viewport so the keyboard never covers the
   filter or its results while the user types): a filter; the chat's threads, failed then moving then the rest;
-  the newest artifacts; then, in a foot that stays put while those lists
-  scroll (however many threads there are), the places (threads, artifacts,
-  projects, settings) and the chat's model and memory; on a phone the places
-  are one row of equal keys, and the model and memory step aside while the
-  keyboard is up. A key or a mouse focuses the filter; a tap
+  the newest artifacts; the places (threads, artifacts, projects, settings);
+  the chat's model and memory. On a phone the last two stand at the sheet's
+  foot while the lists scroll (however many threads there are), the places
+  one row of equal keys; with the keyboard up the model and memory step
+  aside, and with little room left (a phone on its side) the foot rejoins
+  the end of the lists so a result always shows. A key or a mouse focuses the filter; a tap
   focuses the sheet, so no keyboard rises; a close key is always there.
   Arrows walk it, enter opens, escape closes and gives focus back. It is the one floating surface (`--shadow-float`).
 - **Nothing beside the composer.** No key, count or state before or

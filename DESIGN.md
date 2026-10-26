@@ -701,9 +701,8 @@ filter field (14px, 16px on a phone; focused, a 2px signal rule under the
 row) and a close key (a 2.75rem hit area on touch),
 then the chat's threads (failed, moving, the rest; title, state ·
 project), archived and lost counts, the newest artifacts (each after its file
-mark); under them, in a foot that never scrolls with them, the places
-(threads, artifacts, projects, settings) and the chat's model select and
-memory toggle, so no number of threads puts them out of reach. Opened by the wordmark, `/` outside a field and
+mark), then the places (threads, artifacts, projects, settings) and the
+chat's model select and memory toggle. Opened by the wordmark, `/` outside a field and
 ctrl/⌘ k. A key, `/`, ctrl/⌘ k or a mouse puts focus in the filter; a tap
 puts it on the sheet itself, so no on-screen keyboard rises over it (the
 filter is a tap away). The arrow keys walk its items, enter in the filter
@@ -711,12 +710,17 @@ opens the first match, escape or the close key closes and gives focus back.
 Rows and places are 2.75rem on touch.
 On a phone (and a phone on its side) the index is the whole screen: no
 border, radius or shadow, the filter row on top with its close key, the
-results scrolling on their own beneath it, the foot at the bottom with the
-places as one row of equal keys. Its height and top are the
-visual viewport's, followed as it changes, so while the user types into the
-filter the on-screen keyboard covers neither the filter nor the results
-(iOS keeps the layout viewport whole under its keyboard); while it is up the
-chat's model and memory step aside for the results, and the places stay.
+results scrolling on their own beneath it. The places (one row of equal
+keys) and the chat's model and memory stand at its foot while the lists
+scroll under them, so no number of threads puts them out of reach. Its
+height and top are the visual viewport's, followed as it changes, so while
+the user types into the filter the on-screen keyboard covers neither the
+filter nor the results (iOS keeps the layout viewport whole under its
+keyboard). While it is up the model and memory step aside and the places
+stay; with little room left (`data-keyboard="tight"`, a phone on its side)
+the foot goes back to the end of the lists, so a result always shows and
+the places are a scroll away. On a wider screen the places follow the
+lists, as the floating index always had them.
 
 ### The panel (every place over the chat)
 The chat is home and stays mounted. Every other place (threads, a thread,

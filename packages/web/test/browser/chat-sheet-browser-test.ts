@@ -8,7 +8,7 @@
  * a thread cube no longer has says so; a tell the thread took brings it
  * back beside the tell (once), a refused or failed one does not; the index opens from its key, `/`
  * and ctrl k, walks by arrow keys and gives focus back, and with many
- * threads it still floats with its places and the chat's settings in view. Screenshots go to
+ * threads it is on a desktop as it was, its places a scroll or a key away. Screenshots go to
  * CUBE_SCREENSHOTS when it is set. Needs a built UI and Playwright's Chromium. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -510,22 +510,17 @@ await scenario("a mouse or a key opens the index with the filter ready to type, 
   await page.waitForFunction(() => document.activeElement?.matches(".chat-index input"));
 });
 
-for (const viewport of [desktop, between]) await scenario("with many threads the index still floats over the composer, and its places and the chat's settings stay in view while the lists scroll", viewport, async page => {
+for (const viewport of [desktop, between]) await scenario("with many threads the desktop index is as it was: it floats, its places follow the lists, the keys reach them", viewport, async page => {
   await page.locator(".sheet-bar .name-key").click();
   const index = page.locator(".chat-index");
   await index.locator(".index-row[href^='#/t/']").nth(42).waitFor();
   await settle(page);
   const floating = await boxOf(page, ".chat-index");
   assert.ok(floating.width <= 576.5 && floating.top > 0 && floating.bottom < viewport.height - 40, `still a floating index over the composer: ${JSON.stringify(floating)}`);
-  const foot = await boxOf(page, ".index-foot");
-  assert.ok(foot.top >= (await boxOf(page, ".index-body")).bottom - 0.5 && foot.bottom <= floating.bottom, "the foot under the lists, inside the index");
-  const places = () => index.locator(".index-places a").evaluateAll(all => all.map(link => `${link.getAttribute("href")}@${Math.round(link.getBoundingClientRect().top)}`));
-  const before = await places();
-  assert.deepEqual(before.map(place => place.split("@")[0]), ["#/threads", "#/artifacts", "#/projects", "#/settings/providers"]);
-  for (const place of before) assert.ok(Number(place.split("@")[1]) >= foot.top, `${place} in view`);
-  await index.locator(".index-body").evaluate(element => { element.scrollTop = element.scrollHeight; });
-  await settle(page);
-  assert.deepEqual(await places(), before, "the places do not scroll with the lists");
+  assert.equal(await index.locator(".index-foot").evaluate(element => getComputedStyle(element).position), "static", "no sticky foot on a desktop: the lists keep the whole height");
+  const body = await boxOf(page, ".index-body");
+  assert.ok((await boxOf(page, ".index-places")).top > body.bottom, "the places come after the lists, as before");
+  assert.deepEqual(await index.locator(".index-places a").evaluateAll(all => all.map(link => link.getAttribute("href"))), ["#/threads", "#/artifacts", "#/projects", "#/settings/providers"]);
   // the keys walk the index as before: down from the filter to the first thread, up wraps to memory
   await index.locator("input[type=search]").focus();
   await page.keyboard.press("ArrowDown");
@@ -533,10 +528,12 @@ for (const viewport of [desktop, between]) await scenario("with many threads the
   await page.keyboard.press("ArrowUp");
   await page.keyboard.press("ArrowUp");
   assert.equal(await page.evaluate(() => document.activeElement?.className), "index-memory");
-  // shift tab from memory reaches the model, then the last place, focus seen
+  // shift tab from memory reaches the model, then the last place, scrolled into view with its focus seen
   await page.keyboard.press("Shift+Tab");
   await page.keyboard.press("Shift+Tab");
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("href")), "#/settings/providers");
+  const settings = await boxOf(page, ".index-places a:focus");
+  assert.ok(settings.top >= body.top && settings.bottom <= body.bottom, `the focused place is in view: ${settings.top}–${settings.bottom}`);
   assert.notEqual(await page.evaluate(() => getComputedStyle(document.activeElement!).backgroundColor), "rgba(0, 0, 0, 0)", "the focused place is washed");
   await shoot(page, `sheet-${viewport.width}-index-many`);
   await page.keyboard.press("Enter");

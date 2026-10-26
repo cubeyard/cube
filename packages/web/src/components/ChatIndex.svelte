@@ -9,9 +9,9 @@
 
   // The index: everything the chat is not, one step away and gone again.
   // The chat's threads (failed, then moving, then the rest, each in cubed's
-  // own words) and the newest artifacts scroll; under them stand the places
-  // (threads, artifacts, projects, settings) and the chat's own model and
-  // memory, in reach however long the lists are. The wordmark
+  // own words), the newest artifacts, the places (threads, artifacts,
+  // projects, settings) and the chat's own model and memory; on a phone the
+  // last two stay in reach however long the lists are. The wordmark
   // opens it, as do `/` and ctrl/⌘ k; a filter narrows it, the
   // arrow keys walk it, enter opens, escape closes and focus goes back.
   let { work, settings }: { work: ChatWork; settings: Snippet } = $props();
@@ -173,20 +173,20 @@
         </ul>
       {/if}
     </section>
-  </div>
-  <!-- the places and the chat's own settings stand under the lists, never
-       scrolled away by them however many threads there are -->
-  <div class="index-foot">
-    {#if places.length}
-      <nav aria-label="places" class="index-places">
-        {#each places as place (place.href)}
-          <a href={place.href} data-index-item title={place.hint}>{place.name}</a>
-        {/each}
-      </nav>
-    {/if}
-    <section class="index-chat" aria-label="this chat">
-      {@render settings()}
-    </section>
+    <!-- after the lists; on a phone it stays at the sheet's foot while they
+         scroll, so no number of threads puts the places out of reach -->
+    <div class="index-foot">
+      {#if places.length}
+        <nav aria-label="places" class="index-places">
+          {#each places as place (place.href)}
+            <a href={place.href} data-index-item title={place.hint}>{place.name}</a>
+          {/each}
+        </nav>
+      {/if}
+      <section class="index-chat" aria-label="this chat">
+        {@render settings()}
+      </section>
+    </div>
   </div>
   <p class="index-keys" aria-hidden="true"><kbd>↑</kbd><kbd>↓</kbd> choose · <kbd>enter</kbd> open · <kbd>esc</kbd> close</p>
 </dialog>

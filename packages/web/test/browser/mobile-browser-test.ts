@@ -8,7 +8,8 @@
  * keyboard). Turning the phone, long content, an attached image and the
  * fingertip's hit area of every small key are checked; with many threads
  * the index's places and the chat's settings stay on screen under its
- * scrolling lists, and the menu key over a long thread list; the desktop keeps
+ * scrolling lists (on its side with the keyboard up the foot rejoins the
+ * lists, so a result still shows), and the menu key over a long thread list; the desktop keeps
  * its rows. Runs in Chromium, and in WebKit too when Playwright has it.
  * Screenshots go to CUBE_SCREENSHOTS when it is set. Needs a built UI. */
 import assert from "node:assert/strict";
@@ -359,8 +360,8 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       const sheet = await box(page, ".chat-index");
       const body = await box(page, ".chat-index .index-body");
       const foot = await box(page, ".chat-index .index-foot");
-      assert.ok(foot.top >= body.bottom - 0.5 && foot.bottom <= sheet.bottom + 0.5 && foot.bottom <= size.height, `the foot stands under the lists, on screen: ${JSON.stringify({ body, foot, sheet })}`);
-      assert.ok(body.height >= 2 * 44, `the lists keep room for rows: ${body.height}px`);
+      assert.ok(Math.abs(foot.bottom - body.bottom) <= 1 && foot.bottom <= size.height + 0.5, `the foot stands at the sheet's foot, on screen: ${JSON.stringify({ body, foot, sheet })}`);
+      assert.ok(foot.top - body.top >= 2 * 44, `the lists keep room for rows above it: ${foot.top - body.top}px`);
       const places = index.locator(".index-places a");
       assert.deepEqual(await places.evaluateAll(all => all.map(link => link.getAttribute("href"))), PLACES, "every place, in its order");
       const placed = async () => JSON.stringify(await places.evaluateAll(all => all.map(link => { const { top, left, bottom, right } = link.getBoundingClientRect(); return [top, left, bottom, right]; })));
@@ -380,6 +381,9 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       assert.ok(scrolled > 0, "the lists scroll");
       await settle(page);
       assert.equal(await placed(), before, "the places do not move");
+      // at the end of the lists the last row stands clear above the foot
+      const last = await box(page, ".chat-index .index-row >> nth=-1");
+      assert.ok(last.bottom <= (await box(page, ".chat-index .index-foot")).top + 0.5, `the last row is not under the foot: ${last.bottom}`);
       assert.equal(await page.evaluate(() => [window.scrollY, document.scrollingElement?.scrollTop ?? 0].join()), "0,0", "the page behind does not scroll");
       await assertNoSideways(page);
       await page.locator(`${ACTIVE} .chat-index .index-body`).evaluate(element => { element.scrollTop = 0; });
@@ -389,6 +393,46 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       await page.waitForURL(/#\/settings\/providers$/);
       await index.waitFor({ state: "hidden" });
     });
+  }
+
+  // A phone on its side with the keyboard up leaves ~150-160px (tight): the
+  // foot goes back to the end of the lists, so a result always shows, and
+  // the places are a scroll away (synthetic keyboard: a resized viewport, or
+  // a stand-in visual viewport for iOS).
+  for (const [size, room] of [[{ width: 844, height: 390 }, 160], [{ width: 667, height: 375 }, 150]] as const) {
+    for (const ios of [false, true]) {
+      for (const typed of ["s", "re"]) {
+        await scenario(browser, engine, `on its side, typing "${typed}" with the keyboard up (${room}px, ${ios ? "iOS" : "Android"}): the first result row shows whole, the places a scroll away`, { ...size, ios }, "chat", async (page, host) => {
+          host.overview = many(60);
+          await page.locator(`${ACTIVE} .sheet-bar .name-key`).tap();
+          const index = page.locator(`${ACTIVE} .chat-index`);
+          await index.locator(".index-row").nth(59).waitFor({ state: "attached" });
+          await index.locator("input[type=search]").tap();
+          if (ios) await page.evaluate(height => (window.visualViewport as unknown as { set: (h: number) => void }).set(height), room);
+          else await page.setViewportSize({ width: size.width, height: room });
+          await page.waitForFunction(() => document.documentElement.dataset.keyboard === "tight");
+          await page.keyboard.type(typed);
+          await settle(page);
+          const field = await box(page, ".chat-index input[type=search]");
+          // whole within the results' own visible box, not merely laid out on screen
+          const results = await box(page, ".chat-index .index-body");
+          const first = await box(page, ".chat-index .index-row[href^='#/t/']");
+          assert.ok(first.top >= Math.max(field.bottom, results.top) - 0.5 && first.bottom <= Math.min(room, results.bottom) + 0.5 && first.height >= 43.5,
+            `the first thread row shows whole: ${first.top}–${first.bottom} in results ${results.top}–${results.bottom}, of ${room}`);
+          assert.equal(await page.evaluate(([x, y]) => !!document.elementFromPoint(x!, y!)?.closest(".index-row[href^='#/t/']"), [first.left + 20, first.bottom - 4]), true, "its bottom edge is the row itself, not a foot over it");
+          assert.ok(await index.locator(".index-places a").count() >= 1, `"${typed}" matches places too`);
+          await assertNoSideways(page);
+          await shoot(page, engine, `index-tight-${typed}-${ios ? "ios" : "android"}-${size.width}x${size.height}`, room);
+          // the places are reachable: the lists scroll to them, above the keyboard
+          await page.locator(`${ACTIVE} .chat-index .index-body`).evaluate(element => { element.scrollTop = element.scrollHeight; });
+          await settle(page);
+          const settings = await box(page, ".chat-index .index-places a >> nth=-1");
+          assert.ok(settings.top >= results.top - 0.5 && settings.bottom <= Math.min(room, results.bottom) + 0.5, `the last place shows at the end: ${settings.top}–${settings.bottom} in ${results.top}–${results.bottom}`);
+          assert.equal(await page.evaluate(() => (document.activeElement as HTMLInputElement | null)?.value), typed, "the filter keeps focus and the words typed");
+          assert.equal(await page.evaluate(() => [window.scrollY, document.scrollingElement?.scrollTop ?? 0].join()), "0,0", "the page behind does not scroll");
+        });
+      }
+    }
   }
 
   await scenario(browser, engine, "the thread list with 60 threads, read to its end: the menu key stays on screen and settings is one tap away", phones[0]!, "threads", async (page, host) => {
