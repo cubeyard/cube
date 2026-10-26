@@ -5,13 +5,21 @@ primary_target: "packages/web/src/components/ThreadView.svelte"
 related_targets: ["packages/web/src/components/ChangesPane.svelte","packages/web/src/components/Header.svelte","packages/web/src/components/Icon.svelte","packages/web/src/components/Terminal.svelte","packages/web/src/app.css"]
 ---
 
-## Current direction (2026-10-25)
+## Current direction (2026-10-26)
 
-The thread is on the chat's sheet (DESIGN.md, "A thread (the sheet beside
-its sidebar)"): the conversation and composer are the chat's, the sidebar
-and strip are flush on the reading field with hairlines, and a moving state
-has the thinking cube beside its words. The terminal, changes bay and files
-shelf described below are gone from this page; read the rest as history.
+The thread has the chat's whole sheet (DESIGN.md, "A thread (the whole
+sheet)"; the user chose concept A, "arket bytter", of artifact a54a8cce):
+no menu, sidebar, drawer or thread list; one bar with `‹ chat`, the title
+on the centreline (state beneath only when there is one) and the `details`
+key, whose folded row holds project, base, machine, usage, the wait's full
+reason, the model on a phone and archive. The conversation and composer
+are the chat's. The title takes focus on open; escape, `‹ chat` and back
+return to the chat as it was. The terminal, changes bay and files shelf
+described below are gone from this page; read the rest as history.
+
+Out of this change (proposals in a54a8cce, not built): the thread's latest
+report and what it made as a folded line at the top (concept D), and the
+other places (threads, projects, settings) on the whole sheet too.
 
 ## Scope and mode
 

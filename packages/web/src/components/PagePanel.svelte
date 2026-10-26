@@ -16,7 +16,8 @@
   // closing it goes to the chat. Escape closes it unless a field has the
   // focus (a draft is never lost to Escape); a press on the chat beside it
   // closes it too. Focus goes back to where it was in the chat.
-  let { label, children }: { label: string; children: Snippet } = $props();
+  // `whole`: the place has the whole sheet (a thread), with no chat beside it.
+  let { label, whole = false, children }: { label: string; whole?: boolean; children: Snippet } = $props();
 
   let dialog = $state<HTMLDialogElement>();
   // A press closes it only if it began on the backdrop too: a selection
@@ -38,6 +39,8 @@
     // the page when this runs, so the browser's own return cannot be relied on.
     const opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
     dialog?.showModal();
+    // a place may name what takes focus as it opens (a thread's name)
+    dialog?.querySelector<HTMLElement>("[data-panel-focus]")?.focus({ preventScroll: true });
     return () => {
       if (dialog?.open) dialog.close();
       if (opener?.isConnected && !opener.closest("dialog:not([open])")) opener.focus({ preventScroll: true });
@@ -47,7 +50,7 @@
 
 <!-- a press on the backdrop (the chat beside the panel) closes it; escape and the close key do too -->
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-<dialog class="page-panel" bind:this={dialog} aria-label={label} oncancel={onCancel}
+<dialog class="page-panel" class:whole bind:this={dialog} aria-label={label} oncancel={onCancel}
   onpointerdown={(event) => { downOnBackdrop = event.target === dialog; }}
   onclick={(event) => { if (downOnBackdrop && event.target === dialog) close(); downOnBackdrop = false; }}>
   {@render children()}

@@ -1,6 +1,6 @@
 /** Screenshots of the pages beside the chat against the scripted host
  * (mocked data, the built UI): a thread on the sheet while its agent works
- * (the thinking cube beside `working…`), a thread whose machine starts, the
+ * (the thinking cube beside `working…`) and with its details open, a thread whose machine starts, the
  * thread list and the artifact list, at desktop and phone width, light and
  * dark, plus the cube at a few moments, into the directory given as the
  * first argument. Not a test; for review, as chat-sheet-shots.ts is. */
@@ -42,11 +42,10 @@ for (const dark of [false, true]) for (const size of sizes) {
     await page.locator(".page-panel .working-line").screenshot({ path: path.join(out, `cube-working-${tag}-${at}.png`) });
     await pause(page, 260);
   }
-  if (size.touch) {
-    await page.locator(".mobile-thread-switch").tap();
-    await pause(page);
-    await page.screenshot({ path: path.join(out, `thread-drawer-${tag}.png`) });
-  }
+  // the details under the bar: project, base, machine, usage, archive (and on a phone the model)
+  await page.locator(".page-panel .strip-details-key").click();
+  await pause(page);
+  await page.screenshot({ path: path.join(out, `thread-details-${tag}.png`) });
   host.thread = { ...thread, state: "starting" };
   host.transcript = { ...host.transcript, status: { state: "idle", run: null, error: null }, events: [] };
   await page.goto(`${host.url}/#/threads`);

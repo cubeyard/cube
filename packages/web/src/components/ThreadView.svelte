@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
-  import { SvelteMap } from "svelte/reactivity";
+  import { MediaQuery } from "svelte/reactivity";
   import {
     deleteThread,
     errorText,
@@ -13,6 +13,7 @@
   import type { Command } from "../lib/command.ts";
   import { composerWaiting, machineLabel, machineNotice, sleepState, slotReason, stateLabel } from "../lib/thread-state.ts";
   import { startupShown } from "../lib/startup.ts";
+  import { COMPACT_MEDIA } from "../lib/keyboard.ts";
   import type {
     SubjectUsage,
     ThreadModels,
@@ -20,7 +21,7 @@
   } from "../lib/types.ts";
   import { BILLED_NOTE, CLAUDE_BILLING, spendText, tokensText } from "../../../server/src/usage.ts";
   import Conversation from "./Conversation.svelte";
-  import Header from "./Header.svelte";
+  import AuthBadge from "./AuthBadge.svelte";
   import Icon from "./Icon.svelte";
   import StartupPanel from "./StartupPanel.svelte";
   import { pagePanel } from "./PagePanel.svelte";
@@ -41,19 +42,6 @@
   // ago; only a list refreshed since can say the thread is gone.
   const threadsAtMount = untrack(() => threads);
   const gone = $derived(summary === null && threads !== threadsAtMount);
-
-  const projectGroups = $derived.by(() => {
-    const groups = new SvelteMap<string, { project: ThreadSummary["project"]; threads: ThreadSummary[] }>();
-    for (const thread of threads) {
-      let group = groups.get(thread.project.id);
-      if (!group) {
-        group = { project: thread.project, threads: [] };
-        groups.set(thread.project.id, group);
-      }
-      group.threads.push(thread);
-    }
-    return [...groups.values()];
-  });
 
   let modelState = $state<ThreadModels | null>(null);
   let changingModel = $state(false);
@@ -115,27 +103,11 @@
     BILLED_NOTE,
   ].filter(Boolean).join("\n"));
 
-  // ---- the mobile thread drawer: opened from the strip, closed by its key,
-  // the scrim, or Escape; focus goes in with it and back to the opener ----
-  let threadSidebarOpen = $state(false);
-  let sidebarOpener: HTMLElement | null = null;
-  let sidebarClose = $state<HTMLButtonElement>();
-  async function openSidebar(event: MouseEvent): Promise<void> {
-    sidebarOpener = event.currentTarget as HTMLElement;
-    threadSidebarOpen = true;
-    await tick();
-    sidebarClose?.focus();
-  }
-  function closeSidebar(): void {
-    if (!threadSidebarOpen) return;
-    threadSidebarOpen = false;
-    sidebarOpener?.focus();
-    sidebarOpener = null;
-  }
-
-  // ---- on a phone the project, state, model and archive key fold behind
-  // the strip's details key; they fold again when the composer takes focus ----
+  // ---- the details (project, base, machine, usage, archive, and on a phone
+  // the model) fold under the bar's details key; on a phone they fold again
+  // when the composer takes focus ----
   let detailsOpen = $state(false);
+  const compact = new MediaQuery(COMPACT_MEDIA, false);
 
   // ---- machine startup: shown while the machine starts and after a start
   // that failed; afterwards the machine label opens it ----
@@ -148,15 +120,29 @@
   $effect(() => {
     if (summary?.state === "ready" && modelError) untrack(() => void loadModels());
   });
-  let detailsKey = $state<HTMLButtonElement>();
   function onPaneFocusin(event: FocusEvent): void {
-    if ((event.target as Element).closest(".composer") && detailsKey?.getClientRects().length) detailsOpen = false;
+    if ((event.target as Element).closest(".composer") && compact.current) detailsOpen = false;
   }
 
   // The view is keyed on threadId: a delete or a new thread navigates
   // away mid-request, and the completion must then touch nothing here.
   let disposed = false;
   const panel = pagePanel();
+
+  // The thread's name takes focus as the thread opens, so a screen reader
+  // says where it is and no keyboard rises on a phone. PagePanel focuses it
+  // when it opens; a thread opened while the panel is already open (a link
+  // in another thread) focuses it here.
+  let titleHeading = $state<HTMLElement>();
+  let titleFocused = false;
+  $effect(() => {
+    if (!titleHeading || titleFocused) return;
+    titleFocused = true;
+    const heading = titleHeading;
+    void tick().then(() => {
+      if (heading.closest("dialog")?.open && !heading.closest("dialog")?.contains(document.activeElement)) heading.focus({ preventScroll: true });
+    });
+  });
 
   onMount(() => {
     void loadModels();
@@ -203,200 +189,154 @@
     onConsume(pending.id);
     untrack(() => onNewThread(summary?.project.id));
   });
-
-  // Escape closes the topmost overlay — drawer, then files shelf — and hands
-  // focus back to the key that opened it. Native fields keep their Escape.
-  function onWindowKeydown(event: KeyboardEvent): void {
-    if (event.key !== "Escape" || event.defaultPrevented) return;
-    const target = event.target as HTMLElement | null;
-    if (target?.closest?.("dialog, input, textarea, select")) return;
-    if (threadSidebarOpen) {
-      event.preventDefault();
-      closeSidebar();
-    }
-  }
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} />
-
-{#snippet threadControls()}
-  <section class="thread-strip" class:hidden={!summary} class:details-open={detailsOpen} aria-label="thread controls">
-    {#if summary}
-      <span class="strip-title" class:untitled={!summary.title}>{summary.title ?? "untitled"}</span>
-      <button
-        class="mobile-thread-switch"
-        class:untitled={!summary.title}
-        aria-label="open threads"
-        aria-expanded={threadSidebarOpen}
-        aria-controls="thread-sidebar"
-        onclick={openSidebar}
-      >
-        <span>{summary.title ?? "untitled"}</span>
-        <Icon name="chevron" size={12} />
-      </button>
-      <button class="strip-toggle strip-details-key" bind:this={detailsKey} aria-expanded={detailsOpen} onclick={() => (detailsOpen = !detailsOpen)}>
-        details<Icon name="chevron" size={12} />
-      </button>
-      <a class="strip-project" href="#/projects/{summary.project.id}">project / {summary.project.name}</a>
-      {#if summary.workspaceBase}
-        <span class="strip-base" title={`${summary.workspaceBase.remote}\n${summary.workspaceBase.ref}\n${summary.workspaceBase.oid}`}>
-          base / {summary.workspaceBase.ref.replace("refs/heads/", "")} @ {summary.workspaceBase.oid.slice(0, 8)}
-        </span>
+{#snippet modelSelect()}
+  <label class="strip-model" title={modelState?.selected ? `${modelState.selected.provider}/${modelState.selected.id}` : "choose a model"}>
+    <span class="sr-only">model</span>
+    <select aria-label="model" value={modelKey} onchange={changeModel} disabled={!modelState || conversationBusy || changingModel || !modelState.models.length}>
+      {#if !modelState}
+        <option value="">loading models…</option>
+      {:else if !modelState.selected}
+        <option value="">no models available</option>
+      {:else if !selectedModel}
+        <option value={modelKey}>{modelState.selected.id} · unavailable</option>
       {/if}
-      {#if startupSteps && !startupShown(summary)}
-        <!-- the machine label opens the steps the machine took to start -->
-        <button class="strip-machine" class:error={machineLabel(summary)?.failed}
-          title={`${machineLabel(summary)?.title ?? "the machine is up"}\n\nshow how the machine started`}
-          aria-expanded={startupOpen} onclick={() => (startupOpen = !startupOpen)}>{machineLabel(summary)?.text ?? "machine startup"}</button>
-      {:else if machineLabel(summary)}
-        <span class="strip-machine" class:error={machineLabel(summary)?.failed} title={machineLabel(summary)?.title}>{machineLabel(summary)?.text}</span>
-      {/if}
-      {#if stateLabel(summary)}
-        <span class="strip-state" class:error={summary.state === "error"} class:attention={sleepState(summary)} title={slotReason(summary) ?? undefined}>{stateLabel(summary)}</span>
-        {#if slotReason(summary)}<span class="strip-state strip-reason">{slotReason(summary)}</span>{/if}
-      {/if}
-      {#if machineNotice(summary)}
-        <span class="strip-state strip-notice attention">{machineNotice(summary)}</span>
-      {/if}
-      {#if usageText}
-        <span class="strip-usage" title={usageTitle} aria-label={`usage: ${usageText}`}>{usageText}</span>
-      {/if}
-      <span class="spacer"></span>
-      <label class="strip-model" title={modelState?.selected ? `${modelState.selected.provider}/${modelState.selected.id}` : "choose a model"}>
-        <span class="sr-only">model</span>
-        <select aria-label="model" value={modelKey} onchange={changeModel} disabled={!modelState || conversationBusy || changingModel || !modelState.models.length}>
-          {#if !modelState}
-            <option value="">loading models…</option>
-          {:else if !modelState.selected}
-            <option value="">no models available</option>
-          {:else if !selectedModel}
-            <option value={modelKey}>{modelState.selected.id} · unavailable</option>
-          {/if}
-          {#each providers as provider}
-            <optgroup label={providerLabel(provider)}>
-              {#each modelState?.models.filter((model) => model.provider === provider) ?? [] as model}
-                <option value={JSON.stringify(model)}>{model.id}</option>
-              {/each}
-            </optgroup>
+      {#each providers as provider}
+        <optgroup label={providerLabel(provider)}>
+          {#each modelState?.models.filter((model) => model.provider === provider) ?? [] as model}
+            <option value={JSON.stringify(model)}>{model.id}</option>
           {/each}
-        </select>
-        <Icon name="chevron" size={12} />
-      </label>
-      {#if armed.is("thread")}
-        <span class="bank-note" role="status">workspace released; user changes are retained</span>
-      {/if}
-      <span class="key-bank">
-        <button
-          class="key danger"
-          class:icon={!armed.is("thread") && !deleting}
-          class:armed={armed.is("thread")}
-          title={armed.is("thread") ? "press again to archive this thread" : "archive thread"}
-          aria-label={armed.is("thread") ? "confirm: archive this thread" : "archive thread"}
-          disabled={deleting || conversationBusy}
-          onclick={remove}
-          onkeydown={armed.onKeydown}
-          onblur={() => armed.disarm()}
-        >
-          {#if deleting}archiving…{:else if armed.is("thread")}archive?{:else}<Icon name="trash" size={13} />{/if}
-        </button>
-      </span>
-      {#if panel}
-        <button class="key icon panel-close strip-close" type="button" aria-label="close, back to the chat" title="back to the chat · esc" onclick={panel.close}><Icon name="close" size={14} /></button>
-      {/if}
-    {/if}
-  </section>
+        </optgroup>
+      {/each}
+    </select>
+    <Icon name="chevron" size={12} />
+  </label>
 {/snippet}
 
-<div class="thread-body">
-  {#if threadSidebarOpen}
-    <button
-      class="thread-sidebar-scrim"
-      aria-label="close threads"
-      onclick={closeSidebar}
-    ></button>
-  {/if}
-
-  <aside id="thread-sidebar" class="thread-sidebar" class:open={threadSidebarOpen} aria-label="threads">
-    <div class="thread-navigation"><Header section="threads" closeKey={false} /></div>
-    <div class="sidebar-actions">
-      <button class="sidebar-create" onclick={() => onNewThread()} aria-label="new thread" title="new thread · press n"><Icon name="plus" size={14} />thread</button>
-      <button class="key sidebar-close" bind:this={sidebarClose} onclick={closeSidebar}>close</button>
-    </div>
-
-    {#if threads.length > 0}
-      <nav class="thread-sidebar-list" aria-label="active threads">
-        {#each projectGroups as group (group.project.id)}
-          <section class="sidebar-project" aria-label={group.project.name}>
-            <div class="sidebar-project-head">
-              <a href="#/projects/{group.project.id}" title={group.project.name}>{group.project.name}</a>
-              <span class="project-rule" aria-hidden="true"></span>
-              <button
-                class="sidebar-project-new"
-                title={`new thread in ${group.project.name}`}
-                aria-label={`new thread in ${group.project.name}`}
-                onclick={() => onNewThread(group.project.id)}
-              ><Icon name="plus" size={14} /></button>
-            </div>
-            {#each group.threads as thread (thread.id)}
-              <a
-                class="thread-sidebar-row"
-                class:current={thread.id === threadId}
-                href="#/t/{thread.id}"
-                aria-current={thread.id === threadId ? "page" : undefined}
-              >
-                {#if !stateLabel(thread)}<span class="sr-only">ready</span>{/if}
-                <span class="thread-sidebar-copy">
-                  <span class="thread-sidebar-title" class:untitled={!thread.title}>{thread.title ?? "untitled"}</span>
-                  {#if stateLabel(thread)}
-                    <span class="thread-sidebar-meta"><span class:error={thread.state === "error"}>{stateLabel(thread)}</span></span>
-                  {/if}
-                </span>
-              </a>
-            {/each}
-          </section>
-        {/each}
-      </nav>
-    {:else}
-      <p class="thread-sidebar-empty">no active threads</p>
+{#snippet machine(failedOnly: boolean)}
+  {@const label = summary ? machineLabel(summary) : null}
+  {#if summary && !!label?.failed === failedOnly}
+    {#if startupSteps && !startupShown(summary)}
+      <!-- the machine label opens the steps the machine took to start -->
+      <button class="strip-machine" class:error={label?.failed}
+        title={`${label?.title ?? "the machine is up"}\n\nshow how the machine started`}
+        aria-expanded={startupOpen} onclick={() => (startupOpen = !startupOpen)}>{label?.text ?? "machine startup"}</button>
+    {:else if label}
+      <span class="strip-machine" class:error={label.failed} title={label.title}>{label.text}</span>
     {/if}
-  </aside>
+  {/if}
+{/snippet}
 
-  <div class="thread-stage">
-    <main class="thread-workspace">
-      <section class="workspace-pane thread-pane" aria-label="thread" onfocusin={onPaneFocusin}>
-        {@render threadControls()}
-        {#if modelError || (modelState && !selectedModel)}
-          <div class="strip-note bad" role="alert">
-            <span class="strip-note-text">{modelError ?? (modelState?.models.length ? "selected model is unavailable — choose another model" : "no models available — sign in to a provider")}</span>
-            <a class="key" href="#/settings/providers">providers</a>
-            <button class="key" onclick={loadModels}>retry models</button>
-          </div>
+<!-- The thread has the whole sheet: one bar (the way back to the chat, the
+     thread's name and what it is doing, the details key), the details folded
+     beneath it, then the conversation and composer exactly as the chat's. -->
+{#snippet threadBar()}
+  <section class="thread-strip thread-bar" class:hidden={!summary} class:details-open={detailsOpen} aria-label="thread controls">
+    {#if summary}
+      {#if panel}
+        <button class="bar-back" type="button" aria-label="back to the chat" title="back to the chat · esc" onclick={panel.close}>
+          <Icon name="chevron" size={14} /><span class="bar-back-word" aria-hidden="true">chat</span>
+        </button>
+      {:else}
+        <span></span>
+      {/if}
+      <div class="bar-title">
+        <h1 class="strip-title" class:untitled={!summary.title} bind:this={titleHeading} tabindex="-1" data-panel-focus
+          title={summary.title ?? undefined}>{summary.title ?? "untitled"}</h1>
+        {#if stateLabel(summary) || machineLabel(summary)?.failed || machineNotice(summary)}
+          <p class="bar-sub">
+            {#if stateLabel(summary)}
+              <span class="strip-state" class:error={summary.state === "error"} class:attention={sleepState(summary)} title={slotReason(summary) ?? undefined}>{stateLabel(summary)}</span>
+            {/if}
+            {@render machine(true)}
+            {#if machineNotice(summary)}
+              <span class="strip-state strip-notice attention">{machineNotice(summary)}</span>
+            {/if}
+          </p>
         {/if}
-        {#if summary?.error && !startupCarriesError}
-          <div class="strip-note bad"><span class="strip-note-text">{summary.error}</span></div>
+      </div>
+      <div class="bar-end">
+        <AuthBadge quiet />
+        {#if !compact.current}{@render modelSelect()}{/if}
+        <button class="strip-toggle strip-details-key" aria-expanded={detailsOpen} aria-controls="thread-details" onclick={() => (detailsOpen = !detailsOpen)}>
+          details<Icon name="chevron" size={12} />
+        </button>
+      </div>
+    {/if}
+  </section>
+  {#if summary}
+    <div class="thread-details" id="thread-details" hidden={!detailsOpen}>
+      <div class="thread-details-row">
+        <a class="strip-project" href="#/projects/{summary.project.id}">project / {summary.project.name}</a>
+        {#if summary.workspaceBase}
+          <span class="strip-base" title={`${summary.workspaceBase.remote}\n${summary.workspaceBase.ref}\n${summary.workspaceBase.oid}`}>
+            base / {summary.workspaceBase.ref.replace("refs/heads/", "")} @ {summary.workspaceBase.oid.slice(0, 8)}
+          </span>
         {/if}
-        {#if note}
-          <div class="strip-note" class:bad={note.bad} role={note.bad ? "alert" : "status"}>
-            <span class="strip-note-text">
-              {note.text}
-              {#if note.href}<a href={note.href} target="_blank" rel="noopener noreferrer">{note.href}</a>{/if}
-            </span>
-            <button class="key icon note-dismiss" title="dismiss" aria-label="dismiss note" onclick={() => setNote(null)}>
-              <Icon name="close" size={12} />
-            </button>
-          </div>
+        {@render machine(false)}
+        {#if usageText}
+          <span class="strip-usage" title={usageTitle} aria-label={`usage: ${usageText}`}>{usageText}</span>
         {/if}
-        {#if summary && startupSteps && (startupShown(summary) || startupOpen)}
-          <StartupPanel thread={summary} onClose={startupShown(summary) ? null : () => (startupOpen = false)} />
+        {#if slotReason(summary)}<span class="strip-state strip-reason">{slotReason(summary)}</span>{/if}
+        {#if compact.current}{@render modelSelect()}{/if}
+        <span class="spacer"></span>
+        {#if armed.is("thread")}
+          <span class="bank-note" role="status">workspace released; user changes are retained</span>
         {/if}
-        {#if gone}
-          <div class="conversation-gone"><p>this thread is no longer active.</p><a class="key" href="#/threads">back to threads</a></div>
-        {:else}
-          <Conversation sheet {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy}
-            waitingText={composerWaiting(summary)}
-            notice={summary?.agent === "claude-code" || isClaude(modelState?.selected) ? `claude · max — ${CLAUDE_DURABILITY}` : null} />
-        {/if}
-      </section>
-    </main>
-  </div>
-</div>
+        <span class="key-bank">
+          <button
+            class="key danger"
+            class:icon={!armed.is("thread") && !deleting}
+            class:armed={armed.is("thread")}
+            title={armed.is("thread") ? "press again to archive this thread" : "archive thread"}
+            aria-label={armed.is("thread") ? "confirm: archive this thread" : "archive thread"}
+            disabled={deleting || conversationBusy}
+            onclick={remove}
+            onkeydown={armed.onKeydown}
+            onblur={() => armed.disarm()}
+          >
+            {#if deleting}archiving…{:else if armed.is("thread")}archive?{:else}<Icon name="trash" size={13} />{/if}
+          </button>
+        </span>
+      </div>
+    </div>
+  {/if}
+{/snippet}
+
+<main class="thread-workspace">
+  <section class="workspace-pane thread-pane" aria-label="thread" onfocusin={onPaneFocusin}>
+    {@render threadBar()}
+    {#if modelError || (modelState && !selectedModel)}
+      <div class="strip-note bad" role="alert">
+        <span class="strip-note-text">{modelError ?? (modelState?.models.length ? "selected model is unavailable — choose another model" : "no models available — sign in to a provider")}</span>
+        <a class="key" href="#/settings/providers">providers</a>
+        <button class="key" onclick={loadModels}>retry models</button>
+      </div>
+    {/if}
+    {#if summary?.error && !startupCarriesError}
+      <div class="strip-note bad"><span class="strip-note-text">{summary.error}</span></div>
+    {/if}
+    {#if note}
+      <div class="strip-note" class:bad={note.bad} role={note.bad ? "alert" : "status"}>
+        <span class="strip-note-text">
+          {note.text}
+          {#if note.href}<a href={note.href} target="_blank" rel="noopener noreferrer">{note.href}</a>{/if}
+        </span>
+        <button class="key icon note-dismiss" title="dismiss" aria-label="dismiss note" onclick={() => setNote(null)}>
+          <Icon name="close" size={12} />
+        </button>
+      </div>
+    {/if}
+    {#if summary && startupSteps && (startupShown(summary) || startupOpen)}
+      <StartupPanel thread={summary} onClose={startupShown(summary) ? null : () => (startupOpen = false)} />
+    {/if}
+    {#if gone}
+      <div class="conversation-gone"><p>this thread is no longer active.</p><a class="key" href="#/threads">back to threads</a></div>
+    {:else}
+      <Conversation sheet {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy}
+        waitingText={composerWaiting(summary)}
+        notice={summary?.agent === "claude-code" || isClaude(modelState?.selected) ? `claude · max — ${CLAUDE_DURABILITY}` : null} />
+    {/if}
+  </section>
+</main>

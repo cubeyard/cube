@@ -258,26 +258,26 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     });
   }
 
-  await scenario(browser, engine, "a thread's strip is one row: title, details; details hold project, model and archive", phone, "t/t1", async page => {
+  await scenario(browser, engine, "a thread has the whole screen: one row of the way back, its name and details; details hold project, model and archive", phone, "t/t1", async page => {
     const strip = await box(page, ".thread-pane .thread-strip");
     assert.ok(strip.height <= 50, `one row: ${strip.height}`);
-    for (const hidden of [".strip-project", ".strip-model", ".thread-strip .key-bank"]) assert.equal(await visible(page, hidden), false, `${hidden} folded`);
-    const title = await box(page, ".mobile-thread-switch");
+    assert.equal(await page.locator(`${ACTIVE} :is(.thread-sidebar, .main-header, nav, .nav-menu-key)`).count(), 0, "no menu, destinations or thread list");
+    for (const hidden of [".strip-project", ".strip-model", ".thread-details .key-bank"]) assert.equal(await visible(page, hidden), false, `${hidden} folded`);
+    const back = await box(page, ".thread-pane .bar-back");
+    const title = await box(page, ".thread-pane .bar-title");
     const key = await box(page, ".thread-pane .strip-details-key");
-    assert.ok(title.right <= key.left, "a long title gives way to the details key");
-    for (const selector of [".mobile-thread-switch", ".thread-pane .strip-details-key", ".composer .send-key"]) await assertHitArea(page, selector);
+    assert.ok(back.right <= title.left && title.right <= key.left, "the way back, then a long title that gives way to the details key");
+    for (const selector of [".thread-pane .bar-back", ".thread-pane .strip-details-key", ".composer .send-key"]) await assertHitArea(page, selector);
     await assertNoSideways(page);
     await shoot(page, engine, "thread-375x667");
     await page.locator(`${ACTIVE} .thread-pane .strip-details-key`).tap();
-    for (const shown of [".strip-project", ".strip-model", ".thread-strip .key-bank"]) assert.ok(await visible(page, shown), `${shown} shows`);
-    assert.ok((await box(page, ".strip-model")).top >= key.bottom, "the details take the row under the title");
+    for (const shown of [".strip-project", ".strip-model", ".thread-details .key-bank"]) assert.ok(await visible(page, shown), `${shown} shows`);
+    assert.ok((await box(page, ".strip-model")).top >= key.bottom, "the details take the row under the bar");
     await assertNoSideways(page);
     await shoot(page, engine, "thread-details-375x667");
-    // the thread drawer still opens from the title and carries the destinations
-    await page.locator(`${ACTIVE} .mobile-thread-switch`).tap();
-    await page.locator(`${ACTIVE} .thread-sidebar.open`).waitFor();
-    assert.ok(await visible(page, ".thread-navigation header nav"), "the drawer shows its destinations inline");
-    assert.equal(await visible(page, ".thread-navigation .nav-menu-key"), false);
+    // the composer taking focus folds them again, so the conversation keeps the room
+    await page.locator(`${ACTIVE} .composer textarea`).focus();
+    assert.equal(await visible(page, ".strip-project"), false, "the details fold as the composer takes focus");
   });
 
   await scenario(browser, engine, "a thread's failure stays in print with the details folded", phone, "t/t1", async page => {

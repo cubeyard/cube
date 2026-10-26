@@ -85,7 +85,8 @@ try {
     // Ready: the steps fold away; the machine label opens them again.
     fs.writeFileSync(path.join(guest(), "go"), "");
     await panel.waitFor({ state: "detached", timeout: 20_000 });
-    if (layout === "phone") await page.locator(`${ACTIVE} .strip-details-key`).click();
+    // the machine label is one of the thread's details, under the bar's details key
+    await page.locator(`${ACTIVE} .strip-details-key`).click();
     const label = page.locator("button.strip-machine");
     await label.waitFor();
     // (A local guest records no disk preparation, so the label names the steps.)
@@ -100,7 +101,7 @@ try {
 
     // P7-5: the machine's sleep in the strip, in print on a phone with the
     // details closed (U-207-1), and what the composer says while a wake waits.
-    if (layout === "phone") await page.locator(`${ACTIVE} .strip-details-key`).click();
+    await page.locator(`${ACTIVE} .strip-details-key`).click();
     const strip = page.locator("section.thread-strip");
     const state = strip.locator(".strip-state:not(.strip-reason, .strip-notice)");
     const composer = page.locator(`${ACTIVE} .composer textarea`);
@@ -119,14 +120,12 @@ try {
     await seen("waiting for a free slot");
     assert.equal(await state.filter({ hasText: "waiting for a free slot" }).getAttribute("title"), waiting);
     await page.locator(`.composer textarea[placeholder="waiting for a free slot…"]`).waitFor({ timeout: 15_000 });
-    assert.equal(await strip.locator(".strip-reason").isVisible(), false, "the full reason is the label's title, or a line of the details");
+    assert.equal(await page.locator(".thread-details .strip-reason").isVisible(), false, "the full reason is the label's title, or a line of the details");
     await shot(page, `${size}-6-waiting`);
-    if (layout === "phone") {
-      await page.locator(`${ACTIVE} .strip-details-key`).click();
-      assert.equal(await strip.locator(".strip-reason").innerText(), waiting, "the details say why in full");
-      await shot(page, `${size}-7-waiting-details`);
-      await page.locator(`${ACTIVE} .strip-details-key`).click();
-    }
+    await page.locator(`${ACTIVE} .strip-details-key`).click();
+    assert.equal(await page.locator(".thread-details .strip-reason").innerText(), waiting, "the details say why in full");
+    await shot(page, `${size}-7-waiting-details`);
+    await page.locator(`${ACTIVE} .strip-details-key`).click();
     const notice = "restarted after an update; running commands were interrupted";
     host.sleep(thread, { type: "resumed", notice: { text: notice, at: Date.now() } });
     await strip.locator(".strip-notice", { hasText: notice }).waitFor({ timeout: 15_000 });
