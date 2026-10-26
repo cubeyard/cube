@@ -147,6 +147,18 @@ for (const viewport of [desktop, laptop, { width: 1216, height: 800 }]) {
   });
 }
 
+// the field stands a breath off the window's bottom edge, a little more on a taller window
+const lifts: number[] = [];
+for (const viewport of [{ width: 1280, height: 720 }, desktop, { width: 1920, height: 1080 }, { width: 2560, height: 1440 }]) {
+  await scenario("the composer stands off the window's bottom edge", viewport, async page => {
+    const lift = viewport.height - (await boxOf(page, ".composer-field")).bottom;
+    assert.ok(lift >= 16 && lift <= 30, `a modest breath under the field: ${lift}`);
+    assert.ok(lift >= (lifts.at(-1) ?? 0), `no less on a taller window: ${lift} after ${lifts.at(-1)}`);
+    lifts.push(lift);
+    await shoot(page, `sheet-lift-${viewport.width}x${viewport.height}`);
+  });
+}
+
 await scenario("opening a note keeps the conversation still; it opens in place, escape folds it back", desktop, async page => {
   await page.locator(".transcript").evaluate(element => { element.scrollTop = 0; });
   await settle(page);
