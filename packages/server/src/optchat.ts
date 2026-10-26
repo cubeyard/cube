@@ -111,11 +111,43 @@ tracks, or it was interrupted) and the next step is clear and within
 what the user asked, tell it to go on and to wait for such things
 itself; otherwise tell the user what it needs. Between two messages of
 the user a thread takes at most ${TELLS} tells from you; once they are
-spent, ask the user, and do not start another thread to go on instead.
-tell(id, message) gives a thread that has reported more to do. A thread
-that is still working gets it after its current tool call, in the same
-turn; its next report covers it. Tell a working thread only to correct
-or add to its task, not to ask how it is doing.
+spent, ask the user, and do not start another thread to go on with the
+same task. Spent tells never make a new task a tell.
+tell(id, message) gives a thread more of its own task. A thread that is
+still working gets it after its current tool call, in the same turn; its
+next report covers it. Tell a working thread only to correct or narrow
+its task, not to ask how it is doing.
+
+Delegation. A thread is one task: one goal, one scope, one result (a
+pull request, a review, a report). Before every tell, decide whether the
+message continues that task or starts another. Same task, tell the
+thread: fixes to its own work, review findings on its own pull request,
+the user's answer to its question, going on after it stopped short,
+landing or verifying what it made, and a delta review of a change it
+already reviewed (new commits on the same pull request). New task, spawn
+a new thread, even when an open thread knows the code: another pull
+request, issue or design question; a review of anything else; a
+follow-up the thread's task did not include; work in the same area after
+its result was delivered. A review is done by a thread that neither
+wrote the change nor reviewed something else. Keep no thread as a
+standing worker for unrelated follow-ups. Fewer machines, fewer tokens
+or a warm context never justify reusing a thread for a new task. The
+ordinary steps of one task stay in its thread.
+Every task is a full brief: the goal; the project and the pull request,
+branch or artifact ids; the user's rules and preferences that apply,
+restated (the thread sees neither this chat nor your instructions); what
+is in and out of scope; the deliverable; when to stop; and whether it is
+to explore, design, implement or review. Exploring or designing is not
+implementing: no code, branch or pull request unless the task says so. A
+review brief names what to review and the criteria, not the author's
+reasoning. When the user widens a task (design becomes implementation, a
+second feature), ask if it is unclear, then spawn a new thread for the
+new part rather than stretch the old one.
+Capacity: when spawn has no free slot, archive your threads that are
+done or no longer needed and try again; if none can be, tell the user
+what waits and which thread would free a slot. Never put a new task into
+an open thread instead.
+
 history(id) reads one of your threads without changing it: cubed's state
 for it beside its latest answer and conversation. Use it when a report is
 missing or short, or contradicts what threads shows; say what disagrees
@@ -164,7 +196,8 @@ yours and your threads', and you may revise those. Threads can write their
 own (a review of their pull request, say); ask for one in a thread's task
 when the result is worth reading at length. A thread can also revise any
 artifact of its project, yours included when you named the project: to have
-a reviewer update an existing document rather than start another, give it
+the thread that wrote a document update it for the same task (a delta
+review of the same change, say) rather than start another, give it
 the artifact's id and tell it to read the newest revision, then write the
 whole document on top of it (artifact_write with that id, or in Claude Code
 Read and then Write /cube/artifacts/<id>.md). Link an artifact in your reply
@@ -1643,7 +1676,7 @@ export class OptChat {
     });
     const spawn = defineTool({
       name: "spawn",
-      description: "Start one thread per task, in parallel, and answer their ids at once. Each thread is a coding agent with its own machine and a checkout of the project; it does not see this chat. Its report comes back later as a message starting \"[id] \".",
+      description: "Start one thread per task (one goal, one result; another pull request, question or review is a new task), in parallel, and answer their ids at once. Each thread is a coding agent with its own machine and a checkout of the project; it does not see this chat. Its report comes back later as a message starting \"[id] \".",
       parameters: Type.Object({ tasks: Type.Array(Type.Object({
         project: Type.String({ description: "Project name or id" }),
         task: Type.String({ description: "The whole task, self-contained" }),
@@ -1677,7 +1710,7 @@ export class OptChat {
     });
     const tell = defineTool({
       name: "tell",
-      description: `Send a message to a thread you started: more work, an answer, a correction, or to go on when it stopped short. A thread still working reads it after its current tool call. At most ${TELLS} per thread between two messages of the user.`,
+      description: `Send a message to a thread you started about its own task: an answer, a correction, fixes or a delta review of its own work, or to go on when it stopped short. A new task (another pull request, question or review) is a spawn, never a tell. A thread still working reads it after its current tool call. At most ${TELLS} per thread between two messages of the user.`,
       parameters: Type.Object({ id: Type.String(), message: Type.String() }),
       replay: "safe",
       execute: async (args, api, callContext) => {
