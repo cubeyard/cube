@@ -553,8 +553,12 @@ either:
   (`cube.optchat`'s `threads`, written by `spawn` in the call's commit). A
   thread started from the UI is not the chat's and is not shown; a thread
   the chat started needs no further step to appear.
-- **Where a note stands.** At the row whose spawn result names the thread
-  (`[id] started in <project>…`), among the rows shown; an artifact's note at
+- **Where a note stands.** A thread's at its newest row among the rows
+  shown that started it (`[id] started in <project>…`) or told it and was
+  taken (`sent to [id]`, `queued for [id]` while it works, `[id] already
+  has it` on a replay), once: each tell it took brings it back beside that
+  tell. A tell refused (`not sent`), dropped, failed or still running moves
+  nothing. An artifact's note at
   the first row that wrote it (`artifact_write`), linked it
   (`#/a/<id>`) or brought its comments (`[artifact <id>]`). A link to an
   artifact cube cannot show gets no note, and an artifact the chat never

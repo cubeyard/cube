@@ -35,10 +35,14 @@ and settings.
   right of the column in the room there (up to 18rem); it never centres
   with the column or shifts it left.
 - **The margin (≥ 76rem).** Beside the column, scrolling with it: one note
-  per message that started threads (a `spawn` result) or named an artifact
-  (an `artifact_write` result, a `#/a/<id>` link in a reply,
-  an `[artifact <id>]` comment message), each thread and artifact once, at its
-  first row shown. Nothing else: no counters, filters, project groups or
+  per message that started threads (a `spawn` result), told a thread that
+  took it (a `tell` result `sent to`, `queued for` or `already has it`), or
+  named an artifact (an `artifact_write` result, a `#/a/<id>` link in a
+  reply, an `[artifact <id>]` comment message), each thread and artifact
+  once among the rows shown: an artifact at its first row, a thread at its
+  newest (its spawn or the last tell it took; the user's call, 2026-10-26:
+  a thread comes back beside each tell). A refused (`not sent`), dropped,
+  failed or still running tell moves nothing. Nothing else: no counters, filters, project groups or
   settings. Empty is empty, and the margin's room is kept so the column never
   jumps.
 - **Truth only.** A thread's state is cubed's own word from the chat's

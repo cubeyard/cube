@@ -29,11 +29,53 @@ const rows = transcriptRows({ events: chatEvents(), status: { state: "completed"
 const mentions = mentionsOf(rows);
 assert.deepEqual(mentions.map(mention => ({ row: mention.row, threads: mention.threads.map(thread => thread.short), artifacts: mention.artifacts, unstarted: mention.unstarted.length })), [
   { row: "call:spawn-old", threads: [ID.gone.slice(0, 8)], artifacts: [], unstarted: 0 },
-  { row: "call:spawn-1", threads: [ID.composer.slice(0, 8), ID.flaky.slice(0, 8), ID.ca.slice(0, 8)], artifacts: [], unstarted: 1 },
+  // composer room was told later: its note is at that tell, not twice
+  { row: "call:spawn-1", threads: [ID.flaky.slice(0, 8), ID.ca.slice(0, 8)], artifacts: [], unstarted: 1 },
   { row: "4.1", threads: [], artifacts: [ID.proposal], unstarted: 0 },
+  { row: "call:tell-1", threads: [ID.composer.slice(0, 8)], artifacts: [], unstarted: 0 },
   // written by a tool, then linked in the reply: one note, at the write
   { row: "call:write-1", threads: [], artifacts: [ID.review], unstarted: 0 },
-], "each thread and artifact once, at its first row; a tell or a report adds none");
+], "each artifact once, at its first row; each thread once, at its spawn or the last tell it took; a report adds none");
+assert.deepEqual(mentions.find(mention => mention.row === "call:tell-1")!.threads, [{ short: ID.composer.slice(0, 8), project: "cube", title: "composer room: measure the mobile composer and propose more space" }],
+  "a note at a tell keeps what the spawn line said of the thread");
+
+// tells: the thread comes back beside the last tell it took, once; a tell it
+// did not take (refused, dropped, an error, one still running) moves nothing
+{
+  const A = "aaaaaaa1", B = "bbbbbbb2";
+  const spawn = (id: string): ThreadEvent[] => [
+    { type: "tool-call", id: `${id}.c`, callId: id, name: "spawn", input: { tasks: [] }, final: true },
+    { type: "tool-result", id: `${id}.r`, callId: id, name: "spawn", output: `[${A}] started in cube: first\n[${B}] started in cube: second`, isError: false, final: true },
+  ];
+  const tell = (id: string, output: string, isError = false, done = true): ThreadEvent[] => [
+    { type: "tool-call", id: `${id}.c`, callId: id, name: "tell", input: { id: A, message: "go on" }, final: true },
+    ...done ? [{ type: "tool-result", id: `${id}.r`, callId: id, name: "tell", output, isError, final: true } as ThreadEvent] : [],
+  ];
+  const placed = (events: ThreadEvent[], state: "completed" | "working" = "completed") => mentionsOf(transcriptRows({ events, status: { state, run: "r", error: null } }))
+    .map(mention => [mention.row, mention.threads.map(thread => thread.short)]);
+  const report = `its report comes back as a message starting "[${A}] "`;
+  const sent = `sent to [${A}]; ${report}`;
+  const queued = `queued for [${A}], which is working: it has not read it yet, and reads it after its current tool call, in this turn; ${report}`;
+  const consumed = `[${A}] already has it in its conversation; ${report}`;
+  const user = (id: string, text: string): ThreadEvent => ({ type: "user-message", id, text });
+
+  assert.deepEqual(placed([...spawn("s"), user("u1", "and then"), ...tell("t1", sent)]), [["call:s", [B]], ["call:t1", [A]]], "a sent tell brings the thread back beside it");
+  assert.deepEqual(placed([...spawn("s"), ...tell("t1", sent), user("u1", "more"), ...tell("t2", queued)]), [["call:s", [B]], ["call:t2", [A]]], "a repeated tell moves it to the newest; never twice");
+  assert.deepEqual(placed([...spawn("s"), ...tell("t1", queued)]), [["call:s", [B]], ["call:t1", [A]]], "a tell queued into a working thread's turn counts");
+  assert.deepEqual(placed([...spawn("s"), ...tell("t1", consumed)]), [["call:s", [B]], ["call:t1", [A]]], "a replayed tell the thread already has counts");
+  for (const [what, events] of [
+    ["refused", tell("t1", `not sent: [${A}] had 3 tells from you since the user's last message; tell the user what it needs instead`)],
+    ["dropped", tell("t1", `[${A}] took it while working, but it never reached the agent; ${report}, saying why`)],
+    ["an error", tell("t1", `no thread ${A}`, true)],
+  ] as const) assert.deepEqual(placed([...spawn("s"), ...events]), [["call:s", [A, B]]], `a ${what} tell moves nothing`);
+  assert.deepEqual(placed([...spawn("s"), ...tell("t1", "", false, false)], "working"), [["call:s", [A, B]]], "a tell still running moves nothing yet");
+  assert.deepEqual(placed([...spawn("s"), ...tell("t1", sent), ...tell("t2", `not sent: [${A}] had 3 tells`)]), [["call:s", [B]], ["call:t1", [A]]], "a refused tell after a sent one leaves it at the sent one");
+  // its spawn is not among the rows shown (an older page): the tell alone gives it a note, with only its id
+  assert.deepEqual(mentionsOf(transcriptRows({ events: tell("t1", sent), status: { state: "completed", run: "r", error: null } })),
+    [{ row: "call:t1", threads: [{ short: A, project: null, title: null }], artifacts: [], unstarted: [] }], "a thread whose spawn is out of the rows shown comes back at its tell");
+  // a spawn whose every thread was told later keeps only what did not start
+  assert.deepEqual(placed([...spawn("s"), ...tell("t1", sent), ...tell("t2", sent.replaceAll(A, B))]), [["call:t1", [A]], ["call:t2", [B]]], "a spawn left with nothing to show has no note");
+}
 
 // a spawn still running, or one that failed, starts nothing yet
 const running: ThreadEvent[] = [{ type: "tool-call", id: "1", callId: "s", name: "spawn", input: { tasks: [] }, final: true }];
