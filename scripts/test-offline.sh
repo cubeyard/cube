@@ -124,6 +124,7 @@ OFFLINE_TESTS=(
   packages/web/test/thread-state-test.ts
   packages/web/test/thinking-cube-test.ts
   packages/web/test/report-line-test.ts
+  packages/web/test/tool-groups-test.ts
   packages/web/test/provenance-test.ts
   packages/web/test/thread-list-poll-test.ts
   packages/server/test/github-auth-test.ts

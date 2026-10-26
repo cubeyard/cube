@@ -1557,6 +1557,32 @@ a.report-name:hover { color: var(--signal); text-decoration: underline; text-und
 .conversation.sheet .tool-strip pre { background: var(--s3); }
 .tool-said { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: 13px; }
 .tool-strip code.tool-name { font-weight: 400; color: var(--ink-3); font-size: 11px; }
+/* a run of tool calls folded to one line, as a report is: how many, what
+   failed in error ink, the state while it moves, the call worth naming;
+   opened, each call is its own quiet line under one hairline */
+.tool-group { min-width: 0; }
+.tool-group > summary {
+  display: flex; align-items: baseline; gap: 0.5rem; min-width: 0;
+  padding: 0.25rem 0; cursor: pointer; list-style: none; border-radius: var(--r-key);
+  color: var(--ink-3); font-size: 13px; line-height: 1.5;
+}
+.tool-group > summary::-webkit-details-marker { display: none; }
+.tool-group-count { flex: none; color: var(--ink-2); font-weight: 550; }
+.tool-group > summary .tool-state { font-size: 12px; }
+.tool-group-named { flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 0.5rem; overflow: hidden; }
+.tool-group-named .tool-said { color: var(--ink-3); }
+.tool-group-named code.tool-name { flex: none; font: 400 11px/1.4 var(--font-mono); color: var(--ink-3); }
+.tool-group > summary:hover :is(.tool-group-count, .tool-said, .tool-summary, code) { color: var(--ink); }
+.tool-group > summary .tool-chevron { align-self: center; }
+/* opened, the calls follow: the named one need not stand twice */
+.tool-group[open] > summary .tool-group-named { visibility: hidden; }
+.tool-group[open] > summary .tool-chevron { transform: rotate(180deg); }
+.tool-group-body {
+  display: flex; flex-direction: column; gap: 0.3rem; min-width: 0;
+  margin: 0.3rem 0 0.2rem; padding: 0.05rem 0 0.05rem 0.95rem; border-left: 1px solid var(--line-2);
+}
+.tool-group.failed .tool-group-body { border-left-color: var(--bad-line); }
+@media (pointer: coarse) { .tool-group > summary { min-height: 2.75rem; align-items: center; } }
 
 /* the composer: one round field on the sheet (the chat's and a thread's),
    lifted off the window's bottom edge by a breath that grows a little with

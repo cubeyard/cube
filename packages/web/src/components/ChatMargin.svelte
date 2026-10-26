@@ -33,7 +33,9 @@
   const keysOf = (group: NoteGroup) => [...group.threads.map(thread => `t:${thread.short}`), ...group.artifacts.map(artifact => `a:${artifact.id}`)];
   const held = $derived(open ? groups.findIndex(group => keysOf(group).includes(open)) : -1);
 
-  const anchorOf = (row: string) => aside?.parentElement?.querySelector<HTMLElement>(`[data-anchor="${CSS.escape(row)}"]`) ?? null;
+  /** A row in a folded run of tool calls is drawn as the run's line: the note stands by that. */
+  const drawn = (anchor: HTMLElement) => anchor.parentElement?.closest<HTMLElement>("details.tool-group:not([open])") ?? anchor;
+  const anchorOf = (row: string) => { const anchor = aside?.parentElement?.querySelector<HTMLElement>(`[data-anchor="${CSS.escape(row)}"]`); return anchor ? drawn(anchor) : null; };
   const noteOf = (row: string) => aside?.querySelector<HTMLElement>(`.margin-notes > [data-note="${CSS.escape(row)}"]`) ?? null;
   /** noteOf for every row at once (and anchors below): one pass over the DOM, not one per note. */
   const allNotes = () => byValue(aside, ".margin-notes > [data-note]", "data-note");
@@ -42,7 +44,7 @@
     if (!aside) return;
     const base = aside.offsetTop;
     const anchors = byValue(aside.parentElement, "[data-anchor]", "data-anchor"), notesShown = allNotes();
-    const placed = groups.map(group => ({ group, anchor: anchors.get(group.row) ?? null, note: notesShown.get(group.row) ?? null }));
+    const placed = groups.map(group => { const anchor = anchors.get(group.row); return { group, anchor: anchor ? drawn(anchor) : null, note: notesShown.get(group.row) ?? null }; });
     const notes = placed.map(({ anchor, note }) => ({ anchor: anchor ? anchor.offsetTop - base : 0, height: note?.offsetHeight ?? 0 }));
     const result = place(notes, { gap: GAP, limit: aside.clientHeight, hold: held >= 0 ? held : null });
     const next: Record<string, number> = {};
