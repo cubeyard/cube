@@ -9,8 +9,9 @@
 
   // The index: everything the chat is not, one step away and gone again.
   // The chat's threads (failed, then moving, then the rest, each in cubed's
-  // own words), the newest artifacts, the places (threads, artifacts,
-  // projects, settings) and the chat's own model and memory. The wordmark
+  // own words) and the newest artifacts scroll; under them stand the places
+  // (threads, artifacts, projects, settings) and the chat's own model and
+  // memory, in reach however long the lists are. The wordmark
   // opens it, as do `/` and ctrl/⌘ k; a filter narrows it, the
   // arrow keys walk it, enter opens, escape closes and focus goes back.
   let { work, settings }: { work: ChatWork; settings: Snippet } = $props();
@@ -172,6 +173,10 @@
         </ul>
       {/if}
     </section>
+  </div>
+  <!-- the places and the chat's own settings stand under the lists, never
+       scrolled away by them however many threads there are -->
+  <div class="index-foot">
     {#if places.length}
       <nav aria-label="places" class="index-places">
         {#each places as place (place.href)}

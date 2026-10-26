@@ -6,7 +6,9 @@
  * page (the viewport shrinks) and the way iOS Safari does (only the visual
  * viewport shrinks; stood in for here, as no desktop engine has an on-screen
  * keyboard). Turning the phone, long content, an attached image and the
- * fingertip's hit area of every small key are checked; the desktop keeps
+ * fingertip's hit area of every small key are checked; with many threads
+ * the index's places and the chat's settings stay on screen under its
+ * scrolling lists, and the menu key over a long thread list; the desktop keeps
  * its rows. Runs in Chromium, and in WebKit too when Playwright has it.
  * Screenshots go to CUBE_SCREENSHOTS when it is set. Needs a built UI. */
 import assert from "node:assert/strict";
@@ -341,6 +343,111 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.ok((await box(page, ".composer")).bottom <= 667);
     await assertNoSideways(page);
   });
+
+  // Many threads (synthetic): the index's lists scroll, and the places and
+  // the chat's own settings stand under them, never scrolled away.
+  const many = (count: number) => ({ threads: Array.from({ length: count }, (_, n) => ({ id: `m${n}`, title: `synthetic thread ${n + 1} about the gateway's retry budget`,
+    state: n % 7 ? "completed" : "working", project: { id: "p1", name: "cube" }, archived: false, spawned: null })), archived: { shown: 0, total: 3 }, unknown: 0 });
+  const PLACES = ["#/threads", "#/artifacts", "#/projects", "#/settings/providers"];
+  for (const size of [...phones, { width: 844, height: 390 }]) {
+    await scenario(browser, engine, "with 60 threads the places and the chat's model and memory are on screen at once, in a fingertip's reach, and stay while the lists scroll", size, "chat", async (page, host) => {
+      host.overview = many(60);
+      await page.locator(`${ACTIVE} .sheet-bar .name-key`).tap();
+      const index = page.locator(`${ACTIVE} .chat-index`);
+      await index.locator(".index-row").nth(59).waitFor({ state: "attached" });
+      await settle(page);
+      const sheet = await box(page, ".chat-index");
+      const body = await box(page, ".chat-index .index-body");
+      const foot = await box(page, ".chat-index .index-foot");
+      assert.ok(foot.top >= body.bottom - 0.5 && foot.bottom <= sheet.bottom + 0.5 && foot.bottom <= size.height, `the foot stands under the lists, on screen: ${JSON.stringify({ body, foot, sheet })}`);
+      assert.ok(body.height >= 2 * 44, `the lists keep room for rows: ${body.height}px`);
+      const places = index.locator(".index-places a");
+      assert.deepEqual(await places.evaluateAll(all => all.map(link => link.getAttribute("href"))), PLACES, "every place, in its order");
+      const placed = async () => JSON.stringify(await places.evaluateAll(all => all.map(link => { const { top, left, bottom, right } = link.getBoundingClientRect(); return [top, left, bottom, right]; })));
+      const before = await placed();
+      for (const link of await places.all()) {
+        const { top, bottom, left, right } = await link.evaluate(element => element.getBoundingClientRect().toJSON() as DOMRect);
+        assert.ok(top >= foot.top && bottom <= size.height && left >= 0 && right <= size.width, `${await link.textContent()} on screen`);
+        assert.ok(await link.evaluate(element => element.scrollWidth <= element.clientWidth + 0.5), `${await link.textContent()} is not clipped`);
+      }
+      for (const n of [0, 3]) await assertHitArea(page, `.chat-index .index-places a >> nth=${n}`);
+      for (const control of [".index-model select", ".index-memory"]) {
+        const { top, bottom } = await box(page, `.chat-index ${control}`);
+        assert.ok(top >= foot.top && bottom <= size.height, `${control} on screen without scrolling`);
+      }
+      // the lists scroll under the foot, which stays where it is
+      const scrolled = await page.locator(`${ACTIVE} .chat-index .index-body`).evaluate(element => { element.scrollTop = element.scrollHeight; return element.scrollTop; });
+      assert.ok(scrolled > 0, "the lists scroll");
+      await settle(page);
+      assert.equal(await placed(), before, "the places do not move");
+      assert.equal(await page.evaluate(() => [window.scrollY, document.scrollingElement?.scrollTop ?? 0].join()), "0,0", "the page behind does not scroll");
+      await assertNoSideways(page);
+      await page.locator(`${ACTIVE} .chat-index .index-body`).evaluate(element => { element.scrollTop = 0; });
+      await shoot(page, engine, `index-many-${size.width}x${size.height}`);
+      // a place is one tap away: settings opens, the index goes
+      await places.last().tap();
+      await page.waitForURL(/#\/settings\/providers$/);
+      await index.waitFor({ state: "hidden" });
+    });
+  }
+
+  await scenario(browser, engine, "the thread list with 60 threads, read to its end: the menu key stays on screen and settings is one tap away", phones[0]!, "threads", async (page, host) => {
+    host.threads = Array.from({ length: 60 }, (_, n) => ({ ...thread, id: `m${n}`, title: `synthetic thread ${n + 1} about the gateway's retry budget` }));
+    await page.locator(`${ACTIVE} a[href="#/t/m59"]`).waitFor({ state: "attached" });
+    const scrolled = await page.locator(`${ACTIVE} main`).evaluate(element => { element.scrollTop = element.scrollHeight; return element.scrollTop; });
+    assert.ok(scrolled > 0, "the list is longer than the screen");
+    await settle(page);
+    const key = page.locator(`${ACTIVE} .nav-menu-key`);
+    const { top, bottom } = await box(page, ".nav-menu-key");
+    assert.ok(top >= 0 && bottom <= phones[0]!.height, `the menu key is on screen: ${top}–${bottom}`);
+    await key.tap();
+    const settings = page.locator("header nav a", { hasText: "settings" });
+    assert.ok(await settings.isVisible());
+    await settings.tap();
+    await page.waitForURL(/#\/settings\/providers$/);
+  });
+
+  for (const ios of [false, true]) {
+    const way = ios ? "visual viewport only (iOS)" : "whole viewport (Android)";
+    await scenario(browser, engine, `typing in the index's filter with many threads, ${way}: the places stay above the keyboard, the chat's settings step aside and come back`, { ...phone, ios }, "chat", async (page, host) => {
+      host.overview = many(60);
+      await page.locator(`${ACTIVE} .sheet-bar .name-key`).tap();
+      const index = page.locator(`${ACTIVE} .chat-index`);
+      await index.locator(".index-row").nth(59).waitFor({ state: "attached" });
+      await index.locator("input[type=search]").tap();
+      const room = phone.height - 320;
+      if (ios) await page.evaluate(height => (window.visualViewport as unknown as { set: (h: number) => void }).set(height), room);
+      else await page.setViewportSize({ width: phone.width, height: room });
+      await page.waitForFunction(() => document.documentElement.dataset.keyboard);
+      await page.keyboard.type("s");
+      await settle(page);
+      assert.equal(await index.locator(".index-chat").isVisible(), false, "the chat's settings step aside while typing");
+      const field = await box(page, ".chat-index input[type=search]");
+      const first = await box(page, ".chat-index .index-row");
+      assert.ok(first.top >= field.bottom && first.bottom <= room, `the first result is in view: ${first.top}–${first.bottom} of ${room}`);
+      const places = index.locator(".index-places a");
+      assert.deepEqual(await places.evaluateAll(all => all.map(link => link.getAttribute("href"))), PLACES, "\"s\" matches every place");
+      for (const link of await places.all()) {
+        const { top, bottom } = await link.evaluate(element => element.getBoundingClientRect().toJSON() as DOMRect);
+        assert.ok(top >= first.bottom && bottom <= room, `${await link.textContent()} above the keyboard: ${top}–${bottom} of ${room}`);
+      }
+      await assertNoSideways(page);
+      await shoot(page, engine, `index-many-keyboard-${ios ? "ios" : "android"}-375x667`, room);
+      // the filter narrows the places too; enter still opens the first thread
+      await page.keyboard.type("ettings");
+      await settle(page);
+      assert.deepEqual(await places.evaluateAll(all => all.map(link => link.getAttribute("href"))), ["#/settings/providers"]);
+      // the keyboard goes: the chat's settings come back
+      await page.locator(`${ACTIVE} .chat-index input[type=search]`).blur();
+      if (ios) await page.evaluate(() => (window.visualViewport as unknown as { set: (h: null) => void }).set(null));
+      else await page.setViewportSize({ width: phone.width, height: phone.height });
+      await settle(page);
+      assert.equal(await keyboard(page), null);
+      assert.ok(await index.locator(".index-chat").isVisible(), "the chat's settings are back");
+      const { bottom } = await box(page, ".chat-index .index-memory");
+      assert.ok(bottom <= phone.height, "on screen");
+    });
+  }
 
   for (const ios of [false, true]) {
     const way = ios ? "visual viewport only (iOS)" : "whole viewport (Android)";
