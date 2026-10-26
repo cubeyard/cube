@@ -579,7 +579,7 @@ either:
   both read, the thread is in neither and the overview counts threads cubed
   no longer has.
 - **What it shows.** Each open thread with
-  its title and its own state as cubed records it when the page reads
+  its name (`🦦 calm otter`, when it has one), title and its own state as cubed records it when the page reads
   `GET /api/optchat/threads` (`working`, `turn ended`, `waiting on a
   background agent`, `failed`, `stopped`, `starting`, `waiting for a
   runner`, `machine error`, …). Archived threads are not listed, only
@@ -611,7 +611,7 @@ open thread holds a machine, so this list stays short.
 
 `archived_threads(query?, offset?, limit?)` searches the archived ones,
 newest spawn first: `query` is a case-insensitive part of a thread's id,
-title or project; a page holds `limit` matches (20 by default, at most 50)
+name, title or project; a page holds `limit` matches (20 by default, at most 50)
 and its first line says which and where the next page starts
 (`archived threads 1-20 of 60, newest first; next: offset 20`). It reads
 only cubed's registry, never an archived thread's store. `history(id)` reads

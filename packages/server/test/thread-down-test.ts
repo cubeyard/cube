@@ -14,6 +14,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, type Message } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
+import { threadNameText } from "../src/thread-names.ts";
 import { LocalMachines } from "./local-guest.ts";
 
 const textOf = (message: Message) => typeof message.content === "string" ? message.content
@@ -94,7 +95,8 @@ try {
   assert.equal(record.failure, down, "OptChat's thread record shows it");
   assert.equal(record.transcript?.status.error, down, "with its stored transcript");
   // Every reader says the same: the row, `threads`, `history` and the overview.
-  const title = app.registry.getThread(id)!.title;
+  // The name a new thread was given, then its title.
+  const title = `${threadNameText(app.registry.getThread(id)!.name)} · ${app.registry.getThread(id)!.title}`;
   assert.equal(await adapter.describe([id]), `[${id.slice(0, 8)}] empty · ${title} · error: ${down}`, "OptChat's threads says it is down");
   assert.equal(record.machine, `error: ${down}`);
   assert.equal((await adapter.observe!([id])).get(id)?.state, "agent error", "the overview says it failed");

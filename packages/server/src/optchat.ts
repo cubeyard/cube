@@ -34,6 +34,7 @@ import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
 import type { Artifacts } from "./artifact-service.ts";
 import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { addUsage, type OptChatUsage } from "./usage-service.ts";
+import { threadNameText, type ThreadName } from "./thread-names.ts";
 
 const context = BACKGROUND_CONTEXT;
 const log = createLogger("optchat");
@@ -242,10 +243,10 @@ export interface OptThreads {
   /** A message to a thread. One that works gets it steered into its running
    * turn; the answer says what the thread did with it (void: started). */
   tell(id: string, text: string, requestId: string): Promise<ThreadAcceptance | void>;
-  /** One line per thread, in the order given: its state and title. By
-   * default only threads not archived, then how many archived ones were
-   * left out; `archived`: only archived ones matching `query` (id, title or
-   * project), `limit` from `offset` on, with where the next page starts. */
+  /** One line per thread, in the order given: its state, name and title.
+   * By default only threads not archived, then how many archived ones were
+   * left out; `archived`: only archived ones matching `query` (id, name,
+   * title or project), `limit` from `offset` on, with where the next page starts. */
   describe(ids: readonly string[], request?: ThreadListRequest): Promise<string>;
   /** The thread's events; null once it is archived or gone; "archiving"
    * while its archive (or a release left unfinished) goes on; "stored"
@@ -293,6 +294,8 @@ export interface OptThreads {
 export type ThreadRecord = {
   project: string;
   title: string | null;
+  /** Its name ("🦦 calm otter"); absent or null on threads older than names. */
+  name?: ThreadName | null;
   archived: boolean;
   /** The machine as cubed sees it ("ready", "starting its machine",
    * "error: …"); null once archived. */
@@ -334,7 +337,7 @@ const reportText = (report: ReportState) => report === "delivered" ? "delivered"
  * report (or, without a transcript, the failure to start), what disagrees,
  * then the record's page of messages, numbered from the first. */
 export function formatHistory(id: string, record: ThreadRecord, report: ReportState): string {
-  const lines = [`[${short(id)}] ${record.project} · ${record.title ?? "untitled"}`,
+  const lines = [`[${short(id)}] ${record.project} · ${record.name ? `${threadNameText(record.name)} · ` : ""}${record.title ?? "untitled"}`,
     `cubed: ${[record.archived ? "archived" : `machine ${record.machine}`, ...record.facts].join("; ")}`];
   const transcript = record.transcript;
   if (!transcript) {
@@ -1750,7 +1753,7 @@ export class OptChat {
     });
     const archivedThreads = defineTool({
       name: "archived_threads",
-      description: "Search the threads you started that are archived, newest first, read only. query: part of a thread's id, title or project "
+      description: "Search the threads you started that are archived, newest first, read only. query: part of a thread's id, name, title or project "
         + `(any case; absent: every archived thread). offset: skip that many matches, as the "next:" line gives; limit: at most ${ARCHIVED_MAX} (default ${ARCHIVED_PAGE}). `
         + "history(id) reads any of them.",
       parameters: Type.Object({
