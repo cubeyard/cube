@@ -1533,7 +1533,11 @@ header.sheet-bar {
 }
 .report-line > summary::-webkit-details-marker { display: none; }
 .report-line > summary:hover :is(.report-title, .report-summary) { color: var(--ink); }
-.report-title { flex: none; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-weight: 600; }
+.report-title { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-weight: 600; }
+/* a name is short: the first words beside it give way first (shrink is
+   weighed by width, so theirs must outweigh it by far), and it is cut only
+   when nothing else is left to give way */
+.report-title.named ~ .report-summary { flex-shrink: 10000; }
 .report-line > summary .report-kind { flex: none; margin-left: 0; }
 .report-state { flex: none; white-space: nowrap; }
 .report-state.failure { color: var(--bad); }

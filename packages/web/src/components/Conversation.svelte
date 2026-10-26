@@ -18,7 +18,7 @@
   import ThinkingCube from "./ThinkingCube.svelte";
 
   let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread", images = null,
-    sheet = false, foldTools = false, onRows, toolLine, reportLabel, reportTitle, after, margin }: {
+    sheet = false, foldTools = false, onRows, toolLine, reportLabel, reportTitle, reportNamed, after, margin }: {
     threadId?: string;
     /** Messages may be sent while the agent works; they reach it between tool calls. */
     steer?: boolean;
@@ -49,6 +49,9 @@
     reportLabel?: Snippet<[string]>;
     /** A thread report's name in plain words, for its folded line; default "thread <id>". */
     reportTitle?: (from: string) => string;
+    /** Whether that name is the thread's short given name ("🦦 calm otter"),
+     * which the line's first words give way to before it is cut. */
+    reportNamed?: (from: string) => boolean;
     /** Drawn after a row, in the conversation's flow. */
     after?: Snippet<[TranscriptRow]>;
     /** Drawn beside the conversation's column, scrolling with it; rows carry `data-anchor` (`rowKey`). */
@@ -641,7 +644,7 @@
     <details class="conversation-message report report-line" class:failed={line.failed} data-anchor={rowKey(row)}
       open={reportOpen(row.id, line.failed)} ontoggle={(event) => onReportToggle(event, row.id, line.failed)}>
       <summary aria-label={`report from ${title}${line.state ? `, ${line.state}` : ""}${line.summary ? `: ${line.summary}` : ""}`}>
-        <span class="report-title">{title}</span><span class="report-kind">report</span>
+        <span class="report-title" class:named={reportNamed?.(row.from) ?? false}>{title}</span><span class="report-kind">report</span>
         {#if line.state}<span class="report-state" class:failure={line.failed}>{line.state}</span>{/if}
         {#if line.summary}<span class="report-summary">{line.summary}</span>{/if}
         <span class="tool-chevron"><Icon name="chevron" size={12} /></span>

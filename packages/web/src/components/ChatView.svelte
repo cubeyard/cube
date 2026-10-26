@@ -72,6 +72,7 @@
   const calledOf = (short: string) => { const thread = resolveThread({ short, project: null, title: null }, known); return nameText(thread.name) || thread.title; };
   const toolLine = (row: Extract<TranscriptRow, { kind: "tool" }>) => chatToolLine(row, calledOf);
   const reportTitle = (from: string) => calledOf(from) ?? `[${from}]`;
+  const reportNamed = (from: string) => !!resolveThread({ short: from, project: null, title: null }, known).name;
 
   /** What a message's note in the margin holds, for its skip key. */
   const skipText = (group: NoteGroup) => {
@@ -225,7 +226,7 @@
   {#if modelState}
     <Conversation base={CHAT_BASE} steer sheet foldTools model={selectedModel} {changingModel} bind:busy onRows={(shown) => (rows = shown)}
       images={modelState.images ?? { supported: false, reason: "this host does not take images in the chat" }}
-      placeholder="message optchat" {toolLine} {reportLabel} {reportTitle} {after} margin={wide ? margin : undefined}
+      placeholder="message optchat" {toolLine} {reportLabel} {reportTitle} {reportNamed} {after} margin={wide ? margin : undefined}
       empty={{ title: "one chat, every thread", hint: "Say what you want done: the chat starts threads in your projects, follows their reports and remembers everything you said. A thread needs a project; add one under projects." }} />
   {:else}
     <div class="conversation-empty"><p class="conversation-wait" role="status">{modelError ? "connect a model provider to start the chat" : "loading…"}</p></div>

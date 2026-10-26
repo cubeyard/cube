@@ -8,7 +8,7 @@
  * Needs a built UI (pnpm build) and Playwright's Chromium. */
 import assert from "node:assert/strict";
 import { chromium, type Page } from "playwright";
-import type { ThreadSummary } from "../../src/lib/types.ts";
+import type { ThreadEvent, ThreadSummary } from "../../src/lib/types.ts";
 import { artifacts, bodies, chatEvents, ID, overview, threads } from "./chat-sheet-data.ts";
 import { ScriptedHost } from "./scripted-host.ts";
 
@@ -103,8 +103,52 @@ try {
     assert.ok(box.height < 30, `${size.name}: the bar's title stays one line (${box.height}px)`);
     await close();
   }
+  // A report line stays inside its row on narrow phones: a failure stands open
+  // (no first words) with the longest state, from a thread older than names
+  // with a long title and from one with a long name; the title or name gives
+  // way, never the row. A name is cut only when nothing else can give way.
+  const longTitle = "java trusts the runner ca in every image, including the old jdk 8 and jdk 11 builds";
+  const wake = (id: string, thread: string): ThreadEvent => ({ type: "user-message", id, text: `[${thread.slice(0, 8)}] its machine failed to wake for 40 s: out of memory`, from: thread.slice(0, 8) });
+  const long = { emoji: "🐡", words: "cheerful pufferfish" };
+  for (const width of [320, 360, 375, 390]) {
+    const host = await ScriptedHost.start();
+    host.transcript = { ...host.transcript, status: { state: "completed", run: "r", error: null }, events: [...chatEvents(), wake("9.0", ID.ca), wake("9.1", ID.flaky)] };
+    const view = overview();
+    host.overview = { ...view, threads: view.threads.map(thread => thread.id === ID.ca ? { ...thread, title: longTitle }
+      : thread.id === ID.flaky ? { ...thread, name: long } : thread) };
+    host.threads = threads;
+    host.artifacts = artifacts;
+    host.bodies = bodies;
+    const context = await browser.newContext({ viewport: { width, height: 844 }, isMobile: true, hasTouch: true });
+    const page = await context.newPage();
+    page.on("pageerror", error => errors.push(String(error)));
+    await page.goto(`${host.url}/#/chat`);
+    await page.locator(".chat-sheet details.report-line[data-anchor='9.1'] .report-title.named").waitFor();
+    for (const anchor of ["9.0", "9.1", "3.0", "4.0"]) {
+      const summary = page.locator(`.chat-sheet details.report-line[data-anchor='${anchor}'] > summary`);
+      const bounds = await summary.evaluate(element => {
+        const box = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const right = box.right - parseFloat(style.paddingRight);
+        return { overflow: element.scrollWidth - element.clientWidth, past: Math.max(...[...element.children].map(child => child.getBoundingClientRect().right - right)) };
+      });
+      assert.ok(bounds.overflow <= 0, `${width}px, report ${anchor}: its line does not overflow (${bounds.overflow}px)`);
+      assert.ok(bounds.past <= 0.5, `${width}px, report ${anchor}: title, state and chevron inside the line (${bounds.past}px past)`);
+    }
+    // The state stays whole; a long title gives way; a name before a failure is not cut where there is room.
+    const state = page.locator(".chat-sheet details.report-line[data-anchor='9.0'] .report-state");
+    assert.equal(await state.innerText(), "machine failed to wake");
+    assert.ok(await state.evaluate(element => element.scrollWidth <= element.clientWidth), `${width}px: the state is whole`);
+    const cut = (anchor: string) => page.locator(`.chat-sheet details.report-line[data-anchor='${anchor}'] .report-title`).evaluate(element => element.scrollWidth > element.clientWidth);
+    assert.ok(await cut("9.0"), `${width}px: the long title gives way`);
+    if (width >= 360) assert.equal(await cut("9.1"), false, `${width}px: the name stands whole beside the failure`);
+    // A folded line with first words: they give way before the name ("turn ended").
+    assert.equal(await cut("3.0"), false, `${width}px: the name stands whole before the first words`);
+    await context.close();
+    await host.close();
+  }
   assert.deepEqual(errors, [], "no page errors");
-  console.log("ok: thread names in the report line, tell line, margin, index, thread bar and tab; none for an older thread; no width taken");
+  console.log("ok: thread names in the report line, tell line, margin, index, thread bar and tab; none for an older thread; no width taken; report lines stay inside their row at 320-390px");
 } finally {
   await browser.close();
 }
