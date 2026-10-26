@@ -312,8 +312,18 @@ Bounds, so unattended work does not loop or spend without end:
 - `tell` sends at most `TELLS` (8) messages per thread between two messages
   of the user (reports do not count as the user's); then it answers `not
   sent: … tell the user what it needs instead`, and the prompt forbids
-  starting another thread to get around that. Only a tell the thread
-  accepted counts, and a replayed call counts once.
+  starting another thread to go on with the same task. Only a tell the
+  thread accepted counts, and a replayed call counts once.
+- A thread is one task. The prompt's delegation rules (`MASTER`, with the
+  `spawn` and `tell` descriptions) keep a tell for the thread's own task
+  (fixes, findings on its pull request, answers, going on, landing, a delta
+  review of a change it reviewed) and make anything else a new thread: another
+  pull request, question or review, or a follow-up its task did not include.
+  Free machines or tokens never justify reuse; with no free slot OptChat
+  archives done threads or tells the user what waits. A brief is complete and
+  says whether to explore, design, implement or review.
+  `optchat-delegation-test.ts` checks the prompt states them, not that a
+  model follows them.
 - A tell to a thread that is working is steered into its running turn,
   never a second turn beside it, and the current tool call is not
   interrupted. It answers `queued for [id] …`: accepted, not read yet (a
