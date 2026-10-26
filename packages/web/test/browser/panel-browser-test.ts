@@ -5,7 +5,9 @@
  * closes it unless a field holds text; its close key and back close it; a
  * place opened from the chat's index closes the index; the chat's own keys
  * stay off while a place is open. Desktop (a sheet from the right, the chat
- * beside it) and phone (the whole screen). An unsent thread draft
+ * beside it) and phone (the whole screen); a thread has the whole screen at
+ * every width, with no menu or thread list: its name takes focus, and
+ * escape or its way back (`‹ chat`) returns to the chat. An unsent thread draft
  * survives every way the panel closes and is there when the thread opens
  * again; a sent one is not. Needs a built UI (pnpm build)
  * and Playwright's Chromium. */
@@ -126,6 +128,48 @@ try {
       assert.ok((await focused(page)).opener, `${size.name}: after a press on the backdrop, focus is back on the link`);
     }
 
+    // a thread has the whole sheet (no chat beside it, no menu or thread
+    // list), its name takes focus, and the way back is escape or `‹ chat`:
+    // the chat is as it was and focus is back on the link that opened it
+    await page.evaluate(() => { document.querySelector(".chat-sheet .markdown p")!.insertAdjacentHTML("beforeend", ' <a href="#/t/t1" class="test-thread-link">the thread</a>'); });
+    const threadLink = page.locator(".chat-sheet a.test-thread-link");
+    for (const how of ["escape", "the way back"] as const) {
+      await openFrom(page, threadLink);
+      const under = await scroller.evaluate(element => element.scrollTop);
+      assert.equal(await page.evaluate(() => location.hash), "#/t/t1");
+      const whole = (await panel(page).boundingBox())!;
+      assert.ok(whole.x <= 0 && whole.width >= size.width - 1 && whole.height >= size.height - 1, `${size.name}: the thread has the whole screen: ${JSON.stringify(whole)}`);
+      assert.equal(await panel(page).locator(":is(.thread-sidebar, .main-header, nav, .nav-menu-key)").count(), 0, `${size.name}: no menu, destinations or thread list`);
+      await page.waitForFunction(() => document.activeElement?.matches("dialog.page-panel .thread-bar h1"));
+      assert.equal(await panel(page).getByRole("button", { name: "back to the chat" }).count(), 1, `${size.name}: one way back, named`);
+      const draft = panel(page).locator(".composer textarea");
+      assert.equal(await draft.evaluate(element => element === document.activeElement), false, `${size.name}: the composer waits for the reader, no keyboard rises`);
+      if (how === "escape") await page.keyboard.press("Escape");
+      else {
+        // the way back is the first stop before the name: shift+tab, enter
+        await page.keyboard.press("Shift+Tab");
+        assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("aria-label")), "back to the chat");
+        await page.keyboard.press("Enter");
+      }
+      await panel(page).waitFor({ state: "detached" });
+      await page.waitForTimeout(350);
+      assert.equal(await page.evaluate(() => location.hash), "#/chat");
+      const now = await focused(page);
+      assert.ok(now.opener, `${size.name}: after ${how}, focus is back on the link that opened the thread, not ${now.what}`);
+      assert.equal(await chatDraft(page).inputValue(), "a draft the chat keeps", `${size.name}: the chat's draft is kept`);
+      assert.equal(await scroller.evaluate(element => element.scrollTop), under, `${size.name}: the chat's scroll is kept`);
+      await threadLink.evaluate(element => element.removeAttribute("data-opener"));
+    }
+    // the details fold under the bar: closed as the thread opens, a key away
+    await page.evaluate(() => { location.hash = "#/t/t1"; });
+    await panel(page).locator(".thread-bar h1").waitFor();
+    assert.equal(await panel(page).locator(".thread-details").isVisible(), false, `${size.name}: the details start folded`);
+    await panel(page).locator(".strip-details-key").click();
+    assert.ok(await panel(page).locator(".thread-details .strip-project").isVisible(), `${size.name}: the details hold the project`);
+    assert.equal(await panel(page).locator(".strip-details-key").getAttribute("aria-expanded"), "true");
+    await page.evaluate(() => { location.hash = "#/chat"; });
+    await panel(page).waitFor({ state: "detached" });
+
     // a thread from the index: the index goes, the thread opens; escape in its composer with text keeps the panel
     await page.locator(".sheet-bar .name-key").click();
     await page.locator(".chat-index[open] .index-row").first().waitFor();
@@ -139,8 +183,8 @@ try {
     assert.equal(await panel(page).count(), 1, `${size.name}: escape in a field with text never closes the panel`);
     assert.equal(await threadDraft.inputValue(), "a thread draft");
 
-    // the close key closes it; back opens the place again, forward leaves it
-    const close = panel(page).locator(".panel-close").first();
+    // the way back closes it; back opens the place again, forward leaves it
+    const close = panel(page).locator(".bar-back");
     await (size.touch ? close.tap() : close.click());
     await panel(page).waitFor({ state: "detached" });
     assert.equal(await page.evaluate(() => location.hash), "#/chat");
@@ -152,10 +196,9 @@ try {
 
     // an unsent thread draft outlives every way the panel closes, and comes back when the thread opens again
     const paths: Array<[string, () => Promise<void>]> = [
-      ["the close key", async () => { const key = panel(page).locator(".strip-close"); await (size.touch ? key.tap() : key.click()); }],
-      ["escape from outside the field", async () => { await panel(page).locator(".strip-title, .mobile-thread-switch").first().evaluate(element => (element as HTMLElement).blur()); await page.locator("dialog.page-panel").focus(); await page.keyboard.press("Escape"); }],
+      ["the way back", async () => { const key = panel(page).locator(".bar-back"); await (size.touch ? key.tap() : key.click()); }],
+      ["escape from outside the field", async () => { await panel(page).locator(".strip-title").evaluate(element => (element as HTMLElement).blur()); await page.locator("dialog.page-panel").focus(); await page.keyboard.press("Escape"); }],
       ["back", async () => { await page.goBack(); }],
-      ...size.touch ? [] : [["a press on the backdrop", async () => { await page.mouse.click(40, 400); }] as [string, () => Promise<void>]],
     ];
     for (const [index, [how, leave]] of paths.entries()) {
       const words = `draft ${index}: kept when the panel closes by ${how}\nsecond line`;

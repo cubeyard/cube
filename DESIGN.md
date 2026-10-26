@@ -294,24 +294,13 @@ first answer prints one line, `loading…`, in `--ink-2` in the middle of the
 room it will fill; the shell, the view and its conversation each use that
 same line, so their waits in turn read as one (no other wording, no blank
 step, no surface change between them). The thread list keeps the
-centered **47rem** reading measure (`--col`). One thin desktop rail spans the
-sidebar, conversation and changes, with no extra global row above it.
-Global navigation lives at the top of the sidebar; `projects` remains a direct
-exit (inside the thread drawer on narrow screens). Each workspace bay owns its
-top rail: thread title, model and thread controls above the conversation,
-changes controls above changes. Rail edges match the pane below and follow
-the draggable divider. The two-bay workspace starts evenly split, then respects
-the visitor's remembered divider position. At 52rem and below, the bays stack
-in the same viewport with the conversation receiving the larger share, and
-thread controls wrap within the conversation's own rail.
+centered **47rem** reading measure (`--col`). A thread has the whole sheet
+and no menu, destinations or thread list of its own (see "A thread" below):
+the chat is the way to every other thread.
 
-The thread sidebar groups active threads by project, with a small plus button
-beside each project name to start a thread in that project. It has no separate
-“all threads” heading or full-width create button. Project names appear once
-per group; thread rows carry the title and state.
-
-The quiet `+ thread` action and each project's plus open the same native
-dialog, also used by the thread list, project detail and `n` shortcut. A
+The thread list's `new thread` key opens one native dialog, also used by
+project detail and the `n` shortcut (in a thread, `n` starts one in its
+project). A
 project-specific entry preselects its project; the general entry includes
 ready projects with no threads. The first message owns the surface, with
 project and actual model selectors beneath it and one start action. Enter
@@ -346,9 +335,9 @@ allows up to 18rem; it never shifts the column or the composer. Below
 At the 40rem mobile breakpoint (and on a touch screen under 30rem tall, a
 phone on its side): the conversation keeps the screen. Elsewhere the
 destinations fold behind one menu key that names the current page; a
-thread's strip is one row of title and a `details` key, which opens the
-project, model and archive key on the row beneath and folds again when the
-composer takes focus. The chat has no strip: its model and memory are in the
+thread's bar is one row of the way back, the title and the `details` key,
+whose row beneath holds the model too and folds again when the composer
+takes focus. The chat has no strip: its model and memory are in the
 index, the whole screen on a phone. While the on-screen keyboard is up
 (`data-keyboard` on the root, from `lib/keyboard.ts`), the header, the
 chat's wordmark row and its memory step aside, and with under ~220px left a
@@ -392,8 +381,8 @@ key 1px down and swaps `--shadow-key` for `--shadow-key-down` at 80ms. Hover
 brightens the face (`--s3` → `--s4`) and never moves the key.
 
 **The Hairline Rule.** On the sheet, structure is a 1px `--line`: under a
-pane's rail (a thread's strip, an artifact's strip, the comments head),
-beside the thread sidebar and the comments bank, around a list or board
+pane's rail (an artifact's strip, the comments head), around a thread's
+details row, beside the comments bank, around a list or board
 (well radius). No seams, decks or recesses.
 
 ## Shapes
@@ -713,9 +702,11 @@ wide screen (up to 66rem, the chat showing beside it under a putty wash),
 the whole screen at 52rem and below, its height the visual viewport's under
 an iOS keyboard. The place keeps its own address (deep links, back and
 forward work) and its own header row, which ends with a close key (a
-thread's in its strip); the wordmark and `chat` also close it. Escape closes
-it unless a field holds the focus (a draft is never lost to escape); a
-press on the chat beside it closes it. Closing goes to `#/chat` with the
+thread's way back starts its bar); the wordmark and `chat` also close it.
+Escape closes it unless a field holds the focus (a draft is never lost to
+escape); a press on the chat beside it closes it. A thread's panel is
+`whole`: the whole screen at every width, with no wash, border or shadow,
+entering with `settle-in`, so there is no chat beside it to press. Closing goes to `#/chat` with the
 chat exactly as it was (draft, scroll); focus goes back where it was.
 While a place is open, the chat's own keys (`/`, ctrl/⌘ k) are off; a place
 opened from the chat's index closes the index. One panel at a time: a
@@ -723,13 +714,27 @@ place opened from another replaces it; only a true dialog of the place (new
 thread, an action's confirmation) stacks above it. This is a bounded step;
 the structure around the chat may change again.
 
-### A thread (the sheet beside its sidebar)
-A thread's page is the chat's sheet with a sidebar: the sidebar flush on
-`--s4` with one hairline beside it (global navigation at its top, projects
-as quiet heads with their plus, the open thread on a soft `--s3` face), the
-thread's strip a rail with a hairline under it, then the conversation
-exactly as the chat's (no "you"/"agent" labels, user words on a soft face,
-quiet tool lines, a report's name over its words) and the chat's composer.
+### A thread (the whole sheet)
+Opened from the chat (a margin note, a report's name, a spawn's line, an
+index row or a link), a thread takes the chat's whole sheet: the user's
+choice, concept A of artifact a54a8cce. There is no menu, sidebar or
+thread list; the chat is the way to other threads. One bar, flush on
+`--s4` with no hairline: `‹ chat` (the way back, named "back to the
+chat", a 2.75rem hit area on touch) at the start; the title (14.5px/600,
+one line, the whole name in its tooltip) on the conversation's centreline,
+with a 11px line of state beneath only when there is one to print (a
+state, a failed hook, a machine notice); then, at the end, the auth chip
+on failure, the model (on a wide screen) and the `details` key. The
+details are folded when the thread opens and take one hairline-framed row
+in the reading measure: project, base, machine label (the key to the
+startup steps), usage, the full reason a wake waits, the model on a phone,
+and the archive key. Then the conversation exactly as the chat's (no
+"you"/"agent" labels, user words on a soft face, quiet tool lines, a
+report's name over its words) and the chat's composer, in the same place.
+The title takes focus as the thread opens (a screen reader says where it
+is; no keyboard rises on a phone); shift+tab reaches the way back; escape
+outside a field, the way back and the browser's back return to the chat
+with its scroll and draft, and focus goes back to what opened the thread.
 An artifact's page is the same: document and comments bank on one sheet,
 a hairline between, sent comments on soft faces, actions on a soft face in
 a hairline frame.

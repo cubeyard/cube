@@ -193,10 +193,10 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     const cdp = await page.context().newCDPSession(page);
     const visit = async () => {
       await page.evaluate(() => { location.hash = "#/t/t1"; });
-      await page.locator(`${ACTIVE} .thread-body .composer textarea`).waitFor();
+      await page.locator(`${ACTIVE} .thread-workspace .composer textarea`).waitFor();
       await page.locator(ACTIVE).getByText(`answer ${pad(TURNS - 1)}`).waitFor();
       await page.evaluate(() => { location.hash = "#/chat"; });
-      await page.locator(`${ACTIVE} .thread-body`).waitFor({ state: "detached" });
+      await page.locator(`${ACTIVE} .thread-workspace`).waitFor({ state: "detached" });
       await settle(page);
     };
     const nodes = async () => {

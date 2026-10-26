@@ -4,9 +4,8 @@
   import Wordmark from "./Wordmark.svelte";
   import { pagePanel } from "./PagePanel.svelte";
 
-  // `closeKey`: in the panel over the chat, the row ends with the way back
-  // to it (a thread's sidebar leaves it to the thread's own strip).
-  let { section, closeKey = true }: { section: "chat" | "threads" | "artifacts" | "projects" | "settings"; closeKey?: boolean } = $props();
+  // In the panel over the chat, the row ends with the way back to it.
+  let { section }: { section: "chat" | "threads" | "artifacts" | "projects" | "settings" } = $props();
   const panel = pagePanel();
 
   // On a phone the destinations fold behind one key that names the current
@@ -61,7 +60,7 @@
   </nav>
   <span class="spacer"></span>
   <AuthBadge />
-  {#if panel && closeKey}
+  {#if panel}
     <button class="key icon panel-close" type="button" aria-label="close, back to the chat" title="back to the chat · esc" onclick={panel.close}><Icon name="close" size={14} /></button>
   {/if}
 </header>

@@ -235,6 +235,22 @@ thread pages. `workCounts` and the `index` icon went with it. Regression:
 `chat-sheet-browser-test.ts` (desktop, between, phone with a working and a
 failed thread, and an empty chat) and `mobile-browser-test.ts`.
 
+## A thread has the whole sheet (concept A)
+
+At the user's choice (artifact a54a8cce, concept A, "arket bytter") a
+thread opened from the chat takes the chat's whole sheet instead of a
+panel from the right: `PagePanel` is `whole` for a thread (the whole
+screen at every width, no wash, border or shadow). The thread's sidebar,
+its drawer on a phone and the global menu inside it are gone; the chat is
+the way to other threads. One bar: `‹ chat`, the title on the centreline
+(state beneath only when there is one), the model on a wide screen and
+`details`, whose folded row holds project, base, machine, usage, the
+wait's full reason, the phone's model and archive. The title takes focus
+on open; escape, `‹ chat` and back return to the chat with its scroll and
+draft and focus on the opener. Regression: `panel-browser-test.ts`,
+`mobile-browser-test.ts`, `startup-browser-test.ts`,
+`long-chat-browser-test.ts`.
+
 ## States in print, no status lamps
 
 At the user's request the glowing and blinking status lamps are gone from the
