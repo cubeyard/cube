@@ -343,7 +343,10 @@ index, the whole screen on a phone. While the on-screen keyboard is up
 chat's wordmark row and its memory step aside, and with under ~220px left a
 thread's strip too. On a phone the composer's attach and send keys
 are 2.25rem faces with a 2.75rem hit area; the textarea rises to 16px, and the
-form pads its bottom with `env(safe-area-inset-bottom)` except over a keyboard.
+form stands 1rem off the bottom edge, or `env(safe-area-inset-bottom)` and
+0.25rem where that is more, except over a keyboard (0.85rem, no inset). On a
+wider screen the sheet's composer stands a breath off the window's bottom
+edge that grows a little with its height (1rem to 1.85rem, ~23px at 900px).
 
 ### Named Rules
 **The Reading Measure Rule.** 47rem remains the measure for prose and thread

@@ -160,6 +160,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       for (const key of [".sheet-bar .name-key", ".composer .attach-key", ".composer .send-key"]) await assertHitArea(page, key);
       assert.equal(await page.locator(`${ACTIVE} .composer-row > *`).count(), 1, "nothing beside the field: no key or count before it");
       assert.ok(Math.abs((await box(page, ".composer-field")).left - (await box(page, ".transcript-column")).left) <= 0.5, "the field keeps the column's line");
+      assert.ok(Math.abs(phone.height - (await box(page, ".composer-field")).bottom - 16) <= 0.5, "the field stands 1rem off the bottom edge");
       await assertNoSideways(page);
       await shoot(page, engine, `chat-${tag}`);
     });
@@ -221,6 +222,24 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.equal(await visible(page, "#chat-memory"), false, "typing, the memory steps aside");
   });
 
+  // a home indicator's inset (Chromium can set one; WebKit here cannot)
+  if (engine === "chromium") for (const route of ["chat", "t/t1"]) {
+    const size = { width: 390, height: 844, ios: true };
+    await scenario(browser, engine, `the home indicator's inset is the floor under the composer; the keyboard takes its place (${route})`, size, route, async page => {
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Emulation.setSafeAreaInsetsOverride" as never, { insets: { top: 47, bottom: 34, left: 0, right: 0 } } as never);
+      await settle(page);
+      const lift = () => box(page, ".composer-field").then(field => field.bottom);
+      assert.ok(Math.abs(size.height - await lift() - 38) <= 0.5, `the inset and a breath under the field: ${size.height - await lift()}`);
+      await shoot(page, engine, `${route === "chat" ? "chat" : "thread"}-inset-390x844`);
+      await openKeyboard(page, size, 524);
+      await page.waitForFunction(() => document.documentElement.dataset.keyboard === "open");
+      assert.ok(Math.abs(524 - await lift() - 13.6) <= 0.5, `no inset over the keys: ${524 - await lift()}`);
+      await closeKeyboard(page, size);
+      assert.ok(Math.abs(size.height - await lift() - 38) <= 0.5, `the inset is back with the keyboard down: ${size.height - await lift()}`);
+    });
+  }
+
   for (const ios of [false, true]) {
     const way = ios ? "visual viewport only (iOS)" : "whole viewport (Android)";
     for (const size of [{ width: 375, height: 667, ios }, { width: 390, height: 844, ios }]) {
@@ -235,6 +254,8 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
         assert.ok(Math.abs(app.height - room) < 1, `the app is the room above the keyboard: ${app.height} against ${room}`);
         // the pane's own hairline is the last pixel
         assert.ok(Math.abs(composer.bottom - room) <= 1, `the composer sits on the keyboard: ${composer.bottom}`);
+        const lift = room - (await box(page, ".composer-field")).bottom;
+        assert.ok(Math.abs(lift - 13.6) <= 0.5, `the field sits close on the keys: ${lift}`);
         const transcript = await box(page, ".transcript");
         assert.ok(transcript.height >= room - 130, `the conversation keeps the room: ${transcript.height} of ${room}`);
         await atEnd(page, "and still shows the end");

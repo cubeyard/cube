@@ -1558,8 +1558,19 @@ a.report-name:hover { color: var(--signal); text-decoration: underline; text-und
 .tool-said { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: 13px; }
 .tool-strip code.tool-name { font-weight: 400; color: var(--ink-3); font-size: 11px; }
 
-/* the composer: one round field on the sheet (the chat's and a thread's) */
-.conversation.sheet .composer { border-top: 0; box-shadow: none; background: var(--s4); padding-bottom: max(0.85rem, env(safe-area-inset-bottom)); }
+/* the composer: one round field on the sheet (the chat's and a thread's),
+   lifted off the window's bottom edge by a breath that grows a little with
+   the window's height. On a phone the home indicator's inset is the floor;
+   with the keyboard up the field sits close on the keys. */
+.conversation.sheet .composer {
+  --composer-lift: clamp(1rem, 0.4rem + 1.8dvh, 1.85rem);
+  border-top: 0; box-shadow: none; background: var(--s4);
+  padding-bottom: max(var(--composer-lift), env(safe-area-inset-bottom) + 0.25rem);
+}
+@media (max-width: 40rem), (pointer: coarse) and (max-height: 30rem) {
+  .conversation.sheet .composer { --composer-lift: 1rem; }
+  :root[data-keyboard] .conversation.sheet .composer { padding-bottom: 0.85rem; }
+}
 .conversation.sheet .composer-field { border-radius: var(--r-well); box-shadow: 0 1px 3px rgba(38, 32, 18, 0.08); }
 .conversation.sheet .composer-field:has(textarea:focus) { box-shadow: 0 0 0 1px var(--signal); }
 .conversation.sheet .composer .attach-key { border-color: transparent; background: transparent; box-shadow: none; }
