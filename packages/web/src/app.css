@@ -1748,7 +1748,7 @@ button.note-head:hover { background: var(--s3); }
 .chat-index:focus { outline: none; }
 .index-filter input::placeholder { color: var(--ink-3); }
 .index-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0.4rem 0.6rem 0.6rem; overscroll-behavior: contain; }
-.index-body section + section, .index-places { margin-top: 0.7rem; }
+.index-body section + section, .index-places, .index-foot > .index-chat:first-child { margin-top: 0.7rem; }
 .index-body h2 { margin: 0.35rem 0.6rem 0.25rem; font-size: 11px; font-weight: 550; letter-spacing: 0.08em; color: var(--ink-3); }
 .index-body ul { list-style: none; margin: 0; padding: 0; }
 .index-body > section > p { margin: 0.2rem 0.6rem; font-size: 12.5px; overflow-wrap: anywhere; }
@@ -1787,6 +1787,7 @@ button.note-head:hover { background: var(--s3); }
 @media (pointer: coarse) {
   .index-keys { display: none; }
   .index-row { min-height: 2.75rem; align-content: center; }
+  .index-places a { display: inline-grid; place-items: center; min-height: 2.75rem; }
   .sheet-note .note-head { min-height: 2.75rem; align-items: center; }
 }
 /* a phone (lib/keyboard.ts COMPACT_MEDIA): the index is the whole screen,
@@ -1804,6 +1805,28 @@ button.note-head:hover { background: var(--s3); }
   .index-close { width: 2.75rem; height: 2.75rem; }
   .index-meta { max-width: 9rem; }
   .index-model select { font-size: 16px; max-width: 12rem; }
+  /* one row of equal keys, as many as the filter leaves */
+  .index-places { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); padding-inline: 0; }
+  .index-places a { padding-inline: 0.2rem; text-align: center; }
+  /* the places and the chat's settings stay at the sheet's foot while the
+     lists scroll under them, so no number of threads puts them out of reach */
+  .index-foot { position: sticky; bottom: -0.6rem; margin-bottom: -0.6rem; padding: 0.3rem 0 0.6rem; background: var(--s4); }
+  .index-foot .index-places { margin-top: 0; }
+  .index-foot > .index-chat:first-child { margin-top: 0.4rem; }
+  /* what the keys focus scrolls clear of the foot (ChatIndex finishes it
+     where a browser leaves scroll padding out of a focus scroll) */
+  .index-body { scroll-padding-bottom: var(--foot, 0px); }
+  /* while the filter is typed in, the results keep the room the keyboard
+     leaves: the chat's settings step aside (the places stay, and the filter
+     narrows them too), and the keyboard covers the home indicator's inset */
+  :root[data-keyboard] .index-chat { display: none; }
+  :root[data-keyboard] .chat-index { padding-bottom: 0; }
+  :root[data-keyboard] .index-foot:not(:has(.index-places)) { display: none; }
+  /* with little room left (a phone on its side), the foot goes back to the
+     end of the lists and scrolls with them, so a result always shows */
+  :root[data-keyboard="tight"] .index-foot { position: static; margin-bottom: 0; padding: 0; }
+  :root[data-keyboard="tight"] .index-body { scroll-padding-bottom: 0; }
+  :root[data-keyboard="tight"] .index-foot .index-places { margin-top: 0.7rem; }
 }
 
 /* ============================================================ artifact comments bank

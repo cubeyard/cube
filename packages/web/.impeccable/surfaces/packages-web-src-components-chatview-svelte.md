@@ -73,7 +73,11 @@ and settings.
   screen, sized to the visual viewport so the keyboard never covers the
   filter or its results while the user types): a filter; the chat's threads, failed then moving then the rest;
   the newest artifacts; the places (threads, artifacts, projects, settings);
-  the chat's model and memory. A key or a mouse focuses the filter; a tap
+  the chat's model and memory. On a phone the last two stand at the sheet's
+  foot while the lists scroll (however many threads there are), the places
+  one row of equal keys; with the keyboard up the model and memory step
+  aside, and with little room left (a phone on its side) the foot rejoins
+  the end of the lists so a result always shows. A key or a mouse focuses the filter; a tap
   focuses the sheet, so no keyboard rises; a close key is always there.
   Arrows walk it, enter opens, escape closes and gives focus back. It is the one floating surface (`--shadow-float`).
 - **Nothing beside the composer.** No key, count or state before or

@@ -10,7 +10,8 @@
   // The index: everything the chat is not, one step away and gone again.
   // The chat's threads (failed, then moving, then the rest, each in cubed's
   // own words), the newest artifacts, the places (threads, artifacts,
-  // projects, settings) and the chat's own model and memory. The wordmark
+  // projects, settings) and the chat's own model and memory; on a phone the
+  // last two stay in reach however long the lists are. The wordmark
   // opens it, as do `/` and ctrl/⌘ k; a filter narrows it, the
   // arrow keys walk it, enter opens, escape closes and focus goes back.
   let { work, settings }: { work: ChatWork; settings: Snippet } = $props();
@@ -105,6 +106,31 @@
     }
   }
 
+  /** A press on a link while the filter is typed in keeps focus in the
+   * filter: leaving it would end the keyboard's state at once, the chat's
+   * settings would come back into the foot and the links would move from
+   * under the finger before its click. The click opens the link as ever. */
+  function onMousedown(event: MouseEvent): void {
+    if (document.activeElement === input && (event.target as Element).closest("a[href]")) event.preventDefault();
+  }
+
+  // On a phone the foot is sticky over the lists' end: an item focused by
+  // the keys (or Tab) must not stand under it. The browser scrolls a
+  // focused item to the lists' bottom edge after focus moves; then, before
+  // the next paint, the lists scroll on until the item clears the foot.
+  let body = $state<HTMLElement>();
+  let foot = $state<HTMLElement>();
+  let footHeight = $state(0);
+  function onFocusin(event: FocusEvent): void {
+    const item = event.target as HTMLElement;
+    if (!body?.contains(item) || foot?.contains(item)) return;
+    requestAnimationFrame(() => {
+      if (!body || !foot || getComputedStyle(foot).position !== "sticky") return;
+      const under = item.getBoundingClientRect().bottom - foot.getBoundingClientRect().top;
+      if (under > 0) body.scrollTop += under;
+    });
+  }
+
   function onClose(): void {
     unfit?.();
     // Back to where the reader was, unless a link took them elsewhere.
@@ -115,7 +141,7 @@
 
 <!-- a press on the backdrop closes it, as escape does -->
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-<dialog class="chat-index" bind:this={dialog} aria-label="index" tabindex="-1" onclose={onClose} onkeydown={onKeydown}
+<dialog class="chat-index" bind:this={dialog} aria-label="index" tabindex="-1" onclose={onClose} onkeydown={onKeydown} onmousedown={onMousedown}
   style:top={room ? `${room.top}px` : null} style:height={room ? `${room.height}px` : null}
   onclick={(event) => { if (event.target === dialog) dialog?.close(); else if ((event.target as Element).closest("a[href]")) dialog?.close(); }}>
   <div class="index-filter">
@@ -124,7 +150,7 @@
       placeholder="filter" autocomplete="off" spellcheck="false" />
     <button type="button" class="index-close" aria-label="close index" title="close · esc" onclick={() => dialog?.close()}><Icon name="close" size={14} /></button>
   </div>
-  <div class="index-body">
+  <div class="index-body" bind:this={body} onfocusin={onFocusin} style:--foot="{footHeight}px">
     <section aria-labelledby="index-threads">
       <h2 id="index-threads">threads</h2>
       {#if work.error}
@@ -172,16 +198,20 @@
         </ul>
       {/if}
     </section>
-    {#if places.length}
-      <nav aria-label="places" class="index-places">
-        {#each places as place (place.href)}
-          <a href={place.href} data-index-item title={place.hint}>{place.name}</a>
-        {/each}
-      </nav>
-    {/if}
-    <section class="index-chat" aria-label="this chat">
-      {@render settings()}
-    </section>
+    <!-- after the lists; on a phone it stays at the sheet's foot while they
+         scroll, so no number of threads puts the places out of reach -->
+    <div class="index-foot" bind:this={foot} bind:offsetHeight={footHeight}>
+      {#if places.length}
+        <nav aria-label="places" class="index-places">
+          {#each places as place (place.href)}
+            <a href={place.href} data-index-item title={place.hint}>{place.name}</a>
+          {/each}
+        </nav>
+      {/if}
+      <section class="index-chat" aria-label="this chat">
+        {@render settings()}
+      </section>
+    </div>
   </div>
   <p class="index-keys" aria-hidden="true"><kbd>↑</kbd><kbd>↓</kbd> choose · <kbd>enter</kbd> open · <kbd>esc</kbd> close</p>
 </dialog>

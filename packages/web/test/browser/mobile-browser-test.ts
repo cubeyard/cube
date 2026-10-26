@@ -6,7 +6,10 @@
  * page (the viewport shrinks) and the way iOS Safari does (only the visual
  * viewport shrinks; stood in for here, as no desktop engine has an on-screen
  * keyboard). Turning the phone, long content, an attached image and the
- * fingertip's hit area of every small key are checked; the desktop keeps
+ * fingertip's hit area of every small key are checked; with many threads
+ * the index's places and the chat's settings stay on screen under its
+ * scrolling lists (on its side with the keyboard up the foot rejoins the
+ * lists, so a result still shows), and the menu key over a long thread list; the desktop keeps
  * its rows. Runs in Chromium, and in WebKit too when Playwright has it.
  * Screenshots go to CUBE_SCREENSHOTS when it is set. Needs a built UI. */
 import assert from "node:assert/strict";
@@ -341,6 +344,228 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.ok((await box(page, ".composer")).bottom <= 667);
     await assertNoSideways(page);
   });
+
+  // Many threads (synthetic): the index's lists scroll, and the places and
+  // the chat's own settings stand under them, never scrolled away.
+  const many = (count: number) => ({ threads: Array.from({ length: count }, (_, n) => ({ id: `m${n}`, title: `synthetic thread ${n + 1} about the gateway's retry budget`,
+    state: n % 7 ? "completed" : "working", project: { id: "p1", name: "cube" }, archived: false, spawned: null })), archived: { shown: 0, total: 3 }, unknown: 0 });
+  const PLACES = ["#/threads", "#/artifacts", "#/projects", "#/settings/providers"];
+  for (const size of [...phones, { width: 844, height: 390 }]) {
+    await scenario(browser, engine, "with 60 threads the places and the chat's model and memory are on screen at once, in a fingertip's reach, and stay while the lists scroll", size, "chat", async (page, host) => {
+      host.overview = many(60);
+      await page.locator(`${ACTIVE} .sheet-bar .name-key`).tap();
+      const index = page.locator(`${ACTIVE} .chat-index`);
+      await index.locator(".index-row").nth(59).waitFor({ state: "attached" });
+      await settle(page);
+      const sheet = await box(page, ".chat-index");
+      const body = await box(page, ".chat-index .index-body");
+      const foot = await box(page, ".chat-index .index-foot");
+      assert.ok(Math.abs(foot.bottom - body.bottom) <= 1 && foot.bottom <= size.height + 0.5, `the foot stands at the sheet's foot, on screen: ${JSON.stringify({ body, foot, sheet })}`);
+      assert.ok(foot.top - body.top >= 2 * 44, `the lists keep room for rows above it: ${foot.top - body.top}px`);
+      const places = index.locator(".index-places a");
+      assert.deepEqual(await places.evaluateAll(all => all.map(link => link.getAttribute("href"))), PLACES, "every place, in its order");
+      const placed = async () => JSON.stringify(await places.evaluateAll(all => all.map(link => { const { top, left, bottom, right } = link.getBoundingClientRect(); return [top, left, bottom, right]; })));
+      const before = await placed();
+      for (const link of await places.all()) {
+        const { top, bottom, left, right } = await link.evaluate(element => element.getBoundingClientRect().toJSON() as DOMRect);
+        assert.ok(top >= foot.top && bottom <= size.height && left >= 0 && right <= size.width, `${await link.textContent()} on screen`);
+        assert.ok(await link.evaluate(element => element.scrollWidth <= element.clientWidth + 0.5), `${await link.textContent()} is not clipped`);
+      }
+      for (const n of [0, 3]) await assertHitArea(page, `.chat-index .index-places a >> nth=${n}`);
+      for (const control of [".index-model select", ".index-memory"]) {
+        const { top, bottom } = await box(page, `.chat-index ${control}`);
+        assert.ok(top >= foot.top && bottom <= size.height, `${control} on screen without scrolling`);
+      }
+      // the lists scroll under the foot, which stays where it is
+      const scrolled = await page.locator(`${ACTIVE} .chat-index .index-body`).evaluate(element => { element.scrollTop = element.scrollHeight; return element.scrollTop; });
+      assert.ok(scrolled > 0, "the lists scroll");
+      await settle(page);
+      assert.equal(await placed(), before, "the places do not move");
+      // at the end of the lists the last row stands clear above the foot
+      const last = await box(page, ".chat-index .index-row >> nth=-1");
+      assert.ok(last.bottom <= (await box(page, ".chat-index .index-foot")).top + 0.5, `the last row is not under the foot: ${last.bottom}`);
+      assert.equal(await page.evaluate(() => [window.scrollY, document.scrollingElement?.scrollTop ?? 0].join()), "0,0", "the page behind does not scroll");
+      await assertNoSideways(page);
+      await page.locator(`${ACTIVE} .chat-index .index-body`).evaluate(element => { element.scrollTop = 0; });
+      await shoot(page, engine, `index-many-${size.width}x${size.height}`);
+      // a place is one tap away: settings opens, the index goes
+      await places.last().tap();
+      await page.waitForURL(/#\/settings\/providers$/);
+      await index.waitFor({ state: "hidden" });
+    });
+  }
+
+  // A phone on its side with the keyboard up leaves ~150-160px (tight): the
+  // foot goes back to the end of the lists, so a result always shows, and
+  // the places are a scroll away (synthetic keyboard: a resized viewport, or
+  // a stand-in visual viewport for iOS).
+  for (const [size, room] of [[{ width: 844, height: 390 }, 160], [{ width: 667, height: 375 }, 150]] as const) {
+    for (const ios of [false, true]) {
+      for (const typed of ["s", "re"]) {
+        await scenario(browser, engine, `on its side, typing "${typed}" with the keyboard up (${room}px, ${ios ? "iOS" : "Android"}): the first result row shows whole, the places a scroll away`, { ...size, ios }, "chat", async (page, host) => {
+          host.overview = many(60);
+          await page.locator(`${ACTIVE} .sheet-bar .name-key`).tap();
+          const index = page.locator(`${ACTIVE} .chat-index`);
+          await index.locator(".index-row").nth(59).waitFor({ state: "attached" });
+          await index.locator("input[type=search]").tap();
+          if (ios) await page.evaluate(height => (window.visualViewport as unknown as { set: (h: number) => void }).set(height), room);
+          else await page.setViewportSize({ width: size.width, height: room });
+          await page.waitForFunction(() => document.documentElement.dataset.keyboard === "tight");
+          await page.keyboard.type(typed);
+          await settle(page);
+          const field = await box(page, ".chat-index input[type=search]");
+          // whole within the results' own visible box, not merely laid out on screen
+          const results = await box(page, ".chat-index .index-body");
+          const first = await box(page, ".chat-index .index-row[href^='#/t/']");
+          assert.ok(first.top >= Math.max(field.bottom, results.top) - 0.5 && first.bottom <= Math.min(room, results.bottom) + 0.5 && first.height >= 43.5,
+            `the first thread row shows whole: ${first.top}–${first.bottom} in results ${results.top}–${results.bottom}, of ${room}`);
+          assert.equal(await page.evaluate(([x, y]) => !!document.elementFromPoint(x!, y!)?.closest(".index-row[href^='#/t/']"), [first.left + 20, first.bottom - 4]), true, "its bottom edge is the row itself, not a foot over it");
+          assert.ok(await index.locator(".index-places a").count() >= 1, `"${typed}" matches places too`);
+          await assertNoSideways(page);
+          await shoot(page, engine, `index-tight-${typed}-${ios ? "ios" : "android"}-${size.width}x${size.height}`, room);
+          // the places are reachable: the lists scroll to them, above the keyboard
+          await page.locator(`${ACTIVE} .chat-index .index-body`).evaluate(element => { element.scrollTop = element.scrollHeight; });
+          await settle(page);
+          const settings = await box(page, ".chat-index .index-places a >> nth=-1");
+          assert.ok(settings.top >= results.top - 0.5 && settings.bottom <= Math.min(room, results.bottom) + 0.5, `the last place shows at the end: ${settings.top}–${settings.bottom} in ${results.top}–${results.bottom}`);
+          assert.equal(await page.evaluate(() => (document.activeElement as HTMLInputElement | null)?.value), typed, "the filter keeps focus and the words typed");
+          assert.equal(await page.evaluate(() => [window.scrollY, document.scrollingElement?.scrollTop ?? 0].join()), "0,0", "the page behind does not scroll");
+        });
+      }
+    }
+  }
+
+  // With the keyboard up, a destination opens on its first tap: pressing it
+  // keeps focus in the filter, so the keyboard's state and the foot hold still
+  // (synthetic keyboard; on a device iOS may not move focus at all).
+  for (const [size, room, tight] of [[{ width: 375, height: 667 }, 347, false], [{ width: 844, height: 390 }, 160, true]] as const) {
+    for (const ios of [false, true]) {
+      for (const target of ["settings", "threads", "a thread"] as const) {
+        await scenario(browser, engine, `with the keyboard up (${room}px, ${ios ? "iOS" : "Android"}), the first tap on ${target} opens it`, { ...size, ios }, "chat", async (page, host) => {
+          const overview = many(60);
+          overview.threads[0] = { ...overview.threads[0]!, id: "t1", title: thread.title ?? "a thread" };
+          host.overview = overview;
+          await page.locator(`${ACTIVE} .sheet-bar .name-key`).tap();
+          const index = page.locator(`${ACTIVE} .chat-index`);
+          await index.locator(".index-row").nth(59).waitFor({ state: "attached" });
+          await index.locator("input[type=search]").tap();
+          if (ios) await page.evaluate(height => (window.visualViewport as unknown as { set: (h: number) => void }).set(height), room);
+          else await page.setViewportSize({ width: size.width, height: room });
+          await page.waitForFunction(state => document.documentElement.dataset.keyboard === state, tight ? "tight" : "open");
+          await page.keyboard.type("s");
+          await settle(page);
+          const link = target === "a thread" ? index.locator(".index-row[href='#/t/t1']")
+            : index.locator(".index-places a", { hasText: target });
+          if (tight && target !== "a thread") await page.locator(`${ACTIVE} .chat-index .index-body`).evaluate(element => { element.scrollTop = element.scrollHeight; });
+          await settle(page);
+          await link.tap();
+          const expected = target === "settings" ? /#\/settings\/providers$/ : target === "threads" ? /#\/threads$/ : /#\/t\/t1$/;
+          await page.waitForURL(expected, { timeout: 3000 }).catch(async () => assert.fail(`the first tap did not open ${target}: at ${await page.evaluate(() => location.hash)}, keyboard ${await keyboard(page)}`));
+          await index.waitFor({ state: "hidden" });
+        });
+      }
+    }
+  }
+
+  // The keys walk the lists down past the sticky foot: the focused item is
+  // never under it, the last rows and the places included.
+  for (const size of [{ width: 375, height: 667 }, { width: 600, height: 800, touch: false }]) {
+    await scenario(browser, engine, "walking the index by the keys, every focused item stays in view, clear of the foot", size, "chat", async (page, host) => {
+      host.overview = many(60);
+      await page.locator(`${ACTIVE} .sheet-bar .name-key`).click();
+      const index = page.locator(`${ACTIVE} .chat-index`);
+      await index.locator(".index-row").nth(59).waitFor({ state: "attached" });
+      await index.locator("input[type=search]").focus();
+      const seen = async (step: string) => {
+        await settle(page);
+        await settle(page);
+        const where = await page.evaluate(() => {
+          const item = document.activeElement as HTMLElement;
+          const body = document.querySelector(".chat-index .index-body")!.getBoundingClientRect();
+          const foot = document.querySelector(".chat-index .index-foot")!;
+          const box = item.getBoundingClientRect();
+          const inFoot = foot.contains(item);
+          const limit = inFoot || getComputedStyle(foot).position !== "sticky" ? body.bottom : foot.getBoundingClientRect().top;
+          return { text: (item.textContent ?? item.tagName).trim().slice(0, 30), top: box.top, bottom: box.bottom, from: item.matches("input") ? 0 : body.top, limit, inFoot };
+        });
+        assert.ok(where.top >= where.from - 0.5 && where.bottom <= where.limit + 0.5, `${step}: "${where.text}" in view, clear of the foot: ${where.top}–${where.bottom} within ${where.from}–${where.limit}`);
+      };
+      const items = await index.locator("[data-index-item]").count();
+      for (let step = 1; step < items; step++) {
+        await page.keyboard.press("ArrowDown");
+        if (await page.evaluate(() => document.activeElement?.tagName === "SELECT")) break;
+        await seen(`down ${step}`);
+      }
+      // and from the filter up: the end first, then back through the last rows
+      await index.locator("input[type=search]").focus();
+      for (let step = 1; step <= 6; step++) {
+        await page.keyboard.press("ArrowUp");
+        if (await page.evaluate(() => document.activeElement?.tagName === "SELECT")) {
+          await page.locator(`${ACTIVE} .chat-index .index-places a`).last().focus();
+          continue;
+        }
+        await seen(`up ${step}`);
+      }
+    });
+  }
+
+  await scenario(browser, engine, "the thread list with 60 threads, read to its end: the menu key stays on screen and settings is one tap away", phones[0]!, "threads", async (page, host) => {
+    host.threads = Array.from({ length: 60 }, (_, n) => ({ ...thread, id: `m${n}`, title: `synthetic thread ${n + 1} about the gateway's retry budget` }));
+    await page.locator(`${ACTIVE} a[href="#/t/m59"]`).waitFor({ state: "attached" });
+    const scrolled = await page.locator(`${ACTIVE} main`).evaluate(element => { element.scrollTop = element.scrollHeight; return element.scrollTop; });
+    assert.ok(scrolled > 0, "the list is longer than the screen");
+    await settle(page);
+    const key = page.locator(`${ACTIVE} .nav-menu-key`);
+    const { top, bottom } = await box(page, ".nav-menu-key");
+    assert.ok(top >= 0 && bottom <= phones[0]!.height, `the menu key is on screen: ${top}–${bottom}`);
+    await key.tap();
+    const settings = page.locator("header nav a", { hasText: "settings" });
+    assert.ok(await settings.isVisible());
+    await settings.tap();
+    await page.waitForURL(/#\/settings\/providers$/);
+  });
+
+  for (const ios of [false, true]) {
+    const way = ios ? "visual viewport only (iOS)" : "whole viewport (Android)";
+    await scenario(browser, engine, `typing in the index's filter with many threads, ${way}: the places stay above the keyboard, the chat's settings step aside and come back`, { ...phone, ios }, "chat", async (page, host) => {
+      host.overview = many(60);
+      await page.locator(`${ACTIVE} .sheet-bar .name-key`).tap();
+      const index = page.locator(`${ACTIVE} .chat-index`);
+      await index.locator(".index-row").nth(59).waitFor({ state: "attached" });
+      await index.locator("input[type=search]").tap();
+      const room = phone.height - 320;
+      if (ios) await page.evaluate(height => (window.visualViewport as unknown as { set: (h: number) => void }).set(height), room);
+      else await page.setViewportSize({ width: phone.width, height: room });
+      await page.waitForFunction(() => document.documentElement.dataset.keyboard);
+      await page.keyboard.type("s");
+      await settle(page);
+      assert.equal(await index.locator(".index-chat").isVisible(), false, "the chat's settings step aside while typing");
+      const field = await box(page, ".chat-index input[type=search]");
+      const first = await box(page, ".chat-index .index-row");
+      assert.ok(first.top >= field.bottom && first.bottom <= room, `the first result is in view: ${first.top}–${first.bottom} of ${room}`);
+      const places = index.locator(".index-places a");
+      assert.deepEqual(await places.evaluateAll(all => all.map(link => link.getAttribute("href"))), PLACES, "\"s\" matches every place");
+      for (const link of await places.all()) {
+        const { top, bottom } = await link.evaluate(element => element.getBoundingClientRect().toJSON() as DOMRect);
+        assert.ok(top >= first.bottom && bottom <= room, `${await link.textContent()} above the keyboard: ${top}–${bottom} of ${room}`);
+      }
+      await assertNoSideways(page);
+      await shoot(page, engine, `index-many-keyboard-${ios ? "ios" : "android"}-375x667`, room);
+      // the filter narrows the places too; enter still opens the first thread
+      await page.keyboard.type("ettings");
+      await settle(page);
+      assert.deepEqual(await places.evaluateAll(all => all.map(link => link.getAttribute("href"))), ["#/settings/providers"]);
+      // the keyboard goes: the chat's settings come back
+      await page.locator(`${ACTIVE} .chat-index input[type=search]`).blur();
+      if (ios) await page.evaluate(() => (window.visualViewport as unknown as { set: (h: null) => void }).set(null));
+      else await page.setViewportSize({ width: phone.width, height: phone.height });
+      await settle(page);
+      assert.equal(await keyboard(page), null);
+      assert.ok(await index.locator(".index-chat").isVisible(), "the chat's settings are back");
+      const { bottom } = await box(page, ".chat-index .index-memory");
+      assert.ok(bottom <= phone.height, "on screen");
+    });
+  }
 
   for (const ios of [false, true]) {
     const way = ios ? "visual viewport only (iOS)" : "whole viewport (Android)";
