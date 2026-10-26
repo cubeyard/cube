@@ -84,6 +84,13 @@ and settings.
   whole. A failure stands open. Grouping consecutive reports, folding
   artifact-comment messages and sending an index search to the chat are
   proposals (artifact e113082c §8), not part of this.
+- **Tool runs fold (the user's call, 2026-10-26).** Two or more tool calls
+  in a row (only streamed reasoning between them) are one line: `n tools
+  called`, `n failed` in error ink, the state while it moves, the call
+  worth naming. Folded by default, failures too (the line says them; the
+  failed call stands open inside). Prose, messages, reports and a call
+  that returned images end a run; one call alone is its own line. A spawn
+  in a run keeps its note by the run's line; the note's way back opens it.
 - Composer, uploads, history paging and scroll keeping, routes and deep
   links, artifact reading, comments and confirmed merge actions are the
   existing ones, unchanged.

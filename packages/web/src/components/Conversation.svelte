@@ -9,6 +9,7 @@
   import { echo, echoRows, unanswered, unlogged, type Echo } from "../lib/outbox.ts";
   import { keepRows, picturePath, toolOpen, transcriptRows, type ToolState, type TranscriptRow } from "../lib/transcript.ts";
   import { rowKey } from "../lib/provenance.ts";
+  import { groupChoiceKey, groupLine, groupOpen, groupTools, type Shown } from "../lib/tool-groups.ts";
   import { uid } from "../lib/uid.ts";
   import type { MessageImage, ModelSelection, ThreadStatus, ThreadTranscript } from "../lib/types.ts";
   import { tailStart, WINDOW_EVENTS } from "../../../server/src/transcript-window.ts";
@@ -17,7 +18,7 @@
   import ThinkingCube from "./ThinkingCube.svelte";
 
   let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread", images = null,
-    sheet = false, onRows, toolLine, reportLabel, reportTitle, after, margin }: {
+    sheet = false, foldTools = false, onRows, toolLine, reportLabel, reportTitle, after, margin }: {
     threadId?: string;
     /** Messages may be sent while the agent works; they reach it between tool calls. */
     steer?: boolean;
@@ -38,6 +39,8 @@
     /** The chat's sheet: no "you"/"agent" labels over the messages (each
      * keeps its accessible name), quieter tool lines, room for a margin. */
     sheet?: boolean;
+    /** Each run of consecutive tool calls is one folded line (lib/tool-groups.ts). */
+    foldTools?: boolean;
     /** Told the rows shown, for what is drawn beside them. */
     onRows?: (rows: TranscriptRow[]) => void;
     /** A tool row's line in plain words, in place of its raw input. */
@@ -75,6 +78,8 @@
     shownRows = new Map(next.map(row => [row.id, row]));
     return next;
   });
+  /** The rows as drawn: runs of tool calls folded, when this conversation folds them. */
+  const shown = $derived<Shown[]>(foldTools ? groupTools(rows) : rows.map(row => ({ kind: "row", row })));
   const status = $derived<ThreadStatus>(transcript.status);
   $effect(() => { onRows?.(rows); });
   // The draft outlives the view: closing the panel a thread is in keeps it,
@@ -473,6 +478,13 @@
     if (open !== toolOpen(row, chosen)) chosen.set(row.callId, open);
   }
 
+  /** A group stands folded until the reader opens it; the choice is kept by each of its calls. */
+  function onGroupToggle(event: Event, group: Extract<Shown, { kind: "tools" }>): void {
+    const open = (event.currentTarget as HTMLDetailsElement).open;
+    if (open === groupOpen(group, chosen)) return;
+    for (const tool of group.tools) chosen.set(groupChoiceKey(tool.callId), open);
+  }
+
   const toolStateLabel: Record<ToolState, string> = { waiting: "waiting", running: "running", done: "done", error: "error", open: "no result" };
 </script>
 
@@ -500,56 +512,31 @@
           <span>{empty?.hint ?? "Ask for a change, paste an error, or describe what you want to understand."}</span>
         </div>
       {:else}
-        {#each rows as row (row.id)}
-          {#if row.kind === "tool"}
-            {@const line = toolLine?.(row) ?? null}
-            <details class="tool-strip" data-anchor={rowKey(row)} open={toolOpen(row, chosen)} ontoggle={(event) => onToolToggle(event, row)}>
-              <summary title={row.summary || row.name}>
-                {#if line}<span class="tool-said">{line}</span><code class="tool-name">{row.name}</code>
-                {:else}<code>{row.name}</code>{#if row.summary}<span class="tool-summary">{row.summary}</span>{/if}{/if}
-                {#if row.state === "done"}<span class="sr-only">done</span>{:else}<span class="tool-state" class:failure={row.state === "error"}>{toolStateLabel[row.state]}</span>{/if}
-                {#if row.input || row.output || row.images}<span class="tool-chevron"><Icon name="chevron" size={12} /></span>{/if}
-              </summary>
-              {#if row.input}<pre class="tool-input">{row.input}</pre>{/if}
-              {#if row.output}<pre>{row.output}</pre>{/if}
-              {#if row.images}{@render messageImages(row.images, row.summary || row.name)}{/if}
-            </details>
-          {:else if row.kind === "user" && row.from}
-            <!-- A report is one folded line: the chat's own answer is what is read.
-                 A failure stands open; opened, the report is whole, as before. -->
-            {@const line = reportLine(row.text)}
-            {@const title = reportTitle?.(row.from) ?? `thread ${row.from}`}
-            <details class="conversation-message report report-line" class:failed={line.failed} data-anchor={rowKey(row)}
-              open={reportOpen(row.id, line.failed)} ontoggle={(event) => onReportToggle(event, row.id, line.failed)}>
-              <summary aria-label={`report from ${title}${line.state ? `, ${line.state}` : ""}${line.summary ? `: ${line.summary}` : ""}`}>
-                <span class="report-title">{title}</span><span class="report-kind">report</span>
-                {#if line.state}<span class="report-state" class:failure={line.failed}>{line.state}</span>{/if}
-                {#if line.summary}<span class="report-summary">{line.summary}</span>{/if}
+        {#each shown as item (item.kind === "row" ? item.row.id : `tools:${item.key}`)}
+          {#if item.kind === "tools"}
+            <!-- A run of tool calls is one folded line: the chat's prose is what
+                 is read. Its failures print in error ink on the line; opened,
+                 each call is its own strip, as before. -->
+            {@const line = groupLine(item.tools)}
+            {@const said = toolLine?.(line.named) ?? null}
+            {@const named = said ?? [line.named.name, line.named.summary].filter(Boolean).join(" ")}
+            <details class="tool-group" class:failed={!!line.failed} open={groupOpen(item, chosen)} ontoggle={(event) => onGroupToggle(event, item)}>
+              <summary aria-label={`${line.count}${line.failed ? `, ${line.failed}` : ""}${line.state ? `, ${line.state}` : ""}: ${named}`} title={named}>
+                <span class="tool-group-count">{line.count}</span>
+                {#if line.failed}<span class="tool-state failure">{line.failed}</span>{/if}
+                {#if line.state}<span class="tool-state">{line.state}</span>{/if}
+                <span class="tool-group-named">{#if said}<span class="tool-said">{said}</span>{:else}<code class="tool-name">{line.named.name}</code>{#if line.named.summary}<span class="tool-summary">{line.named.summary}</span>{/if}{/if}</span>
                 <span class="tool-chevron"><Icon name="chevron" size={12} /></span>
               </summary>
-              <div class="report-body">
-                <span class="message-label">{#if reportLabel}{@render reportLabel(row.from)}{:else}thread {row.from}{/if}</span>
-                <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text and allows only http(s)/mailto links -->
-                <div class="message-copy markdown">{@html renderMarkdown(row.text)}</div>
+              <div class="tool-group-body">
+                {#each item.rows as row (row.id)}{@render rowView(row)}{/each}
               </div>
             </details>
-          {:else if row.kind === "user"}
-            <article class="conversation-message user" class:sending={row.sending} aria-label="user message" data-anchor={rowKey(row)}>
-              {#if !sheet}<span class="message-label">you{#if row.sending}<span class="message-sending"> · sending</span>{/if}</span>
-              {:else if row.sending}<span class="message-label message-sending">sending</span>{/if}
-              {#if row.images}{@render messageImages(row.images, "")}{/if}
-              {#if row.text}<div class="message-copy">{row.text}</div>{/if}
-            </article>
+            {#each item.rows as row (row.id)}{@render after?.(row)}{/each}
           {:else}
-            <article class="conversation-message assistant" class:continued={!row.labelled} aria-label={row.reasoning ? "agent reasoning" : "agent message"} data-anchor={rowKey(row)}>
-              {#if row.labelled && !sheet}<span class="message-label">agent</span>{/if}
-              <!-- a press on an image the thread read opens it; the keys are in the rendered markup -->
-              <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-              <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text, allows only http(s)/mailto links and shows only images the thread read -->
-              <div class="message-copy markdown" class:reasoning={row.reasoning} onclick={onProseClick}>{@html renderMarkdown(row.text, pictureOf(row))}</div>
-            </article>
+            {@render rowView(item.row)}
+            {@render after?.(item.row)}
           {/if}
-          {@render after?.(row)}
         {/each}
         {#if working}
           <div class="working-line" role="status"><ThinkingCube state="working" /><span>working…</span></div>
@@ -631,6 +618,57 @@
     </dialog>
   {/if}
 </div>
+
+{#snippet rowView(row: TranscriptRow)}
+  {#if row.kind === "tool"}
+    {@const line = toolLine?.(row) ?? null}
+    <details class="tool-strip" data-anchor={rowKey(row)} open={toolOpen(row, chosen)} ontoggle={(event) => onToolToggle(event, row)}>
+      <summary title={row.summary || row.name}>
+        {#if line}<span class="tool-said">{line}</span><code class="tool-name">{row.name}</code>
+        {:else}<code>{row.name}</code>{#if row.summary}<span class="tool-summary">{row.summary}</span>{/if}{/if}
+        {#if row.state === "done"}<span class="sr-only">done</span>{:else}<span class="tool-state" class:failure={row.state === "error"}>{toolStateLabel[row.state]}</span>{/if}
+        {#if row.input || row.output || row.images}<span class="tool-chevron"><Icon name="chevron" size={12} /></span>{/if}
+      </summary>
+      {#if row.input}<pre class="tool-input">{row.input}</pre>{/if}
+      {#if row.output}<pre>{row.output}</pre>{/if}
+      {#if row.images}{@render messageImages(row.images, row.summary || row.name)}{/if}
+    </details>
+  {:else if row.kind === "user" && row.from}
+    <!-- A report is one folded line: the chat's own answer is what is read.
+         A failure stands open; opened, the report is whole, as before. -->
+    {@const line = reportLine(row.text)}
+    {@const title = reportTitle?.(row.from) ?? `thread ${row.from}`}
+    <details class="conversation-message report report-line" class:failed={line.failed} data-anchor={rowKey(row)}
+      open={reportOpen(row.id, line.failed)} ontoggle={(event) => onReportToggle(event, row.id, line.failed)}>
+      <summary aria-label={`report from ${title}${line.state ? `, ${line.state}` : ""}${line.summary ? `: ${line.summary}` : ""}`}>
+        <span class="report-title">{title}</span><span class="report-kind">report</span>
+        {#if line.state}<span class="report-state" class:failure={line.failed}>{line.state}</span>{/if}
+        {#if line.summary}<span class="report-summary">{line.summary}</span>{/if}
+        <span class="tool-chevron"><Icon name="chevron" size={12} /></span>
+      </summary>
+      <div class="report-body">
+        <span class="message-label">{#if reportLabel}{@render reportLabel(row.from)}{:else}thread {row.from}{/if}</span>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text and allows only http(s)/mailto links -->
+        <div class="message-copy markdown">{@html renderMarkdown(row.text)}</div>
+      </div>
+    </details>
+  {:else if row.kind === "user"}
+    <article class="conversation-message user" class:sending={row.sending} aria-label="user message" data-anchor={rowKey(row)}>
+      {#if !sheet}<span class="message-label">you{#if row.sending}<span class="message-sending"> · sending</span>{/if}</span>
+      {:else if row.sending}<span class="message-label message-sending">sending</span>{/if}
+      {#if row.images}{@render messageImages(row.images, "")}{/if}
+      {#if row.text}<div class="message-copy">{row.text}</div>{/if}
+    </article>
+  {:else}
+    <article class="conversation-message assistant" class:continued={!row.labelled} aria-label={row.reasoning ? "agent reasoning" : "agent message"} data-anchor={rowKey(row)}>
+      {#if row.labelled && !sheet}<span class="message-label">agent</span>{/if}
+      <!-- a press on an image the thread read opens it; the keys are in the rendered markup -->
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text, allows only http(s)/mailto links and shows only images the thread read -->
+      <div class="message-copy markdown" class:reasoning={row.reasoning} onclick={onProseClick}>{@html renderMarkdown(row.text, pictureOf(row))}</div>
+    </article>
+  {/if}
+{/snippet}
 
 <!-- `subject` names a tool's images (its path); a message's are numbered -->
 {#snippet messageImages(list: MessageImage[], subject: string)}

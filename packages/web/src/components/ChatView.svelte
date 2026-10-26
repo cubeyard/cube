@@ -85,6 +85,9 @@
     if (!target) return;
     // the way to a report from its note opens it: one action, not two
     if (target instanceof HTMLDetailsElement && target.classList.contains("report-line")) target.open = true;
+    // so does the way to a tool call in a folded run of calls
+    const group = target.parentElement?.closest<HTMLDetailsElement>("details.tool-group");
+    if (group) group.open = true;
     target.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
     // a tool line's own key is its summary; a message takes focus as a place, not a stop in the tab order
     const place = target.querySelector<HTMLElement>(":scope > summary") ?? target;
@@ -217,7 +220,7 @@
     </section>
   {/if}
   {#if modelState}
-    <Conversation base={CHAT_BASE} steer sheet model={selectedModel} {changingModel} bind:busy onRows={(shown) => (rows = shown)}
+    <Conversation base={CHAT_BASE} steer sheet foldTools model={selectedModel} {changingModel} bind:busy onRows={(shown) => (rows = shown)}
       images={modelState.images ?? { supported: false, reason: "this host does not take images in the chat" }}
       placeholder="message optchat" {toolLine} {reportLabel} {reportTitle} {after} margin={wide ? margin : undefined}
       empty={{ title: "one chat, every thread", hint: "Say what you want done: the chat starts threads in your projects, follows their reports and remembers everything you said. A thread needs a project; add one under projects." }} />

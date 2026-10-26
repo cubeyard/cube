@@ -643,7 +643,22 @@ carries a "you"/"agent" label; each keeps its accessible name. Tool lines
 are quiet: no face until opened. The chat's own tools speak in words —
 `started 3 threads · 1 not started`, `told <thread>`, `created <title> ·
 revision 1` — with the tool's mono name after; other tools keep their raw
-primary argument. The composer field takes the well radius and a soft
+primary argument. A **run of tool calls** is one folded line too (the
+user's call, 2026-10-26; `lib/tool-groups.ts`): two or more calls with
+nothing between them but streamed reasoning fold to `n tools called`, then
+`n failed` in `--bad` ink, the run's state while it moves (`waiting`,
+`running`, `no result`) and the call worth naming in its tool line's words
+(the one that moves, else the first that failed, else the last). It comes
+folded, failures too: the line says the failure, and inside, the failed
+call stands open. Opened, each call is its own quiet line under one
+`--line-2` hairline (`--bad-line` when one failed). Prose, a user message,
+a report, a message being sent and a call that returned images end a run;
+one call alone stays its own line; nothing moves or reorders. The reader's
+choice is kept by each of the run's calls, so it holds as the run grows a
+call at a time and when an earlier page reaches back into it. A spawn or a
+write folded into a run keeps its margin note by the run's line, its
+thread lines under it on a phone, and the note's way back opens the run.
+Threads keep their tool lines unfolded. The composer field takes the well radius and a soft
 1px-offset shadow, and nothing stands beside it: no key, count or state.
 What runs and what failed is said where it belongs, in the margin's notes
 and the index.

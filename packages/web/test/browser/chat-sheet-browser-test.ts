@@ -288,7 +288,8 @@ for (const viewport of [desktop, phone]) {
   await scenario("a tell the thread took brings it back beside the tell, once; a refused or failed one does not", viewport, async (page, host) => {
     const wide = viewport.width >= 1216;
     const flaky = ID.flaky.slice(0, 8), ca = ID.ca.slice(0, 8);
-    const noteAt = (row: string) => page.locator(wide ? `.margin-notes > [data-note="${row}"]` : `.transcript-column [data-anchor="${row}"] + .sheet-note`);
+    // inline, a note follows its row, or the folded run of calls the row is in (tool-groups-browser-test)
+    const noteAt = (row: string) => page.locator(wide ? `.margin-notes > [data-note="${row}"]` : `.transcript-column .sheet-note.inline[data-note="${row}"]`);
     const flakyNotes = () => page.locator(wide ? ".margin-note .note-head" : ".transcript-column .sheet-note .note-head", { hasText: "find why the artifact browser test is flaky" });
     const toEnd = async () => { await page.locator(".transcript").evaluate(element => { element.scrollTop = element.scrollHeight; }); await settle(page); };
     const inView = (row: string) => noteAt(row).evaluate(element => {
@@ -327,7 +328,8 @@ for (const viewport of [desktop, phone]) {
       ...tell("tell-no", ca, `not sent: [${ca}] had 3 tells from you since the user's last message; tell the user what it needs instead`),
       ...tell("tell-err", ca, `[${ca}] is archived`, true)];
     host.set(events, { state: "working" });
-    await page.locator(".transcript-column [data-anchor='call:tell-err']").waitFor();
+    // the three tells are one folded run of calls now: the row is there, folded
+    await page.locator(".transcript-column [data-anchor='call:tell-err']").waitFor({ state: "attached" });
     await settle(page);
     assert.equal(await noteAt("call:tell-no").count() + await noteAt("call:tell-err").count(), 0, "a refused or failed tell brings nothing back");
     assert.equal(await noteAt("call:spawn-1").locator(".note-head", { hasText: "java trusts runner ca" }).count(), 1, "the java thread stays at its spawn");
