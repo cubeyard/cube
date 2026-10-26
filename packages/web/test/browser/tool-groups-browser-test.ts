@@ -7,7 +7,9 @@
  * call at a time; a failed call is named on the folded line and stands open
  * inside it. A spawn folded into a run keeps its margin note beside the
  * run's line (desktop) or its thread lines under it (phone), and the note's
- * way back opens the run. Desktop and phone, Chromium and WebKit where
+ * way back opens the run. A tell folded into a run (#288) keeps its
+ * thread's one note, at the newest tell it took, by the run's line while
+ * folded and by the tell's own line once open. Desktop and phone, Chromium and WebKit where
  * Playwright has it. Screenshots go to CUBE_SCREENSHOTS when it is set.
  * Needs a built UI (pnpm build). */
 import assert from "node:assert/strict";
@@ -162,6 +164,80 @@ try {
     await context.close();
     await host.close();
   }
+  // Tells folded into a run (#288): the thread's note stands once, at the newest tell it took,
+  // drawn by the run's line while it is folded and by the tell's own line once it is open.
+  const flaky = ID.flaky.slice(0, 8);
+  const told: ThreadEvent[] = [...history,
+    user("5.0", "tell the flaky one to keep going, then check on it"),
+    call("5.1", "tell-a", "tell", { id: flaky, message: "keep going" }),
+    result("5.2", "tell-a", "tell", `sent to [${flaky}]; its report comes back as a message starting "[${flaky}] "`),
+    call("5.3", "threads-5", "threads", {}),
+    result("5.4", "threads-5", "threads", `[${flaky}] working · find why the artifact browser test is flaky`),
+    call("5.5", "tell-b", "tell", { id: flaky, message: "and rebase on main" }),
+    result("5.6", "tell-b", "tell", `queued for [${flaky}], which is working: it reads it after its current tool call`),
+    agent("5.7", "Told it twice; it is working."),
+    // room under the run: near the page's end the margin lifts notes to stay inside it
+    ...Array.from({ length: 6 }, (_, index) => [user(`6.${index}a`, `question ${index + 1}: anything new?`), agent(`6.${index}b`, "Nothing new: the runners answered within the last minute and nothing needs you.")]).flat(),
+  ];
+  for (const [engine, browser] of engines) for (const base of [{ name: "desktop", width: 1440, height: 900 }, { name: "phone", width: 390, height: 844, touch: true }]) {
+    const size = { ...base, name: `${engine} ${base.name}` };
+    const wide = !base.touch;
+    const host = await ScriptedHost.start();
+    host.transcript = { ...host.transcript, status: { state: "completed", run: "r", error: null }, events: told };
+    host.overview = overview({ flaky: "working" });
+    host.threads = threads;
+    host.artifacts = artifacts;
+    host.bodies = bodies;
+    const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, isMobile: !!size.touch && engine === "chromium", hasTouch: !!size.touch });
+    const page = await context.newPage();
+    page.on("pageerror", error => errors.push(`${size.name}: ${String(error)}`));
+    await page.goto(`${host.url}/#/chat`);
+    await page.getByText("Told it twice; it is working.").waitFor();
+    await page.evaluate(() => document.fonts.ready);
+    await page.locator("[data-anchor='5.0']").evaluate(element => element.scrollIntoView({ block: "start" }));
+
+    const run = groups(page).filter({ has: page.locator("[data-anchor='call:tell-b']") });
+    assert.equal(await isOpen(run), false, `${size.name}: the tells' run comes folded`);
+    assert.equal(await run.locator(":scope > summary .tool-group-count").textContent(), "3 tools called");
+    const notes = page.locator(wide ? ".margin-notes > [data-note]" : ".transcript-column .sheet-note.inline[data-note]")
+      .filter({ has: page.locator(".note-head", { hasText: "find why the artifact browser test is flaky" }) });
+    await notes.first().waitFor();
+    assert.deepEqual(await notes.evaluateAll(all => all.map(note => note.getAttribute("data-note"))), ["call:tell-b"], `${size.name}: one note for the thread, at the newest tell it took`);
+    const note = notes.first();
+    const top = async (locator: Locator) => (await locator.boundingBox())!.y;
+    if (wide) {
+      await page.locator(".margin-note.level[data-note='call:tell-b']").waitFor();
+      // folded, the note stands by the run's line
+      await page.waitForFunction(() => {
+        const note = document.querySelector(".margin-note[data-note='call:tell-b']"), line = document.querySelector("details.tool-group:has([data-anchor='call:tell-b']) > summary");
+        return !!note && !!line && Math.abs(note.getBoundingClientRect().top - line.getBoundingClientRect().top) < 6;
+      }, null, { timeout: 5000 });
+      await run.locator(":scope > summary").click();
+      await page.waitForFunction(() => {
+        const note = document.querySelector(".margin-note[data-note='call:tell-b']"), strip = document.querySelector("[data-anchor='call:tell-b']");
+        return !!note && !!strip && Math.abs(note.getBoundingClientRect().top - strip.getBoundingClientRect().top) < 6;
+      });
+      assert.ok(await note.evaluate(element => element.classList.contains("level")), `${size.name}: opened, the note stands by the tell itself`);
+      await run.locator(":scope > summary").click();
+      await page.waitForFunction(() => {
+        const note = document.querySelector(".margin-note[data-note='call:tell-b']"), line = document.querySelector("details.tool-group:has([data-anchor='call:tell-b']) > summary");
+        return !!note && !!line && Math.abs(note.getBoundingClientRect().top - line.getBoundingClientRect().top) < 6;
+      });
+    } else {
+      assert.ok(await note.isVisible(), `${size.name}: the note stands under the folded run`);
+      assert.ok(await note.evaluate(element => element.previousElementSibling?.matches("details.tool-group:has([data-anchor='call:tell-b'])") ?? false), `${size.name}: right after the run, outside the fold`);
+      await run.locator(":scope > summary").click();
+      assert.ok(await note.isVisible(), `${size.name}: still there with the run open`);
+      assert.ok(await top(note) > await top(run.locator(".tool-strip[data-anchor='call:tell-b']")), `${size.name}: under the tell it belongs to`);
+      await run.locator(":scope > summary").click();
+    }
+    assert.equal(await notes.count(), 1, `${size.name}: still one note after opening and folding`);
+    if (shots) await page.screenshot({ path: path.join(shots, `tool-groups-tells-${engine}-${base.name}.png`) });
+    console.log(`ok: ${size.name}: a tell in a folded run keeps its thread's note, once, by the run's line or the tell's`);
+    await context.close();
+    await host.close();
+  }
+
   assert.deepEqual(errors, [], "no script errors");
   console.log("tool groups browser: ok");
 } finally {
