@@ -719,8 +719,10 @@ filter nor the results (iOS keeps the layout viewport whole under its
 keyboard). While it is up the model and memory step aside and the places
 stay; with little room left (`data-keyboard="tight"`, a phone on its side)
 the foot goes back to the end of the lists, so a result always shows and
-the places are a scroll away. On a wider screen the places follow the
-lists, as the floating index always had them.
+the places are a scroll away. A press on a link while the filter is typed
+in keeps focus in the filter, so nothing moves before the link opens; an
+item the keys focus scrolls clear of the foot. On a wider screen the places
+follow the lists, as the floating index always had them.
 
 ### The panel (every place over the chat)
 The chat is home and stays mounted. Every other place (threads, a thread,
