@@ -470,6 +470,9 @@ header .spacer { margin-left: auto; }
   flex: 0 1 auto; min-width: 3rem;
 }
 .strip-title.untitled { color: var(--ink-3); font-weight: 450; }
+/* a thread's name before its title: the same line, quieter (ThreadName.svelte) */
+.thread-name { margin-right: 0.45em; color: var(--ink-2); font-weight: 500; white-space: nowrap; }
+.thread-emoji { font-weight: 400; }
 .strip-state {
   flex: none; font-size: 11px; font-weight: 550; letter-spacing: 0.06em;
   color: var(--ink-3);
@@ -1530,7 +1533,7 @@ header.sheet-bar {
 }
 .report-line > summary::-webkit-details-marker { display: none; }
 .report-line > summary:hover :is(.report-title, .report-summary) { color: var(--ink); }
-.report-title { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-weight: 600; }
+.report-title { flex: none; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-weight: 600; }
 .report-line > summary .report-kind { flex: none; margin-left: 0; }
 .report-state { flex: none; white-space: nowrap; }
 .report-state.failure { color: var(--bad); }

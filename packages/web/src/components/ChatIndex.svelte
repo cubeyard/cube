@@ -6,6 +6,7 @@
   import type { ChatWork } from "../lib/work.svelte.ts";
   import type { OverviewThread } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
+  import ThreadName from "./ThreadName.svelte";
 
   // The index: everything the chat is not, one step away and gone again.
   // The chat's threads (failed, then moving, then the rest, each in cubed's
@@ -80,7 +81,7 @@
   const rank = (thread: OverviewThread) => failing(thread.state) ? 0 : moving(thread.state) ? 1 : 2;
   const threads = $derived((work.overview?.threads ?? []).filter(thread => !thread.archived)
     .map((thread, index) => ({ thread, index })).sort((a, b) => rank(a.thread) - rank(b.thread) || a.index - b.index)
-    .map(item => item.thread).filter(thread => matches(thread.title, thread.project.name, thread.id.slice(0, 8), thread.state)));
+    .map(item => item.thread).filter(thread => matches(thread.name?.words, thread.title, thread.project.name, thread.id.slice(0, 8), thread.state)));
   const artifacts = $derived((work.artifacts ?? []).filter(artifact => matches(artifact.title, artifact.project?.name)).slice(0, words ? 12 : 6));
   const PLACES = [
     { href: "#/threads", name: "threads", hint: "every thread, by project" },
@@ -166,7 +167,7 @@
           {#each threads as thread (thread.id)}
             <li>
               <a class="index-row" href="#/t/{thread.id}" data-index-item>
-                <span class="index-title" class:untitled={!thread.title}>{thread.title ?? "untitled"}</span>
+                <span class="index-title" class:untitled={!thread.title}><ThreadName name={thread.name} />{thread.title ?? "untitled"}</span>
                 <span class="index-meta" class:failure={failing(thread.state)}>{stateText(thread.state)} · {thread.project.name}</span>
               </a>
             </li>

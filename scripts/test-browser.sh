@@ -42,6 +42,7 @@ node packages/web/test/browser/chat-sheet-browser-test.ts
 node packages/web/test/browser/loading-browser-test.ts
 node packages/web/test/browser/panel-browser-test.ts
 node packages/web/test/browser/reports-browser-test.ts
+node packages/web/test/browser/thread-names-browser-test.ts
 node packages/web/test/browser/tool-groups-browser-test.ts
 node packages/web/test/browser/long-chat-browser-test.ts
 node packages/web/test/browser/mobile-browser-test.ts

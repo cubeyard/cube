@@ -663,6 +663,18 @@ Threads keep their tool lines unfolded. The composer field takes the well radius
 What runs and what failed is said where it belongs, in the margin's notes
 and the index.
 
+### A thread's name
+Every new thread is given a name when it is created: a calm adjective and
+an animal with the animal's emoji (`🦦 calm otter`, `packages/server/src/thread-names.ts`),
+drawn from fixed lists by cubed without asking a model, and different from
+every other open thread's name. The name never changes; a rename changes
+only the title. Where a thread is labelled, the name comes before the title
+in `--ink-2` at 500 weight (`ThreadName.svelte`, its emoji hidden from screen
+readers since the words say it): a margin note, the opened report, the index,
+the thread list and the thread's bar, plus the tab title (`🦦 calm otter ·
+title · cube`). A one-line folded report and a `told` tool line use the name
+alone. A thread created before names has none and shows its title as before.
+
 ### The Margin
 At 76rem and wider, a margin to the right of the centred column (up to
 18rem, never moving it), scrolling with it.

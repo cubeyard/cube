@@ -3,6 +3,7 @@
   import { CHAT_BASE, errorText, fetchChatModels, fetchChatView, setChatModel } from "../lib/api.ts";
   import { providerLabel } from "../lib/agent.ts";
   import { chatToolLine, indexThreads, latestReports, mentionsOf, resolveArtifact, resolveThread, rowKey, type NoteGroup } from "../lib/provenance.ts";
+  import { nameText } from "../lib/thread-name.ts";
   import type { TranscriptRow } from "../lib/transcript.ts";
   import type { ArtifactListItem, ThreadModels, ThreadSummary } from "../lib/types.ts";
   import { ChatWork } from "../lib/work.svelte.ts";
@@ -11,6 +12,7 @@
   import ChatMargin from "./ChatMargin.svelte";
   import Conversation from "./Conversation.svelte";
   import Icon from "./Icon.svelte";
+  import ThreadName from "./ThreadName.svelte";
   import Wordmark from "./Wordmark.svelte";
   import WorkNote from "./WorkNote.svelte";
 
@@ -66,9 +68,10 @@
   const unread = $derived(work.overview ? null : work.error);
   let open = $state<string | null>(null);
 
-  const titleOf = (short: string) => resolveThread({ short, project: null, title: null }, known).title;
-  const toolLine = (row: Extract<TranscriptRow, { kind: "tool" }>) => chatToolLine(row, titleOf);
-  const reportTitle = (from: string) => titleOf(from) ?? `[${from}]`;
+  // A folded line calls a thread by its name; one older than names, by its title.
+  const calledOf = (short: string) => { const thread = resolveThread({ short, project: null, title: null }, known); return nameText(thread.name) || thread.title; };
+  const toolLine = (row: Extract<TranscriptRow, { kind: "tool" }>) => chatToolLine(row, calledOf);
+  const reportTitle = (from: string) => calledOf(from) ?? `[${from}]`;
 
   /** What a message's note in the margin holds, for its skip key. */
   const skipText = (group: NoteGroup) => {
@@ -232,8 +235,8 @@
 
 {#snippet reportLabel(from: string)}
   {@const thread = resolveThread({ short: from, project: null, title: null }, known)}
-  {#if thread.id && !thread.archived}<a class="report-name" href="#/t/{thread.id}">{thread.title ?? `[${from}]`}</a>
-  {:else}<span class="report-name">{thread.title ?? `[${from}]`}</span>{/if}<span class="report-kind">· report</span>
+  {#if thread.id && !thread.archived}<a class="report-name" href="#/t/{thread.id}"><ThreadName name={thread.name} />{thread.title ?? `[${from}]`}</a>
+  {:else}<span class="report-name"><ThreadName name={thread.name} />{thread.title ?? `[${from}]`}</span>{/if}<span class="report-kind">· report</span>
 {/snippet}
 
 {#snippet after(row: TranscriptRow)}

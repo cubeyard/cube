@@ -16,6 +16,8 @@ export type ThreadState = "starting" | "ready" | "error";
 export interface ThreadSummary {
   id: string;
   title: string | null;
+  /** Drawn at creation, never renamed; absent on threads older than names. */
+  name?: import("../../../server/src/thread-names.ts").ThreadName;
   state: ThreadState;
   error: string | null;
   /** What `error` is about: the web decides by this, never by its words. */

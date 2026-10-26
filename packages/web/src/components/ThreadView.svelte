@@ -23,6 +23,8 @@
   import Conversation from "./Conversation.svelte";
   import AuthBadge from "./AuthBadge.svelte";
   import Icon from "./Icon.svelte";
+  import ThreadName from "./ThreadName.svelte";
+  import { threadText } from "../lib/thread-name.ts";
   import StartupPanel from "./StartupPanel.svelte";
   import { pagePanel } from "./PagePanel.svelte";
 
@@ -243,7 +245,7 @@
       {/if}
       <div class="bar-title">
         <h1 class="strip-title" class:untitled={!summary.title} bind:this={titleHeading} tabindex="-1" data-panel-focus
-          title={summary.title ?? undefined}>{summary.title ?? "untitled"}</h1>
+          title={summary.title || summary.name ? threadText(summary) : undefined}><ThreadName name={summary.name} />{summary.title ?? "untitled"}</h1>
         {#if stateLabel(summary) || machineLabel(summary)?.failed || machineNotice(summary)}
           <p class="bar-sub">
             {#if stateLabel(summary)}

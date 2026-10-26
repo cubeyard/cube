@@ -20,6 +20,7 @@
   import { COMMAND_TTL_MS, type Command } from "./lib/command.ts";
   import { createOrdered } from "./lib/ordered.ts";
   import type { DaemonState, ThreadSummary } from "./lib/types.ts";
+  import { threadText } from "./lib/thread-name.ts";
 
   // Global threads, project setup, and one thread's terminal. Cubes never
   // appear in URLs. Ids are opaque tokens (uuids, "new"), used verbatim.
@@ -202,7 +203,7 @@
     if (projectId || artifactId || artifactsRoute) return;
     const current = threadId ? threads.find((thread) => thread.id === threadId) : null;
     document.title =
-      threadId ? `${current?.title ?? "untitled"} · cube`
+      threadId ? `${current ? threadText(current) : "untitled"} · cube`
       : projectsRoute ? "projects · cube"
       : chatRoute ? "chat · cube"
       : settingsPage === "providers" ? "model providers · settings · cube"

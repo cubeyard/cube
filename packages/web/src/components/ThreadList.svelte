@@ -9,6 +9,7 @@
   import type { Project, ThreadSummary } from "../lib/types.ts";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
+  import ThreadName from "./ThreadName.svelte";
 
   let {
     threads,
@@ -216,7 +217,7 @@
             <a class="module-face" href="#/t/{thread.id}">
               {#if !stateLabel(thread)}<span class="sr-only">ready</span>{/if}
               <span class="module-text">
-                <span class="module-title" class:untitled={!thread.title}>{thread.title ?? "untitled"}</span>
+                <span class="module-title" class:untitled={!thread.title}><ThreadName name={thread.name} />{thread.title ?? "untitled"}</span>
                 <span class="module-meta">
                   <span class="module-project">project / {thread.project.name}</span>
                   {#if thread.createdAt}<span>{relTime(thread.createdAt)}</span>{/if}
