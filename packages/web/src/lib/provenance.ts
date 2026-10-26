@@ -1,9 +1,12 @@
 /** What the chat's own log says it started and named: the threads a spawn
- * started (its result lines), the artifacts a reply links, a tool wrote or
- * a comment message came back from. Each is placed at the row that says
- * so, once, at its first mention among the rows shown. Nothing here is
- * inferred from prose or kept by hand: a row that does not name a thread or
- * an artifact in these forms gives none. */
+ * started (its result lines) or a tell reached (its result line), the
+ * artifacts a reply links, a tool wrote or a comment message came back
+ * from. Each is placed at the row that says so, once: an artifact at its
+ * first mention among the rows shown, a thread at its newest (the spawn,
+ * or the last tell the thread took), so a thread comes back into the
+ * margin beside each tell. Nothing here is inferred from prose or kept by
+ * hand: a row that does not name a thread or an artifact in these forms
+ * gives none. */
 import type { ArtifactListItem, ThreadOverview, ThreadSummary } from "./types.ts";
 import type { TranscriptRow } from "./transcript.ts";
 
@@ -31,6 +34,17 @@ const UNSTARTED = /^task (\d+) \((.+?)\) not started: (.*)$/;
 const WRITTEN = /^artifact ([0-9a-f-]{36}) "/;
 const LINKED = /#\/a\/([0-9a-f][0-9a-f-]{7,35})(?![0-9a-f-])/g;
 const COMMENTS = /^\[artifact ([0-9a-f]{8})\]/;
+/** A tell the thread took (optchat.ts, tell): sent, queued into its running
+ * turn, or already in its conversation (a replayed call). Not "not sent"
+ * (refused), not "took it … never reached the agent" (dropped), not an error. */
+const TOLD = /^(?:sent to \[([0-9a-f]{8})\]|queued for \[([0-9a-f]{8})\]|\[([0-9a-f]{8})\] already has it)/;
+
+/** The thread a tell's result says took it, or null. */
+export function toldThread(row: TranscriptRow): string | null {
+  if (row.kind !== "tool" || row.name !== "tell" || row.state !== "done") return null;
+  const told = TOLD.exec(row.output.trim());
+  return told ? (told[1] ?? told[2] ?? told[3])! : null;
+}
 
 /** The spawn lines of a spawn call's result. */
 export function spawnLines(output: string): { threads: ThreadRef[]; unstarted: Unstarted[] } {
@@ -45,9 +59,19 @@ export function spawnLines(output: string): { threads: ThreadRef[]; unstarted: U
   return { threads, unstarted };
 }
 
-/** The mentions in rows, in row order; each thread and artifact once, at its first row. */
+/** The mentions in rows, in row order; each artifact once, at its first row,
+ * each thread once, at its newest: its spawn, or the last tell it took. */
 export function mentionsOf(rows: readonly TranscriptRow[]): Mention[] {
   const out: Mention[] = [];
+  // Where each thread is placed: the last row that started it or told it.
+  const last = new Map<string, number>();
+  // what a spawn line said of a thread, for a note placed at a later tell
+  const said = new Map<string, ThreadRef>();
+  rows.forEach((row, index) => {
+    if (row.kind === "tool" && row.name === "spawn" && row.state !== "error") for (const thread of spawnLines(row.output).threads) { last.set(thread.short, index); said.set(thread.short, thread); }
+    const told = toldThread(row);
+    if (told) last.set(told, index);
+  });
   const seenThreads = new Set<string>();
   const seenArtifacts = new Set<string>();
   const artifact = (key: string, into: string[]) => {
@@ -57,12 +81,16 @@ export function mentionsOf(rows: readonly TranscriptRow[]): Mention[] {
     seenArtifacts.add(prefix);
     into.push(key);
   };
-  for (const row of rows) {
+  for (const [index, row] of rows.entries()) {
     const mention: Mention = { row: rowKey(row), threads: [], artifacts: [], unstarted: [] };
+    const told = toldThread(row);
     if (row.kind === "tool" && row.name === "spawn" && row.state !== "error") {
       const lines = spawnLines(row.output);
-      for (const thread of lines.threads) if (!seenThreads.has(thread.short)) { seenThreads.add(thread.short); mention.threads.push(thread); }
+      for (const thread of lines.threads) if (last.get(thread.short) === index && !seenThreads.has(thread.short)) { seenThreads.add(thread.short); mention.threads.push(thread); }
       mention.unstarted = lines.unstarted;
+    } else if (told) {
+      // a tell names only the id: what its spawn line said, when it is among the rows shown
+      if (last.get(told) === index && !seenThreads.has(told)) { seenThreads.add(told); mention.threads.push(said.get(told) ?? { short: told, project: null, title: null }); }
     } else if (row.kind === "tool" && row.name === "artifact_write" && row.state === "done") {
       const written = WRITTEN.exec(row.output);
       if (written) artifact(written[1]!, mention.artifacts);

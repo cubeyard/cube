@@ -648,9 +648,13 @@ and the index.
 ### The Margin
 At 76rem and wider, a margin to the right of the centred column (up to
 18rem, never moving it), scrolling with it.
-One note per message that started threads (a spawn's result lines) or named
-an artifact (a write or edit result, a `#/a/` link in a reply, a comment
-message), each thread and artifact once, at its first row shown. A note is
+One note per message that started threads (a spawn's result lines), told a
+thread that took it (a tell sent or queued into its turn), or named an
+artifact (a write or edit result, a `#/a/` link in a reply, a comment
+message), each thread and artifact once among the rows shown: an artifact
+at its first row, a thread at its newest (its spawn, or the last tell it
+took), so a thread comes back beside each tell; a refused, dropped or
+failed tell moves nothing. A note is
 flush: the 13px/600 title (an artifact's after its `--ink-3` file mark, its
 kind) clamped to
 two lines, one 12px `--ink-3` line of state in cubed's words (`turn ended`,

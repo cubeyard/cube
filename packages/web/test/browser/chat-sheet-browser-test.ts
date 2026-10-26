@@ -5,7 +5,8 @@
  * never moves the conversation, nor does streaming; many notes never
  * overlap or lengthen the page; a failed thread scrolled away is pinned
  * with the way back; states are cubed's own, and an unreadable overview or
- * a thread cube no longer has says so; the index opens from its key, `/`
+ * a thread cube no longer has says so; a tell the thread took brings it
+ * back beside the tell (once), a refused or failed one does not; the index opens from its key, `/`
  * and ctrl k, walks by arrow keys and gives focus back. Screenshots go to
  * CUBE_SCREENSHOTS when it is set. Needs a built UI and Playwright's Chromium. */
 import assert from "node:assert/strict";
@@ -85,7 +86,7 @@ await scenario("the margin: each note beside the message that started or named i
   await page.locator(".transcript").evaluate(element => { element.scrollTop = 0; });
   await settle(page);
   const { boxes, overlap } = await notes(page);
-  assert.deepEqual(boxes.map(box => box.row), ["call:spawn-old", "call:spawn-1", "4.1", "call:write-1"], "in the conversation's order: spawns, a linked artifact, a written one");
+  assert.deepEqual(boxes.map(box => box.row), ["call:spawn-old", "call:spawn-1", "4.1", "call:tell-1", "call:write-1"], "in the conversation's order: spawns, a linked artifact, the thread told last, a written one");
   assert.equal(overlap, false, "no two notes overlap");
   for (const box of boxes) assert.ok(Math.abs(box.top - await anchorTop(page, box.row)) <= 2 || box.top > await anchorTop(page, box.row), `${box.row} at or below its message`);
   assert.ok(Math.abs(boxes[1]!.top - await anchorTop(page, "call:spawn-1")) <= 2, "the spawn's note is level with it");
@@ -96,8 +97,13 @@ await scenario("the margin: each note beside the message that started or named i
   assert.ok(margin.left >= column.right + 16, "the margin stands apart from the column");
   // the states are cubed's own words; a thread cube lost says so; a task that did not start says why
   const spawn = page.locator(`.margin-note[data-note="call:spawn-1"]`);
-  assert.deepEqual(await spawn.locator(".note-state").allTextContents(), ["working · cube", "turn ended · cube", "machine failed · keel-images", "nope · no project nope"]);
-  assert.deepEqual(await spawn.locator(".note-state").evaluateAll(all => all.map(state => state.classList.contains("failure"))), [false, false, true, true], "failures in error ink, the rest quiet");
+  assert.deepEqual(await spawn.locator(".note-state").allTextContents(), ["turn ended · cube", "machine failed · keel-images", "nope · no project nope"]);
+  assert.deepEqual(await spawn.locator(".note-state").evaluateAll(all => all.map(state => state.classList.contains("failure"))), [false, true, true], "failures in error ink, the rest quiet");
+  // the thread the chat told came back beside the tell, once: not at its spawn too
+  const told = page.locator(`.margin-note[data-note="call:tell-1"]`);
+  assert.deepEqual(await told.locator(".note-title").allTextContents(), ["composer room: measure the mobile composer and propose more space"]);
+  assert.deepEqual(await told.locator(".note-state").allTextContents(), ["working · cube"]);
+  assert.equal(await page.locator(".margin-note .note-head", { hasText: "composer room: measure" }).count(), 1, "one note for the thread");
   assert.equal(await page.locator(".lamp, .blink").count(), 0, "no lamp, glow or blink anywhere: states are words");
   assert.ok(await page.evaluate(() => [...document.querySelectorAll("*")].every(element => getComputedStyle(element).animationIterationCount !== "infinite")), "nothing pulses");
   assert.equal(await page.locator(`.margin-note[data-note="call:spawn-old"] .note-state`).textContent(), "not known to cube · keel-images");
@@ -243,20 +249,87 @@ for (const [viewport, engine] of [[between, browser], [phone, browser], ...safar
     assert.equal(await page.locator(".composer-row > *").count(), 1, "nothing beside the field");
     assert.equal(await page.locator(".composer").getByText(/running|failed/).count(), 0, "no count beside the composer");
     const inline = page.locator(".transcript-column .sheet-note");
-    assert.equal(await inline.count(), 2, "under the two spawns");
+    assert.equal(await inline.count(), 3, "under the two spawns and the tell");
+    assert.equal(await inline.locator(".note-head", { hasText: "composer room: measure" }).count(), 1, "the told thread once, under its tell");
     assert.equal(await page.locator(".transcript-column .sheet-note .note-head.artifact").count(), 0, "artifacts stay links in the text");
     const spawn = page.locator(".transcript-column [data-anchor='call:spawn-1'] + .sheet-note");
-    assert.deepEqual(await spawn.locator(".note-state").allTextContents(), ["working", "turn ended", "machine failed", "nope · no project nope"]);
+    assert.deepEqual(await spawn.locator(".note-state").allTextContents(), ["turn ended", "machine failed", "nope · no project nope"]);
+    const told = page.locator(".transcript-column [data-anchor='call:tell-1'] + .sheet-note");
+    assert.deepEqual(await told.locator(".note-state").allTextContents(), ["working"]);
     // each state is whole on its line: the title gives way first
     for (const state of await spawn.locator(".note-head:not(.static) .note-state").all()) assert.ok(await state.evaluate(element => element.scrollWidth <= element.clientWidth), "the state is not cut");
     assert.ok(await page.locator(".transcript-column").evaluate(element => element.scrollWidth <= element.clientWidth), "nothing overflows sideways");
-    await spawn.locator(".note-head", { hasText: "composer room" }).click();
-    await spawn.locator(".note-peek a", { hasText: "open thread" }).waitFor();
-    assert.match(await spawn.locator(".note-facts").textContent() ?? "", /cube/, "the project, in the opened note");
+    await told.locator(".note-head", { hasText: "composer room" }).click();
+    await told.locator(".note-peek a", { hasText: "open thread" }).waitFor();
+    assert.match(await told.locator(".note-facts").textContent() ?? "", /cube/, "the project, in the opened note");
     if (viewport.touch) assert.ok((await boxOf(page, ".transcript-column .note-head")).height >= 43.9, "a fingertip's height");
-    await spawn.locator(".note-head", { hasText: "composer room" }).scrollIntoViewIfNeeded();
+    await told.locator(".note-head", { hasText: "composer room" }).scrollIntoViewIfNeeded();
     await shoot(page, `sheet-${viewport.width}-inline`);
   }, () => {}, { engine });
+}
+
+// A tell brings its thread back beside it: the thread's spawn is far above,
+// scrolled away, and the tells arrive live. Only a tell the thread took
+// (sent, or queued into its running turn) moves it; a refused or failed one
+// and one still running do not. Never two notes for one thread.
+for (const viewport of [desktop, phone]) {
+  await scenario("a tell the thread took brings it back beside the tell, once; a refused or failed one does not", viewport, async (page, host) => {
+    const wide = viewport.width >= 1216;
+    const flaky = ID.flaky.slice(0, 8), ca = ID.ca.slice(0, 8);
+    const noteAt = (row: string) => page.locator(wide ? `.margin-notes > [data-note="${row}"]` : `.transcript-column [data-anchor="${row}"] + .sheet-note`);
+    const flakyNotes = () => page.locator(wide ? ".margin-note .note-head" : ".transcript-column .sheet-note .note-head", { hasText: "find why the artifact browser test is flaky" });
+    const toEnd = async () => { await page.locator(".transcript").evaluate(element => { element.scrollTop = element.scrollHeight; }); await settle(page); };
+    const inView = (row: string) => noteAt(row).evaluate(element => {
+      const box = element.getBoundingClientRect(), view = element.closest(".transcript")!.getBoundingClientRect();
+      return box.top >= view.top && box.bottom <= view.bottom;
+    });
+    const tell = (id: string, short: string, output: string | null, isError = false): ThreadEvent[] => [
+      { type: "tool-call", id: `${id}.c`, callId: id, name: "tell", input: { id: short, message: "keep going" }, final: true },
+      ...output === null ? [] : [{ type: "tool-result", id: `${id}.r`, callId: id, name: "tell", output, isError, final: true } as ThreadEvent],
+    ];
+    const base = host.transcript.events;
+    await toEnd();
+    assert.equal(await flakyNotes().count(), 1, "one note for the thread, at its spawn far above");
+    assert.equal(await noteAt("call:spawn-1").locator(".note-head", { hasText: "find why the artifact browser test is flaky" }).count(), 1);
+
+    // a tell still running moves nothing yet
+    let events = [...base, { type: "user-message", id: "t.0", text: "tell the flaky one to keep going" } as ThreadEvent, ...tell("tell-q", flaky, null)];
+    host.set(events, { state: "working" });
+    await page.locator(".transcript-column [data-anchor='call:tell-q']").waitFor();
+    await settle(page);
+    assert.equal(await noteAt("call:tell-q").count(), 0, "no note while the tell runs");
+
+    // queued into the working thread's turn: it comes back beside the tell, in view, and leaves the spawn's note
+    events = [...base, events.at(-2)!, ...tell("tell-q", flaky, `queued for [${flaky}], which is working: it has not read it yet, and reads it after its current tool call, in this turn; its report comes back as a message starting "[${flaky}] "`)];
+    host.set(events, { state: "working" });
+    await noteAt("call:tell-q").waitFor();
+    await toEnd();
+    assert.ok(await inView("call:tell-q"), "the note is beside the tell, in view");
+    assert.equal(await flakyNotes().count(), 1, "still one note for the thread");
+    assert.equal(await noteAt("call:spawn-1").locator(".note-head", { hasText: "find why the artifact browser test is flaky" }).count(), 0, "it left the spawn's note");
+    assert.match(await noteAt("call:tell-q").textContent() ?? "", /turn ended/, "with cubed's state for it");
+    if (wide) assert.equal(await noteAt("call:tell-q").evaluate(element => element.classList.contains("level")), true, "level with its tell, tied by a hairline");
+
+    // refused, and an error: the java thread stays at its spawn, nothing beside either tell
+    events = [...events,
+      ...tell("tell-no", ca, `not sent: [${ca}] had 3 tells from you since the user's last message; tell the user what it needs instead`),
+      ...tell("tell-err", ca, `[${ca}] is archived`, true)];
+    host.set(events, { state: "working" });
+    await page.locator(".transcript-column [data-anchor='call:tell-err']").waitFor();
+    await settle(page);
+    assert.equal(await noteAt("call:tell-no").count() + await noteAt("call:tell-err").count(), 0, "a refused or failed tell brings nothing back");
+    assert.equal(await noteAt("call:spawn-1").locator(".note-head", { hasText: "java trusts runner ca" }).count(), 1, "the java thread stays at its spawn");
+
+    // told again: it moves to the newest tell, never two
+    events = [...events, ...tell("tell-again", flaky, `sent to [${flaky}]; its report comes back as a message starting "[${flaky}] "`)];
+    host.set(events, { state: "completed" });
+    await noteAt("call:tell-again").waitFor();
+    await toEnd();
+    assert.equal(await noteAt("call:tell-q").count(), 0, "not at the older tell");
+    assert.equal(await flakyNotes().count(), 1, "one note for the thread");
+    assert.ok(await inView("call:tell-again"), "beside the newest tell, in view");
+    await shoot(page, `sheet-${viewport.width}-told-again`);
+  }, host => { host.transcript = { ...host.transcript, events: chatEvents({ filler: 12 }) }; });
 }
 
 await scenario("the index: the wordmark, / and ctrl k open it; arrows walk it; escape gives focus back; / in the composer is just text", desktop, async page => {
@@ -314,7 +387,7 @@ await scenario("the index: the wordmark, / and ctrl k open it; arrows walk it; e
     await page.locator(".margin-note").first().waitFor();
     await settle(page);
     const early = await states();
-    assert.deepEqual(early, ["reading state… · keel-images", "reading state… · cube", "reading state… · cube", "reading state… · keel-images", "nope · no project nope"], "reading, never lost");
+    assert.deepEqual(early, ["reading state… · keel-images", "reading state… · cube", "reading state… · keel-images", "nope · no project nope", "reading state… · cube"], "reading, never lost");
     assert.equal(await page.locator(".note-state", { hasText: "not known to cube" }).count(), 0);
     assert.equal(await page.locator(".margin-note .note-state.failure").count(), 1, "only the task that did not start, before a state is read");
     await shoot(page, "sheet-desktop-reading");
@@ -325,7 +398,7 @@ await scenario("the index: the wordmark, / and ctrl k open it; arrows walk it; e
     seen.open();
     await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
     await page.locator(".note-state", { hasText: "not known to cube" }).waitFor();
-    assert.deepEqual((await states()).slice(0, 4), ["not known to cube · keel-images", "working · cube", "turn ended · cube", "machine failed · keel-images"]);
+    assert.deepEqual(await states(), ["not known to cube · keel-images", "turn ended · cube", "machine failed · keel-images", "nope · no project nope", "working · cube"]);
   }, host => { host.onThreadList = () => list.promise; host.onOverview = () => seen.promise; });
 }
 
@@ -351,7 +424,7 @@ await scenario("a keyboard or screen reader reaches a message's note from the me
   await page.locator(".transcript").evaluate(element => { element.scrollTop = 0; });
   await settle(page);
   const skip = page.locator(".note-skip").nth(1);
-  assert.equal(await skip.textContent(), "4 threads from this message, in the margin");
+  assert.equal(await skip.textContent(), "3 threads from this message, in the margin");
   const before = await rowTops(page);
   await page.locator(".transcript-column > [data-anchor='call:spawn-1'] summary").focus();
   await page.keyboard.press("Tab");
@@ -367,7 +440,9 @@ await scenario("a keyboard or screen reader reaches a message's note from the me
 
 await scenario("an overview that cannot be read is said, never guessed; the last good one stays", desktop, async (page, host) => {
   const spawn = page.locator(`.margin-note[data-note="call:spawn-1"]`);
-  assert.deepEqual(await spawn.locator(".note-state").allTextContents(), ["state not read · cube", "state not read · cube", "state not read · keel-images", "nope · no project nope"]);
+  const told = page.locator(`.margin-note[data-note="call:tell-1"]`);
+  assert.deepEqual(await spawn.locator(".note-state").allTextContents(), ["state not read · cube", "state not read · keel-images", "nope · no project nope"]);
+  assert.deepEqual(await told.locator(".note-state").allTextContents(), ["state not read · cube"]);
   assert.equal(await spawn.locator(".note-state.failure").count(), 1, "no state is shown as failed when it was not read");
   await page.locator(".sheet-bar .name-key").click();
   await page.locator(".chat-index .index-error", { hasText: "threads could not be read" }).waitFor();
@@ -375,11 +450,11 @@ await scenario("an overview that cannot be read is said, never guessed; the last
   await page.locator(".chat-index .index-error button").click();
   await page.locator(".chat-index .index-row .index-meta", { hasText: "working · cube" }).waitFor();
   await page.keyboard.press("Escape");
-  await spawn.locator(".note-state", { hasText: "working · cube" }).waitFor();
+  await told.locator(".note-state", { hasText: "working · cube" }).waitFor();
   host.overviewError = "the host had a problem";
   await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   await page.waitForTimeout(400);
-  assert.equal(await spawn.locator(".note-state").first().textContent(), "working · cube", "the last good state stays");
+  assert.equal(await told.locator(".note-state").first().textContent(), "working · cube", "the last good state stays");
 }, host => { host.overviewError = "the host had a problem"; });
 
 for (const engine of [browser, ...safari ? [safari] : []]) await scenario("a tap opens the index without the keyboard: the sheet takes focus, its close key is in reach, focus goes back", phone, async page => {
