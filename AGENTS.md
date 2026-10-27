@@ -68,7 +68,10 @@ of it (it uses that host's own gh/git logins).
 Node ≥26, pnpm pinned in package.json, Rust pinned in rust-toolchain.toml.
 `bash scripts/setup-dev.sh` bootstraps a Linux development account. Run
 `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm build`. New offline Node tests
-belong in `scripts/test-offline.sh`.
+belong in `scripts/test-offline.sh`. A thread machine has Playwright's
+Chromium and its libraries from `.agents/setup`: run `pnpm test:browser`
+without installing a browser; `bash scripts/setup-browsers.sh` repairs or
+updates it, `bash scripts/setup-browsers.sh webkit` adds WebKit (DEVELOPING.md).
 
 Choose further tests by risk, not by which package a change touches:
 
