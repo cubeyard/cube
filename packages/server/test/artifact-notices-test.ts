@@ -70,7 +70,7 @@ async function until<T>(read: () => T, check: (value: T) => boolean, what: strin
 }
 const write = (author: ArtifactAuthor, pulls: number[], name: string) => artifacts.write({ agent: author, authors: [author] },
   { name, title: name, body: `# ${name}`, actions: pulls.map(pull => ({ kind: "github.merge", repository: "cubeyard/cube", pull, headSha: SHA })), project: "cube" },
-  { agent: author.kind === "optchat" ? "optchat" : "pi" }, `w-${name}`).id;
+  { agent: author.kind === "optchat" ? "optchat" : "pi" }, `w-${name}`).then(written => written.id);
 const confirm = (id: string, pull: number, requestId: string) => artifacts.run(id, `merge-${pull}`, { revision: 1, confirm: `cubeyard/cube#${pull}`, requestId });
 const notices = (id: string) => artifacts.store.notices(id);
 
@@ -79,7 +79,7 @@ try {
   threads.set("eb809312-0000-4000-8000-000000000001", { id: "eb809312-0000-4000-8000-000000000001", projectId: "p", archived: false, createdAt: Date.now() });
   const author = "eb809312-0000-4000-8000-000000000001";
   chat.started.add(author);
-  const review = write({ kind: "thread", thread: author }, [116, 117], "review");
+  const review = await write({ kind: "thread", thread: author }, [116, 117], "review");
   working.add(author);
   const merged = await confirm(review, 116, "m1");
   assert.equal(merged.state, "succeeded");
@@ -121,7 +121,7 @@ try {
 
   // A thread started in cube (not by the chat), older than the chat's grace to record one: the thread is told, the chat is not.
   threads.set("user-thread", { id: "user-thread", projectId: "p", archived: false, createdAt: Date.now() - 11 * 60_000 });
-  const notes = write({ kind: "thread", thread: "user-thread" }, [118], "notes");
+  const notes = await write({ kind: "thread", thread: "user-thread" }, [118], "notes");
   const before = chat.got.size;
   await confirm(notes, 118, "m4");
   await until(() => notices(notes).map(notice => notice.state), states => states.join() === "delivered,skipped", "told the thread, skipped the chat");
@@ -132,7 +132,7 @@ try {
   // A thread so young the chat may not have recorded spawning it yet: the chat's notice waits, then goes once it has.
   threads.set("young-thread", { id: "young-thread", projectId: "p", archived: false, createdAt: Date.now() });
   open.add(122);
-  const young = write({ kind: "thread", thread: "young-thread" }, [122], "young");
+  const young = await write({ kind: "thread", thread: "young-thread" }, [122], "young");
   await confirm(young, 122, "m-young");
   await until(() => notices(young)[1]!, notice => notice.note === "waiting: the chat has not recorded this thread as its own yet", "the chat's notice waits");
   chat.started.add("young-thread");
@@ -141,14 +141,14 @@ try {
   // An archived author: nothing reaches it, and says so; the chat that started it is still told.
   threads.set("archived-thread", { id: "archived-thread", projectId: "p", archived: false, createdAt: Date.now() });
   chat.started.add("archived-thread");
-  const late = write({ kind: "thread", thread: "archived-thread" }, [119], "late");
+  const late = await write({ kind: "thread", thread: "archived-thread" }, [119], "late");
   threads.get("archived-thread")!.archived = true;
   await confirm(late, 119, "m5");
   await until(() => notices(late).map(notice => notice.state), states => states.join() === "undeliverable,delivered", "archived: the chat only");
   assert.match(notices(late)[0]!.note!, /archived/);
 
   // The chat's own artifact: told to the chat alone.
-  const own = write({ kind: "optchat" }, [120], "own");
+  const own = await write({ kind: "optchat" }, [120], "own");
   // A run cut off mid-merge: cubed stops after GitHub was asked, before the outcome; told as unknown, never as failed or done.
   artifacts.close();
   store.beginAction(own, 1, "merge-120", "m6");
@@ -174,7 +174,7 @@ try {
   artifacts = service({ giveUpMs: 300 });
   threads.set("busy-thread", { id: "busy-thread", projectId: "p", archived: false, createdAt: 0 });
   open.add(121);
-  const busy = write({ kind: "thread", thread: "busy-thread" }, [121], "busy");
+  const busy = await write({ kind: "thread", thread: "busy-thread" }, [121], "busy");
   working.add("busy-thread");
   await confirm(busy, 121, "m7");
   await until(() => notices(busy)[0]!, notice => notice.state === "undeliverable", "gives up", 5000);

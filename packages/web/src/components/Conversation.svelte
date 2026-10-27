@@ -3,6 +3,7 @@
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { errorText, imageUrl, sendPrompt, stopThread, threadBase, threadEvents, uploadImage } from "../lib/api.ts";
   import { ACCEPT, MEDIA_LIMITS, pastedImages, prepareImage } from "../lib/images.ts";
+  import { drawDiagrams } from "../lib/diagram.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
   import { reportLine } from "../lib/report-line.ts";
   import { keep, keptOf, listen, recover, type Pending } from "../lib/drafts.ts";
@@ -85,6 +86,8 @@
   const shown = $derived<Shown[]>(foldTools ? groupTools(rows) : rows.map(row => ({ kind: "row", row })));
   const status = $derived<ThreadStatus>(transcript.status);
   $effect(() => { onRows?.(rows); });
+  // The diagrams in the rows, drawn after each frame; one already drawn is kept and shown at once.
+  $effect(() => { void rows; void tick().then(() => drawDiagrams(scroller)); });
   // The draft outlives the view: closing the panel a thread is in keeps it,
   // its send's identity and a failure's note for the next visit.
   const start = untrack(() => keptOf(base));
@@ -120,6 +123,8 @@
   const uploading = $derived(attachments.some(item => !item.id && !item.error));
   const failedAttachment = $derived(attachments.some(item => item.error));
   const working = $derived(status.state === "working");
+  /** The message being streamed: the last row while the agent works. */
+  const streamingId = $derived(working && rows.at(-1)?.kind === "assistant" ? rows.at(-1)!.id : null);
   // No turn runs, but the agent's background agents do; stop ends them.
   const waiting = $derived(!working && !!status.waiting?.length);
   // A sent message the transcript has not shown yet is busy too: the chat
@@ -668,7 +673,7 @@
       <!-- a press on an image the thread read opens it; the keys are in the rendered markup -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text, allows only http(s)/mailto links and shows only images the thread read -->
-      <div class="message-copy markdown" class:reasoning={row.reasoning} onclick={onProseClick}>{@html renderMarkdown(row.text, pictureOf(row))}</div>
+      <div class="message-copy markdown" class:reasoning={row.reasoning} onclick={onProseClick}>{@html renderMarkdown(row.text, pictureOf(row), { streaming: row.id === streamingId })}</div>
     </article>
   {/if}
 {/snippet}

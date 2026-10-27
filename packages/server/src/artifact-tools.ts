@@ -68,8 +68,8 @@ export function artifactTools(options: {
         const model = options.model?.();
         const provenance: Provenance = { agent: options.agent, ...options.author.kind === "thread" ? { thread: options.author.thread } : {},
           call: api.callId, ...model ? { model } : {}, ...source ? { source } : {} };
-        return text(options.artifacts.write({ agent: options.author, authors: await options.readable() }, { id, base: input.base, title: input.title, body, actions: input.actions, project: input.project },
-          provenance, options.key(api)).text);
+        return text((await options.artifacts.write({ agent: options.author, authors: await options.readable() }, { id, base: input.base, title: input.title, body, actions: input.actions, project: input.project },
+          provenance, options.key(api))).text);
       } catch (error) {
         if (error instanceof ArtifactError) return text(`not written: ${error.message}`);
         throw error;

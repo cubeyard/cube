@@ -16,6 +16,7 @@
  * the outcome: to the author, and to OptChat when it started the author
  * thread (whose answer to its notice also reaches OptChat as its report). */
 import { parseGitHubRepo } from "@cube/git";
+import { checkDiagrams, diagramProblemsText, mermaidFences } from "./artifact-diagrams.ts";
 import { createLogger } from "./log.ts";
 import {
   ARTIFACT_LIMITS, ArtifactError, ArtifactStore, authorKey, authorText, parseActions, sameAuthor,
@@ -126,8 +127,20 @@ export class Artifacts {
   }
 
   /** Writes a new artifact, or a revision of one in `scope` on its newest
-   * revision; answers in words for the agent. */
-  write(scope: ArtifactScope, input: ArtifactWrite, provenance: Provenance, requestId: string): { text: string; id: string; revision: number } {
+   * revision; answers in words for the agent. A body whose ```mermaid
+   * diagrams do not draw is refused before anything is written, with each
+   * problem; a replayed call answers with the revision it wrote. */
+  async write(scope: ArtifactScope, input: ArtifactWrite, provenance: Provenance, requestId: string): Promise<{ text: string; id: string; revision: number }> {
+    if (typeof input.body === "string" && !this.store.requested(scope.agent, requestId)) {
+      let problems;
+      try { problems = await checkDiagrams(input.body); }
+      catch (error) { throw new ArtifactError(`${error instanceof Error ? error.message : String(error)}`, 422); }
+      if (problems.length) throw new ArtifactError(diagramProblemsText(problems, mermaidFences(input.body).length), 422, problems);
+    }
+    return this.commit(scope, input, provenance, requestId);
+  }
+
+  private commit(scope: ArtifactScope, input: ArtifactWrite, provenance: Provenance, requestId: string): { text: string; id: string; revision: number } {
     const { agent } = scope;
     // A blank id is none: create (or find by name) rather than look up "".
     if (input.id !== undefined && !input.id.trim()) input = { ...input, id: undefined };
@@ -166,8 +179,8 @@ export class Artifacts {
   /** Replaces `oldString` in the newest revision of an artifact in `scope`
    * (Claude Code's Edit), written as `write` writes a revision: on the one
    * the agent last read, refused when another is newer. */
-  edit(scope: ArtifactScope, input: { id?: string | undefined; name?: string | undefined; oldString: string; newString: string; replaceAll?: boolean | undefined },
-    provenance: Provenance, requestId: string): { text: string; id: string; revision: number } {
+  async edit(scope: ArtifactScope, input: { id?: string | undefined; name?: string | undefined; oldString: string; newString: string; replaceAll?: boolean | undefined },
+    provenance: Provenance, requestId: string): Promise<{ text: string; id: string; revision: number }> {
     const { agent } = scope;
     const existing = input.id ? this.store.get(input.id) : input.name ? this.store.named(agent, input.name) : null;
     if (!existing || !this.reaches(scope, existing)) throw new ArtifactError(`no artifact ${input.id ?? input.name} you can read; write it whole first`, 404);

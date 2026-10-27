@@ -1895,14 +1895,15 @@ button.note-head:hover { background: var(--s3); }
 .artifact-body .diff-line.del { background: var(--diff-del-bg); color: var(--diff-del); }
 .artifact-body .diff-line.hunk, .artifact-body .diff-line.meta { color: var(--diff-muted); }
 /* diagrams: a picture on the reading field, the source folded under it */
-.artifact-diagram { margin: 0 0 1rem; padding: 0.75rem; border: 1px solid var(--line); border-radius: var(--r-key); background: var(--s3); }
+.diagram-figure { margin: 0 0 1rem; padding: 0.75rem; border: 1px solid var(--line); border-radius: var(--r-key); background: var(--s3); }
 .diagram-picture { display: flex; justify-content: center; min-height: 2rem; }
 .diagram-picture img { display: block; height: auto; max-width: 100%; }
 .diagram-note { margin: 0; font: 12px/1.5 var(--font-mono); color: var(--ink-3); }
-.diagram-note.bad { color: var(--bad); }
+.diagram-note.bad { margin-right: auto; color: var(--bad); }
 .diagram-source { margin-top: 0.4rem; }
 .diagram-source summary { cursor: pointer; font: 11px/1.5 var(--font-mono); color: var(--ink-3); }
-.diagram-source pre { margin: 0.4rem 0 0; }
+.diagram-source pre, pre.diagram-growing { margin: 0.4rem 0 0; }
+.markdown .diagram-figure { margin: 0 0 0.85rem; }
 /* the user's selections */
 .artifact-body mark.anchor { background: color-mix(in srgb, var(--wait) 22%, transparent); color: inherit; border-bottom: 2px solid var(--wait); cursor: pointer; }
 .artifact-body mark.anchor.delivered { background: color-mix(in srgb, var(--ok) 14%, transparent); border-bottom-color: var(--ok); }

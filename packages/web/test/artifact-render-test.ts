@@ -28,7 +28,7 @@ assert.match(html, /<a href="https:\/\/example.com" target="_blank" rel="noopene
 assert.match(html, /<a href="https:\/\/tracker.example\/p.png" target="_blank" rel="noopener noreferrer">pixel<\/a>/, "an image is a link, never fetched");
 assert.equal(hostile.diagrams.length, 1);
 assert.match(hostile.diagrams[0]!, /click A/);
-assert.match(html, /<figure class="artifact-diagram" data-anchor-skip data-diagram="0">/);
+assert.match(html, /<figure class="diagram-figure" data-anchor-skip data-diagram="0" data-diagram-place="artifact">/);
 assert.match(html, /&lt;\/code&gt;&lt;\/pre&gt;&lt;script&gt;alert\(2\)&lt;\/script&gt;/, "a diagram's source is escaped");
 assert.match(html, /<span class="diff-line meta">--- a<\/span>/);
 assert.match(html, /<span class="diff-line hunk">@@ -1 \+1 @@<\/span>/);

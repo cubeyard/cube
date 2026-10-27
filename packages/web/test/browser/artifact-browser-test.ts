@@ -173,7 +173,7 @@ try {
   }));
   assert.deepEqual(inert, { pwned: false, scripts: 0, images: ["data:image/svg+xml;charset", "data:image/svg+xml;charset"], javascript: 0, chatLink: "none", external: "noopener noreferrer", escaped: true });
   await shoot(page, "02-review-desktop");
-  await page.locator(".artifact-diagram").first().scrollIntoViewIfNeeded();
+  await page.locator(".diagram-figure").first().scrollIntoViewIfNeeded();
   await shoot(page, "03-review-diagram");
 
   await steadyKey(page, "Threads", "03a-comment-key-pressed");
@@ -315,14 +315,14 @@ try {
   await shoot(phone, "14-chat-phone");
 
   // The document moves under a selection without a scroll: diagrams drawn
-  // late (mermaid held back, as on a slow first load), a resized window, and
+  // late (Pele held back, as on a slow first load), a resized window, and
   // the comments panel growing on a phone. The key moves with the text.
   async function lateDiagrams(viewport: { width: number; height: number }, mobile: boolean, shot: string): Promise<Page> {
     const late = await browser.newPage({ viewport, isMobile: mobile, hasTouch: mobile });
     late.on("pageerror", error => errors.push(String(error)));
     let release = () => {};
     const held = new Promise<void>(resolve => { release = resolve; });
-    await late.route(/mermaid\.core-[^/]*\.js$/, async route => { await held; await route.continue(); });
+    await late.route(/\/assets\/lazy-[^/]*\.js$/, async route => { await held; await route.continue(); });
     await late.goto(`${url}/#/a/${reviewId}`);
     await late.locator("article.artifact-body h1").waitFor();
     // No scroll anchoring, so no scroll event moves the key in its stead.
@@ -416,12 +416,12 @@ try {
   assert.equal(await cellMarks(page), 0, "a dismissed comment leaves no mark");
   assert.equal(await tableFaults(page), "", "the table once the comment is gone");
 
-  // The black edition: diagrams are drawn with mermaid's dark theme.
+  // The black edition: diagrams are drawn in the page's dark tokens.
   const night = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
   night.on("pageerror", error => errors.push(String(error)));
   await night.goto(`${url}/#/a/${reviewId}`);
   await night.locator(".diagram-picture img").first().waitFor({ timeout: 30_000 });
-  await night.locator(".artifact-diagram").first().scrollIntoViewIfNeeded();
+  await night.locator(".diagram-figure").first().scrollIntoViewIfNeeded();
   await shoot(night, "15-review-dark");
 
   assert.deepEqual(dialogs, [], "nothing in a document opened a dialog");

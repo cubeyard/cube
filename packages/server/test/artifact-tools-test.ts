@@ -112,7 +112,7 @@ try {
   assert.equal(store.get(fromChat)!.head, 2);
 
   // The service itself treats a blank id as none, for any caller.
-  const direct = artifacts.write({ agent: { kind: "optchat" }, authors: [{ kind: "optchat" }] }, { id: "", body: "# direct" }, { agent: "optchat" }, "direct-1");
+  const direct = await artifacts.write({ agent: { kind: "optchat" }, authors: [{ kind: "optchat" }] }, { id: "", body: "# direct" }, { agent: "optchat" }, "direct-1");
   assert.equal(direct.revision, 1);
   assert.equal(store.get(direct.id)!.author.kind, "optchat");
   console.log("artifact tools: ok");
