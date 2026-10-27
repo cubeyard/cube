@@ -137,6 +137,13 @@ export function piLines(state: { models: Record<string, Usage> } | undefined, so
   return lines;
 }
 
+/** A Pi store's requests out when cubed stopped (pi-sends.ts `interrupted`,
+ * by `provider/model`): turns without a usage report, never zero. */
+export function piInterrupted(interrupted: Record<string, number> | undefined): { unknownTurns: number; notes: string[] } {
+  const unknownTurns = Object.values(interrupted ?? {}).reduce((sum, n) => sum + n, 0);
+  return { unknownTurns, notes: unknownTurns ? [`${unknownTurns} model requests were out when cubed stopped: what the provider billed for them is unknown, and they were not sent again`] : [] };
+}
+
 /** Claude Code's per-model running totals in a stream-json `result`. */
 type ModelTotals = Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number | null; usd: number; basis: string }>;
 
