@@ -16,7 +16,7 @@
   // closing it goes to the chat. Escape closes it unless a field has the
   // focus (a draft is never lost to Escape); a press on the chat beside it
   // closes it too. Focus goes back to where it was in the chat.
-  // `whole`: the place has the whole sheet (a thread), with no chat beside it.
+  // `whole`: the place has the whole sheet (a thread, an artifact), with no chat beside it.
   let { label, whole = false, children }: { label: string; whole?: boolean; children: Snippet } = $props();
 
   let dialog = $state<HTMLDialogElement>();

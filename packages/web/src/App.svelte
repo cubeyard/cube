@@ -247,7 +247,7 @@
        one panel, so the chat, its scroll and its draft are there when it closes. -->
   <ChatView {threads} {threadsLoaded} />
   {#if !chatRoute}
-    <PagePanel label={panelLabel} whole={!!threadId}>
+    <PagePanel label={panelLabel} whole={!!threadId || !!artifactId}>
       {#if settingsPage}
         <SettingsLayout page={settingsPage}>
           {@render settings(settingsPage)}
