@@ -12,6 +12,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { openStorage } from "../src/durable-agent.ts";
+import { SendsDoc } from "../src/pi-sends.ts";
 import { analysisText, exportTelemetry, readThread } from "../src/telemetry-export.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -52,6 +53,7 @@ const claudeThread = "c1aude00-0000-4000-8000-000000000001";
   put(1, result1);
   put(1, result1);
   put(2, { type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 529, error: "server_error", uuid: "a1", session_id: "s" });
+  put(2, { type: "system", subtype: "api_retry", attempt: 2, max_retries: 10, retry_delay_ms: 900, error_status: null, error: `/Users/${SECRET}/plan.txt`, uuid: "a2", session_id: "s" });
   put(2, frame("msg_E", { type: "text", text: `API Error: ${SECRET}` }, { input_tokens: 0, output_tokens: 0 }, { error: "rate_limit", message: { id: "msg_E", model: "<synthetic>", content: [], usage: { input_tokens: 0, output_tokens: 0 } } }));
   put(3, { type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "auto", pre_tokens: 150_000, post_tokens: 9_000, duration_ms: 30_000 }, uuid: "c1" });
   put(3, { type: "rate_limit_event", rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour", utilization: 0.81, isUsingOverage: false }, uuid: "l1" });
@@ -72,15 +74,43 @@ const claudeThread = "c1aude00-0000-4000-8000-000000000001";
   assert.deepEqual(item.calls[2]!.tokens, { input: null, output: null, cacheRead: null, cacheWrite: null, cacheWrite1h: null, reasoning: null }, "an error frame's cost is unknown");
   assert.equal(item.calls[0]!.startedAt, Date.parse("2026-10-27T10:00:00.000Z"));
   assert.deepEqual(item.turns.map(turn => [turn.state, turn.results, turn.calls, turn.retries, turn.durationMs, turn.apiDurationMs, turn.ttftMs, turn.error]), [
-    ["completed", 1, 2, 0, 5000, 4000, 900, false], ["failed", 0, 1, 1, null, null, null, null], ["completed", 1, 1, 0, 8000, 7000, 1500, false]],
-    "a repeated result counts once; a turn without one has unknown times; the lost background row is no turn");
+    ["completed", 1, 2, null, 5000, 4000, 900, false], ["failed", 0, 1, 2, null, null, null, null], ["completed", 1, 1, null, 8000, 7000, 1500, false]],
+    "a repeated result counts once; a turn without one has unknown times; no api_retry line is no proof of none; the lost background row is no turn");
   assert.deepEqual(item.turns[0]!.tokens, { input: 20, output: 300, cacheRead: 2000, cacheWrite: 400, cacheWrite1h: 400, reasoning: null });
   assert.deepEqual(item.turns[2]!.steers, { queued: 0, consumed: 1, dropped: 0 });
-  assert.deepEqual(item.events.map(event => event.kind), ["process", "retry", "compaction", "rate-limit"]);
-  assert.deepEqual(item.events[2], { kind: "compaction", thread: claudeThread, turn: `claude:${claudeThread}:3`, seq: 10, trigger: "auto", preTokens: 150_000, postTokens: 9_000, durationMs: 30_000 });
+  assert.deepEqual(item.events.map(event => event.kind), ["process", "retry", "retry", "compaction", "rate-limit"]);
+  assert.deepEqual(item.events[2], { kind: "retry", thread: claudeThread, turn: `claude:${claudeThread}:2`, seq: 9, attempt: 2, maxRetries: 10, delayMs: 900, status: null, error: null },
+    "a path where a reason belongs is dropped");
+  assert.deepEqual(item.events[3], { kind: "compaction", thread: claudeThread, turn: `claude:${claudeThread}:3`, seq: 11, trigger: "auto", preTokens: 150_000, postTokens: 9_000, durationMs: 30_000 });
   assert.equal(item.ledger.unknownTurns, 1, "the failed turn without a result is unknown in the ledger too");
   // Ledger 40 in / 2200 read / 1600 write; calls 10+5+3 / 1000 / 200+300+500. Output is unknown per call.
   assert.deepEqual(item.gap, { input: 22, output: null, cacheRead: 1200, cacheWrite: 600 }, "the gap is what the per-call frames miss");
+}
+
+// ---- Claude Code: a store last opened before steering (no steer table) ----
+const olderThread = "c1aude00-0000-4000-8000-000000000003";
+{
+  const directory = path.join(threads, olderThread);
+  fs.mkdirSync(directory, { recursive: true });
+  const db = new DatabaseSync(path.join(directory, "claude.sqlite"));
+  db.exec(`CREATE TABLE submission(seq INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL UNIQUE, text TEXT NOT NULL, state TEXT NOT NULL, error TEXT, created_at INTEGER NOT NULL);
+    CREATE TABLE message(seq INTEGER PRIMARY KEY AUTOINCREMENT, submission INTEGER NOT NULL, data TEXT NOT NULL);`);
+  db.prepare("INSERT INTO submission(request_id, text, state, created_at) VALUES ('tell:1', 'hi', 'completed', 500)").run();
+  const put = (data: unknown) => db.prepare("INSERT INTO message(submission, data) VALUES (1, ?)").run(JSON.stringify(data));
+  put({ type: "system", subtype: "init", session_id: "s", claude_code_version: "2.1.250", model: `/home/${SECRET}/model` });
+  for (const [id, model] of [["msg_V", "anthropic/claude-sonnet-5-5"], ["msg_P", `/home/${SECRET}/model`], ["msg_Q", `a/${SECRET}/b`], ["msg_T", `~${SECRET}`]]) {
+    put({ type: "assistant", parent_tool_use_id: null, uuid: id, message: { id, model, content: [], stop_reason: null, usage: { input_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } });
+  }
+  put({ type: "result", subtype: "success", is_error: false, uuid: "r", duration_ms: 100, duration_api_ms: 90, num_turns: 1, total_cost_usd: 0.01, usage: { input_tokens: 4, output_tokens: 8 },
+    modelUsage: { "claude-sonnet-5-5": { inputTokens: 4, outputTokens: 8, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.01, costBasis: "list" } } });
+  db.close();
+  const tables = () => { const read = new DatabaseSync(path.join(directory, "claude.sqlite"), { readOnly: true }); try { return read.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map(row => row.name); } finally { read.close(); } };
+
+  const item = (await readThread(directory))!;
+  assert.deepEqual(item.turns.map(turn => [turn.results, turn.durationMs, turn.ttftMs, turn.steers]), [[1, 100, null, null]], "no steer table: steers unknown, the turn still read");
+  assert.deepEqual(item.calls.map(call => call.model), ["anthropic/claude-sonnet-5-5", null, null, null], "a vendor-prefixed model stays; anything path-shaped is dropped");
+  assert.equal(item.events[0]!.kind === "process" && item.events[0]!.model, null);
+  assert.deepEqual(tables(), ["message", "sqlite_sequence", "submission"], "the store is not migrated");
 }
 
 // ---- Pi: a real store, one failed attempt retried, two prompts ----
@@ -104,6 +134,8 @@ const piThread = "9100000-0000-4000-8000-000000000002";
     await harness.waitForIdle(context);
   }
   const ledger = await harness.usage(context);
+  // Two requests out when cubed stopped, as pi-sends.ts records them.
+  await harness.commit(async tx => { (await tx.doc(SendsDoc)).interrupted = { "faux/priced": 2 }; }, context);
   await harness.close(context);
   assert.equal(ROOT_CONVERSATION_ID, conversation.id);
 
@@ -119,22 +151,26 @@ const piThread = "9100000-0000-4000-8000-000000000002";
   assert.deepEqual(item.ledger.lines.map(line => [line.model, line.spend.unpricedTokens]), [["priced", 76]]);
   assert.deepEqual(item.gap, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, "without compaction the calls are the whole ledger");
   assert.deepEqual(Object.keys(ledger.models), ["faux/priced"]);
+  assert.deepEqual([item.ledger.unknownTurns, item.ledger.notes], [2, ["2 model requests were out when cubed stopped: what the provider billed for them is unknown, and they were not sent again"]],
+    "requests out at a stop stay unknown, as the usage report says");
   assert.equal(fs.readdirSync(directory).filter(name => name.startsWith(".read-")).length, 0, "the private copy is removed");
 }
 
 // ---- Export and analysis ----
 {
+  fs.symlinkSync(path.join(root, "gone"), path.join(threads, "z-dangling"));
   const out = path.join(root, "out");
   const { analysis, skipped } = await exportTelemetry(threads, out);
-  assert.deepEqual(skipped, []);
-  assert.equal(analysis.threads, 2);
+  assert.deepEqual(skipped.map(({ thread, error }) => ({ thread, error })), [{ thread: "z-dangling", error: "ENOENT" }], "a broken entry is skipped, the rest read");
+  assert.equal(analysis.threads, 3);
   assert.equal(analysis.billedUsd, null);
   const claude = analysis.byAgent["claude-code"], pi = analysis.byAgent.pi;
-  assert.deepEqual([claude.calls, claude.turns, claude.turnsWithResult, claude.callsWithOutput, claude.retries, claude.compactions, claude.rateLimits, claude.unknownTurns], [4, 3, 2, 0, 1, 1, 1, 1]);
-  assert.deepEqual(claude.turnMs, { n: 2, p50: 5000, p90: 8000, max: 8000 });
-  assert.deepEqual(claude.turnTokens, { input: 23, output: 450, cacheRead: 2000, cacheWrite: 900, cacheWrite1h: null, reasoning: null }, "turn tokens over turns with a result; a missing TTL split stays unknown");
-  assert.ok(Math.abs(claude.ledgerUsd - 0.8) < 1e-9, "claude code's estimate comes from its running totals");
-  assert.deepEqual([pi.calls, pi.turns, pi.callsWithDuration, pi.callsWithOutput, pi.ledgerUnpricedTokens], [3, 2, 3, 3, 76]);
+  assert.deepEqual([claude.calls, claude.turns, claude.turnsWithResult, claude.callsWithOutput, claude.retries, claude.compactions, claude.rateLimits, claude.unknownTurns], [8, 4, 3, 0, 2, 1, 1, 1]);
+  assert.deepEqual(claude.versions, ["2.1.250", "2.1.310"]);
+  assert.deepEqual(claude.turnMs, { n: 3, p50: 5000, p90: 8000, max: 8000 });
+  assert.deepEqual(claude.turnTtftMs, { n: 2, p50: 900, p90: 1500, max: 1500 }, "a result without ttft_ms is left out, not counted as 0");
+  assert.ok(Math.abs(claude.ledgerUsd - 0.81) < 1e-9, "claude code's estimate comes from its running totals");
+  assert.deepEqual([pi.calls, pi.turns, pi.callsWithDuration, pi.callsWithOutput, pi.ledgerUnpricedTokens, pi.unknownTurns], [3, 2, 3, 3, 76, 2]);
   const faux = analysis.groups.find(group => group.agent === "pi")!;
   assert.deepEqual([faux.calls, faux.failedCalls, faux.coldWrites, faux.estimatedUsd?.pricedCalls, faux.estimatedUsd?.unpricedCalls], [3, 1, 0, 0, 3],
     "only the thread's first call wrote without reading, and a first call is no cold write");
@@ -149,17 +185,32 @@ const piThread = "9100000-0000-4000-8000-000000000002";
   assert.match(text, /claude-code claude-opus-5-5: 3 calls in 1 threads, 0 failed/);
   assert.match(text, /output: unknown per call; call time: unknown\n  per-call estimate: not recorded per call/);
   assert.match(text, /pi: 1 threads, 2 turns, 3 calls/);
+  assert.match(text, /retries seen 0, compactions 0, rate-limit events 0, turns without a usage report 2/);
   assert.match(text, /billed amounts unknown/);
 
   const manifest = JSON.parse(fs.readFileSync(path.join(out, "MANIFEST.json"), "utf8")) as { files: Record<string, string> };
   assert.deepEqual(Object.keys(manifest.files).sort(), ["analysis.json", "calls.jsonl", "events.jsonl", "threads.jsonl", "turns.jsonl"]);
+  assert.deepEqual((manifest as unknown as { skipped: unknown }).skipped, [{ thread: "z-dangling", error: "ENOENT" }], "the manifest keeps an error's code, not its message");
+  assert.equal(fs.statSync(out).mode & 0o777, 0o700);
+  assert.deepEqual(fs.readdirSync(out).map(name => fs.statSync(path.join(out, name)).mode & 0o777), Array(6).fill(0o600));
   for (const [name, hash] of Object.entries(manifest.files)) {
     const body = fs.readFileSync(path.join(out, name), "utf8");
     assert.equal(createHash("sha256").update(body).digest("hex"), hash, `${name} matches its manifest hash`);
     assert.ok(!body.includes(SECRET), `${name} holds no text of the thread`);
   }
-  assert.equal(fs.readFileSync(path.join(out, "calls.jsonl"), "utf8").trim().split("\n").length, 7);
-  assert.equal(fs.statSync(path.join(out, "calls.jsonl")).mode & 0o777, 0o600);
+  assert.ok(!fs.readFileSync(path.join(out, "MANIFEST.json"), "utf8").includes(root), "no path in the manifest");
+  assert.equal(fs.readFileSync(path.join(out, "calls.jsonl"), "utf8").trim().split("\n").length, 11);
+
+  // An existing output directory is refused, and what it holds is left alone.
+  const used = path.join(root, "used");
+  fs.mkdirSync(used, { mode: 0o755 });
+  fs.writeFileSync(path.join(used, "calls.jsonl"), "old\n", { mode: 0o644 });
+  await assert.rejects(exportTelemetry(threads, used), { code: "EEXIST" });
+  assert.deepEqual([fs.readFileSync(path.join(used, "calls.jsonl"), "utf8"), fs.readdirSync(used)], ["old\n", ["calls.jsonl"]]);
+  const empty = path.join(root, "empty");
+  fs.mkdirSync(empty, { mode: 0o755 });
+  await assert.rejects(exportTelemetry(threads, empty), { code: "EEXIST" }, "an empty directory is not reused either: its mode is not the export's");
+  assert.deepEqual(fs.readdirSync(empty), []);
 }
 
 fs.rmSync(root, { recursive: true, force: true });

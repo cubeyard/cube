@@ -16,7 +16,8 @@
  * telemetry-export.ts reads the stores. */
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import { claudeLines, piLines, type ClaudeTurn, type UsageLine } from "./usage.ts";
+import { claudeLines, piInterrupted, piLines, type ClaudeTurn, type UsageLine } from "./usage.ts";
+import type { PiUsage } from "./usage-service.ts";
 
 export const TELEMETRY_SCHEMA = "cube.telemetry/1";
 
@@ -67,7 +68,9 @@ export interface Turn {
   startedAt: Known;
   calls: number;
   failedCalls: number;
-  /** Claude Code `api_retry` lines in the turn; Pi: null (its failed attempts are calls). */
+  /** Claude Code `api_retry` lines seen in the turn, null when none: a version
+   * that never prints them looks the same as a turn without retries. Pi: null
+   * (its failed attempts are calls). */
   retries: Known;
   /** Claude Code `result` fields; null without a result. */
   results: number;
@@ -80,6 +83,7 @@ export interface Turn {
   error: boolean | null;
   /** Claude Code: `result.usage`, the main loop only; Pi: the sum of its calls. */
   tokens: Tokens;
+  /** null for Pi and for a claude.sqlite older than steering (no steer table). */
   steers: { queued: number; consumed: number; dropped: number } | null;
 }
 
@@ -107,8 +111,14 @@ export interface ThreadTelemetry {
 }
 
 const num = (value: unknown): Known => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-/** A fixed reason or name, never free text. */
-const word = (value: unknown): string | null => typeof value === "string" && /^[A-Za-z0-9_.:/<>-]{1,80}$/.test(value) ? value : null;
+/** A fixed reason, id or name, never free text or a path. */
+const word = (value: unknown): string | null => typeof value === "string" && /^[A-Za-z0-9_<>-][A-Za-z0-9_.:<>-]{0,79}$/.test(value) ? value : null;
+/** A model name, which may name its vendor (`vendor/model`): one inner slash at most, never a path's start. */
+const modelName = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const parts = value.split("/");
+  return parts.length <= 2 && parts.every(part => word(part) !== null) ? value : null;
+};
 const time = (value: unknown): Known => typeof value === "string" ? num(Date.parse(value)) : null;
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const unknownTokens = (): Tokens => ({ input: null, output: null, cacheRead: null, cacheWrite: null, cacheWrite1h: null, reasoning: null });
@@ -144,7 +154,8 @@ export interface ClaudeStore {
   turns: ReadonlyArray<ClaudeTurn & { createdAt: number }>;
   /** message rows in store order. */
   messages: ReadonlyArray<{ seq: number; submission: number; data: Record<string, unknown> }>;
-  steers: ReadonlyArray<{ submission: number; state: string }>;
+  /** null: the store has no steer table (opened last before steering existed). */
+  steers: ReadonlyArray<{ submission: number; state: string }> | null;
 }
 
 /** A Claude Code thread from its claude.sqlite rows. */
@@ -166,7 +177,7 @@ export function claudeTelemetry(store: ClaudeStore): ThreadTelemetry {
       // One response streams as one frame per content block, each with the same id and usage.
       const prior = calls.get(key);
       const call: ModelCall = prior ?? { kind: "call", id: `claude:${thread}:${key}`, thread, agent: "claude-code", turn,
-        source: data.parent_tool_use_id == null ? "main" : "subagent", provider: "anthropic", model: word(message.model), responseModel: null,
+        source: data.parent_tool_use_id == null ? "main" : "subagent", provider: "anthropic", model: modelName(message.model), responseModel: null,
         responseId: typeof message.id === "string" ? word(message.id) : null, startedAt: time(data.timestamp), durationMs: null,
         tokens: unknownTokens(), estimatedUsd: null, stopReason: null, failed: false };
       // An error frame is not a response: what it cost is unknown.
@@ -190,11 +201,12 @@ export function claudeTelemetry(store: ClaudeStore): ThreadTelemetry {
     } else if (data.type === "system" && data.subtype === "init") {
       const version = word(data.claude_code_version);
       if (version) versions.add(version);
-      events.push({ kind: "process", thread, turn, seq, version, model: word(data.model) });
+      events.push({ kind: "process", thread, turn, seq, version, model: modelName(data.model) });
     }
   }
   const all = [...calls.values()];
   const steers = (submission: number) => {
+    if (!store.steers) return null;
     const rows = store.steers.filter(steer => steer.submission === submission);
     return { queued: rows.filter(row => row.state === "queued").length, consumed: rows.filter(row => row.state === "consumed").length, dropped: rows.filter(row => row.state === "dropped").length };
   };
@@ -203,7 +215,7 @@ export function claudeTelemetry(store: ClaudeStore): ThreadTelemetry {
     const ended = results.get(row.seq) ?? [];
     const last = ended.at(-1);
     return { kind: "turn", id: turnId(row.seq), thread, agent: "claude-code", state: row.state, startedAt: num(row.createdAt), calls: own.length,
-      failedCalls: own.filter(call => call.failed).length, retries: retries.get(row.seq) ?? 0, results: ended.length,
+      failedCalls: own.filter(call => call.failed).length, retries: retries.get(row.seq) ?? null, results: ended.length,
       durationMs: num(last?.duration_ms), apiDurationMs: num(last?.duration_api_ms), ttftMs: num(last?.ttft_ms), modelRounds: num(last?.num_turns),
       stopReason: word(last?.stop_reason), terminalReason: word(last?.terminal_reason),
       error: last ? last.is_error === true || last.subtype !== "success" : null,
@@ -218,8 +230,8 @@ export interface PiStore {
   thread: string;
   /** Every conversation's entries, oldest first. */
   conversations: ReadonlyArray<{ id: string; root: boolean; entries: readonly EntryRecord[] }>;
-  /** The summed `pi.usage` ledger (usage-service.ts sumUsage). */
-  usage: Parameters<typeof piLines>[0];
+  /** The summed `pi.usage` ledger and the requests out at a stop (usage-service.ts sumUsage). */
+  usage: PiUsage;
 }
 
 /** A Pi thread from its store's entries. */
@@ -250,8 +262,8 @@ export function piTelemetry(store: PiStore): ThreadTelemetry {
         const response = message as AssistantMessage, usage = response.usage;
         const priced = num(usage?.cost?.total);
         const call: ModelCall = { kind: "call", id: `pi:${thread}:${conversation.id}:${entry.id}`, thread, agent: "pi", turn: turn?.id ?? null,
-          source: conversation.root ? "main" : "other", provider: word(response.provider), model: word(response.model),
-          responseModel: word(response.responseModel), responseId: word(response.responseId), startedAt: num(response.timestamp), durationMs: num(response.durationMs),
+          source: conversation.root ? "main" : "other", provider: word(response.provider), model: modelName(response.model),
+          responseModel: modelName(response.responseModel), responseId: word(response.responseId), startedAt: num(response.timestamp), durationMs: num(response.durationMs),
           tokens: usage ? { input: num(usage.input), output: num(usage.output), cacheRead: num(usage.cacheRead), cacheWrite: num(usage.cacheWrite),
             cacheWrite1h: num(usage.cacheWrite1h), reasoning: num(usage.reasoning) } : unknownTokens(),
           // A response with tokens and no cost had no price: unknown, not free.
@@ -269,7 +281,8 @@ export function piTelemetry(store: PiStore): ThreadTelemetry {
     close();
   }
   const lines = piLines(store.usage, "pi");
-  return { kind: "thread", schema: TELEMETRY_SCHEMA, thread, agent: "pi", versions: [], calls, turns, events, ledger: { lines, unknownTurns: 0, notes: [] }, gap: gap(lines, calls) };
+  // As usage-service.ts reads the same store: requests out at a stop are unknown.
+  return { kind: "thread", schema: TELEMETRY_SCHEMA, thread, agent: "pi", versions: [], calls, turns, events, ledger: { lines, ...piInterrupted(store.usage.interrupted) }, gap: gap(lines, calls) };
 }
 
 // ---- analysis ----

@@ -1,10 +1,11 @@
 /** Exports content-free per-call and per-turn telemetry from thread stores
- * (telemetry.ts says what each figure means) and prints
- * an aggregate analysis. Read-only: claude.sqlite is opened read-only, a Pi
- * store is read from a private copy (durable-agent.ts readStorage, which
- * writes and removes a `.read-*` directory beside it). Point it at a copy of
- * `CUBED_STATE/threads` or at cubed's own while cubed is stopped: an open Pi
- * store belongs to its agent.
+ * (telemetry.ts says what each figure means) and prints an aggregate
+ * analysis. It never changes a store's contents or schema: claude.sqlite is
+ * opened read-only (SQLite may leave its `-shm` and `-wal` files beside it),
+ * a Pi store is read from a private copy (durable-agent.ts readStorage, which
+ * writes and removes a `.read-*` directory beside it), so the threads
+ * directory must be writable. Point it at a copy of `CUBED_STATE/threads`, or
+ * at cubed's own while cubed is stopped: an open Pi store belongs to its agent.
  *
  *   node packages/server/src/telemetry-export.ts <threads directory> <output directory> */
 import { createHash } from "node:crypto";
@@ -30,7 +31,9 @@ export async function readThread(directory: string): Promise<ThreadTelemetry | n
       const turns = db.prepare("SELECT seq, state, created_at AS createdAt FROM submission WHERE request_id NOT LIKE 'cube:background:%:lost' ORDER BY seq").all() as Array<{ seq: number; state: "running" | "completed" | "failed" | "stopped"; createdAt: number }>;
       const messages = (db.prepare("SELECT seq, submission, data FROM message WHERE json_extract(data, '$.type') IN ('assistant', 'system', 'result', 'rate_limit_event') ORDER BY seq").all() as Array<{ seq: number; submission: number; data: string }>)
         .map(row => ({ seq: row.seq, submission: row.submission, data: JSON.parse(row.data) as Record<string, unknown> }));
-      const steers = db.prepare("SELECT submission, state FROM steer").all() as Array<{ submission: number; state: string }>;
+      // A store claude-agent.ts has not opened since steering came has no steer table; it is read as it is, never migrated.
+      const steering = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'steer'").get() !== undefined;
+      const steers = steering ? db.prepare("SELECT submission, state FROM steer").all() as Array<{ submission: number; state: string }> : null;
       return claudeTelemetry({ thread, turns, messages, steers });
     } finally { db.close(); }
   }
@@ -59,15 +62,26 @@ export async function readThread(directory: string): Promise<ThreadTelemetry | n
   return null;
 }
 
-/** Reads every thread directory under `threads` and writes the export to `out`. */
-export async function exportTelemetry(threads: string, out: string): Promise<{ analysis: Analysis; skipped: Array<{ thread: string; error: string }> }> {
-  fs.mkdirSync(out, { recursive: true, mode: 0o700 });
-  const items: ThreadTelemetry[] = [], skipped: Array<{ thread: string; error: string }> = [];
-  for (const name of fs.readdirSync(threads).sort()) {
+/** A thread that could not be read: its error's code only, never its message. */
+export interface Skipped { thread: string; error: string; message: string }
+
+/** Reads every thread directory under `threads` and writes the export to
+ * `out`, which must not exist yet: a fresh 0700 directory, each file created
+ * 0600 and never through an existing name or link. */
+export async function exportTelemetry(threads: string, out: string): Promise<{ analysis: Analysis; skipped: Skipped[] }> {
+  const names = fs.readdirSync(threads).sort();
+  fs.mkdirSync(out, { mode: 0o700 });
+  const items: ThreadTelemetry[] = [], skipped: Skipped[] = [];
+  for (const name of names) {
     const directory = path.join(threads, name);
-    if (!fs.statSync(directory).isDirectory()) continue;
-    try { const item = await readThread(directory); if (item) items.push(item); }
-    catch (error) { skipped.push({ thread: name, error: error instanceof Error ? error.message.slice(0, 200) : "unreadable" }); }
+    try {
+      if (!fs.statSync(directory).isDirectory()) continue;
+      const item = await readThread(directory);
+      if (item) items.push(item);
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      skipped.push({ thread: name, error: typeof code === "string" && /^[A-Z0-9_]{1,40}$/.test(code) ? code : "unreadable", message: error instanceof Error ? error.message : String(error) });
+    }
   }
   const analysis = analyze(items);
   const files: Record<string, string> = {
@@ -77,10 +91,10 @@ export async function exportTelemetry(threads: string, out: string): Promise<{ a
     "threads.jsonl": items.map(({ calls, turns, events, ...thread }) => JSON.stringify({ ...thread, calls: calls.length, turns: turns.length, events: events.length })).join("\n"),
     "analysis.json": JSON.stringify(analysis, null, 2),
   };
-  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(out, name), text ? `${text}\n` : "", { mode: 0o600 });
-  const manifest = { schema: TELEMETRY_SCHEMA, generatedAt: new Date().toISOString(), threads: items.length, skipped,
+  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(out, name), text ? `${text}\n` : "", { mode: 0o600, flag: "wx" });
+  const manifest = { schema: TELEMETRY_SCHEMA, generatedAt: new Date().toISOString(), threads: items.length, skipped: skipped.map(({ thread, error }) => ({ thread, error })),
     files: Object.fromEntries(Object.keys(files).map(name => [name, createHash("sha256").update(fs.readFileSync(path.join(out, name))).digest("hex")])) };
-  fs.writeFileSync(path.join(out, "MANIFEST.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(out, "MANIFEST.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, flag: "wx" });
   return { analysis, skipped };
 }
 
@@ -94,7 +108,7 @@ export function analysisText(analysis: Analysis): string {
     if (!a.threads) continue;
     lines.push(`${agent}: ${a.threads} threads${a.versions.length ? ` (versions ${a.versions.join(", ")})` : ""}, ${a.turns} turns${agent === "claude-code" ? ` (${a.turnsWithResult} with a result)` : ""}, ${a.calls} calls`,
       `  coverage: duration ${pct(a.callsWithDuration, a.calls)} of calls, output ${pct(a.callsWithOutput, a.calls)} of calls`,
-      `  retries ${a.retries}, compactions ${a.compactions}, rate-limit events ${a.rateLimits}, turns without a usage report ${a.unknownTurns}`,
+      `  retries seen ${a.retries}, compactions ${a.compactions}, rate-limit events ${a.rateLimits}, turns without a usage report ${a.unknownTurns}`,
       `  turn time: ${ms(a.turnMs)}; api: ${ms(a.turnApiMs)}; first token: ${ms(a.turnTtftMs)}; tools: ${ms(a.toolMs)}`,
       `  estimate (usage ledger): $${a.ledgerUsd.toFixed(2)}${a.ledgerUnpricedTokens ? ` + ${a.ledgerUnpricedTokens} unpriced tokens` : ""}`);
   }
@@ -111,7 +125,13 @@ export function analysisText(analysis: Analysis): string {
 if (import.meta.main) {
   const [threads, out] = process.argv.slice(2);
   if (!threads || !out) { console.error("usage: node packages/server/src/telemetry-export.ts <threads directory> <output directory>"); process.exit(2); }
-  const { analysis, skipped } = await exportTelemetry(path.resolve(threads), path.resolve(out));
-  console.log(analysisText(analysis));
-  for (const item of skipped) console.log(`skipped ${item.thread}: ${item.error}`);
+  try {
+    const { analysis, skipped } = await exportTelemetry(path.resolve(threads), path.resolve(out));
+    console.log(analysisText(analysis));
+    // The message stays on this terminal; the export keeps only its code.
+    for (const item of skipped) console.log(`skipped ${item.thread}: ${item.message}`);
+  } catch (error) {
+    console.error(`telemetry export failed: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
 }

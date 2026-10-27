@@ -20,7 +20,7 @@ import { readStorage } from "./durable-agent.ts";
 import { createLogger } from "./log.ts";
 import { threadAgent, type Registry, type Thread } from "./registry.ts";
 import {
-  BILLED_NOTE, CLAUDE_BILLING, claudeLines, gapsText, mergeLines, piLines, spendText, subject, tokensText, totals, zeroSpend, addSpend,
+  BILLED_NOTE, CLAUDE_BILLING, claudeLines, gapsText, mergeLines, piInterrupted, piLines, spendText, subject, tokensText, totals, zeroSpend, addSpend,
   type ClaudeRecord, type ClaudeTurn, type Pricing, type SubjectUsage, type UsageLine, type UsageTotals,
 } from "./usage.ts";
 
@@ -123,9 +123,8 @@ export class UsageService {
   }
 
   private piThread(thread: Thread, state: PiUsage, read: SubjectUsage["read"], readAt: number): SubjectUsage {
-    const interrupted = Object.values(state.interrupted ?? {}).reduce((sum, n) => sum + n, 0);
-    const notes = interrupted ? [`${interrupted} model requests were out when cubed stopped: what the provider billed for them is unknown, and they were not sent again`] : [];
-    return subject({ ...this.base(thread), lines: piLines(state, "pi", this.pricing), unknownTurns: interrupted, ...interrupted ? { incomplete: true } : {}, read, readAt, notes });
+    const { unknownTurns, notes } = piInterrupted(state.interrupted);
+    return subject({ ...this.base(thread), lines: piLines(state, "pi", this.pricing), unknownTurns, ...unknownTurns ? { incomplete: true } : {}, read, readAt, notes });
   }
 
   /** One thread's usage; archived threads included. */
