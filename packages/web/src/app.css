@@ -1429,7 +1429,8 @@ select.compose-input {
 }
 
 /* ============================================================ a thread
-   A thread has the whole sheet (concept A, artifact a54a8cce): the panel
+   A thread has the whole sheet (concept A, artifact a54a8cce), and an
+   artifact too, with the same bar (its revision at the end): the panel
    covers the chat edge to edge with no wash, border or shadow, so the
    thread reads as the chat's own page turned. One bar: the way back to the
    chat, the thread's name (its state beneath, only when there is one) on
@@ -1877,8 +1878,8 @@ button.note-head:hover { background: var(--s3); }
 }
 .artifact-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .artifact-workspace > .work-panel { grid-column: 2; }
-.artifact-title { min-width: 0; }
-.artifact-strip .strip-state { flex: none; }
+/* before the document is here, or when there is none: the bar and a line */
+.artifact-workspace.bare { grid-template-columns: minmax(0, 1fr); }
 .artifact-revision select { max-width: 11rem; }
 .artifact-scroll { flex: 1; min-height: 0; overflow: auto; padding: 1rem clamp(1rem, 4vw, 2.5rem) 3rem; background: var(--s4); }
 .artifact-scroll > * { max-width: 46rem; margin-inline: auto; }
@@ -1976,7 +1977,7 @@ p.action-problems { padding-left: 0.75rem; }
 @media (max-width: 52rem) {
   .artifact-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
   .artifact-workspace > .work-panel { grid-column: 1; grid-row: 2; max-height: 42vh; border-left: 0; border-top: 1px solid var(--line-2); }
-  .artifact-strip .strip-state, .artifact-strip .strip-project { display: none; }
-  .thread-strip .artifact-title { display: block; flex: 1; }
+  /* the provenance line in the document names the author */
+  .artifact-strip .bar-sub { display: none; }
   .artifact-workspace > .work-panel { max-height: 36vh; }
 }

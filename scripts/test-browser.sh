@@ -4,7 +4,8 @@
 # makes that a failure. The phone layout also runs in WebKit, Safari's engine,
 # when Playwright has it; in CI both are required. CI's browser job runs in
 # Playwright's own image, which has both browsers and their system libraries;
-# CI without them installs them here (apt-get and Playwright's download).
+# CI without them installs them here (scripts/setup-browsers.sh). A thread
+# machine has Chromium from .agents/setup.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if ! (cd packages/web && node -e 'require.resolve("playwright")' 2>/dev/null); then
@@ -17,22 +18,14 @@ has_browsers() {
     process.exit(process.argv.slice(1).every((name) => fs.existsSync(pw[name].executablePath())) ? 0 : 1)' "$@")
 }
 if [ -n "${CI:-}" ]; then
-  if has_browsers chromium webkit; then
-    echo "chromium and webkit for playwright $(cd packages/web && node -p 'require("playwright/package.json").version') are installed (${PLAYWRIGHT_BROWSERS_PATH:-default path})"
-  else
-    pnpm --filter @cube/web exec playwright install --with-deps chromium webkit
-  fi
-  if ! has_browsers chromium webkit; then
-    echo "FAIL: Chromium or WebKit for Playwright is missing in CI" >&2
-    exit 1
-  fi
+  bash scripts/setup-browsers.sh chromium webkit
 fi
 if ! has_browsers chromium; then
   if [ "${CUBE_TEST_BROWSER:-}" = required ]; then
-    echo "FAIL: Chromium for Playwright is missing: pnpm --filter @cube/web exec playwright install chromium" >&2
+    echo "FAIL: Chromium for Playwright $(cd packages/web && node -p 'require("playwright/package.json").version') is missing: bash scripts/setup-browsers.sh" >&2
     exit 1
   fi
-  echo "SKIP: browser tests (install Chromium: pnpm --filter @cube/web exec playwright install chromium)"
+  echo "SKIP: browser tests (install Chromium: bash scripts/setup-browsers.sh)"
   exit 0
 fi
 pnpm build

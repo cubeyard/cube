@@ -51,7 +51,7 @@ const history: ThreadEvent[] = [
 
 const engines: Array<[string, Browser]> = [["chromium", await chromium.launch()]];
 if (fs.existsSync(webkit.executablePath())) engines.push(["webkit", await webkit.launch()]);
-else console.log("SKIP: webkit (install it: pnpm --filter @cube/web exec playwright install webkit)");
+else console.log("SKIP: webkit (install it: bash scripts/setup-browsers.sh webkit)");
 const errors: string[] = [];
 const groups = (page: Page) => page.locator(".chat-sheet details.tool-group");
 const isOpen = (locator: Locator) => locator.evaluate(element => (element as HTMLDetailsElement).open);

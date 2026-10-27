@@ -157,6 +157,20 @@ try {
   await shoot(page, "01-chat-index");
   await page.keyboard.press("Escape");
 
+  // From its note in the margin (opened, then `read`): the review has the whole sheet, as a
+  // thread does, and its way back leaves the chat's draft as it was.
+  await page.locator(".composer textarea").fill("a draft the chat keeps");
+  await page.locator(".sheet-margin .note-title", { hasText: "post-merge review" }).click();
+  await page.locator(".sheet-margin .note-peek a.note-link", { hasText: "read" }).click();
+  await page.locator(".artifact-strip h1", { hasText: "post-merge review" }).waitFor();
+  const sheet = (await page.locator("dialog.page-panel").boundingBox())!;
+  assert.ok(sheet.x <= 0 && sheet.width >= 1439, `the artifact has the whole sheet: ${JSON.stringify(sheet)}`);
+  assert.equal(await page.locator("dialog.page-panel .main-header").count(), 0, "no menu over the artifact");
+  await page.getByRole("button", { name: "back to the chat" }).click();
+  await page.locator("dialog.page-panel").waitFor({ state: "detached" });
+  assert.equal(await page.locator(".composer textarea").inputValue(), "a draft the chat keeps", "the chat's draft is kept");
+  await page.locator(".composer textarea").fill("");
+
   await link.click();
   await page.locator("article.artifact-body h1", { hasText: "post-merge review" }).waitFor();
   await page.locator(".diagram-picture img").first().waitFor({ timeout: 30_000 });
@@ -304,13 +318,19 @@ try {
   assert.ok(overflow <= 0, `no sideways scroll on a phone (${overflow}px)`);
   // the artifact's strip has no details key: its revision choice stays in view
   assert.ok(await phone.locator(".artifact-revision select").isVisible(), "the revision choice shows on a phone");
+  assert.ok(await phone.getByRole("button", { name: "back to the chat" }).isVisible(), "the way back shows on a phone");
   await shoot(phone, "12-review-phone");
   await until(async () => phone.locator(".diagram-picture[aria-busy]").count(), count => count === 0, "every diagram drawn on the phone");
   await steadyKey(phone, "the store keeps every revision", "12a-comment-key-phone", true);
   await phone.goto(`${url}/#/artifacts`);
   await phone.locator(".artifact-list li").first().waitFor();
   await shoot(phone, "13-list-phone");
-  await phone.goto(`${url}/#/chat`);
+  // the list, then its artifact over the whole screen; its way back is the chat
+  await phone.locator(".artifact-list-title", { hasText: "post-merge review" }).tap();
+  await phone.locator(".artifact-strip h1", { hasText: "post-merge review" }).waitFor();
+  await phone.getByRole("button", { name: "back to the chat" }).tap();
+  await phone.locator("dialog.page-panel").waitFor({ state: "detached" });
+  assert.equal(await phone.evaluate(() => location.hash), "#/chat");
   await phone.locator(".composer textarea").waitFor();
   await shoot(phone, "14-chat-phone");
 

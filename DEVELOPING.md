@@ -96,9 +96,22 @@ in place) is tested the same way, with `mkfs.erofs`.
 header has the command).
 
 UI behavior is checked in a real browser: `scripts/test-browser.sh` (the end of
-`pnpm test`; `pnpm test:browser` alone) builds the UI and drives Chromium. CI
-installs Chromium; elsewhere install it once with `pnpm --filter @cube/web exec
-playwright install chromium`, or `pnpm test` prints a SKIP notice
+`pnpm test`; `pnpm test:browser` alone) builds the UI and drives Chromium.
+`bash scripts/setup-browsers.sh [chromium] [webkit]` (Chromium alone without
+arguments) makes the browsers usable for the pinned Playwright: one that
+launches is left alone (under a second); otherwise Playwright downloads it
+into its cache (`~/.cache/ms-playwright`, `~/Library/Caches/ms-playwright` on
+macOS), dropping revisions no installed Playwright uses, and on Linux with
+apt-get installs its system libraries through sudo if it still does not
+launch. `.agents/setup` runs it, so a thread machine and its template come
+with Chromium and its libraries in the agent's cache: `pnpm test:browser`
+needs no install there. WebKit (another download and, on a Debian 13
+guest with Chromium ready, 263 more apt packages) is not provisioned: the phone and touch scenarios that use it
+print a SKIP for it and run in CI's `browser` job; `bash
+scripts/setup-browsers.sh webkit` adds it when a change needs Safari's
+engine. A template keeps the browsers its setup installed for up to a day,
+so after a Playwright upgrade `pnpm install` there, then rerun the script.
+Without Chromium `pnpm test` prints a SKIP notice
 (`CUBE_TEST_BROWSER=required` makes that a failure). `packages/web/test/browser/chat-browser-test.ts` runs the
 chat against a scripted host (`scripted-host.ts`) that sets the order and
 timing of every answer and frame: a slow send, an older frame after a newer

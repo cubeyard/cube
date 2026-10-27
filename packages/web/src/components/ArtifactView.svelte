@@ -7,13 +7,14 @@
   import { relTime } from "../lib/time.ts";
   import { uid } from "../lib/uid.ts";
   import type { ActionPreview, ArtifactAction, ArtifactComment, ArtifactView, Revision } from "../lib/types.ts";
-  import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
+  import { pagePanel } from "./PagePanel.svelte";
 
   // One artifact: the document an agent wrote, its revisions, the user's
   // comments on selections and the actions it offers. The chat stays the
   // place to talk; comments go to the author as one message when sent.
   let { artifactId, revision: requested = null }: { artifactId: string; revision?: number | null } = $props();
+  const panel = pagePanel();
 
   let view = $state<ArtifactView | null>(null);
   let loadError = $state<string | null>(null);
@@ -50,6 +51,8 @@
   const head = $derived(artifact?.head ?? 0);
   // While a comment is written its revision stays on screen; a newer one shows as newer.
   const number = $derived(requested && requested >= 1 && requested <= head ? requested : pending?.revision ?? head);
+  // The document is here (or its revision's error): until then only the bar shows.
+  const ready = $derived(!gone && !!view && !!artifact && (!!shown || !!shownError));
   const older = $derived(!!shown && shown.number < head);
   const rendered = $derived(shown ? renderArtifact(shown.body) : null);
   const comments = $derived(view?.comments ?? []);
@@ -320,22 +323,32 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<Header section="artifacts" />
-{#if gone}
-  <main class="artifact-missing"><p>this artifact does not exist on this host.</p><a class="key" href="#/artifacts">all artifacts</a></main>
-{:else if loadError && !view}
-  <main class="artifact-missing" role="alert"><p>{loadError}</p><button class="key" onclick={load}>retry</button></main>
-{:else if !view || !artifact || (!shown && !shownError)}
-  <!-- until the document itself is here: no strip over an empty page first -->
-  <p class="loading" role="status">loading…</p>
-{:else}
-  <main class="artifact-workspace">
-    <section class="artifact-pane" aria-label="document">
-      <section class="thread-strip artifact-strip" aria-label="artifact">
-        <h1 class="strip-title artifact-title">{artifact.title}</h1>
-        <span class="strip-state">by {#if authorLink}<a class="strip-link" href={authorLink}>{author}</a>{:else}{author}{/if}{artifact.thread?.archived ? " (archived)" : ""}</span>
-        {#if artifact.project}<a class="strip-project" href={`#/projects/${artifact.project.id}`}>{artifact.project.name}</a>{/if}
-        <span class="spacer"></span>
+<!-- The artifact has the whole sheet, as a thread does: one bar (the way
+     back to the chat, the title with its author beneath, the revision),
+     then the document and its comments bank. The bar stands in every state,
+     so a missing artifact still has its way back. -->
+{#snippet bar()}
+  <section class="thread-strip thread-bar artifact-strip" aria-label="artifact">
+    {#if panel}
+      <button class="bar-back" type="button" aria-label="back to the chat" title="back to the chat · esc" onclick={panel.close}>
+        <Icon name="chevron" size={14} /><span class="bar-back-word" aria-hidden="true">chat</span>
+      </button>
+    {:else}
+      <span></span>
+    {/if}
+    <div class="bar-title">
+      <h1 class="strip-title artifact-title" class:untitled={!artifact} tabindex="-1" data-panel-focus title={artifact?.title}>
+        {#if artifact}{artifact.title}{:else if gone || loadError}artifact{:else}<span class="sr-only">artifact</span>{/if}
+      </h1>
+      {#if artifact}
+        <p class="bar-sub">
+          <span class="strip-state">by {#if authorLink}<a class="strip-link" href={authorLink}>{author}</a>{:else}{author}{/if}{artifact.thread?.archived ? " (archived)" : ""}</span>
+          {#if artifact.project}<a class="strip-project" href={`#/projects/${artifact.project.id}`}>{artifact.project.name}</a>{/if}
+        </p>
+      {/if}
+    </div>
+    <div class="bar-end">
+      {#if ready && view}
         <label class="strip-model artifact-revision" title="revision">
           <span class="sr-only">revision</span>
           <select aria-label="revision" value={String(number)} onchange={(event) => {
@@ -348,7 +361,22 @@
           </select>
           <Icon name="chevron" size={12} />
         </label>
-      </section>
+      {/if}
+    </div>
+  </section>
+{/snippet}
+
+<main class="artifact-workspace" class:bare={!ready}>
+  <section class="artifact-pane" aria-label="document">
+    {@render bar()}
+    {#if gone}
+      <div class="artifact-missing"><p>this artifact does not exist on this host.</p><a class="key" href="#/artifacts">all artifacts</a></div>
+    {:else if loadError && !view}
+      <div class="artifact-missing" role="alert"><p>{loadError}</p><button class="key" onclick={load}>retry</button></div>
+    {:else if !ready}
+      <!-- until the document itself is here: the bar, then an empty page -->
+      <p class="loading" role="status">loading…</p>
+    {:else}
       {#if older}
         <div class="strip-note" role="status">
           <span class="strip-note-text">revision {shown?.number} of {head}: an older version. Comments made here keep this revision; its actions do not run.</span>
@@ -395,7 +423,9 @@
         <button class="key primary artifact-select-key" style={`left: ${selection.x}px; top: ${selection.y}px`}
           onpointerdown={(event) => event.preventDefault()} onclick={startComment} title="comment on the selection · c">comment</button>
       {/if}
-    </section>
+    {/if}
+  </section>
+  {#if ready && artifact}
     <aside class="work-panel artifact-comments" aria-labelledby="comments-heading">
       <div class="work-head">
         <h2 id="comments-heading">comments</h2>
@@ -449,8 +479,8 @@
         {/if}
       </div>
     </aside>
-  </main>
-{/if}
+  {/if}
+</main>
 
 <dialog class="new-thread-dialog action-dialog" bind:this={dialog} aria-labelledby="action-title"
   oncancel={(event) => { if (running) event.preventDefault(); }} onclose={() => { confirming = null; }}>

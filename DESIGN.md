@@ -747,7 +747,7 @@ forward work) and its own header row, which ends with a close key (a
 thread's way back starts its bar); the wordmark and `chat` also close it.
 Escape closes it unless a field holds the focus (a draft is never lost to
 escape); a press on the chat beside it closes it. A thread's panel is
-`whole`: the whole screen at every width, with no wash, border or shadow,
+`whole`, and an artifact's too: the whole screen at every width, with no wash, border or shadow,
 entering with `settle-in`, so there is no chat beside it to press. Closing goes to `#/chat` with the
 chat exactly as it was (draft, scroll); focus goes back where it was.
 While a place is open, the chat's own keys (`/`, ctrl/⌘ k) are off; a place
@@ -777,9 +777,17 @@ The title takes focus as the thread opens (a screen reader says where it
 is; no keyboard rises on a phone); shift+tab reaches the way back; escape
 outside a field, the way back and the browser's back return to the chat
 with its scroll and draft, and focus goes back to what opened the thread.
-An artifact's page is the same: document and comments bank on one sheet,
-a hairline between, sent comments on soft faces, actions on a soft face in
-a hairline frame.
+An artifact's page is the same: it takes the whole sheet from every way in
+(a chat link, a margin note's `read`, the index, the list, a direct link),
+with the thread's bar: `‹ chat`, the title on the document's centreline
+with its author and project beneath (folded on a phone, where the
+provenance line names the author), the revision at the end. The bar
+stands while the document loads and when it is missing, so the way back
+is always there. Then document and comments bank on one sheet, a hairline
+between (the bank below the document on a phone), sent comments on soft
+faces, actions on a soft face in a hairline frame. The title takes focus
+as it opens; escape, `‹ chat` and back return as from a thread (back from
+an artifact opened in the list is the list).
 
 ### Named Rules
 **The Actions-In-The-Module Rule.** A module's controls live inside it, on its
