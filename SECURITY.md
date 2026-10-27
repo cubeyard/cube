@@ -120,7 +120,10 @@ a separate download exit are later work.
 Work artifacts ([docs/artifacts.md](docs/artifacts.md)) are agent-written
 documents the browser renders as data: raw HTML is shown as text, links are
 http(s), mailto or cube's own pages, images are links, and Mermaid diagrams
-are shown as images of their SVG. Their only side effect is a typed
+(in artifacts and the chat) are drawn by Pele in the browser, with links and
+images off, and shown as images of their SVG; cubed checks an artifact's
+diagrams with the same library in a worker thread bounded by size, count, a
+deadline and a heap cap. No diagram source is sent to a rendering service. Their only side effect is a typed
 `github.merge` action, which agents can declare but never run: cubed checks
 the repository against the artifact's project and the pull request's live
 head, the user confirms the exact target, and cubed merges with the host's

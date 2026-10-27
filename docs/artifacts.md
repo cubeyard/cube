@@ -16,11 +16,13 @@ someone wrote.
 packages/server/src/
 ├── artifacts.ts          # the store: artifacts, revisions, comments, batches, action runs
 ├── artifact-service.ts   # agents' write/read, comment delivery, action preview and run
+├── artifact-diagrams.ts  # ```mermaid fences checked with Pele before a revision is written
+├── artifact-diagrams-worker.ts  # Pele off the main thread, under a deadline and a heap cap
 ├── artifact-tools.ts     # artifact_write / artifact_read for OptChat and Pi threads
 └── github-pulls.ts       # a pull request's live state and its merge
 packages/claude-mod/hooks/tools.ts       # /cube/artifacts/<name>.md for Claude Code threads
 packages/web/src/lib/artifact-render.ts  # Markdown, diff and diagram placeholders as data
-packages/web/src/lib/mermaid.ts          # diagrams drawn as <img> of their SVG
+packages/web/src/lib/diagram.ts          # diagrams drawn by Pele as <img> of their SVG (artifacts and chat)
 packages/web/src/lib/anchor.ts           # selections as anchors, found again or outdated
 packages/web/src/components/ArtifactView.svelte, ArtifactList.svelte
 ```
@@ -109,17 +111,63 @@ data (`renderArtifact`):
   or cube's own `#/…` pages (those open in place); images become links, so the
   browser fetches nothing the document names.
 - ` ```diff ` and ` ```patch ` blocks are coloured line by line, as text.
-- ` ```mermaid ` blocks are drawn by Mermaid 11 (loaded only on a page with a
-  diagram) with `securityLevel: "strict"` and text labels, one at a time, at
-  most 20,000 characters each, and shown as an `<img>` of the SVG: an image
-  document runs no script, loads nothing and has no links. Mermaid draws in
-  a hidden element of the page before the picture is taken, so that moment
-  relies on its `strict` level (DOMPurify, no HTML labels, no click
-  handlers); what stays on the page is only the image. The source is
-  folded under the picture; a diagram that does not parse says why and opens
-  its source.
+- ` ```mermaid ` blocks are drawn by [Pele](https://pele.run) 1.12, a local
+  library (`pele/lazy`: its core and each diagram type's code load only when
+  a page draws one; nothing is sent anywhere), with links and images off,
+  at most 20,000 characters and 500 flowchart edges each, one at a time,
+  and shown as an `<img>` of the SVG: an image document runs no script,
+  loads nothing and has no links. Pele renders to a string, so nothing of
+  the diagram is put in the page before the image. Its colours are the
+  page's tokens around the figure, written into the SVG as Pele's CSS
+  variables; it draws and measures in a system font, the one an image can
+  use. The source is folded under the picture; a diagram that does not
+  parse says why (Pele's message, line and column, as text) and opens its
+  source.
+- The OptChat and thread transcripts render ` ```mermaid ` the same way.
+  While a message streams, a fence that has not closed yet shows its
+  source as it grows ("diagram drawn when its block is complete") and is
+  drawn once its closing marker arrives, while the rest still streams; a
+  drawing is kept by its source and theme, so the next frame shows it at
+  once rather than drawing it again.
 - The OptChat transcript's own Markdown now also links `#/…` pages, so an
   agent's reply can link `[review](#/a/<id>)`.
+
+## Diagrams are checked before a revision is written
+
+Every write (`artifact_write` inline or from a workspace `path`, OptChat's
+`artifact_write`, Claude Code's `Write` of `<name>.md` or `.json` and its
+`Edit`) passes through `Artifacts.write`, which finds the body's
+` ```mermaid ` fences as the page does (the same `marked` version and
+options, the info string's first word) and draws each with Pele, with the
+page's options, before the store is touched. If one does not draw, nothing
+is written: no artifact is created, no revision added, the newest revision
+stays as it was, and the agent is told every problem:
+
+```text
+not written: 2 ```mermaid diagrams do not draw, so nothing was written; fix each and write again:
+- diagram 2 of 4, fence at body line 10, diagram line 2, column 8 (body line 12): syntax: Parse error on line 2: Expecting 'TXT', got 'NEWLINE'
+      A->>B
+    -------^
+- diagram 4 of 4, fence at body line 28: unsupported-diagram: No diagram type detected for the given text.
+Pele draws the diagrams (Mermaid syntax, https://pele.run/compatibility); ...
+```
+
+Pi tools answer it as the tool's text, Claude Code as the tool's error; the
+workspace route also returns the problems as data (`diagrams: [{diagram,
+code, message, line, column, snippet, fenceLine, bodyLine}]`, status 422).
+`code` is Pele's (`syntax`, `semantic`, `limit`, `unsupported-diagram`) or
+`render` when Pele itself failed. Messages and snippets are the agent's own
+source, cut at 600 and 240 characters.
+
+The check runs in a worker thread, one at a time, under a 5 s deadline and a
+192 MB heap: at most 50 diagrams a revision and 20,000 characters each
+(checked before the worker starts). A check that cannot finish refuses the
+write and says so; a body without diagrams starts no worker. A replayed
+call (the same request id) answers with the revision it wrote without being
+checked again. Revisions written before the check stay as they were; the
+page shows a diagram of theirs that does not draw as an error with its
+source. ZenUML and other external Mermaid plugins are not supported by Pele,
+so they are refused.
 
 ## Comments
 
@@ -278,6 +326,22 @@ journaled there.
   restart, skipped for a thread the chat did not start, undeliverable when
   archived, a run cut off mid-merge told as unknown after a restart, and the
   24 h bound.
+- `packages/server/test/artifact-diagrams-test.ts`: fences found as the
+  page finds them (nested in lists and quotes, `~~~`, the first word of the
+  info string, other code not); every problem with its place and Pele's
+  words; the size, count, edge and deadline bounds; through the service, a
+  refused first write creating nothing, a refused write and Edit adding no
+  revision and leaving the valid one, the problems as data, a fixed Edit
+  written, a replay answered unchecked, an older unchecked revision read.
+  `artifacts-test.ts` also refuses a Pi thread's body from a workspace file
+  and a Claude Code thread's Edit, Write and new name over the real routes.
+- `packages/web/test/browser/diagram-browser-test.ts`: the chat with three
+  diagrams (one that does not parse, its error as text and source open; a
+  hostile one inert) and a table, at 1280×800 and 390×844; a message
+  streamed frame by frame, its open fence growing as source, never drawn
+  broken, the first diagram drawn mid-stream; an artifact revision from
+  before the check showing its error beside a drawn diagram in light and
+  dark; no request leaving the host.
 - `packages/web/test/artifact-render-test.ts`: hostile Markdown, links,
   images, diagram sources, diff lines, fence languages; anchors exact, moved,
   outdated and ambiguous.
