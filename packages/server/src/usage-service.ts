@@ -277,7 +277,7 @@ async function readPiStore(file: string): Promise<PiUsage> {
   return state;
 }
 
-async function sumUsage(storage: SqliteStorage): Promise<PiUsage> {
+export async function sumUsage(storage: SqliteStorage): Promise<PiUsage> {
   const sum: { models: Record<string, Usage>; tools: Record<string, Usage> } = { models: {}, tools: {} };
   let cursor: Cursor | undefined;
   do {

@@ -139,7 +139,8 @@ network or an authenticated proxy).
 - **Claude Code internals** outside its query pipeline (its permission
   classifier, token-count probes), which `modelUsage` excludes; older Claude
   Code versions without `modelUsage` (their turns count as unknown); a per-turn
-  or per-subagent breakdown (only per-model totals are reported).
+  or per-subagent breakdown (only per-model totals are reported; the offline
+  [telemetry export](telemetry.md) gives per-call and per-turn records).
 - **Pi threads whose agent never opened since this change** show
   `unavailable` until it opens or the thread is archived.
 - **Time series.** Totals are lifetime totals per thread; there is no per-day
