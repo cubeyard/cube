@@ -251,6 +251,18 @@ draft and focus on the opener. Regression: `panel-browser-test.ts`,
 `mobile-browser-test.ts`, `startup-browser-test.ts`,
 `long-chat-browser-test.ts`.
 
+## An artifact has the whole sheet too
+
+At the user's request ("artifacts må også åpnes over hele siden sånn som
+tråder") an artifact opens like a thread: `PagePanel` is `whole` for
+`#/a/<id>`, the global menu is gone from its page, and its strip is the
+thread's bar (`‹ chat`, title with author beneath, revision at the end),
+shown in every state (loading, missing, error). The list of artifacts stays
+a sheet beside the chat. Regression: `panel-browser-test.ts` (chat link,
+index, list and back to it, fresh direct link, missing artifact; Chromium
+and WebKit, desktop and phone) and `artifact-browser-test.ts` (margin note,
+phone way back, plus every earlier check).
+
 ## States in print, no status lamps
 
 At the user's request the glowing and blinking status lamps are gone from the

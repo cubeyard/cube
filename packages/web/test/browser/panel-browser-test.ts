@@ -7,7 +7,9 @@
  * stay off while a place is open. Desktop (a sheet from the right, the chat
  * beside it) and phone (the whole screen); a thread has the whole screen at
  * every width, with no menu or thread list: its name takes focus, and
- * escape or its way back (`‹ chat`) returns to the chat. An unsent thread draft
+ * escape or its way back (`‹ chat`) returns to the chat. An artifact has the
+ * whole sheet the same way, from a chat link, the index, the list (back is
+ * the list again) and a reloaded direct link. An unsent thread draft
  * survives every way the panel closes and is there when the thread opens
  * again; a sent one is not. Needs a built UI (pnpm build)
  * and Playwright's Chromium. */
@@ -97,7 +99,8 @@ try {
     assert.equal(await scroller.evaluate(element => element.scrollTop), scrolled, `${size.name}: the scroll is kept`);
 
     // focus goes back to the link that opened the place: after escape, and after the close key
-    const link = page.locator(".chat-sheet .markdown a", { hasText: "composer room: more space on the phone" });
+    await page.evaluate(() => { document.querySelector(".chat-sheet .markdown p")!.insertAdjacentHTML("beforeend", ' <a href="#/artifacts" class="test-place-link">every artifact</a>'); });
+    const link = page.locator(".chat-sheet a.test-place-link");
     for (const how of ["escape", "close key"] as const) {
       await openFrom(page, link);
       if (how === "escape") await page.keyboard.press("Escape");
@@ -111,12 +114,13 @@ try {
     if (!size.touch) {
       // a selection dragged out of the panel onto the chat beside it keeps the panel open
       await openFrom(page, link);
-      const text = panel(page).locator(".artifact-body p").first();
+      const text = panel(page).locator(".artifact-list-lede");
       await text.waitFor();
       const from = (await text.boundingBox())!;
-      await page.mouse.move(from.x + 10, from.y + from.height / 2);
+      // on its first line, from the middle of it
+      await page.mouse.move(from.x + from.width / 2, from.y + 8);
       await page.mouse.down();
-      await page.mouse.move(40, from.y + from.height / 2, { steps: 8 });
+      await page.mouse.move(40, from.y + 8, { steps: 8 });
       await page.mouse.up();
       await page.waitForTimeout(200);
       assert.equal(await panel(page).count(), 1, `${size.name}: a selection dragged onto the backdrop does not close the panel`);
@@ -160,6 +164,83 @@ try {
       assert.equal(await scroller.evaluate(element => element.scrollTop), under, `${size.name}: the chat's scroll is kept`);
       await threadLink.evaluate(element => element.removeAttribute("data-opener"));
     }
+    // an artifact has the whole sheet too, as a thread does: its title takes
+    // focus, the way back is escape or `‹ chat`, and the chat is as it was
+    const artifactLink = page.locator(".chat-sheet .markdown a", { hasText: "composer room: more space on the phone" });
+    const proposal = artifacts[1]!.id;
+    for (const how of ["escape", "the way back"] as const) {
+      await openFrom(page, artifactLink);
+      const under = await scroller.evaluate(element => element.scrollTop);
+      assert.equal(await page.evaluate(() => location.hash), `#/a/${proposal}`);
+      await panel(page).locator("article.artifact-body").waitFor();
+      const whole = (await panel(page).boundingBox())!;
+      assert.ok(whole.x <= 0 && whole.width >= size.width - 1 && whole.height >= size.height - 1, `${size.name}: the artifact has the whole screen: ${JSON.stringify(whole)}`);
+      assert.equal(await panel(page).locator(":is(.main-header, nav, .nav-menu-key, .panel-close)").count(), 0, `${size.name}: no menu or destinations over the artifact`);
+      await page.waitForFunction(() => document.activeElement?.matches("dialog.page-panel .artifact-strip h1"));
+      assert.equal(await panel(page).locator(".artifact-strip h1").textContent().then(text => text?.trim()), "composer room: more space on the phone");
+      assert.equal(await panel(page).getByRole("button", { name: "back to the chat" }).count(), 1, `${size.name}: one way back, named`);
+      assert.ok(await panel(page).getByRole("button", { name: "back to the chat" }).isVisible(), `${size.name}: the way back shows`);
+      assert.ok(await panel(page).locator(".artifact-revision select").isVisible(), `${size.name}: the revision choice shows`);
+      assert.equal(await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth), true, `${size.name}: nothing scrolls sideways`);
+      if (how === "escape") await page.keyboard.press("Escape");
+      else {
+        await page.keyboard.press("Shift+Tab");
+        assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("aria-label")), "back to the chat");
+        await page.keyboard.press("Enter");
+      }
+      await panel(page).waitFor({ state: "detached" });
+      await page.waitForTimeout(350);
+      assert.equal(await page.evaluate(() => location.hash), "#/chat");
+      const now = await focused(page);
+      assert.ok(now.opener, `${size.name}: after ${how}, focus is back on the link that opened the artifact, not ${now.what}`);
+      assert.equal(await chatDraft(page).inputValue(), "a draft the chat keeps", `${size.name}: the chat's draft is kept`);
+      assert.equal(await scroller.evaluate(element => element.scrollTop), under, `${size.name}: the chat's scroll is kept`);
+      await artifactLink.evaluate(element => element.removeAttribute("data-opener"));
+    }
+    // from the chat's index: the index goes and the artifact has the whole sheet
+    await page.locator(".sheet-bar .name-key").click();
+    const indexRow = page.locator(".chat-index[open] a.index-row", { hasText: "today's review" });
+    await (size.touch ? indexRow.tap() : indexRow.click());
+    await panel(page).locator(".artifact-strip h1", { hasText: "today's review" }).waitFor();
+    assert.equal(await page.locator(".chat-index[open]").count(), 0, `${size.name}: the index closed as the artifact opened`);
+    assert.equal(await panel(page).evaluate(element => element.classList.contains("whole")), true, `${size.name}: from the index, the whole sheet`);
+    const back = panel(page).locator(".bar-back");
+    await (size.touch ? back.tap() : back.click());
+    await panel(page).waitFor({ state: "detached" });
+    assert.equal(await chatDraft(page).inputValue(), "a draft the chat keeps", `${size.name}: the draft outlives the index's artifact`);
+    // from the list of artifacts: the list is a sheet beside the chat (the
+    // whole screen on a phone), the artifact the whole sheet; back is the list again
+    await page.evaluate(() => { location.hash = "#/artifacts"; });
+    await panel(page).locator(".artifact-list-title").first().waitFor();
+    assert.equal(await panel(page).evaluate(element => element.classList.contains("whole")), false, `${size.name}: the list is not the whole sheet`);
+    await panel(page).locator(".artifact-list-title", { hasText: "composer room" }).click();
+    await panel(page).locator(".artifact-strip h1", { hasText: "composer room" }).waitFor();
+    assert.equal(await panel(page).evaluate(element => element.classList.contains("whole")), true, `${size.name}: from the list, the whole sheet`);
+    await page.goBack();
+    await panel(page).locator(".artifact-list-title").first().waitFor();
+    assert.equal(await panel(page).evaluate(element => element.classList.contains("whole")), false, `${size.name}: back is the list again`);
+    // a direct link loaded fresh (as a reload or a pasted address is): the
+    // whole sheet at once, its title focused, the chat under it, the way back to it
+    const direct = await context.newPage();
+    direct.on("pageerror", error => errors.push(String(error)));
+    await direct.goto(`${host.url}/#/a/${proposal}`);
+    await panel(direct).locator("article.artifact-body").waitFor();
+    assert.equal(await panel(direct).evaluate(element => element.classList.contains("whole")), true, `${size.name}: a direct link has the whole sheet`);
+    await direct.waitForFunction(() => document.activeElement?.matches("dialog.page-panel .artifact-strip h1"));
+    assert.equal(await direct.locator(".chat-sheet").count(), 1, `${size.name}: the chat is mounted under a direct link`);
+    await (size.touch ? panel(direct).locator(".bar-back").tap() : panel(direct).locator(".bar-back").click());
+    await panel(direct).waitFor({ state: "detached" });
+    assert.equal(await direct.evaluate(() => location.hash), "#/chat");
+    await direct.close();
+    // an artifact that is not there still has its way back
+    await page.evaluate(() => { location.hash = "#/a/no-such-artifact"; });
+    await panel(page).getByText("this artifact does not exist on this host.").waitFor();
+    assert.ok(await panel(page).getByRole("button", { name: "back to the chat" }).isVisible(), `${size.name}: a missing artifact has its way back`);
+    await page.evaluate(() => { location.hash = "#/chat"; });
+    await panel(page).waitFor({ state: "detached" });
+    await chatDraft(page).fill("a draft the chat keeps");
+    await scroller.evaluate(element => { element.scrollTop = 120; });
+
     // the details fold under the bar: closed as the thread opens, a key away
     await page.evaluate(() => { location.hash = "#/t/t1"; });
     await panel(page).locator(".thread-bar h1").waitFor();
