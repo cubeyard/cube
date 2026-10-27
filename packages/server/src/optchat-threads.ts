@@ -11,9 +11,12 @@ import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
 import type { MachineSleep } from "./machine-sleep.ts";
 import { failureOf, type ThreadCondition } from "./thread-condition.ts";
 import type { Failure } from "./thread-failure.ts";
+import { threadNameText } from "./thread-names.ts";
 
 /** How long the overview waits for one thread's stored state. */
 const OBSERVE_MS = 2000;
+/** "🦦 calm otter · " before a title; nothing for a thread older than names. */
+const named = (thread: Thread) => thread.name ? `${threadNameText(thread.name)} · ` : "";
 
 /** Which of a project's hooks are set (project_hooks reads them). */
 function hookSummary(hooks: Project["hooks"]): string {
@@ -124,7 +127,7 @@ export function readThreads(options: { registry: Registry; conversations: Thread
       if (request?.archived) {
         const query = request.query?.trim().toLowerCase() ?? "";
         const matches = known.filter(thread => thread.archived && (!query
-          || [thread.id, thread.title ?? "", projectOf(thread)].some(field => field.toLowerCase().includes(query))));
+          || [thread.id, thread.name?.words ?? "", thread.title ?? "", projectOf(thread)].some(field => field.toLowerCase().includes(query))));
         const offset = Math.max(0, request.offset ?? 0);
         const limit = Math.min(Math.max(1, request.limit ?? ARCHIVED_PAGE), ARCHIVED_MAX);
         const page = matches.slice(offset, offset + limit);
@@ -132,7 +135,7 @@ export function readThreads(options: { registry: Registry; conversations: Thread
         if (!page.length) return matches.length ? `no ${what} from ${offset + 1} on; there are ${matches.length}` : `no ${what}`;
         const more = offset + page.length < matches.length ? `; next: offset ${offset + page.length}` : "";
         return [`${what} ${offset + 1}-${offset + page.length} of ${matches.length}, newest first${more}`,
-          ...page.map(thread => `[${thread.id.slice(0, 8)}] ${projectOf(thread)} · ${thread.title ?? "untitled"} · archived`)].join("\n");
+          ...page.map(thread => `[${thread.id.slice(0, 8)}] ${projectOf(thread)} · ${named(thread)}${thread.title ?? "untitled"} · archived`)].join("\n");
       }
       const lines: string[] = [];
       for (const thread of known) {
@@ -151,7 +154,7 @@ export function readThreads(options: { registry: Registry; conversations: Thread
             if (status) run = `, ${status.state}${status.waiting?.length && status.state !== "working" ? `, waiting on ${agents(status.waiting)}` : ""}`;
           } catch { /* the state says enough */ }
         }
-        lines.push(`[${id.slice(0, 8)}] ${project} · ${thread.title ?? "untitled"} · ${conditionText(condition)}${run}`);
+        lines.push(`[${id.slice(0, 8)}] ${project} · ${named(thread)}${thread.title ?? "untitled"} · ${conditionText(condition)}${run}`);
       }
       const archived = known.filter(thread => thread.archived).length;
       if (archived && !lines.length) lines.push("no threads that are not archived");
@@ -180,7 +183,7 @@ export function readThreads(options: { registry: Registry; conversations: Thread
           } catch { run = "unknown"; }
           finally { clearTimeout(timer); }
         }
-        return { id, title: thread.title, project, state: run, archived: thread.archived };
+        return { id, title: thread.title, ...thread.name ? { name: thread.name } : {}, project, state: run, archived: thread.archived };
       };
       return new Map(await Promise.all(ids.map(async id => [id, await one(id)] as const)));
     },
@@ -197,7 +200,7 @@ export function readThreads(options: { registry: Registry; conversations: Thread
         `workspace writer: ${conversations.owner(id) ?? "none"}`,
       ];
       const record = {
-        project: registry.getProject(thread.projectId)?.name ?? thread.projectId, title: thread.title, archived: thread.archived,
+        project: registry.getProject(thread.projectId)?.name ?? thread.projectId, title: thread.title, name: thread.name ?? null, archived: thread.archived,
         machine: thread.archived ? null : conditionText(condition), facts, agentOpen: conversations.agentOpen(id), failure: failureOf(condition)?.text ?? null,
       };
       try { return { ...record, transcript: await conversations.storedHistory(id, request), unreadable: null }; }

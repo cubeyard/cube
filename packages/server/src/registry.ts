@@ -10,6 +10,7 @@ import type { ThreadSkills } from "./skills.ts";
 import { newPlaceholder } from "./egress-policy.ts";
 import { HOLDS_SLOT_SQL, nextSleep, type MachineSleep, type SleepEvent } from "./machine-sleep.ts";
 import { nextPhase, type PhaseEvent, type ThreadPhase } from "./thread-phase.ts";
+import { newThreadName, type ThreadName } from "./thread-names.ts";
 
 /** The registry schema; older registries are refused (fresh CUBED_STATE). */
 export const REGISTRY_SCHEMA = 102;
@@ -150,6 +151,9 @@ export interface RunnerStatus {
 }
 export interface Thread {
   id: string; projectId: string; title: string | null; createdAt: number;
+  /** Drawn at creation and never changed ("🦦 calm otter", thread-names.ts):
+   * a rename changes only the title. Absent on threads older than names. */
+  name?: ThreadName;
   archived: boolean; model: ModelSelection; runnerId: string;
   /** The agent chosen at creation, fixed for the thread; absent means pi. */
   agent?: ThreadAgent;
@@ -820,8 +824,13 @@ export class Registry {
       if (!load) throw new Error(this.runnerLoads().length
         ? "no free thread machine in the global runner pool (its berth vm runners) — archive an idle thread, enroll another berth vm, raise a runner's limit, or start the thread on a runner by name"
         : "no berth vm runner in the global runner pool: start the thread on a berth host by name, or enroll a berth vm");
-      const thread: Thread = { id: randomUUID(), projectId, runnerId: load.id, ...(options.runnerId !== undefined ? { pinned: true as const } : {}),
-        title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, agent, archived: false, createdAt: Date.now(),
+      // Drawn inside this transaction, so no two creations give two open
+      // threads one name.
+      const id = randomUUID();
+      const taken = new Set((this.db.prepare(`SELECT json_extract(data, '$.name.words') AS words FROM thread WHERE ${OPEN_THREAD}`).all() as Array<{ words: string | null }>)
+        .flatMap(row => row.words ? [row.words] : []));
+      const thread: Thread = { id, projectId, runnerId: load.id, ...(options.runnerId !== undefined ? { pinned: true as const } : {}),
+        title: text.replace(/\s+/g, " ").slice(0, 80) || null, name: newThreadName(id, taken), model, agent, archived: false, createdAt: Date.now(),
         allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks },
           ...(project.machine && Object.keys(project.machine).length ? { machine: { ...project.machine } } : {}),
           ...(resolved?.skills ? { skills: resolved.skills } : {}) },

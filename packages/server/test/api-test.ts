@@ -99,10 +99,15 @@ try {
   assert.deepEqual((await first.json()).threads, threads);
   const same = await fetch(`${base}/api/threads?includeArchived=1`, { headers: { "if-none-match": etag } });
   assert.deepEqual([same.status, await same.text()], [304, ""]);
-  app.registry.renameThread(threads[0].id, "renamed");
+  // The list carries the name drawn at creation; a rename, by the API, changes only the title.
+  const name = threads[0].name as { emoji: string; words: string };
+  assert.match(`${name.emoji} ${name.words}`, /^\p{Extended_Pictographic}\uFE0F? [a-z]+ [a-z]+$/u);
+  assert.equal(threads[0].title, "inspect workspace", "the title stays the task");
+  assert.equal((await write(`/api/threads/${threads[0].id}`, { title: "renamed" }, "PATCH")).status, 200);
   const changed = await fetch(`${base}/api/threads?includeArchived=1`, { headers: { "if-none-match": etag } });
   assert.equal(changed.status, 200);
-  assert.equal((await changed.json()).threads[0].title, "renamed");
+  const renamed = (await changed.json()).threads[0];
+  assert.deepEqual([renamed.title, renamed.name], ["renamed", name]);
   assert.notEqual(changed.headers.get("etag"), etag);
   assert.deepEqual((await (await fetch(`${base}/api/projects`)).json()).projects.map((item: { id: string; threadCount: number; retainedThreadCount: number }) =>
     [item.id, item.threadCount, item.retainedThreadCount]), [[project.id, 1, 1]], "each project's threads, counted");

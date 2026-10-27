@@ -35,6 +35,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { readThreads } from "../src/optchat-threads.ts";
+import { threadNameText } from "../src/thread-names.ts";
 import { threadRow } from "../src/thread-condition.ts";
 import { START_TRIES } from "../src/thread-recovery.ts";
 import { lifecycle, until, Phase, type Cubed } from "./lifecycle-fixture.ts";
@@ -86,7 +87,7 @@ for (const seed of seeds) {
       if (JSON.stringify(cubed.conversations.condition(fresh(t.id))) !== before) continue;
       const what = `I10 after ${after}: ${t.id.slice(0, 8)} (${before})`;
       assert.equal(record.failure, row.error, `${what}: history's failure is the row's`);
-      assert.ok(line.startsWith(`[${t.id.slice(0, 8)}] life · ${fresh(t.id).title} · ${record.machine}`), `${what}: threads says history's state: ${line}`);
+      assert.ok(line.startsWith(`[${t.id.slice(0, 8)}] life · ${threadNameText(fresh(t.id).name)} · ${fresh(t.id).title} · ${record.machine}`), `${what}: threads says history's state: ${line}`);
       if (row.error) assert.ok(line.includes(row.error), `${what}: threads says the failure: ${line}`);
       if (row.waiting && !fresh(t.id).vm?.suspension) assert.ok(line.includes(row.waiting), `${what}: threads says the wait: ${line}`);
       if (overview === "machine error" || overview === "agent error") assert.equal(row.state, "error", `${what}: the overview's failure is the row's`);

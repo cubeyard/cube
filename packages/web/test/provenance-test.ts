@@ -3,6 +3,7 @@
  * places its notes without overlap and without growing the page. */
 import assert from "node:assert/strict";
 import { place } from "../src/lib/margin-layout.ts";
+import { nameText, threadText } from "../src/lib/thread-name.ts";
 import { chatToolLine, excerpt, latestReports, mentionsOf, indexThreads, resolveArtifact, resolveThread, spawnLines } from "../src/lib/provenance.ts";
 import { transcriptRows } from "../src/lib/transcript.ts";
 import { failing, moving, stateText } from "../src/lib/work-state.ts";
@@ -97,12 +98,12 @@ const full = overview();
 const seen = full.threads as OverviewThread[];
 const archived: ThreadSummary[] = [...threads, { ...threads[0]!, id: "eeeeeee9-0000-4000-8000-000000000000", title: "old", archived: true }];
 assert.deepEqual(resolveThread({ short: ID.ca.slice(0, 8), project: "x", title: "y" }, indexThreads(full, threads, true)),
-  { short: ID.ca.slice(0, 8), id: ID.ca, title: "java trusts runner ca", project: "keel-images", state: "machine failed", archived: false, known: "overview", spawned: seen[2]!.spawned });
+  { short: ID.ca.slice(0, 8), id: ID.ca, title: "java trusts runner ca", name: null, project: "keel-images", state: "machine failed", archived: false, known: "overview", spawned: seen[2]!.spawned });
 assert.equal(resolveThread({ short: "eeeeeee9", project: null, title: null }, indexThreads(full, archived, true)).state, "archived");
 assert.equal(resolveThread({ short: "eeeeeee9", project: null, title: null }, indexThreads(full, archived, true)).known, "list");
 const gone = { short: ID.gone.slice(0, 8), project: "keel-images", title: null };
 assert.deepEqual(resolveThread(gone, indexThreads(full, threads, true)),
-  { short: ID.gone.slice(0, 8), id: null, title: null, project: "keel-images", state: null, archived: false, known: "none", spawned: null });
+  { short: ID.gone.slice(0, 8), id: null, title: null, name: null, project: "keel-images", state: null, archived: false, known: "none", spawned: null });
 assert.equal(resolveThread(gone, indexThreads(null, [], false)).known, "pending", "nothing read yet: nothing claimed");
 assert.equal(resolveThread(gone, indexThreads(full, [], false)).known, "pending", "the overview alone does not know archived threads");
 assert.equal(resolveThread(gone, indexThreads(null, threads, true)).known, "pending", "the overview not read (or failed): not claimed lost");
@@ -113,6 +114,16 @@ assert.equal(resolveThread({ short: ID.composer.slice(0, 8), project: null, titl
 const sharing: ThreadSummary[] = [{ ...threads[0]!, id: "ffffffff-0000-4000-8000-000000000001", title: "first" }, { ...threads[0]!, id: "ffffffff-0000-4000-8000-000000000002", title: "second" }];
 assert.equal(resolveThread({ short: "ffffffff", project: null, title: null }, indexThreads(null, sharing, true)).title, "first");
 assert.equal(resolveThread({ short: "ffff", project: null, title: null }, indexThreads(null, sharing, true)).title, "first");
+// a thread's name comes from the overview, else the list; one older than names has none
+const otter = { emoji: "🦦", words: "calm otter" };
+const composer = { short: ID.composer.slice(0, 8), project: null, title: null };
+assert.deepEqual(resolveThread(composer, indexThreads({ ...full, threads: full.threads.map(each => each.id === ID.composer ? { ...each, name: otter } : each) }, threads, true)).name, otter);
+assert.deepEqual(resolveThread(composer, indexThreads(null, threads.map(each => each.id === ID.composer ? { ...each, name: otter } : each), true)).name, otter);
+assert.equal(resolveThread(composer, indexThreads(full, threads, true)).name, null);
+assert.equal(nameText(otter), "🦦 calm otter");
+assert.equal(nameText(undefined), "");
+assert.deepEqual([threadText({ name: otter, title: "fix it" }), threadText({ title: "fix it" }), threadText({ name: otter, title: null }), threadText({ title: null })],
+  ["🦦 calm otter · fix it", "fix it", "🦦 calm otter", "untitled"]);
 
 assert.equal(resolveArtifact(ID.review, artifacts)?.title, "today's review");
 assert.equal(resolveArtifact(ID.proposal.slice(0, 8), artifacts)?.title, "composer room: more space on the phone");

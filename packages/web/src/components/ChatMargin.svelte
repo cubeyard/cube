@@ -4,6 +4,7 @@
   import { failing, stateText } from "../lib/work-state.ts";
   import type { NoteGroup, NoteThread } from "../lib/provenance.ts";
   import Icon from "./Icon.svelte";
+  import ThreadName from "./ThreadName.svelte";
   import WorkNote from "./WorkNote.svelte";
 
   // The desktop margin: each note beside the message that started or
@@ -126,7 +127,7 @@
     <div class="margin-pins">
       {#each pins as item (item.thread.short)}
         <button type="button" class="margin-pin" onclick={() => back(item)} title="show where the chat started it">
-          <span class="note-title">{item.thread.title ?? `[${item.thread.short}]`}</span>
+          <span class="note-title"><ThreadName name={item.thread.name} />{item.thread.title ?? (item.thread.name ? "" : `[${item.thread.short}]`)}</span>
           <span class="note-state failure">{stateText(item.thread.state ?? "")}</span>
           <span class="pin-way"><Icon name={item.direction === "up" ? "arrow" : "down"} size={12} /><span class="sr-only">{item.direction === "up" ? "above" : "below"}, show it</span></span>
         </button>

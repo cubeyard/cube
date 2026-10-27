@@ -9,6 +9,7 @@
  * gives none. */
 import type { ArtifactListItem, ThreadOverview, ThreadSummary } from "./types.ts";
 import type { TranscriptRow } from "./transcript.ts";
+import type { ThreadName } from "./thread-name.ts";
 
 /** A thread a spawn line started: its short id and what the line printed. */
 export type ThreadRef = { short: string; project: string | null; title: string | null };
@@ -113,6 +114,8 @@ export function mentionsOf(rows: readonly TranscriptRow[]): Mention[] {
  * a thread cube has not been asked about. */
 export type NoteThread = {
   short: string; id: string | null; title: string | null; project: string | null;
+  /** Its name ("🦦 calm otter"), once cube has said it. */
+  name: ThreadName | null;
   /** cubed's state words; null when only the list or nothing knows it. */
   state: string | null; archived: boolean; known: "overview" | "list" | "none" | "pending";
   /** When the chat started it, as cubed recorded it. */
@@ -141,11 +144,11 @@ export function resolveThread(ref: Pick<ThreadRef, "short" | "project" | "title"
   const { overview, threads, listed } = index;
   const short8 = ref.short.length === 8;
   const seen = short8 ? index.seen.get(ref.short) : overview?.threads.find(thread => thread.id.startsWith(ref.short));
-  if (seen) return { short: ref.short, id: seen.id, title: seen.title, project: seen.project.name, state: seen.state, archived: seen.archived, known: "overview", spawned: seen.spawned };
+  if (seen) return { short: ref.short, id: seen.id, title: seen.title, name: seen.name ?? null, project: seen.project.name, state: seen.state, archived: seen.archived, known: "overview", spawned: seen.spawned };
   const record = short8 ? index.records.get(ref.short) : threads.find(thread => thread.id.startsWith(ref.short));
-  if (record) return { short: ref.short, id: record.id, title: record.title, project: record.project.name, state: record.archived ? "archived" : null, archived: record.archived, known: "list", spawned: null };
+  if (record) return { short: ref.short, id: record.id, title: record.title, name: record.name ?? null, project: record.project.name, state: record.archived ? "archived" : null, archived: record.archived, known: "list", spawned: null };
   const gone = listed && !!overview && overview.unknown > 0;
-  return { short: ref.short, id: null, title: ref.title, project: ref.project, state: null, archived: false, known: gone ? "none" : "pending", spawned: null };
+  return { short: ref.short, id: null, title: ref.title, name: null, project: ref.project, state: null, archived: false, known: gone ? "none" : "pending", spawned: null };
 }
 
 /** The artifact a key names, when exactly one readable artifact has it. */
@@ -179,8 +182,8 @@ export function excerpt(markdown: string, chars = 220): string {
 const WROTE = /^artifact \S+ "(.*)" (created at revision|wrote revision|unchanged: the same as revision) (\d+)\./;
 const VERB: Record<string, string> = { "created at revision": "created", "wrote revision": "revised", "unchanged: the same as revision": "unchanged" };
 
-/** The chat's own tools in plain words (`name` gives a thread's title by
- * its short id); null keeps the raw tool line: a call still being written,
+/** The chat's own tools in plain words (`name` gives what a thread is
+ * called, by its short id); null keeps the raw tool line: a call still being written,
  * an error, or a tool these words do not cover. */
 export function chatToolLine(row: Extract<TranscriptRow, { kind: "tool" }>, name: (short: string) => string | null): string | null {
   if (row.name === "spawn") {

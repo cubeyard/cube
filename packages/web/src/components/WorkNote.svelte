@@ -5,6 +5,7 @@
   import { failing, stateText } from "../lib/work-state.ts";
   import type { ArtifactListItem } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
+  import ThreadName from "./ThreadName.svelte";
 
   // One note: what one message of the chat started or named, each as a
   // title and one line of state in words. A press opens it in place (the
@@ -98,7 +99,7 @@
             {@const thread = item.thread}
             <button type="button" class="note-head" aria-expanded={open === item.key} aria-controls={peekId(item.key)} onclick={() => toggle(item)}>
               <span class="note-text">
-                <span class="note-title" class:untitled={!thread.title}>{thread.title ?? `[${thread.short}]`}</span>
+                <span class="note-title" class:untitled={!thread.title && !thread.name}><ThreadName name={thread.name} />{thread.title ?? (thread.name ? "" : `[${thread.short}]`)}</span>
                 <span class="note-state" class:failure={!!thread.state && failing(thread.state)}>{[threadState(thread), !inline && thread.project].filter(Boolean).join(" · ")}</span>
               </span>
             </button>

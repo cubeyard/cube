@@ -6,6 +6,7 @@
  * where the readers disagreed before each ranked the facts itself. */
 import assert from "node:assert/strict";
 import { readThreads } from "../src/optchat-threads.ts";
+import { threadNameText } from "../src/thread-names.ts";
 import type { Registry, Thread } from "../src/registry.ts";
 import { startFailureOf, threadCondition, threadRow, type ThreadRuntime } from "../src/thread-condition.ts";
 import { releaseFailed, startFailed } from "../src/thread-failure.ts";
@@ -111,7 +112,7 @@ for (const [n, item] of cases.entries()) {
   const condition = threadCondition(t, runtime);
   assert.equal(condition.kind, item.expect.kind, `${item.name}: kind`);
   assert.deepEqual(threadRow(condition), item.expect.row, `${item.name}: the API's row`);
-  assert.equal(await reads.describe([t.id]), `[${t.id.slice(0, 8)}] web · ${t.title} · ${item.expect.threads}`, `${item.name}: threads`);
+  assert.equal(await reads.describe([t.id]), `[${t.id.slice(0, 8)}] web · ${t.name ? `${threadNameText(t.name)} · ` : ""}${t.title} · ${item.expect.threads}`, `${item.name}: threads`);
   const record = (await reads.history(t.id))!;
   assert.equal(record.machine, item.expect.machine, `${item.name}: history's machine`);
   assert.equal(record.failure, item.expect.row.error, `${item.name}: history's failure is the row's error`);

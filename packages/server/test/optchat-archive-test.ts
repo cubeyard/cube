@@ -17,6 +17,7 @@ import { ThreadWorking, type Conversations } from "../src/conversation.ts";
 import { allocationFailed } from "../src/thread-failure.ts";
 import { ARCHIVED_MAX, OptChat, type OptThreads, type ThreadListRequest, type ThreadRecord } from "../src/optchat.ts";
 import { cubeThreads, readThreads } from "../src/optchat-threads.ts";
+import { threadNameText } from "../src/thread-names.ts";
 import { threadCondition } from "../src/thread-condition.ts";
 import type { Registry, Thread } from "../src/registry.ts";
 import type { ThreadTranscript } from "../src/thread-events.ts";
@@ -142,15 +143,16 @@ try {
   }
 
   // cubed's side of the lists (readThreads): the default leaves archived
-  // threads out and counts them; archived_threads' search matches id, title
-  // or project, pages and says where the next page starts. Only the ids the
+  // threads out and counts them; archived_threads' search matches id, name,
+  // title or project, pages and says where the next page starts. Only the ids the
   // chat passes are read: another chat's thread is never listed. An
   // archived thread's store is never read for a list.
   {
     const make = (n: number, extra: Partial<Thread>) => ({ id: `${String(n).padStart(8, "0")}-0000-4000-8000-000000000000`, title: `task ${n}`, projectId: n % 2 ? "web" : "cube",
       archived: false, workspaceState: "available", workspaceError: null, vm: undefined, ...extra }) as unknown as Thread;
     const open = make(1, { title: "running work" }), ended = make(2, { title: "ended work" }), failed = make(3, { title: "broken", workspaceState: "failed" });
-    const old = Array.from({ length: 60 }, (_, k) => make(100 + k, { archived: true, title: k === 7 ? "Fix the Cart" : `old ${k}` }));
+    const old = Array.from({ length: 60 }, (_, k) => make(100 + k, { archived: true, title: k === 7 ? "Fix the Cart" : `old ${k}`,
+      ...k === 9 ? { name: { emoji: "🦦", words: "calm otter" } } : {} }));
     const foreign = make(900, { archived: true, title: "fix elsewhere" });
     const all = new Map([open, ended, failed, ...old, foreign].map(thread => [thread.id, thread]));
     const registry = { getThread: (id: string) => all.get(id) ?? null, getProject: (id: string) => ({ name: id }) } as unknown as Registry;
@@ -173,7 +175,7 @@ try {
 
     const first = (await reads.describe(mine, { archived: true })).split("\n");
     assert.equal(first[0], "archived threads 1-20 of 60, newest first; next: offset 20");
-    assert.deepEqual(first.slice(1), old.slice(0, 20).map(thread => `[${thread.id.slice(0, 8)}] ${thread.projectId} · ${thread.title} · archived`));
+    assert.deepEqual(first.slice(1), old.slice(0, 20).map(thread => `[${thread.id.slice(0, 8)}] ${thread.projectId} · ${thread.name ? `${threadNameText(thread.name)} · ` : ""}${thread.title} · archived`));
     const last = (await reads.describe(mine, { archived: true, offset: 40, limit: ARCHIVED_MAX })).split("\n");
     assert.equal(last[0], "archived threads 41-60 of 60, newest first", "the last page has no next");
     assert.equal(last.length, 21);
@@ -182,6 +184,8 @@ try {
     // Title in any case, project and id prefix match; another chat's
     // archived "fix elsewhere" is not among the chat's ids.
     assert.equal(await reads.describe(mine, { archived: true, query: " fix " }), `archived threads matching "fix" 1-1 of 1, newest first\n[${old[7]!.id.slice(0, 8)}] web · Fix the Cart · archived`);
+    // A thread's name is searched and listed before its title (one older than names has none, above).
+    assert.equal(await reads.describe(mine, { archived: true, query: "Otter" }), `archived threads matching "Otter" 1-1 of 1, newest first\n[${old[9]!.id.slice(0, 8)}] web · ${threadNameText(old[9]!.name)} · old 9 · archived`);
     assert.match(await reads.describe(mine, { archived: true, query: "CUBE" }), /^archived threads matching "CUBE" 1-20 of 30, newest first; next: offset 20\n/);
     assert.match(await reads.describe(mine, { archived: true, query: old[3]!.id.slice(0, 8) }), /^archived threads matching "\d+" 1-1 of 1, newest first\n.* · old 3 · archived$/);
     assert.equal(await reads.describe(mine, { archived: true, query: "nothing like it" }), `no archived threads matching "nothing like it"`);
