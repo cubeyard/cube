@@ -27,26 +27,45 @@ async function until<T>(read: () => Promise<T>, check: (value: T) => boolean, wh
   return value;
 }
 const shoot = async (page: Page, name: string) => { if (shots) await page.screenshot({ path: path.join(shots, `${name}.png`) }); };
-/** Selects `text` (its first occurrence) in the document, as a drag would. */
-async function select(page: Page, text: string): Promise<void> {
-  await page.evaluate(wanted => {
+/** Selects `text` (its first occurrence) in the document, as a drag would;
+ * with `to`, from the start of `text` to the end of `to`, across elements. */
+async function select(page: Page, text: string, to?: string): Promise<void> {
+  await page.evaluate(([wanted, last]) => {
     const article = document.querySelector("article.artifact-body")!;
-    const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
-    for (let node = walker.nextNode() as Text | null; node; node = walker.nextNode() as Text | null) {
-      const at = node.data.indexOf(wanted);
-      if (at < 0) continue;
-      node.parentElement!.scrollIntoView({ block: "center" });
-      const range = document.createRange();
-      range.setStart(node, at);
-      range.setEnd(node, at + wanted.length);
-      const selection = document.getSelection()!;
-      selection.removeAllRanges();
-      selection.addRange(range);
-      return;
-    }
-    throw new Error(`no text ${wanted}`);
-  }, text);
+    const find = (search: string, after?: Node): { node: Text; at: number } => {
+      const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+      if (after) walker.currentNode = after;
+      for (let node = (after ? walker.currentNode : walker.nextNode()) as Text | null; node; node = walker.nextNode() as Text | null) {
+        const at = node.data.indexOf(search);
+        if (at >= 0) return { node, at };
+      }
+      throw new Error(`no text ${search}`);
+    };
+    const from = find(wanted!);
+    const end = last === undefined ? { node: from.node, at: from.at + wanted!.length } : (({ node, at }) => ({ node, at: at + last.length }))(find(last, from.node));
+    from.node.parentElement!.scrollIntoView({ block: "center" });
+    const range = document.createRange();
+    range.setStart(from.node, from.at);
+    range.setEnd(end.node, end.at);
+    const selection = document.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }, [text, to] as const);
 }
+/** What is wrong with the document's tables, or "": a row holds only its
+ * cells, each lined up under its column's header. A <mark> between cells is
+ * laid out as an extra cell. */
+const tableFaults = (page: Page) => page.evaluate(() => {
+  const faults: string[] = [];
+  for (const table of document.querySelectorAll("article.artifact-body table")) {
+    for (const stray of table.querySelectorAll(":is(table, thead, tbody, tfoot, tr) > :not(thead, tbody, tfoot, tr, th, td)")) faults.push(`a <${stray.tagName.toLowerCase()}> in a <${stray.parentElement!.tagName.toLowerCase()}>`);
+    const rows = [...table.querySelectorAll("tr")];
+    const columns = (row: Element) => [...row.children].map(cell => Math.round(cell.getBoundingClientRect().left));
+    const header = columns(rows[0]!);
+    for (const row of rows.slice(1)) if (JSON.stringify(columns(row)) !== JSON.stringify(header)) faults.push(`cells at ${columns(row)} under headers at ${header}`);
+  }
+  return faults.join("; ");
+});
 /** The comment key under a selection of `text`: a mouse press near its edge
  * leaves it in place (it sinks a pixel), keeps the selection and opens the
  * composer on that text; a tap does too (a tap's click reaches the key even
@@ -101,8 +120,8 @@ const keyGap = (page: Page) => page.evaluate(() => {
   return Math.max(Math.abs(key.top - Math.min(Math.max(rect.bottom + 8, field.top + 8), field.bottom - 52)),
     Math.abs(key.left + key.width / 2 - Math.min(Math.max(rect.left + rect.width / 2, 60), innerWidth - 60)));
 });
-async function comment(page: Page, text: string, body: string): Promise<void> {
-  await select(page, text);
+async function comment(page: Page, text: string, body: string, to?: string): Promise<void> {
+  await select(page, text, to);
   await page.locator(".artifact-select-key").click();
   await page.locator(".comment-composer textarea").fill(body);
   await page.locator(".comment-composer button[type=submit]").click();
@@ -370,6 +389,32 @@ try {
   await page.locator(".comment-item.draft .work-dismiss").click();
   await page.locator(".comment-item.draft").waitFor({ state: "detached" });
   await narrow.close();
+
+  // A comment across a table's cells and rows marks the text in its cells
+  // and leaves the table whole: written, opened again, and on a phone.
+  const cellMarks = (on: Page) => on.locator("article.artifact-body table mark.anchor").count();
+  assert.equal(await tableFaults(page), "", "the table before a comment");
+  await comment(page, "diagrams are images", "Does a diagram's text stay out of the anchors?", "GitHub refuses");
+  assert.equal(await tableFaults(page), "", "the table with a comment across its cells");
+  assert.equal(await cellMarks(page), 3, "each cell's part of the selection is marked");
+  await shoot(page, "18a-table-comment");
+  await page.reload();
+  await page.locator("article.artifact-body table mark.anchor").first().waitFor();
+  assert.equal(await tableFaults(page), "", "the table with a saved comment, opened again");
+  assert.equal(await cellMarks(page), 3, "the saved comment's marks, opened again");
+  const small = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  small.on("pageerror", error => errors.push(String(error)));
+  await small.goto(`${url}/#/a/${reviewId}`);
+  await small.locator("article.artifact-body table mark.anchor").first().waitFor();
+  await small.locator("article.artifact-body table").scrollIntoViewIfNeeded();
+  assert.equal(await tableFaults(small), "", "the table with a comment, on a phone");
+  assert.equal(await cellMarks(small), 3, "the comment's marks, on a phone");
+  await shoot(small, "18b-table-comment-phone");
+  await small.close();
+  await page.locator(".comment-item.draft .work-dismiss").click();
+  await page.locator(".comment-item.draft").waitFor({ state: "detached" });
+  assert.equal(await cellMarks(page), 0, "a dismissed comment leaves no mark");
+  assert.equal(await tableFaults(page), "", "the table once the comment is gone");
 
   // The black edition: diagrams are drawn with mermaid's dark theme.
   const night = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });

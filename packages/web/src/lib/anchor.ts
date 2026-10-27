@@ -100,12 +100,19 @@ export function textRange(root: HTMLElement, start: number, end: number): Range 
   return range;
 }
 
-/** Marks [start, end) of the document's text, across element boundaries. */
+/** Elements whose own text is only the white space between their children:
+ * a <mark> there would be a stray box (in a table row, an extra cell). */
+const STRUCTURAL = new Set(["TABLE", "THEAD", "TBODY", "TFOOT", "TR", "COLGROUP", "UL", "OL"]);
+
+/** Marks [start, end) of the document's text, across element boundaries.
+ * The text counted stays the same; only white space between table cells,
+ * rows or list items is left unmarked. */
 export function mark(root: HTMLElement, start: number, end: number, attributes: Record<string, string>): HTMLElement[] {
   const marks: HTMLElement[] = [];
   for (const { node, start: at } of textNodes(root).nodes) {
     const from = Math.max(start, at), to = Math.min(end, at + node.data.length);
     if (from >= to) continue;
+    if (STRUCTURAL.has(node.parentElement?.tagName ?? "") && !node.data.trim()) continue;
     const range = document.createRange();
     range.setStart(node, from - at);
     range.setEnd(node, to - at);
