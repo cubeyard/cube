@@ -782,5 +782,5 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
 
 await suite(chromium, "chromium");
 if (fs.existsSync(webkit.executablePath())) await suite(webkit, "webkit");
-else console.log("SKIP: webkit (install it: pnpm --filter @cube/web exec playwright install webkit)");
+else console.log("SKIP: webkit (install it: bash scripts/setup-browsers.sh webkit)");
 process.exit(failed ? 1 : 0);

@@ -11,6 +11,7 @@ OFFLINE_TESTS=(
   scripts/keel-release-test.ts
   scripts/berth-release-test.ts
   scripts/fake-github-test.ts
+  scripts/setup-browsers-test.ts
   packages/server/test/log-test.ts
   packages/server/test/registry-test.ts
   packages/server/test/thread-names-test.ts

@@ -33,7 +33,7 @@ async function open(width: number, height: number, hash: string): Promise<Page> 
 const shot = async (page: Page, name: string) => { if (shots) await page.screenshot({ path: path.join(shots, `${name}.png`) }); };
 
 const engines = fs.existsSync(webkit.executablePath()) ? [chromium, webkit] : [chromium];
-if (engines.length === 1) console.log("SKIP: webkit (install it: pnpm --filter @cube/web exec playwright install webkit)");
+if (engines.length === 1) console.log("SKIP: webkit (install it: bash scripts/setup-browsers.sh webkit)");
 try {
   for (const engine of engines) {
   if (engine !== chromium) { await browser.close(); browser = await engine.launch(); }

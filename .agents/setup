@@ -70,5 +70,8 @@ step "Install the pinned Rust toolchain" rustup toolchain install
 printf '\nToolchain: Node.js %s, pnpm %s, %s\n' "$(node --version)" "$(pnpm --version)" "$(cargo --version)"
 step "Install workspace dependencies" env CI=1 pnpm install --frozen-lockfile
 step "Build the web application" pnpm build
+# Chromium for the browser tests (pnpm test:browser), in this account's
+# Playwright cache, so the template carries it; WebKit stays in CI.
+step "Install Chromium for the browser tests" bash scripts/setup-browsers.sh
 
 printf '\nOrb setup complete.\n'

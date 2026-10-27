@@ -56,7 +56,7 @@ async function openFrom(page: Page, link: ReturnType<Page["locator"]>): Promise<
 // WebKit (Safari's engine) too, where Playwright has it.
 const engines: Array<[string, Browser]> = [["chromium", await chromium.launch()]];
 if (fs.existsSync(webkit.executablePath())) engines.push(["webkit", await webkit.launch()]);
-else console.log("SKIP: webkit (install it: pnpm --filter @cube/web exec playwright install webkit)");
+else console.log("SKIP: webkit (install it: bash scripts/setup-browsers.sh webkit)");
 
 try {
   for (const [engine, browser] of engines) for (const base of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844, touch: true }]) {

@@ -24,7 +24,7 @@ if (shots) fs.mkdirSync(shots, { recursive: true });
 const browser = await chromium.launch();
 // Safari's engine, for the touch scenarios, when Playwright has it (CI does)
 const safari: Browser | null = fsSync.existsSync(webkit.executablePath()) ? await webkit.launch() : null;
-if (!safari) console.log("SKIP: webkit touch scenarios (install it: pnpm --filter @cube/web exec playwright install webkit)");
+if (!safari) console.log("SKIP: webkit touch scenarios (install it: bash scripts/setup-browsers.sh webkit)");
 let failed = false;
 type Viewport = { width: number; height: number; touch?: boolean };
 const desktop: Viewport = { width: 1440, height: 900 };
