@@ -14,6 +14,7 @@
  * started, as notices recorded with the outcome itself. */
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import type { DiagramProblem } from "./artifact-diagrams.ts";
 
 export const ARTIFACT_LIMITS = {
   title: 200,
@@ -92,7 +93,9 @@ export interface ActionNotice {
 export const isArtifactName = (value: unknown): value is string => typeof value === "string" && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(value) && !value.includes("..");
 export class ArtifactError extends Error {
   readonly status: number;
-  constructor(message: string, status = 400) { super(message); this.name = "ArtifactError"; this.status = status; }
+  /** A write refused for its diagrams: each problem, for a caller that reads them as data. */
+  readonly diagrams: readonly DiagramProblem[] | undefined;
+  constructor(message: string, status = 400, diagrams?: readonly DiagramProblem[]) { super(message); this.name = "ArtifactError"; this.status = status; this.diagrams = diagrams; }
 }
 
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

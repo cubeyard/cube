@@ -411,7 +411,10 @@ revision must be written on the newest one, so a stale write is refused
 rather than lost, and the author, who gets the comments, never changes. A
 write's request id is the tool call's, so a replay writes once. The
 browser renders a body as data: raw HTML as text, safe links only, diffs as
-text, Mermaid diagrams as `<img>` of their SVG. Comments are drafts until
+text, Mermaid diagrams drawn by Pele (a local library, nothing sent out) as
+`<img>` of their SVG, in artifacts and the chat alike; cubed refuses a write
+whose diagrams Pele cannot draw, with each problem, before any revision is
+written. Comments are drafts until
 sent; a batch goes to OptChat's pending queue or a thread's prompt, which
 refuses while it works, and waits with its reason until it is accepted once.
 The only action is `github.merge`, checked against the artifact's project,

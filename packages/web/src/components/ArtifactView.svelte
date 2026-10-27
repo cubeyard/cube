@@ -3,7 +3,7 @@
   import { addComment, deleteComment, errorText, fetchArtifact, fetchRevision, isNotFound, previewAction, runAction, sendComments } from "../lib/api.ts";
   import { renderArtifact } from "../lib/artifact-render.ts";
   import { mark, placeAnchor, selectionAnchor, textNodes, textRange, type Anchor, type Placement } from "../lib/anchor.ts";
-  import { drawDiagram } from "../lib/mermaid.ts";
+  import { drawDiagrams } from "../lib/diagram.ts";
   import { relTime } from "../lib/time.ts";
   import { uid } from "../lib/uid.ts";
   import type { ActionPreview, ArtifactAction, ArtifactComment, ArtifactView, Revision } from "../lib/types.ts";
@@ -70,7 +70,6 @@
   const runs = (action: string) => view?.actionRuns.filter((run) => run.action === action) ?? [];
   // Who hears of a run's outcome; a chat that did not start the thread is not told.
   const told = (run: string) => view?.notices.filter((notice) => notice.run === run && notice.state !== "skipped") ?? [];
-  const dark = () => matchMedia("(prefers-color-scheme: dark)").matches;
 
   async function load(): Promise<void> {
     try {
@@ -99,7 +98,7 @@
   $effect(() => {
     const html = rendered?.html;
     if (!html || !body) return;
-    void tick().then(() => drawAll(rendered!.diagrams));
+    void tick().then(() => { if (!disposed) void drawDiagrams(body); });
   });
   // Placed again only when a comment or its state changes, not at every poll.
   const marksKey = $derived(comments.map((comment) => `${comment.id}:${comment.state}`).join());
@@ -110,34 +109,6 @@
     const list = untrack(() => comments);
     void tick().then(() => placeMarks(root, current.number, list));
   });
-
-  async function drawAll(diagrams: string[]): Promise<void> {
-    const root = body;
-    for (const figure of root?.querySelectorAll<HTMLElement>("figure[data-diagram]") ?? []) {
-      const source = diagrams[Number(figure.dataset.diagram)];
-      const picture = figure.querySelector<HTMLElement>(".diagram-picture");
-      if (source === undefined || !picture || picture.dataset.drawn) continue;
-      picture.dataset.drawn = "1";
-      const drawn = await drawDiagram(source, dark());
-      if (disposed || !picture.isConnected) return;
-      picture.removeAttribute("aria-busy");
-      picture.replaceChildren();
-      if ("error" in drawn) {
-        const note = document.createElement("p");
-        note.className = "diagram-note bad";
-        note.textContent = drawn.error;
-        picture.append(note);
-        figure.querySelector("details")?.setAttribute("open", "");
-      } else {
-        // An image of the SVG: nothing in it runs, loads or links.
-        const image = document.createElement("img");
-        image.src = drawn.url;
-        image.alt = `diagram ${Number(figure.dataset.diagram) + 1}; its source is below`;
-        if (drawn.width) image.style.maxWidth = `min(100%, ${Math.ceil(drawn.width)}px)`;
-        picture.append(image);
-      }
-    }
-  }
 
   function placeMarks(root: HTMLElement, revision: number, list: ArtifactComment[]): void {
     // Marking replaces text nodes; a selection waiting for a comment is selected again after.

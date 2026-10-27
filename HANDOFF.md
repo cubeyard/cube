@@ -387,7 +387,9 @@ OptChat and threads write documents for the user (`artifact_write`/
 `artifact_read`; Claude Code threads `Write`/`Read /cube/artifacts/<name>.md`),
 kept with revisions and provenance in `CUBED_STATE/artifacts.sqlite` and
 shown at `#/a/<id>` (list at `#/artifacts`, newest five in the chat panel).
-The body renders as data (Markdown, diffs, Mermaid drawn as images). The
+The body renders as data (Markdown, diffs, Mermaid drawn by Pele as images,
+as in the chat); a write whose diagrams do not draw is refused with where and
+why, writing nothing. The
 user selects text and comments; drafts are sent as one message to the author
 (OptChat's queue, or a thread's prompt once its turn ends; never an
 interruption), delivered once. The only action is `github.merge`, previewed

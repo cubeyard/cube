@@ -1,11 +1,15 @@
 import { Marked, type Tokens } from "marked";
+import { diagramFigure } from "./diagram.ts";
 
 /** Agent prose as GitHub-flavoured markdown. The text is model output and
  * may quote anything it read, so raw HTML is printed as text, links are
  * limited to http(s) and mailto, and images become plain links: the browser
  * never fetches a URL the transcript names. The one exception is an image
  * the caller's `picture` resolves (one the thread itself read, served from
- * the thread's own store): that is shown, as a key that opens it larger. */
+ * the thread's own store): that is shown, as a key that opens it larger.
+ * A ```mermaid fence becomes a diagram figure (`diagram.ts`, drawn as an
+ * image by Pele); while the message still streams, a fence not yet closed
+ * shows its source as it grows and is drawn once it closes. */
 const marked = new Marked({
   gfm: true,
   breaks: true,
@@ -25,6 +29,11 @@ const marked = new Marked({
       if (label.includes(SHOWN_IMAGE)) return `${label} <a href="${escapeHtml(url)}"${titleAttr}${target}>${escapeHtml(href)}</a>`;
       return `<a href="${escapeHtml(url)}"${titleAttr}${target}>${label}</a>`;
     },
+    // Other fences: marked's own code block.
+    code({ text, lang, raw }: Tokens.Code): string | false {
+      if ((lang ?? "").trim().split(/\s+/)[0]!.toLowerCase() !== "mermaid") return false;
+      return diagramFigure(text, "chat", diagrams++, { complete: !growing || closed(raw) });
+    },
     image({ href, text }: Tokens.Image): string {
       const shown = picture?.(href);
       if (shown) {
@@ -43,11 +52,24 @@ const SHOWN_IMAGE = "message-image markdown-image";
 
 /** The image source a markdown image's target resolves to, during one render. */
 let picture: ((href: string) => string | null) | undefined;
+/** Whether the text being rendered may still grow, and its diagrams so far. */
+let growing = false;
+let diagrams = 0;
 
-export function renderMarkdown(text: string, pictures?: (href: string) => string | null): string {
+/** A fence closed by its own marker: an open one runs to the end of the text. */
+function closed(raw: string): boolean {
+  const lines = raw.trimEnd().split("\n");
+  const fence = /^ {0,3}(`{3,}|~{3,})/.exec(lines[0]!)?.[1];
+  return !!fence && lines.length > 1 && new RegExp(`^ {0,3}${fence[0]}{${fence.length},}\\s*$`).test(lines.at(-1)!);
+}
+
+/** `streaming`: the text is a message still being written. */
+export function renderMarkdown(text: string, pictures?: (href: string) => string | null, options: { streaming?: boolean } = {}): string {
   picture = pictures;
+  growing = !!options.streaming;
+  diagrams = 0;
   try { return marked.parse(text) as string; }
-  finally { picture = undefined; }
+  finally { picture = undefined; growing = false; }
 }
 
 /** `pages`: also cube's own hash routes (`#/a/<id>`, `#/t/<id>`, …). */

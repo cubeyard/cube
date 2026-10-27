@@ -164,6 +164,10 @@ faux.setResponses(Array.from({ length: 200 }, () => async request => {
     const id = /steal (\S+)/.exec(said)![1];
     return fauxAssistantMessage([fauxToolCall("artifact_write", { id, body: "# mine now" }, { id: "t-steal" }), fauxToolCall("artifact_read", { id }, { id: "t-peek" })], { stopReason: "toolUse" });
   }
+  if (said.includes("broken diagram")) {
+    return fauxAssistantMessage([fauxToolCall("bash", { command: "printf '# broken\\n\\n```mermaid\\nflowchart LR\\n  A[x --> B\\n```\\n' > broken.md" }, { id: "t-broken-file" }),
+      fauxToolCall("artifact_write", { path: "broken.md" }, { id: "t-broken" })], { stopReason: "toolUse" });
+  }
   if (said.includes("escape")) return fauxAssistantMessage([fauxToolCall("artifact_write", { path: "../../etc/passwd" }, { id: "t-esc" })], { stopReason: "toolUse" });
   if (said.includes("write merge notes")) {
     return fauxAssistantMessage([fauxToolCall("artifact_write", { title: "merge notes", body: "# merge notes\n\nready to merge",
@@ -178,7 +182,7 @@ const HOSTILE = [
   "# post-merge review",
   "<script>alert('x')</script><img src=x onerror=alert(1)>",
   "[click](javascript:alert(1)) and [ok](https://example.com)",
-  "```mermaid\nsequenceDiagram\n  A->>B: hi\n  click A call alert(1)\n```",
+  "```mermaid\nflowchart TD\n  A[\"<img src=x onerror=alert(1)>\"] --> B\n  click A call alert(1)\n  click B \"javascript:alert(2)\"\n```",
   "```diff\n-old\n+new\n```",
   "The summary line to comment on.",
 ].join("\n\n");
@@ -270,13 +274,21 @@ try {
   await call(`/api/threads/${piThread}/prompt`, { text: "bad action", requestId: "bad-action" });
   history = await until(() => call(`/api/threads/${piThread}/history`), value => JSON.stringify(value.body).includes("t-act") && value.body.events.at(-1)?.type === "assistant-text", "bad action settles");
   assert.match(JSON.stringify(history.body), /cubeyard\/demo is not a repository of this artifact's project/);
+  // A body from a workspace file whose diagram does not draw: refused with where and why, nothing written.
+  await call(`/api/threads/${piThread}/prompt`, { text: "broken diagram", requestId: "broken-diagram" });
+  history = await until(() => call(`/api/threads/${piThread}/history`), value => JSON.stringify(value.body).includes("t-broken\"") && value.body.events.at(-1)?.type === "assistant-text", "broken diagram settles");
+  const broken = history.body.events.filter((event: any) => event.type === "tool-result" && event.callId === "t-broken").map((event: any) => event.output).join("");
+  assert.match(broken, /^not written: a ```mermaid diagram does not draw, so nothing was written; fix it and write again:\n- diagram 1 of 1, fence at body line 3, diagram line 2, column 12 \(body line 5\): syntax: Parse error on line 2: Expecting /);
+  assert.match(broken, /\n {4} {2}A\[x --> B\n {4}-{11}\^/, "the line and Pele's marker");
   assert.equal((await call("/api/artifacts")).body.artifacts.length, 2);
 
   // A Claude Code thread: the mod's /cube/artifacts paths.
   const claudeThread = (await call("/api/threads", { projectId: project.body.project.id, requestId: "t-claude", model: { provider: "claude-code", id: "fable" },
     text: ["write-at /cube/artifacts/design.md # design notes\\n\\n```mermaid\\ngraph TD; A-->B\\n```", "read-at /cube/artifacts/design.md",
       // A part read and an Edit, through the real route: revision 2 on the one read.
-      "read-at /cube/artifacts/design.md 7 2", "edit-at /cube/artifacts/design.md A-->B A-->C", "write-at /cube/artifacts/../x.md nope",
+      "read-at /cube/artifacts/design.md 7 2", "edit-at /cube/artifacts/design.md A-->B A-->C",
+      "edit-at /cube/artifacts/design.md A-->C A-->[", "write-at /cube/artifacts/design.md # design notes\\n\\n```mermaid\\nnot a diagram\\n```",
+      "write-at /cube/artifacts/broken.md # broken\\n\\n```mermaid\\nsequenceDiagram\\n  A->>B\\n```", "write-at /cube/artifacts/../x.md nope",
       "write-at /cube/elsewhere.md nope", "read-at /cube/artifacts",
       // Another thread's artifact of the project: refused unread, then read and revised by id; another project's is not there.
       `write-at /cube/artifacts/${threadArtifact.id}.md # thread notes\\n\\nblind`, `read-at /cube/artifacts/${threadArtifact.id}.md`,
@@ -296,6 +308,12 @@ try {
   const designed = (await call(`/api/artifacts/${design.id}/revisions/2`)).body;
   assert.equal(designed.revision.body, "# design notes\n\n```mermaid\ngraph TD; A-->C\n```", "the Edit is revision 2");
   assert.equal(designed.revision.provenance.agent, "claude-code");
+  // A broken diagram through Edit, Write and a new name: refused with the problem, nothing written or created.
+  assert.equal((await call(`/api/artifacts/${design.id}`)).body.artifact.head, 2, "a refused Edit or Write writes no revision");
+  assert.match(claudeText, /diagram 1 of 1, fence at body line 3, diagram line 1, column 15 \(body line 4\): syntax: Parse error on line 1: Expecting 'NODE_STRING', got 'SQS'/);
+  assert.match(claudeText, /diagram 1 of 1, fence at body line 3: unsupported-diagram: No diagram type detected/);
+  assert.match(claudeText, /diagram 1 of 1, fence at body line 3, diagram line 2, column 8 \(body line 5\): syntax: Parse error on line 2: Expecting 'TXT', got 'NEWLINE'/);
+  assert.ok(!(await call("/api/artifacts")).body.artifacts.some((item: any) => item.name === "broken"), "a refused write creates nothing");
   assert.match(claudeText, new RegExp(`revision 1 of artifact ${threadArtifact.id} was written by thread \\[${piThread.slice(0, 8)}\\]; read its newest revision first`));
   assert.match(claudeText, new RegExp(`wrote revision 2\\. .*it stays thread \\[${piThread.slice(0, 8)}\\]'s artifact`));
   assert.equal((claudeText.match(new RegExp(`File does not exist: /cube/artifacts/${review.id}\\.md`, "g")) ?? []).length, 2, "another project's artifact is neither read nor written, as if there were none");

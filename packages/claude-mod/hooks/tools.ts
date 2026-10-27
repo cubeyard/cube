@@ -98,6 +98,7 @@ export const ARTIFACT_GUIDE = "An artifact is a document the user reads beside t
   + "Pick the smallest view that makes the point: a call tree or file tree in a text fence, a ```mermaid sequence, state or flow diagram, "
   + "a ```diff of the shape that changes (a component tree, a call stack, a file layout, real code), a short table, pseudocode. "
   + "Raw HTML is shown as text, scripts never run, images are links, and only http(s) and #/ links work. "
+  + "```mermaid diagrams are drawn by Pele (Mermaid syntax) and checked before a write is accepted: one that does not draw refuses the whole write, which tells you each diagram's problem and line; fix them and write again. "
   + "Comments come back to you as a message starting \"[artifact <id>]\" with the exact text they are about; answer them, and write a new revision of the same artifact when they call for changes. "
   + "You may revise an artifact someone else wrote when you can read it (a thread reads every artifact of its project): read its newest revision first, then write the whole document with its id. "
   + "A write on an older revision than the newest is refused rather than overwriting someone's newer one: read again and redo it on top. It stays its author's: the user's comments on it still go to the author. "

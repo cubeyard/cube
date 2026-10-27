@@ -32,8 +32,8 @@ const thread = (id: string): ArtifactAuthor => ({ kind: "thread", thread: id });
 function claude(id: string): ToolScope {
   const scope = { agent: thread(id), authors: [thread(id)] };
   const provenance = { agent: "claude-code" as const, thread: id };
-  const answer = <T>(run: () => T): T => {
-    try { return run(); } catch (error) {
+  const answer = async <T>(run: () => T | Promise<T>): Promise<T> => {
+    try { return await run(); } catch (error) {
       if (error instanceof ArtifactError) throw new WorkspaceClientError(error.status === 404 ? "NOT_FOUND" : "INVALID_REQUEST", error.message);
       throw error;
     }
@@ -51,7 +51,7 @@ const line = (index: number) => `- step ${index}: ${"berth keel phase detail ".r
 const body = ["# masterplan", "", ...Array.from({ length: 860 }, (_, index) => line(index))].join("\n");
 assert.ok(body.length > 125_000);
 const action = { kind: "github.merge", repository: "cubeyard/demo", pull: 7, headSha: "a".repeat(40), method: "squash" };
-const id = artifacts.write({ agent: thread(AUTHOR), authors: [thread(AUTHOR)] }, { name: "masterplan", body, actions: [action] }, { agent: "claude-code", thread: AUTHOR }, "w-1").id;
+const id = (await artifacts.write({ agent: thread(AUTHOR), authors: [thread(AUTHOR)] }, { name: "masterplan", body, actions: [action] }, { agent: "claude-code", thread: AUTHOR }, "w-1")).id;
 const file = `/cube/artifacts/${id}.md`;
 const target = { kind: "md" as const, name: id };
 const reviewer = claude(REVIEWER);

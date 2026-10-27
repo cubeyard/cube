@@ -900,18 +900,20 @@ export async function createCubed(options: {
                 throw new ArtifactError("requestId and edit {oldString, newString, replaceAll?} are required");
               }
               const target = isArtifactId(body.name) ? { id: body.name } : { name: body.name };
-              const written = artifactService.edit(scope, { ...target, oldString: edit.oldString, newString: edit.newString, replaceAll: edit.replaceAll as boolean | undefined }, provenance, body.requestId);
+              const written = await artifactService.edit(scope, { ...target, oldString: edit.oldString, newString: edit.newString, replaceAll: edit.replaceAll as boolean | undefined }, provenance, body.requestId);
               return json({ text: written.text, id: written.id, revision: written.revision });
             }
             if (typeof body.requestId !== "string" || typeof body.body !== "string") throw new ArtifactError("requestId and body are required");
             if (body.base !== undefined && typeof body.base !== "number") throw new ArtifactError("base must be a revision number");
             const target = isArtifactId(body.name) ? { id: body.name } : { name: body.name };
-            const written = artifactService.write(scope, { ...target, base: body.base, title: typeof body.title === "string" ? body.title : undefined, body: body.body, actions: body.actions },
+            const written = await artifactService.write(scope, { ...target, base: body.base, title: typeof body.title === "string" ? body.title : undefined, body: body.body, actions: body.actions },
               provenance, body.requestId);
             return json({ text: written.text, id: written.id, revision: written.revision });
           }
         } catch (error) {
-          if (error instanceof ArtifactError) return json({ error: error.message, code: error.status === 404 ? "NOT_FOUND" : "INVALID_REQUEST", completionUnknown: false }, error.status);
+          if (error instanceof ArtifactError) {
+            return json({ error: error.message, code: error.status === 404 ? "NOT_FOUND" : "INVALID_REQUEST", completionUnknown: false, ...error.diagrams ? { diagrams: error.diagrams } : {} }, error.status);
+          }
           throw error;
         }
         return json({ error: "not found", code: "NOT_FOUND", completionUnknown: false }, 404);

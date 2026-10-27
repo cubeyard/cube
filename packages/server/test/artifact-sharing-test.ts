@@ -48,21 +48,21 @@ const scope = (agent: ArtifactAuthor): ArtifactScope => ({ agent, authors: agent
 let calls = 0;
 const write = (agent: ArtifactAuthor, input: { id?: string; base?: number; body: string; actions?: unknown; project?: string }, requestId = `w${++calls}`) =>
   artifacts.write(scope(agent), input, { agent: agent.kind === "optchat" ? "optchat" : "pi", call: requestId }, requestId);
-const refused = (run: () => unknown, pattern: RegExp, status: number) => assert.throws(run, (error: unknown) =>
+const refused = (run: () => unknown, pattern: RegExp, status: number) => assert.rejects(async () => run(), (error: unknown) =>
   error instanceof ArtifactError && error.status === status && pattern.test(error.message), String(pattern));
 const merge = (headSha: string) => [{ kind: "github.merge", repository: "cubeyard/cube", pull: 7, headSha, method: "squash" }];
 
 try {
   // OptChat writes the pull request's artifact in project p, with its merge pinned to SHA.
-  const review = write(optchat, { project: "cube", body: "# PR 7\n\nfirst", actions: merge(SHA) }).id;
+  const review = (await write(optchat, { project: "cube", body: "# PR 7\n\nfirst", actions: merge(SHA) })).id;
   const original = store.revision(review, 1)!;
 
   // A thread of p sees it; it must read before it revises someone else's revision.
   assert.match(artifacts.read(scope(thread(B)), undefined), new RegExp(`${review} "PR 7" · revision 1 · by optchat`));
-  refused(() => write(thread(A), { id: review, body: "# PR 7\n\nblind" }), /was written by optchat; read its newest revision first/, 409);
+  await refused(() => write(thread(A), { id: review, body: "# PR 7\n\nblind" }), /was written by optchat; read its newest revision first/, 409);
   assert.equal(store.get(review)!.head, 1, "a blind write writes nothing");
   assert.match(artifacts.read(scope(thread(A)), review), /revision 1 of 1 · by optchat · project cube/);
-  const byA = write(thread(A), { id: review, body: "# PR 7\n\nreviewed by A" });
+  const byA = await write(thread(A), { id: review, body: "# PR 7\n\nreviewed by A" });
   assert.equal(byA.revision, 2);
   assert.match(byA.text, /it stays optchat's artifact: the user's comments on it go to optchat, not to you\./);
   assert.match(byA.text, /Actions kept from revision 1 .*merge-7: merge cubeyard\/cube#7 at aaaaaaaaaaaa \(squash\)/);
@@ -76,41 +76,41 @@ try {
 
   // Stale: B read revision 2, A wrote 3 on its own newest; B's write on 2 is refused, then made on 3.
   artifacts.read(scope(thread(B)), review);
-  assert.equal(write(thread(A), { id: review, body: "# PR 7\n\nA again" }).revision, 3);
-  refused(() => write(thread(B), { id: review, body: "# PR 7\n\nB on 2" }), /revision 3 \(by thread \[aaaaaaaa\]\) is newer than revision 2 this write is based on/, 409);
-  refused(() => write(thread(B), { id: review, base: 1, body: "# PR 7\n\nB on 1" }), /is newer than revision 1/, 409);
+  assert.equal((await write(thread(A), { id: review, body: "# PR 7\n\nA again" })).revision, 3);
+  await refused(() => write(thread(B), { id: review, body: "# PR 7\n\nB on 2" }), /revision 3 \(by thread \[aaaaaaaa\]\) is newer than revision 2 this write is based on/, 409);
+  await refused(() => write(thread(B), { id: review, base: 1, body: "# PR 7\n\nB on 1" }), /is newer than revision 1/, 409);
   assert.equal(store.get(review)!.head, 3, "nothing was overwritten");
   artifacts.read(scope(thread(B)), review);
-  assert.equal(write(thread(B), { id: review, body: "# PR 7\n\nB on 3" }, "b-on-3").revision, 4);
+  assert.equal((await write(thread(B), { id: review, body: "# PR 7\n\nB on 3" }, "b-on-3")).revision, 4);
 
   // Two writers on the same base: the first wins, the second is refused rather than lost.
-  assert.equal(write(optchat, { id: review, base: 4, body: "# PR 7\n\nchat on 4" }).revision, 5);
-  refused(() => write(thread(A), { id: review, base: 4, body: "# PR 7\n\nA on 4" }), /revision 5 \(by optchat\) is newer than revision 4/, 409);
+  assert.equal((await write(optchat, { id: review, base: 4, body: "# PR 7\n\nchat on 4" })).revision, 5);
+  await refused(() => write(thread(A), { id: review, base: 4, body: "# PR 7\n\nA on 4" }), /revision 5 \(by optchat\) is newer than revision 4/, 409);
   // A replayed call finds its revision whoever wrote since; another editor's request id is no replay.
-  assert.equal(write(thread(B), { id: review, body: "# PR 7\n\nB on 3" }, "b-on-3").revision, 4);
-  refused(() => write(thread(A), { id: review, base: 5, body: "# PR 7\n\nx" }, "b-on-3"), /another author's write/, 409);
+  assert.equal((await write(thread(B), { id: review, body: "# PR 7\n\nB on 3" }, "b-on-3")).revision, 4);
+  await refused(() => write(thread(A), { id: review, base: 5, body: "# PR 7\n\nx" }, "b-on-3"), /another author's write/, 409);
 
   // Another project's thread can neither read nor revise it, nor list it.
-  refused(() => artifacts.read(scope(thread(C)), review), /no artifact .* you can read/, 404);
-  refused(() => write(thread(C), { id: review, base: 5, body: "# mine" }), /no artifact .* you can read/, 404);
+  await refused(() => artifacts.read(scope(thread(C)), review), /no artifact .* you can read/, 404);
+  await refused(() => write(thread(C), { id: review, base: 5, body: "# mine" }), /no artifact .* you can read/, 404);
   assert.equal(artifacts.read(scope(thread(C)), undefined), "no artifacts yet");
   // An artifact without a project stays its author's.
-  const plan = write(optchat, { body: "# plan" }).id;
-  refused(() => artifacts.read(scope(thread(A)), plan), /you can read/, 404);
+  const plan = (await write(optchat, { body: "# plan" })).id;
+  await refused(() => artifacts.read(scope(thread(A)), plan), /you can read/, 404);
 
   // A thread's artifact: revised by another thread of its project and by the chat that started it.
-  const notes = write(thread(A), { body: "# notes\n\nby A" }).id;
+  const notes = (await write(thread(A), { body: "# notes\n\nby A" })).id;
   artifacts.read(scope(thread(B)), notes);
-  assert.match(write(thread(B), { id: notes, body: "# notes\n\nby B" }).text, /it stays thread \[aaaaaaaa\]'s artifact/);
+  assert.match((await write(thread(B), { id: notes, body: "# notes\n\nby B" })).text, /it stays thread \[aaaaaaaa\]'s artifact/);
   artifacts.read(scope(optchat), notes);
-  assert.equal(write(optchat, { id: notes, body: "# notes\n\nby the chat" }).revision, 3);
+  assert.equal((await write(optchat, { id: notes, body: "# notes\n\nby the chat" })).revision, 3);
   assert.deepEqual(store.revisions(notes).map(revision => revision.editor), [thread(A), thread(B), optchat]);
   assert.deepEqual(store.get(notes)!.author, thread(A));
 
   // The merge stays pinned: the user previews revision 5, a thread writes 6; revision 5 no longer runs and nothing ran on write.
   assert.deepEqual((await artifacts.preview(review, "merge-7", 5)).problems, []);
   artifacts.read(scope(thread(A)), review);
-  write(thread(A), { id: review, body: "# PR 7\n\nhead moved, new pin", actions: merge(NEXT) });
+  await write(thread(A), { id: review, body: "# PR 7\n\nhead moved, new pin", actions: merge(NEXT) });
   assert.equal(store.revision(review, 6)!.actions[0]!.headSha, NEXT);
   assert.equal(store.revision(review, 5)!.actions[0]!.headSha, SHA, "the earlier pin is kept with its revision");
   assert.deepEqual(store.actionRuns(review), [], "a revision runs no action");
@@ -119,7 +119,7 @@ try {
   await assert.rejects(artifacts.run(review, "merge-7", { revision: 6, confirm: "cubeyard/cube#7", requestId: "m-new" }), /not run/);
   assert.deepEqual(merges, []);
   // [] removes the actions; the earlier revisions keep theirs.
-  write(thread(A), { id: review, body: "# PR 7\n\nno merge", actions: [] });
+  await write(thread(A), { id: review, body: "# PR 7\n\nno merge", actions: [] });
   assert.deepEqual(store.revision(review, 7)!.actions, []);
   assert.equal(store.revision(review, 6)!.actions.length, 1);
 

@@ -31,4 +31,22 @@ const linked = renderMarkdown("[![a](/workspace/a.png)](https://example.com/page
 assert.match(linked, /^<p><button [^]*<\/button> <a href="https:\/\/example.com\/page" target="_blank" rel="noopener noreferrer">https:\/\/example.com\/page<\/a><\/p>/, "a linked image is a key beside its link, not inside it");
 assert.doesNotMatch(renderMarkdown("![a](/workspace/a.png)"), /<img/, "no resolver, no image");
 assert.doesNotMatch(renderMarkdown("![a](/workspace/a.png)"), /media/, "the resolver of one render does not outlive it");
-console.log("ok: agent markdown renders without raw html, script links or remote images, and shows only the images the thread read");
+
+// ```mermaid in the chat: a figure with its source escaped and folded under it, never markup of its own.
+const fences = renderMarkdown("one\n\n```mermaid\nflowchart LR\n  A[\"<img src=x onerror=alert(1)>\"] --> B\n```\n\n```Mermaid extra\nsequenceDiagram\n  A->>B: hi\n```\n\n```js\nx\n```");
+assert.equal((fences.match(/<figure class="diagram-figure" data-anchor-skip data-diagram="\d" data-diagram-place="chat">/g) ?? []).length, 2, "every mermaid fence is a figure, by its first word");
+assert.match(fences, /data-diagram="0"[\s\S]*data-diagram="1"/, "numbered in order");
+assert.match(fences, /<div class="diagram-picture" aria-busy="true"><p class="diagram-note">drawing diagram…<\/p><\/div>/);
+assert.doesNotMatch(fences, /<img/, "the source stays text");
+assert.match(fences, /A\[&quot;&lt;img src=x onerror=alert\(1\)&gt;&quot;\]/);
+assert.match(fences, /<pre><code class="language-js">x/, "other fences stay code");
+// Streaming: a fence still open shows its source as it grows and is drawn once closed; a finished message draws it as it is.
+const open = "text\n\n```mermaid\nflowchart LR\n  A --> B";
+assert.match(renderMarkdown(open, undefined, { streaming: true }), /<figure class="diagram-figure" data-anchor-skip><div class="diagram-picture"><p class="diagram-note">diagram drawn when its block is complete<\/p><\/div><pre class="diagram-growing"><code>flowchart LR\n  A --&gt; B<\/code><\/pre><\/figure>/);
+assert.doesNotMatch(renderMarkdown(open, undefined, { streaming: true }), /data-diagram=/, "an open fence is not drawn");
+assert.match(renderMarkdown(`${open}\n\`\`\``, undefined, { streaming: true }), /data-diagram="0"/, "closed, it is drawn while the message streams on");
+assert.match(renderMarkdown(`${open}\n\`\`\`\n\nmore`, undefined, { streaming: true }), /data-diagram="0"/);
+assert.match(renderMarkdown("````mermaid\nflowchart LR\n  A --> B\n```", undefined, { streaming: true }), /diagram-growing/, "a shorter marker does not close a longer fence");
+assert.match(renderMarkdown(open), /data-diagram="0"/, "a finished message draws an unclosed fence");
+assert.match(renderMarkdown("```mermaid\n" + "A-->B\n".repeat(4000) + "```"), /diagram too large to draw \(23999 characters; at most 20000\)/);
+console.log("ok: agent markdown renders without raw html, script links or remote images, and shows only the images the thread read; mermaid fences are figures, an open one while streaming its growing source");
