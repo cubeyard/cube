@@ -6,6 +6,7 @@
  * One environment serves one tool call. Every write carries a key derived from
  * the call's task id, so a replayed call never writes twice, and a write after
  * a read in the same call is conditional on the content that was read. */
+import { createHash } from "node:crypto";
 import path from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { err, ExecutionError, FileError, LineScanner, ok, type BinaryReader, type DirReader, type ExecutionEnv, type FileErrorCode, type FileInfo, type FileWatcher, type Result, type ShellExecResult, type TextLineReader } from "@earendil-works/pi-durable/env";
@@ -136,6 +137,19 @@ export function expandHome(file: string): string | null {
 export function workspacePath(absolute: string): string {
   if (absolute === WORKSPACE_ROOT) return ".";
   return absolute.startsWith(`${WORKSPACE_ROOT}/`) ? absolute.slice(WORKSPACE_ROOT.length + 1) : absolute;
+}
+
+/** A file in the thread's machine as text, at most `limit` bytes, under the
+ * lease `token`: what artifact_write's `path` reads, for Pi and Claude Code. */
+export async function readMachineText(workspace: Workspace, token: string, file: string, limit: number): Promise<{ text: string; path: string; sha256: string }> {
+  const expanded = expandHome(file);
+  if (expanded === null) throw new Error(`${file}: only ~ and ~/ name a home, the agent's`);
+  const target = workspacePath(path.posix.resolve(WORKSPACE_ROOT, expanded));
+  if (target === ".") throw new Error("path must name a file");
+  const read = await workspace.readFile(token, target, { limit: limit + 1 });
+  if (!read.eof || read.content.byteLength > limit) throw new Error(`${file} is larger than ${limit} bytes`);
+  const bytes = Buffer.from(read.content);
+  return { text: bytes.toString("utf8"), path: path.posix.resolve(WORKSPACE_ROOT, target), sha256: createHash("sha256").update(bytes).digest("hex") };
 }
 
 /** A BinaryReader over bytes already read whole. Lines are scanned with Pi's

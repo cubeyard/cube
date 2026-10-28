@@ -26,6 +26,9 @@ export interface WorkspaceWriteResult { sha256: string; size: number }
 export interface WorkspaceStat { kind: "file" | "directory" | "symlink" | "other"; size: number; mode: number; modifiedMs: number; sha256: string | null }
 export interface WorkspaceWrite { expectedSha?: string; createParents?: boolean }
 
+/** A cube tool as `$.tool.register` takes it (packages/server/src/cube-tools.ts). */
+export interface CubeToolSpec { name: string; description: string; inputSchema: Record<string, unknown>; isDeferred: boolean }
+
 export interface WorkspaceRequest { method: string; path: string; headers: Record<string, string>; body?: string }
 export interface WorkspaceReply { status: number; text: string }
 /** One HTTP exchange; rejects only when no reply arrived. */
@@ -93,18 +96,12 @@ export class WorkspaceClient {
   writeFile(token: string, key: string, file: string, content: Uint8Array, options: WorkspaceWrite = {}): Promise<WorkspaceWriteResult> {
     return this.call("PUT", "/file", { token, body: { key, path: file, content: toBase64(content), ...options } });
   }
-  /** The work artifacts the thread can read (cubed's, not workspace files):
-   * one named artifact (or one by id) as text, or the list without a name. */
-  artifact(token: string, name?: string): Promise<{ text: string }> {
-    return this.call("GET", `/artifacts${name === undefined ? "" : `?${new URLSearchParams({ name })}`}`, { token });
-  }
-  /** Writes the named artifact's next revision; the request id makes a repeated call write it once. */
-  writeArtifact(token: string, request: { name: string; requestId: string; call: string; body: string; title?: string; actions?: unknown; base?: number }): Promise<{ text: string; id: string; revision: number }> {
-    return this.call("POST", "/artifacts", { token, body: request });
-  }
-  /** Replaces text in the named artifact's newest revision, as its next revision. */
-  editArtifact(token: string, request: { name: string; requestId: string; call: string; edit: { oldString: string; newString: string; replaceAll: boolean } }): Promise<{ text: string; id: string; revision: number }> {
-    return this.call("POST", "/artifacts", { token, body: request });
+  /** The cube tools cubed offers this thread, as Claude Code registers them. */
+  async tools(token: string): Promise<CubeToolSpec[]> { return (await this.call<{ tools: CubeToolSpec[] }>("GET", "/tools", { token })).tools; }
+  /** One call of a cube tool, answered by cubed; the same `call` (its
+   * tool_use_id) again does not write twice. */
+  callTool(token: string, name: string, call: string, input: Record<string, unknown>): Promise<{ text: string }> {
+    return this.call("POST", `/tools/${encodeURIComponent(name)}`, { token, body: { call, input } });
   }
   stat(token: string, file: string): Promise<WorkspaceStat> {
     return this.call("GET", `/stat?${new URLSearchParams({ path: file })}`, { token });

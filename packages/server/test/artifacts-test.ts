@@ -1,6 +1,7 @@
 /** Work artifacts end to end through cubed's routes, with disposable state:
  * OptChat, a Pi thread (over a local guest) and a Claude Code thread (the
- * fake `claude` running the mod's own tools over the workspace socket) write
+ * fake `claude` running the mod's own tools over the workspace socket, cube's
+ * artifact tools among them) write
  * artifacts; revisions and provenance persist across a restart; a Claude
  * Code thread revises a Pi thread's artifact of its project by id, never
  * another project's; hostile action declarations are refused; comments are anchored
@@ -282,41 +283,45 @@ try {
   assert.match(broken, /\n {4} {2}A\[x --> B\n {4}-{11}\^/, "the line and Pele's marker");
   assert.equal((await call("/api/artifacts")).body.artifacts.length, 2);
 
-  // A Claude Code thread: the mod's /cube/artifacts paths.
+  // A Claude Code thread: cube's tools as its mod registers and forwards them.
+  const cube = (name: string, input: Record<string, unknown>) => `tool ${name} ${JSON.stringify(input)}`;
   const claudeThread = (await call("/api/threads", { projectId: project.body.project.id, requestId: "t-claude", model: { provider: "claude-code", id: "fable" },
-    text: ["write-at /cube/artifacts/design.md # design notes\\n\\n```mermaid\\ngraph TD; A-->B\\n```", "read-at /cube/artifacts/design.md",
-      // A part read and an Edit, through the real route: revision 2 on the one read.
-      "read-at /cube/artifacts/design.md 7 2", "edit-at /cube/artifacts/design.md A-->B A-->C",
-      "edit-at /cube/artifacts/design.md A-->C A-->[", "write-at /cube/artifacts/design.md # design notes\\n\\n```mermaid\\nnot a diagram\\n```",
-      "write-at /cube/artifacts/broken.md # broken\\n\\n```mermaid\\nsequenceDiagram\\n  A->>B\\n```", "write-at /cube/artifacts/../x.md nope",
-      "write-at /cube/elsewhere.md nope", "read-at /cube/artifacts",
+    text: [cube("artifact_write", { body: "# design notes\n\n```mermaid\ngraph TD; A-->B\n```" }), cube("artifact_read", { id: "$ID" }),
+      // A part read and an edit, through the real route: revision 2 on the one read.
+      cube("artifact_read", { id: "$ID", offset: 7, limit: 2 }), cube("artifact_edit", { id: "$ID", old_string: "A-->B", new_string: "A-->C" }),
+      cube("artifact_edit", { id: "$ID", old_string: "A-->C", new_string: "A-->[" }), cube("artifact_write", { id: "$ID", body: "# design notes\n\n```mermaid\nnot a diagram\n```" }),
+      cube("artifact_write", { body: "# broken\n\n```mermaid\nsequenceDiagram\n  A->>B\n```" }),
+      // Input the schema refuses, a tool cube does not offer, and the old artifact paths.
+      cube("artifact_write", { base: "one", body: "# x" }), cube("artifact_delete", {}), "write-at /cube/artifacts/design.md nope", cube("artifact_read", {}),
       // Another thread's artifact of the project: refused unread, then read and revised by id; another project's is not there.
-      `write-at /cube/artifacts/${threadArtifact.id}.md # thread notes\\n\\nblind`, `read-at /cube/artifacts/${threadArtifact.id}.md`,
-      `write-at /cube/artifacts/${threadArtifact.id}.md # thread notes\\n\\nthe guest wrote this\\n\\nrevised by claude`,
-      `read-at /cube/artifacts/${review.id}.md`, `write-at /cube/artifacts/${review.id}.md # mine`].join("\n") })).body.id as string;
+      cube("artifact_write", { id: threadArtifact.id, body: "# thread notes\n\nblind" }), cube("artifact_read", { id: threadArtifact.id }),
+      cube("artifact_write", { id: threadArtifact.id, body: "# thread notes\n\nthe guest wrote this\n\nrevised by claude" }),
+      cube("artifact_read", { id: review.id }), cube("artifact_write", { id: review.id, body: "# mine" })].join("\n") })).body.id as string;
   const claudeHistory = await until(() => call(`/api/threads/${claudeThread}/history`), value => value.status === 200 && value.body.status.state === "completed", "the claude thread finishes");
   const claudeText = JSON.stringify(claudeHistory.body);
   assert.match(claudeText, /created at revision 1/);
   assert.match(claudeText, /--- body of revision 1 ---/);
-  assert.match(claudeText, /is not an artifact path/);
+  assert.match(claudeText, /Validation failed for tool \\"artifact_write\\":\\n  - base: must be integer/);
+  assert.match(claudeText, /No such tool available: mcp__cube__artifact_delete/);
+  assert.match(claudeText, /\/cube\/artifacts\/design\.md is not in the machine: cube keeps artifacts, read and written with the tools mcp__cube__artifact_read/);
   list = await call("/api/artifacts");
   const design = list.body.artifacts.find((item: any) => item.title === "design notes");
   assert.equal(design.author.thread, claudeThread);
   assert.equal((await call(`/api/artifacts/${design.id}`)).body.revisions[0].provenance.agent, "claude-code");
-  assert.match(claudeText, /\[lines 7-8 of \d+; Read with offset 9 for the rest/);
-  assert.match(claudeText, /Edit ok: \/cube\/artifacts\/design\.md/);
+  assert.match(claudeText, /\[lines 7-8 of \d+; artifact_read with offset 9 for the rest/);
+  assert.match(claudeText, /artifact [0-9a-f-]{36} \\"design notes\\" wrote revision 2\./);
   const designed = (await call(`/api/artifacts/${design.id}/revisions/2`)).body;
   assert.equal(designed.revision.body, "# design notes\n\n```mermaid\ngraph TD; A-->C\n```", "the Edit is revision 2");
   assert.equal(designed.revision.provenance.agent, "claude-code");
-  // A broken diagram through Edit, Write and a new name: refused with the problem, nothing written or created.
+  // A broken diagram through an edit, a revision and a new artifact: refused with the problem, nothing written or created.
   assert.equal((await call(`/api/artifacts/${design.id}`)).body.artifact.head, 2, "a refused Edit or Write writes no revision");
   assert.match(claudeText, /diagram 1 of 1, fence at body line 3, diagram line 1, column 15 \(body line 4\): syntax: Parse error on line 1: Expecting 'NODE_STRING', got 'SQS'/);
   assert.match(claudeText, /diagram 1 of 1, fence at body line 3: unsupported-diagram: No diagram type detected/);
   assert.match(claudeText, /diagram 1 of 1, fence at body line 3, diagram line 2, column 8 \(body line 5\): syntax: Parse error on line 2: Expecting 'TXT', got 'NEWLINE'/);
-  assert.ok(!(await call("/api/artifacts")).body.artifacts.some((item: any) => item.name === "broken"), "a refused write creates nothing");
+  assert.ok(!(await call("/api/artifacts")).body.artifacts.some((item: any) => item.title === "broken"), "a refused write creates nothing");
   assert.match(claudeText, new RegExp(`revision 1 of artifact ${threadArtifact.id} was written by thread \\[${piThread.slice(0, 8)}\\]; read its newest revision first`));
   assert.match(claudeText, new RegExp(`wrote revision 2\\. .*it stays thread \\[${piThread.slice(0, 8)}\\]'s artifact`));
-  assert.equal((claudeText.match(new RegExp(`File does not exist: /cube/artifacts/${review.id}\\.md`, "g")) ?? []).length, 2, "another project's artifact is neither read nor written, as if there were none");
+  assert.equal((claudeText.match(new RegExp(`no artifact ${review.id} you can read`, "g")) ?? []).length, 2, "another project's artifact is neither read nor written, as if there were none");
   const shared = (await call(`/api/artifacts/${threadArtifact.id}`)).body;
   assert.deepEqual(shared.artifact.author, { kind: "thread", thread: piThread }, "the author stays");
   assert.deepEqual(shared.revisions.map((item: any) => [item.number, item.editor.thread, item.provenance.agent]), [[1, piThread, "pi"], [2, claudeThread, "claude-code"]]);
@@ -325,8 +330,8 @@ try {
   assert.equal((await call("/api/artifacts", { body: "# x", requestId: "w" })).status, 404);
   assert.equal((await call(`/api/artifacts/${threadArtifact.id}`, { body: "# x", requestId: "w" })).status, 404);
   assert.equal((await call(`/api/artifacts/${threadArtifact.id}/revisions`, { body: "# x", requestId: "w" })).status, 404);
-  // The socket's artifact routes need the thread's lease token.
-  const unauth = await fetch(`${base}/api/threads/${claudeThread}/workspace/artifacts`);
+  // The socket's tool routes need the thread's lease token.
+  const unauth = await fetch(`${base}/api/threads/${claudeThread}/workspace/tools`);
   assert.equal(unauth.status, 404, "the browser-facing host does not serve them");
   // The Claude Code mod's ready (claude-ready.ts) counts only on cubed's
   // private socket: the same thread, its child's own lease token and a nonce

@@ -6,7 +6,9 @@
  *
  * Steps, one per line: `run <command>`, `slow <command>`, `write <file> <text>`,
  * `edit <file> <old> <new>`, `read <file>`, `write-at <absolute path> <text>` and
- * `read-at <absolute path>` (the mod's /cube/artifacts paths too), `say <text>`, `crash`, `fail`,
+ * `read-at <absolute path>`, `tool <name> <json input>` (a cube tool the mod
+ * registered, mcp__cube__<name>; `$ID` in the input is the artifact id the
+ * last result named), `say <text>`, `crash`, `fail`,
  * `id <tool_use_id> run <command>`, `ignore-interrupt`, `ignore-term`,
  * `background <task_id> <ms> <description>` (a background Agent that
  * finishes after ms: Claude Code's task_started and task_notification
@@ -19,8 +21,8 @@
  * steered: see `queued` below.
  * FAKE_CLAUDE_LOG names a file that receives one JSON line per start.
  *
- * At start it says the mod is in, as the mod's last `session.start` hook
- * does (CUBE_MOD_NONCE to `…/claude-ready`). FAKE_CLAUDE_MOD=missing is
+ * At start it lists the cube tools and says the mod is in, as the mod's
+ * last `session.start` hook does (CUBE_MOD_NONCE to `…/claude-ready`). FAKE_CLAUDE_MOD=missing is
  * Claude Code without the mod: it says nothing, and a `run` step it is
  * sent runs on the host, as Claude Code's own Bash would; `forged` sends
  * another nonce first.
@@ -35,7 +37,7 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkspaceClient } from "../../claude-mod/hooks/workspace.ts";
-import { artifactPath, bash, edit, editArtifact, read, readArtifact, write, writeArtifact, type ToolScope } from "../../claude-mod/hooks/tools.ts";
+import { bash, CUBE_TOOL_PREFIX, cubeTool, edit, read, write, type ToolScope } from "../../claude-mod/hooks/tools.ts";
 import { unixTransport } from "./unix-transport.ts";
 
 const args = process.argv.slice(2);
@@ -65,7 +67,8 @@ const client = new WorkspaceClient({ base: env.CUBE_WORKSPACE_PATH!, transport: 
 // `early`: no ready, and a turn printed at once (which no prompt asked for).
 const missing = env.FAKE_CLAUDE_MOD === "missing" || env.FAKE_CLAUDE_MOD === "forged" || env.FAKE_CLAUDE_MOD === "early";
 if (env.FAKE_CLAUDE_MOD === "forged") await client.ready(env.CUBE_WORKSPACE_TOKEN!, "0".repeat(64)).then(() => fail("a forged nonce was taken"), () => {});
-else if (!missing) await client.ready(env.CUBE_WORKSPACE_TOKEN!, env.CUBE_MOD_NONCE ?? fail("expected CUBE_MOD_NONCE"));
+const registered = missing ? [] : (await client.tools(env.CUBE_WORKSPACE_TOKEN!)).map(tool => `${CUBE_TOOL_PREFIX}${tool.name}`);
+if (!missing) await client.ready(env.CUBE_WORKSPACE_TOKEN!, env.CUBE_MOD_NONCE ?? fail("expected CUBE_MOD_NONCE"));
 
 const TURN_USAGE = { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 50, cacheCreationInputTokens: 10, costUSD: 0.01 };
 type Totals = Record<string, typeof TURN_USAGE & { webSearchRequests: number; contextWindow: number; maxOutputTokens: number; costBasis: string }>;
@@ -90,7 +93,7 @@ const usage = () => {
 const emit = (message: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ ...message, session_id: session })}\n`);
 // FAKE_CLAUDE_STEER=none: a Claude Code that advertises neither capability steering needs.
 const capabilities = env.FAKE_CLAUDE_STEER === "none" ? ["interrupt_receipt_v1"] : ["interrupt_receipt_v1", "interrupt_cancel_queued_v1", "msg_lifecycle_v1"];
-emit({ type: "system", subtype: "init", model, cwd: process.cwd(), tools: ["Bash", "Read", "Write", "Edit"], plugins: [{ name: "cube", path: mod }], claude_code_version: "2.1.310-fake", capabilities });
+emit({ type: "system", subtype: "init", model, cwd: process.cwd(), tools: ["Bash", "Read", "Write", "Edit", ...registered], plugins: [{ name: "cube", path: mod }], claude_code_version: "2.1.310-fake", capabilities });
 
 if (env.FAKE_CLAUDE_MOD === "early") emit({ type: "assistant", parent_tool_use_id: null, message: { id: "msg_early", role: "assistant", model, content: [{ type: "text", text: "a turn of its own" }] } });
 let calls = 0;
@@ -147,15 +150,16 @@ async function say(text: string): Promise<void> {
   emit({ type: "assistant", parent_tool_use_id: null, message: { id, role: "assistant", model, content: [{ type: "text", text }] } });
 }
 
+/** The artifact id the last tool result named, for `$ID`. */
+let lastArtifact = "";
 async function tool(id: string, name: string, toolInput: Record<string, unknown>, signal: AbortSignal): Promise<void> {
   emit({ type: "assistant", parent_tool_use_id: null, message: { id: `msg_${randomUUID()}`, role: "assistant", model, content: [{ type: "tool_use", id, name, input: toolInput }] } });
   const scope: ToolScope = { client, token: env.CUBE_WORKSPACE_TOKEN!, root: env.CUBE_WORKSPACE_ROOT!,
     ...(env.CUBE_WORKSPACE_REAL_ROOT ? { realRoot: env.CUBE_WORKSPACE_REAL_ROOT } : {}), signal };
-  // As register.ts: /cube/artifacts paths are the thread's artifacts.
-  const artifact = artifactPath(toolInput.file_path);
-  const result = artifact && "deny" in artifact ? artifact
-    : artifact ? name === "Write" ? await writeArtifact(scope, id, artifact, toolInput as never)
-      : name === "Edit" ? await editArtifact(scope, id, artifact, toolInput as never) : await readArtifact(scope, artifact, toolInput as never)
+  // As register.ts: a cube tool is cubed's to answer; Claude Code has no tool by a name nothing registered.
+  const cube = name.startsWith(CUBE_TOOL_PREFIX);
+  const answer = cube ? registered.includes(name) ? await cubeTool(scope, id, name, toolInput) : { deny: `No such tool available: ${name}` } : null;
+  const result = answer !== null ? typeof answer === "string" ? { text: answer } : answer
     : name === "Bash" ? await bash(scope, id, toolInput as never)
     : name === "Write" ? await write(scope, id, toolInput as never)
     : name === "Edit" ? await edit(scope, id, toolInput as never)
@@ -167,9 +171,10 @@ async function tool(id: string, name: string, toolInput: Record<string, unknown>
     : image ? [{ type: "image", source: { type: "base64", data: image.base64, media_type: image.type } }]
     : name === "Bash" ? [(result as { stdout: string }).stdout, (result as { stderr: string }).stderr].filter(Boolean).join("\n")
     : name === "Read" ? (result as { file: { content: string } }).file.content
-    : artifact && name === "Write" ? (result as { content: string }).content
+    : cube ? (result as { text: string }).text
     : `${name} ok: ${String(toolInput.file_path)}`;
   emit({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content, is_error: "deny" in result }] }, ...image ? { tool_use_result: result } : {} });
+  lastArtifact = /artifact ([0-9a-f-]{36})/.exec(typeof content === "string" ? content : "")?.[1] ?? lastArtifact;
 }
 
 /** A background Agent: launched within the turn, its own messages carry
@@ -216,6 +221,7 @@ async function turn(text: string, prompted = true): Promise<void> {
       // read-at <path> [offset [limit]]; edit-at <path> <old> <new>, "_" a space.
       else if (verb === "read-at") await tool(id, "Read", { file_path: rest[0], ...rest[1] ? { offset: Number(rest[1]) } : {}, ...rest[2] ? { limit: Number(rest[2]) } : {} }, controller.signal);
       else if (verb === "edit-at") await tool(id, "Edit", { file_path: rest[0], old_string: rest[1]!.replace(/_/g, " "), new_string: rest[2]!.replace(/_/g, " ") }, controller.signal);
+      else if (verb === "tool") await tool(id, `${CUBE_TOOL_PREFIX}${rest[0]}`, JSON.parse(rest.slice(1).join(" ").replaceAll("$ID", lastArtifact)) as Record<string, unknown>, controller.signal);
       else if (verb === "hang") await new Promise(() => {});
       else if (verb === "background" || verb === "background-quiet" || verb === "background-later") background(id, rest[0]!, Number(rest[1]), rest.slice(2).join(" "), verb !== "background-quiet", verb === "background-later");
       else if (verb === "monitor") emit({ type: "system", subtype: "task_started", task_id: rest[0], description: "watch a log", task_type: "monitor", is_backgrounded: true });
@@ -243,4 +249,4 @@ async function turn(text: string, prompted = true): Promise<void> {
     if (next.length) enqueue(() => { for (const item of next) lifecycle(item.uuid, "started"); return turn(next.map(item => item.text).join("\n")); });
   }
 }
-const TOOLS = new Set(["run", "slow", "write", "edit", "read", "write-at", "read-at", "edit-at"]);
+const TOOLS = new Set(["run", "slow", "write", "edit", "read", "write-at", "read-at", "edit-at", "tool"]);

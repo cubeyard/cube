@@ -1,4 +1,4 @@
-/** `artifact_write` as the two Pi adapters build it (a thread's, with path,
+/** `artifact_write` as Pi gets it (piTool) in the two lists built for it (a thread's, with path,
  * and OptChat's, with project) over a real store with a fake registry: a
  * blank id, path or body counts as left out, as models often send them, so
  * creating still creates; a real body with a real path is still refused;
@@ -8,10 +8,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ToolExecutionApi, ToolRegistration } from "@earendil-works/pi-durable";
+import type { ToolExecutionApi } from "@earendil-works/pi-durable";
 import { Artifacts } from "../src/artifact-service.ts";
 import { ArtifactStore, type ArtifactAuthor } from "../src/artifacts.ts";
 import { artifactTools } from "../src/artifact-tools.ts";
+import { piTool } from "../src/cube-tools.ts";
 import type { GithubPulls } from "../src/github-pulls.ts";
 import type { Registry } from "../src/registry.ts";
 
@@ -31,14 +32,15 @@ const reads: string[] = [];
 
 let calls = 0;
 const adapter = (author: ArtifactAuthor, thread: boolean) => {
-  const [write] = artifactTools({
-    artifacts, author, agent: thread ? "pi" : "optchat", readable: async () => [author], key: api => `req-${api.callId}`,
+  const [tool] = artifactTools({
+    artifacts, author, agent: thread ? "pi" : "optchat", readable: async () => [author],
     ...thread ? { readFile: async (file: string) => {
       reads.push(file);
       if (!(file in files)) throw new Error(`no file ${file}`);
       return { text: files[file]!, path: file, sha256: "0".repeat(64) };
     } } : { projects: true },
-  }) as [ToolRegistration];
+  });
+  const write = piTool(tool!, api => `req-${api.callId}`);
   return async (args: Record<string, unknown>) => {
     const result = await write.execute(args as never, { callId: `c${++calls}` } as unknown as ToolExecutionApi, {} as never);
     return (result as { output: Array<{ text: string }> }).output.map(part => part.text).join("");

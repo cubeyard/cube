@@ -40,9 +40,11 @@ import { PiThreadEvents } from "./pi-thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
 import { TranscriptWindowError, windowed, windowQuery } from "./transcript-window.ts";
 import { threadUsageText, usageText, UsageService } from "./usage-service.ts";
-import { ARTIFACT_LIMITS, ArtifactError, ArtifactStore, isArtifactId, isArtifactName, type ArtifactAuthor } from "./artifacts.ts";
+import { ARTIFACT_LIMITS, ArtifactError, ArtifactStore, isArtifactId } from "./artifacts.ts";
 import { Artifacts } from "./artifact-service.ts";
 import { ARTIFACT_GUIDE, artifactTools } from "./artifact-tools.ts";
+import { piTool, toolsRoute } from "./cube-tools.ts";
+import { readMachineText } from "./workspace-env.ts";
 import { githubPulls, type GithubPulls } from "./github-pulls.ts";
 import { Portal, portalSettings, type PortalSettings } from "./portal.ts";
 import { DEFAULT_LOCAL_BERTH_LISTEN, DEFAULT_LOCAL_BERTH_MACHINES, describeBerthImage, enrollRunner, initLocalBerth } from "./runner-enroll.ts";
@@ -304,15 +306,18 @@ export async function createCubed(options: {
   }
   let portal: Portal | null = null;
   let artifacts: Artifacts | null = null;
+  /** A thread's cube tools, the same list for its Pi and its Claude Code
+   * agent: its own artifacts and its project's; a body may come from a file
+   * in its machine. */
+  const threadTools = (thread: string, agent: "pi" | "claude-code", readFile: (file: string) => Promise<{ text: string; path: string; sha256: string }>) =>
+    artifactTools({ artifacts: artifacts!, author: { kind: "thread", thread }, agent, readable: async () => [{ kind: "thread", thread }], readFile });
   const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, ...options.machines ? { machines: options.machines } : {}, ...options.now ? { now: options.now } : {},
     ...options.patience ? { patience: options.patience } : {}, runner: { policy, ...options.runner }, claude: claudeCommand ? {
     command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
   } : null, portal: thread => portal!.guest(thread),
-  // A Pi thread writes and reads its own artifacts; a body may come from a workspace file.
   hostTools: thread => ({ readFile, key }) => ({
-    note: `artifact_write and artifact_read keep documents for the user (work artifacts). ${ARTIFACT_GUIDE}`,
-    tools: artifactTools({ artifacts: artifacts!, author: { kind: "thread", thread: thread.id }, agent: "pi", key,
-      readable: async () => [{ kind: "thread", thread: thread.id }], readFile: file => readFile(file, ARTIFACT_LIMITS.body) }),
+    note: `artifact_write, artifact_read and artifact_edit keep documents for the user (work artifacts). ${ARTIFACT_GUIDE}`,
+    tools: threadTools(thread.id, "pi", file => readFile(file, ARTIFACT_LIMITS.body)).map(tool => piTool(tool, key)),
   }) });
   portal = new Portal({ settings: options.portal === undefined ? portalSettings() : options.portal, directory: path.join(options.state, "portal"),
     registry, machines, wake: thread => conversations.wake(thread.id), archiving: id => conversations.archivingNow(id) });
@@ -870,53 +875,17 @@ export async function createCubed(options: {
       const thread = registry.getThread(parts[2]);
       if (!thread || thread.archived) return json({ error: "thread not found", code: "NOT_FOUND", completionUnknown: false }, 404);
       const body = await readJson(request);
-      // A Claude Code thread's artifacts (the mod's /cube/artifacts paths):
-      // the lease token cubed holds for that thread's child is the authorization.
-      if (parts[4] === "artifacts" && parts.length === 5) {
-        const token = /^Bearer ([^\s]+)$/.exec(request.headers.authorization ?? "")?.[1];
-        if (!token) return json({ error: "workspace lease token required", code: "LEASE_STALE", completionUnknown: false }, 401);
-        const lease = await conversations.workspace(thread.id).lease({ token }).catch(() => null);
-        if (!lease) return json({ error: "workspace lease is not held by this token", code: "LEASE_STALE", completionUnknown: false }, 401);
-        if (lease.owner !== "claude-code") return json({ error: "artifacts here are for claude code threads", code: "WRONG_NODE", completionUnknown: false }, 403);
-        const author: ArtifactAuthor = { kind: "thread", thread: thread.id };
-        const scope = { agent: author, authors: [author] };
-        try {
-          // A name in the form of an artifact id is that artifact, the thread's or not.
-          if (request.method === "GET") {
-            const name = url.searchParams.get("name");
-            if (!name) return json({ text: artifactService.read(scope, undefined) });
-            const artifact = isArtifactId(name) ? artifactService.store.get(name) : isArtifactName(name) ? artifactService.store.named(author, name) : null;
-            if (!artifact) return json({ error: `no artifact named ${name}; write /cube/artifacts/${name}.md to create it`, code: "NOT_FOUND", completionUnknown: false }, 404);
-            const revision = url.searchParams.get("revision");
-            // Whole: the mod pages it with Read's offset and limit.
-            return json({ text: artifactService.read(scope, artifact.id, revision ? Number(revision) : undefined, { whole: true }) });
-          }
-          if (request.method === "POST") {
-            if (!isArtifactName(body.name)) throw new ArtifactError("a name is 1 to 64 lowercase letters, digits, dots, dashes or underscores");
-            const provenance = { agent: "claude-code" as const, thread: thread.id, ...typeof body.call === "string" ? { call: body.call.slice(0, 200) } : {} };
-            if (body.edit !== undefined) {
-              const edit = body.edit as Record<string, unknown> | null;
-              if (typeof body.requestId !== "string" || !edit || typeof edit.oldString !== "string" || typeof edit.newString !== "string" || (edit.replaceAll !== undefined && typeof edit.replaceAll !== "boolean")) {
-                throw new ArtifactError("requestId and edit {oldString, newString, replaceAll?} are required");
-              }
-              const target = isArtifactId(body.name) ? { id: body.name } : { name: body.name };
-              const written = await artifactService.edit(scope, { ...target, oldString: edit.oldString, newString: edit.newString, replaceAll: edit.replaceAll as boolean | undefined }, provenance, body.requestId);
-              return json({ text: written.text, id: written.id, revision: written.revision });
-            }
-            if (typeof body.requestId !== "string" || typeof body.body !== "string") throw new ArtifactError("requestId and body are required");
-            if (body.base !== undefined && typeof body.base !== "number") throw new ArtifactError("base must be a revision number");
-            const target = isArtifactId(body.name) ? { id: body.name } : { name: body.name };
-            const written = await artifactService.write(scope, { ...target, base: body.base, title: typeof body.title === "string" ? body.title : undefined, body: body.body, actions: body.actions },
-              provenance, body.requestId);
-            return json({ text: written.text, id: written.id, revision: written.revision });
-          }
-        } catch (error) {
-          if (error instanceof ArtifactError) {
-            return json({ error: error.message, code: error.status === 404 ? "NOT_FOUND" : "INVALID_REQUEST", completionUnknown: false, ...error.diagrams ? { diagrams: error.diagrams } : {} }, error.status);
-          }
-          throw error;
-        }
-        return json({ error: "not found", code: "NOT_FOUND", completionUnknown: false }, 404);
+      // A Claude Code thread's cube tools (cube-tools.ts), which its mod
+      // registers and forwards: the lease token cubed holds for that
+      // thread's child is the authorization.
+      if (parts[4] === "tools" && parts.length <= 6) {
+        const workspace = conversations.workspace(thread.id);
+        const abandoned = new AbortController();
+        response.once("close", () => { if (!response.writableFinished) abandoned.abort(); });
+        const result = await toolsRoute({ method: request.method!, name: parts[5], token: /^Bearer ([^\s]+)$/.exec(request.headers.authorization ?? "")?.[1], body, signal: abandoned.signal },
+          token => workspace.lease({ token }).catch(() => null),
+          token => threadTools(thread.id, "claude-code", file => readMachineText(workspace, token, file, ARTIFACT_LIMITS.body)));
+        return json(result.body, result.status);
       }
       // The thread names the Claude Code mod's ready here, on this socket only.
       const result = await workspaceRoute(conversations.workspace(thread.id), { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body, thread: thread.id });

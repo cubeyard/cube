@@ -83,7 +83,7 @@ export const threads: ThreadSummary[] = [
 ];
 
 const artifact = (id: string, title: string, head: number, author: ArtifactListItem["author"], comments: Partial<ArtifactListItem["comments"]> = {}): ArtifactListItem => ({
-  id, title, name: null, head, author, createdAt: Date.now() - 3_600_000, updatedAt: Date.now() - 120_000, projectId: "cube",
+  id, title, head, author, createdAt: Date.now() - 3_600_000, updatedAt: Date.now() - 120_000, projectId: "cube",
   comments: { draft: 0, queued: 0, delivered: 0, undeliverable: 0, ...comments },
   project: { id: "cube", name: "cube" }, thread: author.kind === "thread" ? { id: author.thread, title: "composer room", archived: false } : null,
 });
