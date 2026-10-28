@@ -30,14 +30,13 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
 };
 use time::OffsetDateTime;
 
 const CA_YEARS: i64 = 10;
 const LEAF_HOURS: i64 = 24;
 /// Leaves are re-minted well before they expire.
-const LEAF_REFRESH: Duration = Duration::from_secs(12 * 3600);
+const LEAF_REFRESH: time::Duration = time::Duration::hours(12);
 const LEAF_CACHE: usize = 4096;
 
 pub fn provider() -> Arc<CryptoProvider> {
@@ -51,7 +50,8 @@ pub struct Ca {
     sha256: String,
     leaf_key: KeyPair,
     serial: AtomicU64,
-    cache: Mutex<HashMap<String, (Arc<ServerConfig>, Instant)>>,
+    /// Each name's config and the wall-clock time its leaf was minted.
+    cache: Mutex<HashMap<String, (Arc<ServerConfig>, OffsetDateTime)>>,
     provider: Arc<CryptoProvider>,
 }
 
@@ -208,10 +208,13 @@ impl Ca {
 
     /// A leaf for `name` (a DNS name), signed by the CA, valid 24 hours.
     pub fn leaf(&self, name: &str) -> Result<CertificateDer<'static>> {
+        self.leaf_at(name, OffsetDateTime::now_utc())
+    }
+
+    fn leaf_at(&self, name: &str, now: OffsetDateTime) -> Result<CertificateDer<'static>> {
         let mut params = CertificateParams::new(vec![name.to_string()])?;
         params.distinguished_name = DistinguishedName::new();
         params.distinguished_name.push(DnType::CommonName, name);
-        let now = OffsetDateTime::now_utc();
         params.not_before = now - time::Duration::hours(1);
         params.not_after = now + time::Duration::hours(LEAF_HOURS);
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -233,13 +236,21 @@ impl Ca {
 
     /// TLS server configuration for one SNI name, offering only `http/1.1`.
     pub fn server_config(&self, name: &str) -> Result<Arc<ServerConfig>> {
+        self.server_config_at(name, OffsetDateTime::now_utc())
+    }
+
+    fn server_config_at(&self, name: &str, now: OffsetDateTime) -> Result<Arc<ServerConfig>> {
         let mut cache = self.cache.lock().unwrap();
+        // The leaf's age is read on the clock that set its validity: a
+        // monotonic clock stops while the host sleeps, the wall clock (and
+        // the guest's) does not.
         if let Some((config, minted)) = cache.get(name)
-            && minted.elapsed() < LEAF_REFRESH
+            && *minted <= now
+            && now - *minted < LEAF_REFRESH
         {
             return Ok(config.clone());
         }
-        let leaf = self.leaf(name)?;
+        let leaf = self.leaf_at(name, now)?;
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.leaf_key.serialize_der()));
         let mut config = ServerConfig::builder_with_provider(self.provider.clone())
             .with_safe_default_protocol_versions()?
@@ -250,7 +261,7 @@ impl Ca {
         if cache.len() >= LEAF_CACHE {
             cache.clear();
         }
-        cache.insert(name.to_string(), (config.clone(), Instant::now()));
+        cache.insert(name.to_string(), (config.clone(), now));
         Ok(config)
     }
 }
@@ -323,6 +334,183 @@ mod tests {
             &config,
             &again.server_config("api.github.com").unwrap()
         ));
+    }
+
+    /// A client whose clock reads `now`, as the guest's does.
+    #[derive(Debug)]
+    struct At(OffsetDateTime);
+    impl rustls::time_provider::TimeProvider for At {
+        fn current_time(&self) -> Option<UnixTime> {
+            Some(UnixTime::since_unix_epoch(std::time::Duration::from_secs(
+                self.0.unix_timestamp() as u64,
+            )))
+        }
+    }
+
+    /// Moves TLS records both ways until neither side has more to say.
+    fn pump(
+        client: &mut rustls::ClientConnection,
+        server: &mut rustls::ServerConnection,
+    ) -> Result<(), rustls::Error> {
+        loop {
+            let mut wire = Vec::new();
+            while client.wants_write() {
+                client.write_tls(&mut wire).unwrap();
+            }
+            let sent = !wire.is_empty();
+            let mut rest = &wire[..];
+            while !rest.is_empty() {
+                server.read_tls(&mut rest).unwrap();
+                server.process_new_packets()?;
+            }
+            wire.clear();
+            while server.wants_write() {
+                server.write_tls(&mut wire).unwrap();
+            }
+            let answered = !wire.is_empty();
+            let mut rest = &wire[..];
+            while !rest.is_empty() {
+                client.read_tls(&mut rest).unwrap();
+                client.process_new_packets()?;
+            }
+            if !sent && !answered {
+                return Ok(());
+            }
+        }
+    }
+
+    /// A real handshake for `name` with `config`, by a client that trusts
+    /// only the CA and verifies at `now`.
+    fn connect(
+        ca: &Ca,
+        config: Arc<ServerConfig>,
+        name: &str,
+        now: OffsetDateTime,
+    ) -> Result<(rustls::ClientConnection, rustls::ServerConnection), rustls::Error> {
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.der().clone()).unwrap();
+        let client = rustls::ClientConfig::builder_with_details(provider(), Arc::new(At(now)))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let mut client = rustls::ClientConnection::new(
+            Arc::new(client),
+            ServerName::try_from(name.to_string()).unwrap(),
+        )
+        .unwrap();
+        let mut server = rustls::ServerConnection::new(config).unwrap();
+        pump(&mut client, &mut server)?;
+        assert!(!client.is_handshaking());
+        Ok((client, server))
+    }
+
+    /// The leaf a guest at `now` is served for `name`, through the cache.
+    fn served(ca: &Ca, name: &str, now: OffsetDateTime) -> Result<Vec<u8>, rustls::Error> {
+        let config = ca.server_config_at(name, now).unwrap();
+        let (client, _) = connect(ca, config, name, now)?;
+        Ok(client.peer_certificates().unwrap()[0].to_vec())
+    }
+
+    fn expired(error: &rustls::Error) -> bool {
+        matches!(
+            error,
+            rustls::Error::InvalidCertificate(
+                rustls::CertificateError::Expired | rustls::CertificateError::ExpiredContext { .. }
+            )
+        )
+    }
+
+    fn start() -> (tempfile::TempDir, Ca, OffsetDateTime) {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = Ca::load_or_create(dir.path()).unwrap();
+        let now = OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp())
+            .unwrap();
+        (dir, ca, now)
+    }
+
+    fn hours(h: i64) -> time::Duration {
+        time::Duration::hours(h)
+    }
+
+    /// The incident's shape: a leaf minted, then the host asleep (its
+    /// monotonic clock still) while the wall clock passes the leaf's end.
+    #[test]
+    fn a_leaf_is_renewed_by_the_wall_clock_across_a_host_sleep() {
+        let (_dir, ca, t0) = start();
+        let first = ca.server_config_at("github.com", t0).unwrap();
+        let (mut open, mut open_server) = connect(&ca, first.clone(), "github.com", t0).unwrap();
+        let later = t0 + hours(24) + time::Duration::minutes(40);
+
+        // The first leaf is truly expired by then: the guest refuses it.
+        let error = connect(&ca, first, "github.com", later).unwrap_err();
+        assert!(expired(&error), "{error:?}");
+        // A new connection gets a fresh leaf, with no restart.
+        served(&ca, "github.com", later).unwrap();
+
+        // A connection made before the renewal goes on working.
+        use std::io::{Read, Write};
+        open.writer().write_all(b"ping").unwrap();
+        pump(&mut open, &mut open_server).unwrap();
+        let mut got = [0; 4];
+        open_server.reader().read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"ping");
+    }
+
+    #[test]
+    fn leaves_are_cached_until_half_their_life_then_renewed_per_host() {
+        let (_dir, ca, t0) = start();
+        let skew = time::Duration::seconds(142);
+        let github = served(&ca, "github.com", t0).unwrap();
+        let api = served(&ca, "api.github.com", t0 + skew).unwrap();
+        assert_eq!(served(&ca, "github.com", t0 + hours(1)).unwrap(), github);
+        let edge = t0 + hours(12) - time::Duration::seconds(1);
+        assert_eq!(served(&ca, "github.com", edge).unwrap(), github);
+        assert_eq!(served(&ca, "api.github.com", edge).unwrap(), api);
+
+        // Each host renews on its own leaf's age.
+        let renewed = served(&ca, "github.com", t0 + hours(12)).unwrap();
+        assert_ne!(renewed, github);
+        assert_eq!(served(&ca, "api.github.com", t0 + hours(12)).unwrap(), api);
+        assert_ne!(
+            served(&ca, "api.github.com", t0 + hours(12) + skew).unwrap(),
+            api
+        );
+        assert_eq!(
+            served(&ca, "github.com", t0 + hours(12) + skew).unwrap(),
+            renewed
+        );
+    }
+
+    /// A wall clock stepped back past a leaf's start gets a new leaf, not
+    /// one the guest would call not yet valid.
+    #[test]
+    fn a_clock_stepped_back_renews_the_leaf() {
+        let (_dir, ca, t0) = start();
+        let first = served(&ca, "github.com", t0).unwrap();
+        assert_ne!(served(&ca, "github.com", t0 - hours(2)).unwrap(), first);
+    }
+
+    #[test]
+    fn concurrent_handshakes_share_one_renewal() {
+        let (_dir, ca, t0) = start();
+        let first = ca.server_config_at("github.com", t0).unwrap();
+        let later = t0 + hours(13);
+        let barrier = std::sync::Barrier::new(16);
+        let configs: Vec<_> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..16)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        ca.server_config_at("github.com", later).unwrap()
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|w| w.join().unwrap()).collect()
+        });
+        assert!(!Arc::ptr_eq(&configs[0], &first));
+        assert!(configs.iter().all(|c| Arc::ptr_eq(c, &configs[0])));
+        connect(&ca, configs[0].clone(), "github.com", later).unwrap();
     }
 
     #[test]
