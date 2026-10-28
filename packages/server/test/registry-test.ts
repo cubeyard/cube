@@ -34,7 +34,11 @@ try {
   const updated = registry.updateThreadVm(thread.id, { provisionAttempt: 2 });
   assert.equal(updated.vm?.provisionAttempt, 2);
   assert.equal(registry.availableRunners().length, 0);
-  assert.throws(() => registry.createThread("other", "racing-project", model, "race"), /no free thread machine/);
+  const racing = registry.createThread("other", "racing-project", model, "race");
+  assert.equal(racing.vm?.suspension?.state, "queued", "a full runner queues a new thread rather than refusing it");
+  assert.equal(registry.runnerSlots().free, 0, "and the queued thread holds no slot");
+  registry.applyPhase(racing.id, { type: "releaseBegan" });
+  registry.applyPhase(racing.id, { type: "released" });
   registry.close(); registry = new Registry(filename);
   assert.deepEqual(registry.createThread("project", "request", model, "one"), updated);
   assert.throws(() => registry.createThread("project", "request", model, "two"), /conflicts/);
@@ -115,7 +119,7 @@ try {
       parentPort.once("message", () => {
         try {
           const thread = registry.createThread(workerData.projectId, workerData.projectId, { provider: "fixture", id: "selected" }, workerData.projectId);
-          parentPort.postMessage({ ok: true, threadId: thread.id });
+          parentPort.postMessage({ ok: true, threadId: thread.id, queued: thread.vm?.suspension?.state === "queued" });
         } catch (error) { parentPort.postMessage({ ok: false, error: error.message }); }
         finally { registry.close(); }
       });
@@ -124,9 +128,9 @@ try {
     const worker = new Worker(workerSource, { eval: true, workerData: {
       module: new URL("../src/registry.ts", import.meta.url).href, filename: raceFile, projectId } });
     let ready!: () => void;
-    let result!: (value: { ok: boolean; error?: string }) => void;
+    let result!: (value: { ok: boolean; error?: string; queued?: boolean }) => void;
     const started = new Promise<void>(resolve => { ready = resolve; });
-    const finished = new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
+    const finished = new Promise<{ ok: boolean; error?: string; queued?: boolean }>((resolve, reject) => {
       result = resolve; worker.once("error", reject);
     });
     worker.on("message", message => message.ready ? ready() : result(message));
@@ -136,10 +140,11 @@ try {
   competitors.forEach(competitor => competitor.worker.postMessage("start"));
   const raceResults = await Promise.all(competitors.map(competitor => competitor.finished));
   await Promise.all(competitors.map(competitor => competitor.worker.terminate()));
-  assert.equal(raceResults.filter(result => result.ok).length, 1, "simultaneous projects cannot double-allocate one runner");
-  assert.match(raceResults.find(result => !result.ok)?.error ?? "", /no free thread machine/);
+  assert.deepEqual(raceResults.map(result => result.ok ? result.queued : result.error).sort(), [false, true],
+    "simultaneous projects cannot double-allocate one runner: one holds it, the other is queued");
   const raced = new Registry(raceFile);
-  assert.equal(raced.listThreads().length, 1);
+  assert.equal(raced.listThreads().length, 2);
+  assert.equal(raced.runnerSlots().free, 0);
   assert.equal(raced.availableRunners().length, 0);
   raced.close();
 

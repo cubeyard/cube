@@ -60,7 +60,7 @@ try {
     Object.fromEntries([...new Set([...Object.keys(before), ...Object.keys(after)])].filter(key => JSON.stringify(before[key]) !== JSON.stringify(after[key])).map(key => [key, key in after ? after[key] : "(gone)"]));
 
   const thread = registry.createThread("p", "a", model, "a");
-  assert.throws(() => registry.createThread("p", "b", model, "b"), /no free thread machine/, "one slot, held by the new thread");
+  assert.equal(registry.createThread("p", "b", model, "b").vm?.suspension?.state, "queued", "one slot, held by the new thread: the next is queued");
   // The runner's row (its allocation state over its one slot) is updated in the same transaction.
   const steps: Array<[PhaseEvent, Record<string, unknown>, string]> = [
     [{ type: "tryFailed", failure: allocationFailed("boom"), at: 5 }, { retry: { failures: 1, at: 5, since: 5, error: "workspace allocation failed: boom" } }, "allocating"],

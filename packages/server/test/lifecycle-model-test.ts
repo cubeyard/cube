@@ -24,11 +24,15 @@
  *       start failure now, for each thread no start or wake owns;
  *   I11 the slots the registry counts (its SQL) are the threads `holdsSlot`
  *       says hold one (machine-sleep.ts);
+ *   I13 no thread gets a slot while one that waited longer for it still
+ *       waits (first come first served, new threads and wakes alike);
+ *   I14 no creation fails while a runner exists: a full one queues; a
+ *       queued thread is archived without its runner being asked;
  *   G   no guest call reaches a machine that does not run;
  *
  * and at the end, every message request id is in its thread's store once.
  * LIFECYCLE_SEEDS (comma-separated) picks the seeds; LIFECYCLE_STEPS the
- * length of a run. */
+ * length of a run. A step that hangs fails, naming the step. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -38,10 +42,16 @@ import { readThreads } from "../src/optchat-threads.ts";
 import { threadNameText } from "../src/thread-names.ts";
 import { threadRow } from "../src/thread-condition.ts";
 import { START_TRIES } from "../src/thread-recovery.ts";
-import { lifecycle, until, Phase, type Cubed } from "./lifecycle-fixture.ts";
+import { holdsSlot } from "../src/machine-sleep.ts";
+import { lifecycle, until, Phase, RUNNER, type Cubed } from "./lifecycle-fixture.ts";
 
-const seeds = (process.env.LIFECYCLE_SEEDS ?? "1,2").split(",").map(Number);
-const steps = Number(process.env.LIFECYCLE_STEPS ?? 28);
+// Seed 13 restarts cubed, then messages a sleeping thread on a full runner
+// whose slot frees in step 29 (review B1: the wake's start once waited for
+// the run that waited for the wake).
+const seeds = (process.env.LIFECYCLE_SEEDS ?? "1,2,13").split(",").map(Number);
+const steps = Number(process.env.LIFECYCLE_STEPS ?? 30);
+/** A step that does not finish in this long is a hang, said as one. */
+const STEP_MS = 120_000;
 
 function random(seed: number) {
   let state = seed >>> 0;
@@ -66,10 +76,19 @@ for (const seed of seeds) {
   let cubed: Cubed = listen(life.start());
   const tells: Array<{ id: string; requestId: string; text: string }> = [];
   const archivedAt = new Map<string, number>();
+  /** Threads seen waiting for a slot, to say the queue was exercised. */
+  const queuedSeen = new Set<string>();
   const broken = new Set<string>();
   const trace: string[] = [];
   const open = () => registry.listThreads().filter(t => !t.archived);
   const stored = async (id: string) => (await cubed.conversations.storedHistory(id, { limit: 1 }).catch(() => null))?.status;
+  /** A thread that began to wait for a slot started an idle round in the
+   * background, and the admissions it gives: their runner requests belong
+   * to the step that caused them, not to the next. */
+  const settled = async () => {
+    await cubed.conversations.suspendIdle();
+    await until("admissions settle", () => open().every(t => !cubed.conversations.owns(fresh(t.id))), 15_000).catch(() => {});
+  };
   const quiet = async () => {
     for (const t of open()) await until(`${t.id.slice(0, 8)} quiet`, async () => (await stored(t.id))?.state !== "working", 15_000).catch(() => {});
   };
@@ -99,17 +118,17 @@ for (const seed of seeds) {
   };
   const actions: Record<string, () => Promise<void>> = {
     async create() {
-      let thread;
-      try { thread = life.thread(); } catch { trace.push("create refused: no free slot"); return; }
+      const thread = life.thread();
       await cubed.conversations.activate(thread.id);
+      await settled();
       trace.push(`create ${thread.id.slice(0, 8)} -> ${fresh(thread.id).workspaceState}`);
     },
     async broken() {
-      let thread;
-      try { thread = life.thread(); } catch { trace.push("broken create refused: no free slot"); return; }
+      const thread = life.thread();
       berth.failCreates.set(vmOf(thread.id), "the runner cannot make its disk");
       broken.add(vmOf(thread.id));
       await cubed.conversations.activate(thread.id);
+      await settled();
       trace.push(`broken ${thread.id.slice(0, 8)} -> ${fresh(thread.id).workspaceState}`);
     },
     async replay() {
@@ -175,12 +194,14 @@ for (const seed of seeds) {
       await quiet();
     },
     async archive() {
-      const t = rng.pick(open().filter(t => t.workspaceState === "available" || t.workspaceState === "failed"));
+      const t = rng.pick(open().filter(t => t.workspaceState === "available" || t.workspaceState === "failed" || t.vm?.suspension?.state === "queued"));
       if (!t) return;
+      const queued = t.vm?.suspension?.state === "queued" ? berth.events.length : null;
       const began = Date.now();
       const result = await cubed.conversations.archive(t.id).then(r => `retained=${r.retained}`, (error: Error) => error.message);
       assert.ok(Date.now() - began < 5_000, `I9: archiving ${t.id.slice(0, 8)} took ${Date.now() - began} ms`);
       if (fresh(t.id).archived) archivedAt.set(vmOf(t.id), berth.events.length);
+      if (queued !== null && !owned(t.id)) assert.deepEqual(berth.touched(vmOf(t.id), queued), [], `I14: archiving queued ${t.id.slice(0, 8)} asked its runner nothing`);
       trace.push(`archive ${t.id.slice(0, 8)}: ${result}`);
     },
   };
@@ -190,11 +211,24 @@ for (const seed of seeds) {
     for (const [name, w] of weights) { roll -= w; if (roll < 0) return name; }
     return weights[0]![0];
   };
+  const queue = () => registry.slotQueue().get(RUNNER)?.waiting ?? [];
+  /** An admission that may have begun before the step (a wake's own loop). */
+  const owned = (id: string) => cubed.conversations.owns(fresh(id));
   try {
     await actions.create!();
     for (let step = 0; step < steps; step++) {
       const name = choose();
-      await actions[name]!();
+      const order = queue();
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([actions[name]!(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`step ${step} (${name}) did not finish in ${STEP_MS / 1000} s`)), STEP_MS); })])
+        .finally(() => clearTimeout(timer));
+      const still = new Set(queue());
+      for (const id of [...order, ...still]) queuedSeen.add(id);
+      for (const [k, id] of order.entries()) {
+        if (still.has(id) || fresh(id).archived || !holdsSlot(fresh(id).vm?.suspension)) continue;
+        const passed = order.slice(0, k).filter(earlier => still.has(earlier));
+        assert.deepEqual(passed, [], `I13 after ${name}: ${id.slice(0, 8)} got a slot while ${passed.map(e => e.slice(0, 8))} waited longer`);
+      }
       assert.deepEqual(berth.violations, [], `G after ${name}`);
       const counted = registry.runnerSlots();
       assert.equal(counted.total - counted.free, held(), `I11 after ${name}: the registry's count is holdsSlot's`);
@@ -220,7 +254,7 @@ for (const seed of seeds) {
       db.close();
       assert.equal(n, 1, `${tell.requestId} is in its thread's store once`);
     }
-    console.log(`ok: lifecycle model seed ${seed}: ${steps} steps (${trace.filter(line => line.startsWith("restart")).length} restarts, ${tells.length} messages, ${archivedAt.size} archives, ${berth.starts()} starts on the runner); I1–I6, I8–I12 and G held; I12 over ${toldFailures} failing reads; I10 over ${[...agreed].map(([kind, n]) => `${n} ${kind}`).join(", ")}`);
+    console.log(`ok: lifecycle model seed ${seed}: ${steps} steps (${trace.filter(line => line.startsWith("restart")).length} restarts, ${tells.length} messages, ${archivedAt.size} archives, ${berth.starts()} starts on the runner); I1–I6, I8–I14 and G held (${queuedSeen.size} threads queued); I12 over ${toldFailures} failing reads; I10 over ${[...agreed].map(([kind, n]) => `${n} ${kind}`).join(", ")}`);
   } catch (error) {
     console.error(`seed ${seed} trace:\n  ${trace.join("\n  ")}`);
     throw error;

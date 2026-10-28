@@ -31,6 +31,19 @@ export const DEFAULT_EXEC_TIMEOUT_MS = 30 * 60 * 1000;
 /** States in which a command still runs (workspace.ts GuestOperationState;
  * `Unknown` is no operation with that key: nothing runs under it). */
 const RUNNING = new Set(["Accepted", "Running"]);
+/** `work`, or the reason `signal` gives once it aborts first. */
+export function abortable<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) { work.catch(() => {}); return Promise.reject(signal.reason); }
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+/** How long a machine running when this cubed first saw it counts as busy
+ * (B-207-2): the guest's longest command and the grace. */
+export const RESTART_GUARD_MS = DEFAULT_EXEC_TIMEOUT_MS + EXEC_GRACE_MS;
 /** The key of what may run from before this cubed saw the machine. */
 const BEFORE = "";
 
@@ -52,7 +65,7 @@ export class MachineActivity {
     let activity = this.threads.get(id);
     if (!activity) {
       // First seen in this process: what ran before may still run.
-      const before = DEFAULT_EXEC_TIMEOUT_MS + EXEC_GRACE_MS;
+      const before = RESTART_GUARD_MS;
       activity = { last: this.now(), calls: 0, dials: 0, commands: new Map([[BEFORE, { until: this.now() + before, timeoutMs: DEFAULT_EXEC_TIMEOUT_MS }]]) };
       this.threads.set(id, activity);
     }
@@ -111,7 +124,9 @@ export class MachineActivity {
   guest(id: string, transport: GuestTransport, before?: () => Promise<void>): GuestTransport {
     return {
       call: async (op: GuestOp, header: Record<string, unknown>, options?: GuestCallOptions): Promise<GuestAnswer> => {
-        if (before) await before();
+        // A wait for a wake ends with the call (a stop, the agent's close):
+        // the wake may be what waits for the call's run to end.
+        if (before) await abortable(before(), options?.signal);
         const activity = this.of(id);
         activity.calls++;
         activity.last = this.now();

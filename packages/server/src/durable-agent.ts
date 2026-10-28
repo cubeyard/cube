@@ -198,10 +198,10 @@ export async function openAgent(options: {
       sections: [section("preamble", () => `You are a coding agent working in this thread's own Debian virtual machine. File tools address the workspace root as ${WORKSPACE_ROOT} and take relative paths there; an absolute path elsewhere (/home/agent, /tmp) is a file in the same machine, reached with the agent's own permissions (use sudo in bash for root-owned files; /proc, /sys and /dev only through bash). bash runs commands as the user agent (with passwordless sudo) with the workspace root as its working directory. codemode runs one JavaScript script that calls these tools, for batching, chaining or filtering their results. The machine reaches the internet over HTTP and HTTPS only, through cube's gateway, which decides every request; other connections are refused. git and gh are installed and authenticated for GitHub where the host allows it (GH_TOKEN holds a placeholder the gateway replaces; never print or copy it elsewhere). Never assume access to control-plane files or credentials. A server a command starts ends with that command: to keep a web server running and give the user a URL, run "cube service start NAME --port PORT -- COMMAND" (it must listen on 0.0.0.0; "cube service --help" lists status, logs and stop). ${PROJECT_HOOKS_NOTE}${host ? ` ${host.note}` : ""}`, { tag: false }),
         // The repository's own instructions live in the VM, as they do
         // for Claude Code threads; rendered each generation, so edits apply.
-        section("repository", async () => {
+        section("repository", async (_input, context) => {
           const parts: string[] = [];
           for (const file of INSTRUCTION_FILES) {
-            const text = await instructionFile(options.workspace, lease.token, file);
+            const text = await instructionFile(options.workspace, lease.token, file, context.abortSignal);
             if (text) parts.push(`Contents of ${file} in the thread workspace (project instructions, checked into the codebase):\n\n${text}`);
           }
           return parts.length ? parts.join("\n\n") : undefined;
@@ -337,9 +337,9 @@ const INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"];
 const INSTRUCTION_BYTES = 64 * 1024;
 
 /** A repository instruction file from the workspace root, or null when absent. */
-async function instructionFile(workspace: Workspace, token: string, file: string): Promise<string | null> {
+async function instructionFile(workspace: Workspace, token: string, file: string, signal?: AbortSignal): Promise<string | null> {
   try {
-    const read = await workspace.readFile(token, file, { limit: INSTRUCTION_BYTES });
+    const read = await workspace.readFile(token, file, { limit: INSTRUCTION_BYTES, ...signal ? { signal } : {} });
     const text = Buffer.from(read.content).toString("utf8").trim();
     if (!text) return null;
     return !read.eof ? `${text}\n\n[truncated at ${INSTRUCTION_BYTES / 1024} KiB]` : text;

@@ -309,7 +309,8 @@
 <main class="thread-workspace">
   <section class="workspace-pane thread-pane" aria-label="thread" onfocusin={onPaneFocusin}>
     {@render threadBar()}
-    {#if modelError || (modelState && !selectedModel)}
+    <!-- While the machine waits its models cannot be read; the composer says why. -->
+    {#if !composerWaiting(summary) && (modelError || (modelState && !selectedModel))}
       <div class="strip-note bad" role="alert">
         <span class="strip-note-text">{modelError ?? (modelState?.models.length ? "selected model is unavailable — choose another model" : "no models available — sign in to a provider")}</span>
         <a class="key" href="#/settings/providers">providers</a>

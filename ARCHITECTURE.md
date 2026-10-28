@@ -665,8 +665,9 @@ the placeholder in the answer; the token never reaches cubed's Node
 process, the runner or the guest. The pool is the `berth vm` runners
 (registry.ts `pooledRunner`; the user's decision of 2026-10-16): a thread
 that names no runner goes to one of them, by fitness, a failed machine
-last, then load, and is refused when none has a free slot, never placed on
-a host runner; while its `berth vm` is down it waits there. A host runner
+last, then load (threads waiting for a slot included); with no slot free it
+is queued on the least loaded and starts in its turn
+(docs/thread-lifecycle.md), never placed on a host runner; while its `berth vm` is down it waits there. A host runner
 takes a thread only by name (OptChat `spawn` with `runner`, or `runner` in
 `POST /api/threads`), pinned; a protocol-3 runner takes none. On it,
 `RunnerMachines` creates the thread's machine with its size and

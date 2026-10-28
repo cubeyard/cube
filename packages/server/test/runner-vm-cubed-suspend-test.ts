@@ -75,6 +75,7 @@ import { fakeGithub, git } from "../../../scripts/fake-github.ts";
 import { createCubed } from "../src/index.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
 import { portalSettings } from "../src/portal.ts";
+import type { Thread } from "../src/registry.ts";
 import { enrollRunner } from "../src/runner-enroll.ts";
 import { observeRunners } from "../src/runner-observe.ts";
 import { RunnerSession } from "../src/runner-session.ts";
@@ -334,6 +335,7 @@ async function setup(id: string, what: string, command: string, sentinel: string
 const BOOT = "cat /proc/sys/kernel/random/boot_id";
 const hookLines = (log: string, kind: string) => log.split("\n").filter(line => line.startsWith(`${kind} `));
 const thread = (id: string) => app.registry.getThread(id)!;
+const memoryOf = (t: Thread) => t.vm?.suspension?.state === "suspended" ? t.vm.suspension.memoryBytes : undefined;
 const suspended = (id: string) => thread(id).vm?.suspension?.state === "suspended";
 const listedThread = async (id: string) => ((await api("/api/threads")).threads as Array<{ id: string; vm?: { suspension?: { state: string; waiting?: string }; notice?: { text: string } }; waiting?: string | null }>).find(t => t.id === id)!;
 const freeSlots = async () => ((await api("/api/projects")).projects as Array<{ availableSlotCount: number }>)[0]!.availableSlotCount;
@@ -403,7 +405,7 @@ async function suspendedBy(id: string, what: string, from: number): Promise<numb
   await until(`${what}: no QEMU left`, 15000, () => qemus(vmId) === "");
   assert.ok(fs.existsSync(memoryFile(vmId)), `${what}: the memory file is on disk`);
   const line = berthEvents(vmId).filter(event => / suspended: /.test(event)).at(-1) ?? "";
-  note(`${what}: suspended ${(ms / 1000).toFixed(1)} s after it went idle; berth: ${line}; memory ${thread(id).vm?.suspension?.memoryBytes ?? "?"} bytes`);
+  note(`${what}: suspended ${(ms / 1000).toFixed(1)} s after it went idle; berth: ${line}; memory ${memoryOf(thread(id)) ?? "?"} bytes`);
   return ms;
 }
 async function echo(socket: Duplex, line: string): Promise<void> {
@@ -548,7 +550,7 @@ try {
   assert.ok(suspended(a), "N1: the loop leaves it suspended");
   assert.equal(asked(a, "machineStart"), startsBefore, "N1: the loop sends no machine_start");
   assert.equal(asked(a), asksBefore, "N1: the loop does not ask again");
-  summary.N1 = { suspendedAfterMs: n1, memoryBytes: thread(a).vm?.suspension?.memoryBytes ?? null };
+  summary.N1 = { suspendedAfterMs: n1, memoryBytes: memoryOf(thread(a)) ?? null };
 
   // N4: a message wakes it before the run; the same boot, no resume hooks.
   const n4From = Date.now();

@@ -27,6 +27,8 @@ OFFLINE_TESTS=(
   packages/server/test/archive-timing-test.ts
   packages/server/test/runner-suspend-test.ts
   packages/server/test/thread-lifecycle-test.ts
+  packages/server/test/thread-queue-test.ts
+  packages/server/test/queue-claude-test.ts
   packages/server/test/lifecycle-model-test.ts
   packages/server/test/cubed-wake-test.ts
   packages/server/test/runner-placement-test.ts

@@ -923,7 +923,7 @@ failure) nor recovery rounds send its request again; then archives it.
 - `<CUBED_STATE>/optchat/AGENTS.md`, if present, is the user's instructions,
   appended to the system prompt. It is read on every request; keep it stable
   for the cache.
-- A spawned thread goes to the runner pool (its `berth vm` runners; refused
+- A spawned thread goes to the runner pool (its `berth vm` runners; queued
   when none has a free slot) unless the task names a `runner`
   (its node id, from `runners`); then it starts on that runner and never
   moves, and waits while it is down (on a `berth vm`, one whose machine
@@ -979,9 +979,11 @@ artifact of a thread it started.
   Only a thread's latest run is observed: if two runs settle while cubed is
   down, only the second is reported. A thread whose machine fails to start
   reports that once.
-  Each open thread holds one of its runner's machine slots (a runner hosts up
-  to its `maxActiveVms`), so a spawn beyond the free slots reports "no free
-  thread machine" for that task.
+  A running thread holds one of its runner's machine slots (a runner hosts up
+  to its `maxActiveVms`); a spawn beyond the free slots is queued and starts
+  in its turn, saying it waits for a free slot. A `tell` to a thread still
+  queued is refused with that wait (nothing is lost; tell it again once it
+  runs). Each runner has its own queue.
 - **Stop** aborts a running turn and cancels the wait of every pending
   message. Those messages, and any steered one the abort withdrew before Pi
   placed it, are written to the log as unanswered user messages, as in the

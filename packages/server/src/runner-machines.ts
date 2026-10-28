@@ -260,6 +260,8 @@ export class RunnerMachines implements ThreadMachines {
 
   touch(thread: Thread): void { this.activity.touch(thread.id); }
 
+  idleMs(thread: Thread): number { return this.activity.idleMs(thread.id); }
+
   /** Whether the thread's machine is suspended (or waking). */
   suspended(thread: Thread): boolean { return !this.retired(thread) && !!this.options.registry.getThread(thread.id)?.vm?.suspension; }
 
@@ -317,13 +319,14 @@ export class RunnerMachines implements ThreadMachines {
     this.log.info("wake dropped: no one asks for the machine", { thread: id, phase: machine ? "SUSPENDED" : "gone" });
   }
 
-  /** Suspends the thread's machine when it has been idle for idleMs and
+  /** Suspends the thread's machine when it has been idle for `idleMs` (the
+   * options' idleMs, IDLE_MS, unless a thread waits for its slot) and
    * nothing runs in it: `busy` (the conversation's), its commands, calls and
    * portal connections, and no registered service (asked last, with the
    * suspend's gate up, so nothing starts between). Only a running machine
    * on a runner that says it can suspend, one suspend per runner at a time;
    * a refusal keeps it running. True when it was suspended. */
-  async suspendIfIdle(thread: Thread, busy: () => Promise<string | null>): Promise<boolean> {
+  async suspendIfIdle(thread: Thread, busy: () => Promise<string | null>, idleMs = this.options.idleMs ?? IDLE_MS): Promise<boolean> {
     const current = this.options.registry.getThread(thread.id);
     if (!current || current.archived || current.workspaceState !== "available" || !this.onVm(current) || !this.running(current)) return false;
     if (this.starting.has(thread.id) || this.suspending.has(thread.id)) return false;
@@ -332,7 +335,7 @@ export class RunnerMachines implements ThreadMachines {
     if (!session.capabilities.includes(SUSPEND_CAPABILITY)) return false;
     const refusedBy = this.noSuspend.get(current.runnerId);
     if (refusedBy !== undefined && refusedBy === (session.runner?.softwareVersion ?? "")) return false;
-    if (this.activity.idleMs(thread.id) < (this.options.idleMs ?? IDLE_MS)) return false;
+    if (this.activity.idleMs(thread.id) < idleMs) return false;
     // From here guest calls and starts wait for the outcome (N-207-1).
     let open!: () => void;
     const gate = new Promise<void>(resolve => { open = resolve; });
@@ -451,6 +454,10 @@ export class RunnerMachines implements ThreadMachines {
   }
 
   private async boot(thread: Thread, options: StartOptions): Promise<MachineStart> {
+    // A queued thread's machine is made only once it got its slot
+    // (Conversations asks for it): its runner is not asked before.
+    const queued = this.options.registry.getThread(thread.id)?.vm?.suspension;
+    if (queued?.state === "queued") throw new RunnerWait(queued.waiting);
     const session = this.session(thread);
     const ref = this.ref(thread);
     const node = session.nodeId;
@@ -506,6 +513,10 @@ export class RunnerMachines implements ThreadMachines {
         // never takes the slot of a thread whose machine is not created yet.
         if (!holdsSlot(this.options.registry.applySleep(thread.id, { type: "wakeAsked", waiting }))) throw full();
       } else if (suspension) this.options.registry.applySleep(thread.id, { type: "running" });
+      // A snapshot the runner restored is the boot it saved, also when this
+      // process never saw that boot (a cubed restart since the suspend): its
+      // agent goes on, it is not a machine that booted again.
+      let sameBoot = false;
       const startAndWait = async () => {
         let started: Machine;
         try { started = await session.machine({ case: "machineStart", value: { ref, fence: this.fence(thread), ...start } }); }
@@ -517,7 +528,7 @@ export class RunnerMachines implements ThreadMachines {
           }
           throw error;
         }
-        if (resuming) this.resumed(thread, started, node);
+        if (resuming) sameBoot = this.resumed(thread, started, node);
         return this.ready(session, ref);
       };
       const ready = created ? await this.step(thread, startAndWait) : await startAndWait();
@@ -529,7 +540,7 @@ export class RunnerMachines implements ThreadMachines {
       if (machine.status?.phase !== MachineStatus_Phase.RUNNING) {
         this.activity.started(thread.id);
       }
-      const booted = this.boots.get(thread.id) !== boot;
+      const booted = !sameBoot && this.boots.get(thread.id) !== boot;
       this.boots.set(thread.id, boot);
       if (booted) this.events.record(thread.id, "ready", `boot ${boot.slice(0, 8)} of ${what} ${node}`);
       return { booted };
@@ -847,18 +858,21 @@ export class RunnerMachines implements ThreadMachines {
   /** After `machine_start` on a suspended machine: it runs again, resumed
    * (the same boot) or, when the runner could not use its snapshot, from
    * its disk (B7-5: a notice, and running commands were interrupted). */
-  private resumed(thread: Thread, machine: Machine, node: string): void {
+  /** Records a resume; true when the runner restored the snapshot (the
+   * same boot), false when it started the machine from its disk. */
+  private resumed(thread: Thread, machine: Machine, node: string): boolean {
     const dropped = machine.status?.conditions.find(condition => condition.type === "SnapshotDropped");
     if (dropped) {
       const text = dropped.reason === "version" ? RESTARTED_AFTER_UPDATE : RESTARTED;
       this.options.registry.applySleep(thread.id, { type: "resumed", notice: { text, at: Date.now() } });
       this.events.record(thread.id, "restarted from its disk", `runner ${node} could not use the snapshot (${safeText(dropped.reason, 32)}: ${safeText(dropped.message, 256)})`);
       this.log.warn("snapshot dropped; the machine started from its disk", { thread: thread.id, runner: node, reason: dropped.reason });
-      return;
+      return false;
     }
     // A notice of an earlier cold start is old news now (N-207-6).
     this.options.registry.applySleep(thread.id, { type: "resumed", notice: null });
     this.events.record(thread.id, "resumed", `on VM runner ${node}, the same boot`);
+    return true;
   }
 
   /** The portal's connection to `port` of the thread's machine, at its

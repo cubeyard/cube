@@ -13,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { create } from "@bufbuild/protobuf";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
-import { MachineSchema, MachineStatus_Phase as Phase, Runner_Kind, type Machine } from "../src/gen/runner_pb.js";
+import { ConditionSchema, MachineSchema, MachineStatus_Phase as Phase, Runner_Kind, type Machine } from "../src/gen/runner_pb.js";
 import type { Conversations } from "../src/conversation.ts";
 import { GuestTransportError, type GuestTransport } from "../src/guest-transport.ts";
 import { holdsSlot } from "../src/machine-sleep.ts";
@@ -43,6 +43,10 @@ export class FakeBerth {
   readonly failCreates = new Map<string, string>();
   /** Machines (by id) whose resume from SUSPENDED fails, and with what. */
   readonly failResumes = new Map<string, string>();
+  /** Machines (by id) whose snapshot the runner cannot use: a resume boots them from their disk (`SnapshotDropped`). */
+  readonly dropSnapshots = new Set<string>();
+  /** Machines (by id) whose suspend the runner refuses as busy (open streams). */
+  readonly busy = new Set<string>();
   /** How many deletes fail before one succeeds. */
   failDeletes = 0;
   readonly phases = new Map<string, Phase>();
@@ -117,15 +121,19 @@ export class FakeBerth {
           this.refuse("RESOURCE_EXHAUSTED", "the machine stays suspended");
         }
         // A boot (not a resume) starts with an empty per-boot tmpfs.
-        if (phase !== Phase.SUSPENDED && phase !== Phase.RUNNING) {
+        const dropped = phase === Phase.SUSPENDED && this.dropSnapshots.has(vm);
+        if (dropped || (phase !== Phase.SUSPENDED && phase !== Phase.RUNNING)) {
           this.boots.set(vm, (this.boots.get(vm) ?? 0) + 1);
           fs.rmSync(path.join(this.guestOf(vm).root, "run"), { recursive: true, force: true });
         }
         this.set(op, vm, Phase.RUNNING);
-        return this.machine(vm);
+        const started = this.machine(vm);
+        if (dropped) started.status!.conditions.push(create(ConditionSchema, { type: "SnapshotDropped", reason: "restore", message: "the snapshot could not be restored" }));
+        return started;
       }
       case "machineSuspend":
         if (phase !== Phase.RUNNING) throw new RunnerError("FAILED_PRECONDITION", "busy", "not running");
+        if (this.busy.has(vm)) { this.events.push({ op, vm, from: phase, to: phase }); throw new RunnerError("FAILED_PRECONDITION", "busy", "streams are open"); }
         this.set(op, vm, Phase.SUSPENDED);
         return this.machine(vm);
       case "machineDelete":
@@ -178,9 +186,13 @@ export const project: Project = { id: "p", name: "life", status: "ready", error:
 /** A cubed process over a state directory: a new one is a restart. */
 export interface Cubed { conversations: Conversations; machines: ThreadMachines; close(): Promise<void> }
 
-export function lifecycle(root: string, options: { slots: number; idleMs?: number; wakeWaitMs?: number; kind?: "vm" | "host" }) {
+type FauxResponses = Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0];
+
+/** `responses`: the faux model's answers (default: "done", 2000 times). */
+/** `restartMs`: PATIENCE.restartMs (default 0: a wake's patience counts at once). */
+export function lifecycle(root: string, options: { slots: number; idleMs?: number; wakeWaitMs?: number; restartMs?: number; kind?: "vm" | "host"; responses?: FauxResponses }) {
   const faux = fauxProvider({ tokensPerSecond: 1_000_000 });
-  faux.setResponses(Array.from({ length: 2000 }, () => fauxAssistantMessage("done")));
+  faux.setResponses(options.responses ?? Array.from({ length: 2000 }, () => fauxAssistantMessage("done")));
   const models = createModels();
   models.setProvider(faux.provider);
   const model = { provider: faux.getModel().provider, id: faux.getModel().id };
@@ -194,7 +206,7 @@ export function lifecycle(root: string, options: { slots: number; idleMs?: numbe
   /** A cubed over the state; `wakeWaitMs` for this one only. */
   const start = (restart: { wakeWaitMs?: number } = {}): Cubed => {
     const { machines, conversations } = threadRuntime({ registry, threads: path.join(root, "threads"), models, now: () => clock.now,
-      patience: { retryMs: 50, wakeMs: restart.wakeWaitMs ?? options.wakeWaitMs ?? 600 },
+      patience: { retryMs: 50, wakeMs: restart.wakeWaitMs ?? options.wakeWaitMs ?? 600, restartMs: options.restartMs ?? 0 },
       runner: { session: () => berth.session(), policy, log: quiet, templates: { enabled: false, ttlMs: 0 }, idleMs: options.idleMs ?? 60_000 } });
     return { conversations, machines, close: () => conversations.close(2000) };
   };

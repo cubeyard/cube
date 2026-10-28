@@ -1,22 +1,24 @@
 import type { ThreadSummary } from "./types.ts";
 
 /** The machine is suspended (idle; it holds no slot) or being woken; a
- * full runner makes it wait, and the label says so (P7-5, B7-2). */
+ * full runner makes it wait, and the label says so (P7-5, B7-2), as it does
+ * for a new thread queued for its first slot. */
 const suspension = (thread: ThreadSummary) => thread.state === "error" ? null : thread.vm?.suspension ?? null;
 /** A wake says what it waits for, also while each try starts the machine
  * again (the API says `starting` then), so the label does not flicker. */
 export const stateLabel = (thread: ThreadSummary) => {
   if (thread.state === "error") return "error";
   const suspended = suspension(thread);
+  if (suspended?.state === "queued") return "waiting for a free slot";
   if (suspended?.state === "waking") return suspended.waiting ? "waiting for a free slot" : "waking the thread's machine";
   if (thread.state === "starting") return "starting the thread's machine";
   if (suspended) return "suspended";
   return null;
 };
-/** Why a wake waits: the runner has no free slot (its full words). */
+/** Why a wake or a new thread waits: the runner has no free slot (its full words). */
 export const slotReason = (thread: ThreadSummary) => {
   const sleep = thread.vm?.suspension;
-  return sleep?.state === "waking" ? sleep.waiting ?? null : null;
+  return sleep?.state === "waking" || sleep?.state === "queued" ? sleep.waiting ?? null : null;
 };
 /** Whether the strip's label is about the machine's sleep (it stays in
  * print on a phone, with the details closed). */
@@ -32,6 +34,7 @@ export const STARTING_TEXT = "starting the thread's machine…";
 export const composerWaiting = (thread: ThreadSummary | null | undefined): string | null => {
   if (!thread) return null;
   const suspended = suspension(thread);
+  if (suspended?.state === "queued") return "waiting for a free slot…";
   if (suspended?.state === "waking") return suspended.waiting ? "waiting for a free slot…" : "waking the thread's machine…";
   return thread.state === "starting" ? STARTING_TEXT : null;
 };

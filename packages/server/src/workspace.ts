@@ -79,7 +79,7 @@ export interface Workspace {
   /** File paths are relative to the workspace or absolute in the thread's
    * machine (`filePath`); outside the workspace the helper acts with the
    * agent account's permissions. */
-  readFile(token: string, file: string, options?: { offset?: number; limit?: number }): Promise<WorkspaceFile>;
+  readFile(token: string, file: string, options?: { offset?: number; limit?: number; signal?: AbortSignal }): Promise<WorkspaceFile>;
   writeFile(token: string, key: string, file: string, content: Uint8Array, options?: WorkspaceWrite): Promise<WorkspaceWriteResult>;
   stat(token: string, file: string): Promise<WorkspaceStat>;
 }

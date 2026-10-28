@@ -136,7 +136,20 @@ import { NoMachines } from "./local-guest.ts";
   await activity.guest("w", { call: async () => { order.push("call"); return { header: {}, body: Buffer.alloc(0) }; }, close: async () => {} },
     async () => { order.push("before"); }).call("hello", {});
   assert.deepEqual(order, ["before", "call"]);
-  console.log("ok: machine-idle: a machine first seen running is busy for the longest command and the grace (B-207-2); a command is busy from exec until a get says it ended (also between polls), or until its own timeout and the grace; calls and portal connections while open");
+  // A call whose wait for `before` is aborted ends with the abort, before
+  // the wake does; one aborted already does not wait at all.
+  let wakeUp!: () => void;
+  const waking = new Promise<void>(resolve => { wakeUp = resolve; });
+  const unanswered = { call: async () => { order.push("sent"); return { header: {}, body: Buffer.alloc(0) }; }, close: async () => {} };
+  const stop = new AbortController();
+  const waited = activity.guest("w", unanswered, () => waking).call("hello", {}, { signal: stop.signal }).then(() => "answered", (error: Error) => error.message);
+  stop.abort(new Error("stopped"));
+  assert.equal(await waited, "stopped");
+  assert.equal(await activity.guest("w", unanswered, () => Promise.reject(new Error("closing"))).call("hello", {}, { signal: stop.signal }).catch((error: Error) => error.message), "stopped");
+  wakeUp();
+  await delay(10);
+  assert.deepEqual(order, ["before", "call"], "neither call was sent");
+  console.log("ok: machine-idle: a machine first seen running is busy for the longest command and the grace (B-207-2); a command is busy from exec until a get says it ended (also between polls), or until its own timeout and the grace; calls and portal connections while open; a call's wait for a wake ends with its abort");
 }
 
 // ------------------------------------------------ 2. conversation.ts
@@ -152,7 +165,7 @@ import { NoMachines } from "./local-guest.ts";
   }
   const machines = new Asked();
   const started = machines.starts;
-  const registry = { listThreads: () => threads, getThread: (id: string) => threads.find(t => t.id === id) ?? null, interruptStartupSteps: () => {} } as unknown as Registry;
+  const registry = { listThreads: () => threads, getThread: (id: string) => threads.find(t => t.id === id) ?? null, interruptStartupSteps: () => {}, slotQueue: () => new Map() } as unknown as Registry;
   const conversations = new Conversations({ registry, directory: fs.mkdtempSync(path.join(os.tmpdir(), "cube-suspend-conv-")), models: createModels(), machines });
   await conversations.boot();
   assert.deepEqual(started.sort(), ["claude", "idle", "working"], "the recovery loop leaves the suspended machine alone, and a wake no one owns (thread-lifecycle-test.ts R1) is not continued");
@@ -379,7 +392,7 @@ const IDLE = 300;
 const sessionNow = () => new RunnerSession(config, { log: quiet });
 let session = sessionNow();
 // The wiring cubed runs: Conversations own the wake (their guest transports' `before`).
-const runtime = threadRuntime({ registry, threads: path.join(root, "threads"), models: createModels(), patience: { retryMs: 50, wakeMs: 10000 },
+const runtime = threadRuntime({ registry, threads: path.join(root, "threads"), models: createModels(), patience: { retryMs: 50, wakeMs: 10000, restartMs: 0 },
   runner: { session: () => session, policy, idleMs: IDLE, suspendTimeoutMs: 400, log: quiet } });
 const vms = runtime.machines as RunnerMachines;
 const conversations = runtime.conversations;
@@ -423,7 +436,8 @@ try {
   assert.equal(await vms.suspendIfIdle(fresh(thread), idle), true);
   assert.equal(count("machineSuspend"), 1);
   assert.equal(fresh(thread).vm!.suspension?.state, "suspended");
-  assert.equal(fresh(thread).vm!.suspension?.memoryBytes, 123 * 2 ** 20);
+  const slept = fresh(thread).vm!.suspension;
+  assert.equal(slept?.state === "suspended" && slept.memoryBytes, 123 * 2 ** 20);
   assert.equal(vms.running(fresh(thread)), false);
   assert.equal(registry.runnerSlots().free, 2, "B7-2: a suspended machine frees its slot");
   console.log("ok: suspended only after the idle time, never while a command runs between polls or the agent works; then it holds no slot");
@@ -652,7 +666,7 @@ try {
   const saved = fresh(third).vm!.suspension!;
   assert.deepEqual(registry.applySleep(third.id, { type: "wakeAsked", waiting: "waiting for a free slot" }), { ...saved, state: "waking" });
   assert.equal(registry.runnerSlots().free, slots - 1, "waking: its QEMU may be starting");
-  assert.deepEqual(registry.applySleep(third.id, { type: "slotTaken", waiting: "waiting for a free slot" }), { ...saved, state: "waking", waiting: "waiting for a free slot" });
+  assert.deepEqual(registry.applySleep(third.id, { type: "slotTaken", waiting: "waiting for a free slot" }, 42), { ...saved, state: "waking", waiting: "waiting for a free slot", since: 42 });
   assert.equal(registry.runnerSlots().free, slots, "waiting for a slot: none held");
   assert.deepEqual(registry.applySleep(third.id, { type: "wakeDropped" }), saved, "a dropped wake is the same sleep again");
   assert.equal(registry.runnerSlots().free, slots);

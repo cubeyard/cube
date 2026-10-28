@@ -41,16 +41,16 @@ try {
   assert.equal(registry.getThread(pinned.id)!.runnerId, "node-mac");
 
   registry.createThread("project", "named-2", model, "x", "pi", undefined, { runnerId: "node-mac" });
-  assert.throws(() => registry.createThread("project", "named-3", model, "x", "pi", undefined, { runnerId: "node-mac" }),
-    /runner node-mac has no free thread machine \(2 of 2 in use\)/);
+  const named3 = registry.createThread("project", "named-3", model, "x", "pi", undefined, { runnerId: "node-mac" });
+  assert.deepEqual([named3.runnerId, named3.pinned, named3.vm?.suspension?.state], ["node-mac", true, "queued"], "a full named runner queues the thread on it, pinned");
   assert.throws(() => registry.createThread("project", "nobody", model, "x", "pi", undefined, { runnerId: "node-nobody" }), /no enrolled runner node-nobody/);
   assert.throws(() => registry.namedRunnerId("node-nobody"), /no runner node-nobody; runners lists them/);
-  // The berth vm full: the pool refuses, though the p3 and host runners have free slots.
+  // The berth vm full: the pool queues, though the p3 and host runners have free slots.
   for (const name of ["pooled-2", "pooled-3"]) registry.createThread("project", name, model, "x");
-  assert.throws(() => registry.createThread("project", "pooled-4", model, "x"), /no free thread machine in the global runner pool \(its berth vm runners\)[^]*start the thread on a runner by name/,
-    "a full pool never falls back to a protocol-3 or host runner");
+  const pooled4 = registry.createThread("project", "pooled-4", model, "x");
+  assert.deepEqual([pooled4.runnerId, pooled4.vm?.suspension?.state], ["runner-pool", "queued"], "a full pool queues on its berth vm: never a protocol-3 or host runner");
   assert.equal(registry.listThreads().filter(thread => thread.runnerId === "runner-p3").length, 0, "nothing was placed on the protocol-3 runner");
   // A replayed request finds its thread, wherever it was named to.
   assert.equal(registry.createThread("project", "named", model, "x", "pi", undefined, { runnerId: "node-mac" }).id, pinned.id);
-  console.log("ok: host and protocol-3 runners stay out of the pool, threads reach a host runner only by name and a protocol-3 runner never, a full berth vm pool refuses, named capacity");
+  console.log("ok: host and protocol-3 runners stay out of the pool, threads reach a host runner only by name and a protocol-3 runner never, a full berth vm pool or named runner queues");
 } finally { registry.close(); fs.rmSync(root, { recursive: true, force: true }); }

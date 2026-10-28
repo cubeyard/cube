@@ -435,13 +435,16 @@ try {
     try { await cubed.conversations.guest(fresh(id)).call("stat", { path: "/workspace" }); return { tries: asked() - before, error: null }; }
     catch (error) { return { tries: asked() - before, error: (error as Error).message }; }
   };
+  /** A thread on the only slot the runner refuses to suspend (busy): a's
+   * wake waits however idle it is. */
+  const holder = () => { const t = full.thread(); berth.busy.add(vmOf(t.id)); return t; };
   try {
     const a = full.thread();
     await cubed.conversations.activate(a.id);
     await done(a.id);
     await sleep();
     assert.equal(fresh(a.id).vm?.suspension?.state, "suspended");
-    const b = full.thread();
+    const b = holder();
     await cubed.conversations.activate(b.id);
     await done(b.id);
     const first = await call(a.id);
@@ -460,7 +463,7 @@ try {
     await cubed.conversations.activate(a.id);
     assert.equal(fresh(a.id).vm?.suspension, undefined, "with the slot free its activation resumes it");
     await sleep();
-    const c = full.thread();
+    const c = holder();
     await cubed.conversations.activate(c.id);
     await done(c.id);
     const afterActivate = await call(a.id);
@@ -470,7 +473,7 @@ try {
     assert.deepEqual([resumed.error, fresh(a.id).vm?.suspension], [null, undefined], "with the slot free a call resumes the machine");
     assert.equal(berth.resumes(vmOf(a.id)), 2);
     await sleep();
-    const d = full.thread();
+    const d = holder();
     await cubed.conversations.activate(d.id);
     await done(d.id);
     const later = await call(a.id);

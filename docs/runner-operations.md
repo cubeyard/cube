@@ -287,8 +287,10 @@ runner.
   end, no portal connection, and no service registered with `cube service`
   (until it is decided whether such a machine may sleep). After cubed itself
   restarts, a machine it finds running waits 32 minutes first: commands from
-  before may still run. One machine per runner is suspended at a time. A
-  suspended machine holds no slot. Anything
+  before may still run. While a thread waits for a slot on the runner (a
+  new thread, or a wake), its idlest machine is suspended at once instead,
+  under the same rules, until each waiting thread has a slot. One machine
+  per runner is suspended at a time. A suspended machine holds no slot. Anything
   the thread needs wakes it (a message, a command, the portal); with the
   runner full the thread waits, saying so (`waiting for a free slot`). The
   runner keeps a machine running when its disk is short or the save fails.
@@ -298,8 +300,8 @@ runner.
   runner's other machine operations for up to 85 s (it waits at most 5 s for
   them, saves for at most 60 s and undoes or quits for at most 15 s, then
   kills QEMU: the machine is stopped, its disk kept); a thread that starts
-  meanwhile says only that it starts. A thread waiting for a free slot gets
-  none ahead of a new thread, and archiving a suspended thread on a full
+  meanwhile says only that it starts. Threads waiting for a free slot get
+  one in the order they asked, new threads and wakes alike, and archiving a suspended thread on a full
   runner waits for a slot (up to 30 minutes).
 - **Retire** it as any runner: archive its threads, then `POST
   /api/runners/<id>/retire` with `confirm` set to its node id and a
