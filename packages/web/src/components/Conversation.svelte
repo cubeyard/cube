@@ -239,6 +239,33 @@
     events.read().then(next => { if (!disposed && reconnecting) void show(next); }, () => {});
   }
 
+  let watching: ReturnType<typeof events.watch> | null = null;
+  function follow(): void {
+    watching = events.watch(onFrame, {
+      onInterrupt: () => {
+        if (disposed) return;
+        reconnecting = true;
+        catchUp();
+      },
+      onEnd: cause => { if (!disposed) { historyError = errorText(cause); reconnecting = false; loading = false; } },
+    });
+  }
+  // A thread's history cannot be read while its machine waits (for a free
+  // slot or a runner): the stream that ended then follows again once the
+  // wait is over.
+  let waited = false;
+  $effect(() => {
+    if (waitingText) { waited = true; return; }
+    if (!waited || !historyError) return;
+    waited = false;
+    untrack(() => {
+      historyError = null;
+      loading = true;
+      void watching?.then(watch => watch.stop());
+      follow();
+    });
+  });
+
   onMount(() => {
     // a draft kept from an earlier visit: the field grows to hold it
     if (prompt) void tick().then(resizeComposer);
@@ -251,14 +278,7 @@
       keep(base, { note: recovery.note });
       void tick().then(resizeComposer);
     });
-    const watching = events.watch(onFrame, {
-      onInterrupt: () => {
-        if (disposed) return;
-        reconnecting = true;
-        catchUp();
-      },
-      onEnd: cause => { if (!disposed) { historyError = errorText(cause); reconnecting = false; loading = false; } },
-    });
+    follow();
     const onScroll = () => { following = atBottom(); nearTop(); };
     scroller.addEventListener("scroll", onScroll, { passive: true });
     // An image in agent prose is markup, not a component: its failure is caught here.
@@ -278,7 +298,7 @@
       scroller.removeEventListener("scroll", onScroll);
       column.removeEventListener("error", onImageError, true);
       settle.disconnect();
-      void watching.then(watch => watch.stop());
+      void watching?.then(watch => watch.stop());
     };
   });
 
@@ -560,7 +580,7 @@
   </div>
 
   {#if reconnecting}<div class="conversation-note" role="status">reconnecting to the thread…</div>{/if}
-  {#if error || historyError || status.state === "failed"}<div class="conversation-error" role="alert">{error ?? historyError ?? status.error ?? "the run failed"}</div>{/if}
+  {#if error || (historyError && !waitingText) || status.state === "failed"}<div class="conversation-error" role="alert">{error ?? (waitingText ? null : historyError) ?? status.error ?? "the run failed"}</div>{/if}
   <form class="composer" aria-busy={busy} onsubmit={(event) => { event.preventDefault(); void submit(); }}
     ondragover={(event) => { if (images && event.dataTransfer?.types.includes("Files")) event.preventDefault(); }} ondrop={onDrop}>
     <span class="sr-only" id="composer-hint">enter to send · shift enter for a new line{images ? " · attach images with the + key, or paste or drop them" : ""}</span>

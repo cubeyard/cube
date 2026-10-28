@@ -48,12 +48,16 @@ export async function startStartupHost() {
   return {
     url,
     projectId: project.id,
-    /** Starts a thread of the project; its machine starts at once. */
-    thread: async (name: string) => (await post("/api/threads", { projectId: project.id, requestId: name, text: "hello", model })).id as string,
+    /** Starts a thread of the project (or of `projectId`); its machine starts at once. */
+    thread: async (name: string, projectId = project.id) => (await post("/api/threads", { projectId, requestId: name, text: "hello", model })).id as string,
+    /** A project with no repository and no hooks: its threads are ready at once. */
+    plainProject: async () => ((await post("/api/projects", { name: "plain", repositories: [] })).project as { id: string }).id,
+    /** The thread's machine sleep as the registry has it. */
+    suspension: (id: string) => app.registry.getThread(id)?.vm?.suspension,
     /** The thread machine's root (where `oom` and `go` let its hook go on). */
     guest: (id: string) => machines.guest(app.registry.getThread(id)!).root,
     /** Archives a thread, which frees its runner slot. */
-    archive: async (id: string) => { await fetch(`${url}/api/threads/${id}`, { method: "DELETE" }); },
+    archive: async (id: string) => (await fetch(`${url}/api/threads/${id}`, { method: "DELETE" })).ok,
     /** Applies a sleep event to the thread's machine (P7-5, machine-sleep.ts):
      * suspended, being woken, waiting for a slot, or resumed with a notice. */
     sleep: (id: string, ...events: SleepEvent[]) => { for (const event of events) app.registry.applySleep(id, event); },

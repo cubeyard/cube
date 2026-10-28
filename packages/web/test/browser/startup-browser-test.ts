@@ -6,7 +6,9 @@
  * steps fold away and the machine label opens them again. The project page
  * sets the machine size. A suspended, waking or waiting machine and its
  * notice stay in print in the strip, also on a phone with the details
- * closed (P7-5). Desktop and phone, in Chromium and, when
+ * closed (P7-5). A thread queued on a full runner waits for a free slot,
+ * saying so in the strip and the composer, and is ready once one frees
+ * (desktop and phone, Chromium). Desktop and phone, in Chromium and, when
  * Playwright has it, WebKit. Screenshots go to CUBE_SCREENSHOTS when it is
  * set. Needs a built UI (pnpm build). */
 import assert from "node:assert/strict";
@@ -137,6 +139,45 @@ try {
     await host.archive(thread);
     console.log(`ok (${size}): steps, the live log, the out-of-memory try with its advice, the next try, the steps after ready, and the machine's sleep in the strip`);
   }
+  }
+
+  // A full runner queues a new thread: the strip and the composer say it
+  // waits for a free slot; once a thread is archived it gets the slot and
+  // becomes ready, at both sizes.
+  const plain = await host.plainProject();
+  for (const [layout, width, height] of [["desktop", 1280, 800], ["phone", 390, 844]] as const) {
+    const holders = [await host.thread(`hold-1-${layout}`, plain), await host.thread(`hold-2-${layout}`, plain)];
+    const queued = await host.thread(`queued-${layout}`, plain);
+    assert.equal(host.suspension(queued)?.state, "queued", "the runner's two slots are taken: queued");
+    const page = await open(width, height, `#/t/${queued}`);
+    const state = page.locator("section.thread-strip .strip-state:not(.strip-reason, .strip-notice)");
+    await state.filter({ hasText: "waiting for a free slot" }).waitFor({ timeout: 15_000 });
+    assert.match(await state.filter({ hasText: "waiting for a free slot" }).getAttribute("title") ?? "", /^waiting for a free slot on runner node-browser: /);
+    const composer = page.locator(`${ACTIVE} .composer textarea`);
+    await page.locator(`${ACTIVE} .composer textarea[placeholder="waiting for a free slot…"]`).waitFor({ timeout: 15_000 });
+    await composer.fill("hello?");
+    assert.equal(await page.locator(`${ACTIVE} .composer .send-key`).isEnabled(), false, "a message would wait unseen: it is not sent while the thread waits");
+    await composer.fill("");
+    // Its history and models cannot be read before its machine runs: the
+    // wait is said once, not as errors (the reads fail within a second).
+    await page.waitForTimeout(2_000);
+    assert.equal(await page.locator(`${ACTIVE} .conversation-error`).count(), 0, "no error under the transcript while it waits");
+    assert.equal(await page.locator(`${ACTIVE} .strip-note.bad`).count(), 0, "no model error while it waits");
+    await shot(page, `queue-${layout}-1-waiting`);
+    // Once its first turn ended (an archive refuses a thread at work).
+    for (const deadline = Date.now() + 30_000; !await host.archive(holders[0]!);) {
+      assert.ok(Date.now() < deadline, "the holder could be archived");
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    await page.locator(`${ACTIVE} .composer textarea[placeholder="message this thread"]`).waitFor({ timeout: 30_000 });
+    assert.equal(await composer.isEnabled(), true, "ready: the composer takes a message");
+    assert.equal(await state.filter({ hasText: "waiting for a free slot" }).count(), 0, "the wait is gone from the strip");
+    await page.locator(`${ACTIVE}`, { hasText: "the machine is up" }).first().waitFor({ timeout: 15_000 });
+    assert.equal(host.suspension(queued), undefined);
+    await shot(page, `queue-${layout}-2-ready`);
+    await page.close();
+    for (const id of [holders[1]!, queued]) await host.archive(id);
+    console.log(`ok (${layout}): a thread queued on a full runner says it waits for a free slot, then is ready once a slot frees`);
   }
 
   // The project page sets the machine size; new threads get it.
