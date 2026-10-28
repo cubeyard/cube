@@ -78,8 +78,9 @@ export function workspacePath(root: string, file: string, realRoot?: string): st
   const normal = `/${parts.join("/")}`;
   const base = [root, realRoot ?? ""].map(alias => alias.replace(/\/+$/, "")).find(alias => alias && (normal === alias || normal.startsWith(`${alias}/`)));
   const resolved = base ? `${VIRTUAL_ROOT}${normal.slice(base.length)}` : normal;
-  // cube's artifacts are not the machine's, however the path reaches /cube.
-  if (resolved === "/cube" || resolved.startsWith("/cube/")) return { deny: `${file} is not in the machine: cube keeps artifacts at ${ARTIFACT_ROOT}/<name>.md, written whole with Write` };
+  // cube's artifacts were once files here; a session that remembers so is
+  // told where they are rather than writing a file no one reads.
+  if (resolved === "/cube" || resolved.startsWith("/cube/")) return { deny: `${file} is not in the machine: cube keeps artifacts, read and written with the tools ${CUBE_TOOL_PREFIX}artifact_read, ${CUBE_TOOL_PREFIX}artifact_write and ${CUBE_TOOL_PREFIX}artifact_edit` };
   if (resolved === VIRTUAL_ROOT) return { deny: `${file} is the workspace root, not a file` };
   if (resolved === "/") return { deny: `${file} is the machine's root directory, not a file` };
   return resolved.startsWith(`${VIRTUAL_ROOT}/`) ? resolved.slice(VIRTUAL_ROOT.length + 1) : resolved;
@@ -89,98 +90,23 @@ export function workspacePath(root: string, file: string, realRoot?: string): st
 export const PROJECT_HOOKS_NOTE = "The project's external hooks (pre-setup and pre-resume, which run before the repository's .agents/setup and .agents/resume) are kept in cube's projects, not in the repository: "
   + "`cube hooks` shows the ones this machine runs, with their last outcomes and logs (read only). A thread cannot change them; the user does, in cube's projects or by asking OptChat.";
 
-/** How an agent should write one, after the show-me skill
- * (https://www.humanlayer.com/blog/show-me-skill): compact visuals beside
- * short text, never walls of prose. */
-export const ARTIFACT_GUIDE = "An artifact is a document the user reads beside the chat, selects text in and comments on; every write is a new revision and older ones stay. "
-  + "Use one for what the user will read and discuss at length (a review, a plan, a report, a design), not for a short reply. "
-  + "Write it as GitHub Markdown and show rather than tell: keep prose brief and put each visual next to the short text it supports. "
-  + "Pick the smallest view that makes the point: a call tree or file tree in a text fence, a ```mermaid sequence, state or flow diagram, "
-  + "a ```diff of the shape that changes (a component tree, a call stack, a file layout, real code), a short table, pseudocode. "
-  + "Raw HTML is shown as text, scripts never run, images are links, and only http(s) and #/ links work. "
-  + "```mermaid diagrams are drawn by Pele (Mermaid syntax) and checked before a write is accepted: one that does not draw refuses the whole write, which tells you each diagram's problem and line; fix them and write again. "
-  + "Comments come back to you as a message starting \"[artifact <id>]\" with the exact text they are about; answer them, and write a new revision of the same artifact when they call for changes. "
-  + "You may revise an artifact someone else wrote when you can read it (a thread reads every artifact of its project): read its newest revision first, then write the whole document with its id. "
-  + "A write on an older revision than the newest is refused rather than overwriting someone's newer one: read again and redo it on top. It stays its author's: the user's comments on it still go to the author. "
-  + "actions offer the user a button; the only kind is github.merge of a pull request in the project's own repository, pinned to its exact 40-character head commit. "
-  + "A revision that leaves actions out keeps the newest revision's as they are; give actions to change them (a new head needs a new headSha), [] to remove them. "
-  + "Nothing runs unless the user confirms it on the artifact's page, after cube checks the pull request again; never claim an action ran.";
+/** Claude Code's name for a tool this mod registers: `mcp__`, the plugin's
+ * name (`cube`), two underscores, then the cube tool's own name. */
+export const CUBE_TOOL_PREFIX = "mcp__cube__";
 
-/** Where Read and Write reach work artifacts instead of the workspace:
- * `<name>.md` is a document, `<name>.json` is `{title?, body, actions?,
- * base?}`, the folder itself lists them; a name in the form of an artifact
- * id is that artifact, the thread's or another one it can read. cubed keeps
- * them, not the machine. */
-export const ARTIFACT_ROOT = "/cube/artifacts";
-export type ArtifactPath = { kind: "list" } | { kind: "md" | "json"; name: string };
-export function artifactPath(file: unknown): ArtifactPath | Denied | null {
-  if (typeof file !== "string" || (file !== "/cube" && !file.startsWith("/cube/"))) return null;
-  if (file === ARTIFACT_ROOT || file === `${ARTIFACT_ROOT}/`) return { kind: "list" };
-  const match = /^\/cube\/artifacts\/([a-z0-9][a-z0-9._-]{0,63})\.(md|json)$/.exec(file);
-  if (!match || match[1]!.includes("..")) return { deny: `${file} is not an artifact path: use ${ARTIFACT_ROOT}/<name>.md (or .json), the name in lowercase letters, digits, dots, dashes or underscores` };
-  return { kind: match[2] as "md" | "json", name: match[1]! };
-}
-
-/** Read's lines of an artifact, as of a file (offset and limit), at most this many characters at once. */
-export const ARTIFACT_READ_CHARS = 120_000;
-
-export async function readArtifact(scope: ToolScope, target: ArtifactPath, input: ReadInput): Promise<ReadResult | Denied> {
+/** A call of one of cube's own tools (packages/server/src/cube-tools.ts):
+ * cubed checks the input against the tool's schema and answers it, and the
+ * tool_use_id makes a repeated call write once. Only forwarded here. */
+export async function cubeTool(scope: ToolScope, toolUseId: string, tool: string, input: Record<string, unknown>): Promise<string | Denied> {
+  if (!tool.startsWith(CUBE_TOOL_PREFIX)) return { deny: `${tool} is not a cube tool` };
+  const name = tool.slice(CUBE_TOOL_PREFIX.length);
   try {
-    const { text } = await scope.client.artifact(scope.token, target.kind === "list" ? undefined : target.name);
-    const lines = text.split("\n");
-    const startLine = Math.max(1, Math.floor(input.offset ?? 1));
-    const count = Math.max(1, Math.floor(input.limit ?? READ_DEFAULT_LINES));
-    const shown: string[] = [];
-    let chars = 0;
-    for (const line of lines.slice(startLine - 1, startLine - 1 + count)) {
-      if (shown.length && chars + line.length + 1 > ARTIFACT_READ_CHARS) break;
-      shown.push(line.slice(0, ARTIFACT_READ_CHARS));
-      chars += line.length + 1;
-    }
-    const end = startLine - 1 + shown.length;
-    // Write replaces the whole document: a part read must say it is one.
-    const rest = !shown.length ? [`[the artifact has ${lines.length} lines; Read it with a smaller offset]`]
-      : end < lines.length ? [`[lines ${startLine}-${end} of ${lines.length}; Read with offset ${end + 1} for the rest. Write replaces the whole document, so read all of it before writing it, or change a part with Edit]`] : [];
-    const content = [...shown, ...rest].join("\n");
-    return { type: "text", file: { filePath: input.file_path, content, numLines: shown.length, startLine, totalLines: lines.length } };
-  } catch (error) { return denied(error, input.file_path); }
-}
-
-/** Edit on an artifact is a new revision cubed writes on the newest one,
- * the one the agent last read: a small change without the whole document. */
-export async function editArtifact(scope: ToolScope, toolUseId: string, target: ArtifactPath, input: EditInput): Promise<EditResult | Denied> {
-  if (target.kind !== "md") return { deny: `Edit reaches ${ARTIFACT_ROOT}/<name>.md; write ${target.kind === "json" ? "a .json artifact whole with Write" : `${ARTIFACT_ROOT}/<name>.md, not the folder`}` };
-  if (typeof input.old_string !== "string" || typeof input.new_string !== "string") return { deny: "old_string and new_string are required" };
-  if (input.old_string === input.new_string) return { deny: "No changes to make: old_string and new_string are exactly the same." };
-  const replaceAll = input.replace_all === true;
-  try {
-    await scope.client.editArtifact(scope.token, { name: target.name, requestId: key(toolUseId, "artifact"), call: toolUseId, edit: { oldString: input.old_string, newString: input.new_string, replaceAll } });
-    return { filePath: input.file_path, oldString: input.old_string, newString: input.new_string, originalFile: null, structuredPatch: [], userModified: false, replaceAll };
-  } catch (error) { return denied(error, input.file_path); }
-}
-
-export async function writeArtifact(scope: ToolScope, toolUseId: string, target: ArtifactPath, input: WriteInput): Promise<WriteResult | Denied> {
-  if (target.kind === "list") return { deny: `write ${ARTIFACT_ROOT}/<name>.md, not the folder` };
-  if (typeof input.content !== "string") return { deny: "content is required" };
-  let document: { body: string; title?: string; actions?: unknown; base?: number } = { body: input.content };
-  if (target.kind === "json") {
-    let parsed: unknown;
-    try { parsed = JSON.parse(input.content); } catch { return { deny: `${input.file_path} must be JSON: {"title"?: string, "body": string, "actions"?: [...], "base"?: number}` }; }
-    const record = parsed as Record<string, unknown> | null;
-    if (!record || typeof record !== "object" || Array.isArray(record) || typeof record.body !== "string" || (record.title !== undefined && typeof record.title !== "string")
-      || (record.base !== undefined && typeof record.base !== "number")) {
-      return { deny: `${input.file_path} must be JSON: {"title"?: string, "body": string, "actions"?: [...], "base"?: number}` };
-    }
-    const extra = Object.keys(record).filter(name => !["title", "body", "actions", "base"].includes(name));
-    if (extra.length) return { deny: `${input.file_path}: unknown field ${extra.join(", ")}` };
-    document = { body: record.body, ...typeof record.title === "string" ? { title: record.title } : {}, ...record.actions === undefined ? {} : { actions: record.actions },
-      ...typeof record.base === "number" ? { base: record.base } : {} };
+    const answer = await abortable(scope.client.callTool(scope.token, name, toolUseId, input), scope.signal);
+    return answer ? answer.text : { deny: `${name} was stopped; it may have written, so read before writing again` };
+  } catch (error) {
+    if (error instanceof WorkspaceClientError && (error.code === "LEASE_STALE" || error.code === "LEASE_HELD")) return denied(error, name);
+    return { deny: `${name}: ${error instanceof Error ? error.message : String(error)}` };
   }
-  try {
-    const written = await scope.client.writeArtifact(scope.token, { name: target.name, requestId: key(toolUseId, "artifact"), call: toolUseId, ...document });
-    // The tool's own shape; what cubed said reaches the model as the content.
-    return { type: "update", filePath: input.file_path, content: written.text, structuredPatch: [], originalFile: null };
-  } catch (error) { return denied(error, input.file_path); }
 }
 
 export function key(toolUseId: string, suffix: string): string {

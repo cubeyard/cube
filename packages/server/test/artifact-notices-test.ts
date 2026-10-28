@@ -69,7 +69,7 @@ async function until<T>(read: () => T, check: (value: T) => boolean, what: strin
   return value;
 }
 const write = (author: ArtifactAuthor, pulls: number[], name: string) => artifacts.write({ agent: author, authors: [author] },
-  { name, title: name, body: `# ${name}`, actions: pulls.map(pull => ({ kind: "github.merge", repository: "cubeyard/cube", pull, headSha: SHA })), project: "cube" },
+  { title: name, body: `# ${name}`, actions: pulls.map(pull => ({ kind: "github.merge", repository: "cubeyard/cube", pull, headSha: SHA })), project: "cube" },
   { agent: author.kind === "optchat" ? "optchat" : "pi" }, `w-${name}`).then(written => written.id);
 const confirm = (id: string, pull: number, requestId: string) => artifacts.run(id, `merge-${pull}`, { revision: 1, confirm: `cubeyard/cube#${pull}`, requestId });
 const notices = (id: string) => artifacts.store.notices(id);

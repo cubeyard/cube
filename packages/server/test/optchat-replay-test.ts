@@ -127,6 +127,8 @@ try {
     },
     artifact_write: { args: { title: "Report", body: "# Report\n\nbody" } },
     artifact_read: { args: {} },
+    // The report artifact_write wrote.
+    artifact_edit: { get args() { return { id: store.list({ authors: [{ kind: "optchat" }] })[0]!.id, old_string: "body", new_string: "edited" }; } },
   };
   assert.deepEqual(Object.keys(cases).sort(), names, "the table covers every tool");
   let task = 100;

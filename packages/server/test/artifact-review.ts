@@ -12,9 +12,9 @@ Threads and the chat can now write documents you read beside the chat. Comments 
 packages/server/src/
 ├── artifacts.ts          # store: revisions, comments, batches, action runs
 ├── artifact-service.ts   # write/read for agents, delivery, merge checks
-├── artifact-tools.ts     # artifact_write / artifact_read (pi, optchat)
+├── artifact-tools.ts     # artifact_write / artifact_read / artifact_edit
+├── cube-tools.ts         # one definition, offered to pi and to claude code (mcp__cube__*)
 └── github-pulls.ts       # live pull request state, merge pinned to a head
-packages/claude-mod/hooks/tools.ts   # /cube/artifacts/<name>.md for claude code
 packages/web/src/components/ArtifactView.svelte
 \`\`\`
 

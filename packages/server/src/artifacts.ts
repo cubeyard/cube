@@ -50,7 +50,7 @@ export interface Provenance {
   source?: { path: string; sha256: string };
 }
 export interface ArtifactSummary {
-  id: string; title: string; name: string | null; author: ArtifactAuthor; projectId: string | null;
+  id: string; title: string; author: ArtifactAuthor; projectId: string | null;
   head: number; createdAt: number; updatedAt: number;
   comments: { draft: number; queued: number; delivered: number; undeliverable: number };
 }
@@ -90,7 +90,6 @@ export interface ActionNotice {
   state: "queued" | "delivered" | "undeliverable" | "skipped"; note: string | null; createdAt: number; deliveredAt: number | null;
 }
 
-export const isArtifactName = (value: unknown): value is string => typeof value === "string" && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(value) && !value.includes("..");
 export class ArtifactError extends Error {
   readonly status: number;
   /** A write refused for its diagrams: each problem, for a caller that reads them as data. */
@@ -191,6 +190,8 @@ export class ArtifactStore {
     this.db.exec("PRAGMA foreign_keys=ON");
     const version = (this.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
     if (version !== 0 && version !== SCHEMA) throw new Error(`artifacts.sqlite has schema ${version}, not ${SCHEMA}`);
+    // `name` is what the retired /cube/artifacts paths of Claude Code threads
+    // named an artifact; kept so older stores open, no longer written or read.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, title TEXT NOT NULL, author TEXT NOT NULL, project_id TEXT,
         head INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, create_request TEXT NOT NULL UNIQUE, name TEXT);
@@ -227,7 +228,7 @@ export class ArtifactStore {
    * Actions left out keep the newest revision's, exactly. The same request
    * id finds the revision it wrote (a replayed tool call); the same content
    * as the current revision writes nothing. */
-  write(editor: ArtifactAuthor, input: { id?: string | undefined; name?: string | undefined; base?: number | undefined; title: string; body: string;
+  write(editor: ArtifactAuthor, input: { id?: string | undefined; base?: number | undefined; title: string; body: string;
     actions?: ArtifactAction[] | undefined; projectId: string | null },
   provenance: Provenance, requestId: string): { revision: Revision; created: boolean; unchanged: boolean; actionsKept: boolean } {
     const title = input.title.trim().replace(/\s+/g, " ");
@@ -235,7 +236,6 @@ export class ArtifactStore {
     if (typeof input.body !== "string" || !input.body.trim()) throw new ArtifactError("body is required");
     if (Buffer.byteLength(input.body) > ARTIFACT_LIMITS.body) throw new ArtifactError(`body is ${Buffer.byteLength(input.body)} bytes; at most ${ARTIFACT_LIMITS.body}`);
     if (!requestId || requestId.length > 300) throw new ArtifactError("a request id is required");
-    if (input.name !== undefined && !isArtifactName(input.name)) throw new ArtifactError("a name is 1 to 64 lowercase letters, digits, dots, dashes or underscores");
     // The editor is read back from the provenance, so it names the editor's thread.
     if (editor.kind === "thread") provenance = { ...provenance, thread: editor.thread };
     return this.transaction(() => {
@@ -250,15 +250,12 @@ export class ArtifactStore {
         return { revision: this.revision(String(prior.artifact), number)!, created: number === 1, unchanged: false, actionsKept: kept };
       }
       const now = Date.now();
-      const named = input.id === undefined && input.name !== undefined
-        ? this.db.prepare("SELECT id FROM artifacts WHERE author = ? AND name = ?").get(authorKey(editor), input.name) as Row | undefined : undefined;
-      if (named) input = { ...input, id: String(named.id) };
       if (input.id === undefined) {
         const count = (this.db.prepare("SELECT count(*) AS n FROM artifacts WHERE author = ?").get(authorKey(editor)) as { n: number }).n;
         if (count >= ARTIFACT_LIMITS.perAuthor) throw new ArtifactError(`at most ${ARTIFACT_LIMITS.perAuthor} artifacts per author`);
         const id = randomUUID();
-        this.db.prepare("INSERT INTO artifacts (id, title, author, project_id, head, created_at, updated_at, create_request, name) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)")
-          .run(id, title, authorKey(editor), input.projectId, now, now, requestId, input.name ?? null);
+        this.db.prepare("INSERT INTO artifacts (id, title, author, project_id, head, created_at, updated_at, create_request) VALUES (?, ?, ?, ?, 1, ?, ?, ?)")
+          .run(id, title, authorKey(editor), input.projectId, now, now, requestId);
         this.db.prepare("INSERT INTO revisions (artifact, number, title, body, actions, provenance, request_id, created_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?)")
           .run(id, title, input.body, JSON.stringify(input.actions ?? []), JSON.stringify(provenance), requestId, now);
         return { revision: this.revision(id, 1)!, created: true, unchanged: false, actionsKept: false };
@@ -290,13 +287,8 @@ export class ArtifactStore {
   private summary(row: Row): ArtifactSummary {
     const counts = { draft: 0, queued: 0, delivered: 0, undeliverable: 0 };
     for (const comment of this.comments(String(row.id))) counts[comment.state]++;
-    return { id: String(row.id), title: String(row.title), name: row.name === null ? null : String(row.name), author: parseAuthor(String(row.author)), projectId: row.project_id === null ? null : String(row.project_id),
+    return { id: String(row.id), title: String(row.title), author: parseAuthor(String(row.author)), projectId: row.project_id === null ? null : String(row.project_id),
       head: Number(row.head), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), comments: counts };
-  }
-  /** The artifact an author named so (the Claude Code mod's paths). */
-  named(author: ArtifactAuthor, name: string): ArtifactSummary | null {
-    const row = this.db.prepare("SELECT * FROM artifacts WHERE author = ? AND name = ?").get(authorKey(author), name) as Row | undefined;
-    return row ? this.summary(row) : null;
   }
   get(id: string): ArtifactSummary | null {
     const row = this.row(id);

@@ -16,7 +16,7 @@ saves a project's external hooks in cube's projects (`project_hooks`,
 `project_hooks_write`, the project named explicitly; see
 [project-hooks.md](project-hooks.md)), writes work
 artifacts and reads and revises its own and its threads' (`artifact_write`,
-`artifact_read`; see [artifacts.md](artifacts.md)) and reads its own
+`artifact_read`, `artifact_edit`; see [artifacts.md](artifacts.md)) and reads its own
 memory (`zoom`, `date`). It keeps no task list: the chat page shows its
 threads, derived from its own spawns (see "Threads beside the chat"), and
 no model reads the chat in the background for wishes or todos. Threads do
@@ -182,7 +182,7 @@ finishes in cubed). So every tool is read-only or keyed (`TOOL_REPLAY`):
 | `tell` | `optchat:<call>`: Pi's submissions and Claude Code's table take it once; counted once against the tells |
 | `archive` | the call's task: its stored lines (see "Archiving") |
 | `project_hooks_write` | `<chat>:hooks:<task>`: saves nothing and answers the stored text (docs/project-hooks.md) |
-| `artifact_write` | `<chat>:artifact:<task>`: finds the revision it wrote |
+| `artifact_write` `artifact_edit` | `<chat>:artifact:<task>`: finds the revision it wrote |
 
 A tool missing from the table is refused when the chat builds its tools.
 The close then gives the cut-off calls up to 2 s (`CLOSE_SETTLE_MS`) to

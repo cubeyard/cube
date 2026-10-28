@@ -13,8 +13,15 @@ const LIMITS = { maxFrameBytes: 1048576, requestTimeoutMs: 30000, maxCommandByte
 type Reply = { value: { status: number; ok: boolean; headers: Record<string, string>; text: string } }
 type Request = { method: string; path: string; body: Record<string, unknown> | undefined; socketPath: string | undefined; authorization: string | undefined }
 
-/** The routes cubed serves, in memory: files, keyed commands and writes. */
-function fakeWorkspace(on: On, files: Record<string, string> = {}, env: Record<string, string> = {}) {
+/** What cubed lists at GET /tools (packages/server/src/cube-tools.ts), much shortened. */
+const TOOLS = [
+  { name: 'artifact_write', description: 'Create an artifact', inputSchema: { type: 'object', properties: { body: { type: 'string' } } }, isDeferred: false },
+  { name: 'artifact_read', description: 'Read an artifact', inputSchema: { type: 'object', properties: { id: { type: 'string' } } }, isDeferred: false },
+]
+
+/** The routes cubed serves, in memory: files, keyed commands and writes,
+ * cube's tools (each call answered with what reached it) and the ready. */
+function fakeWorkspace(on: On, files: Record<string, string> = {}, env: Record<string, string> = {}, tools: unknown = TOOLS) {
   const requests: Request[] = []
   const operations = new Map<string, { request: string; reply: Reply }>()
   const shas = new Map<string, number>()
@@ -49,6 +56,14 @@ function fakeWorkspace(on: On, files: Record<string, string> = {}, env: Record<s
       const seen = operations.get(decodeURIComponent(route.slice('/operations/'.length)))
       return seen ? seen.reply : fail(404, 'NOT_FOUND')
     }
+    if (route === '/tools' && request.method === 'GET') return tools === null ? fail(500, 'IO_ERROR') : reply(200, { tools })
+    if (route.startsWith('/tools/') && request.method === 'POST') {
+      const name = decodeURIComponent(route.slice('/tools/'.length))
+      if (!TOOLS.some(tool => tool.name === name)) return fail(404, 'NOT_FOUND')
+      if ((body?.input as Record<string, unknown> | undefined)?.id === 7) return reply(400, { error: 'Validation failed for tool "artifact_read":\n  - id: must be string', code: 'INVALID_REQUEST', completionUnknown: false })
+      return reply(200, { text: `cubed ran ${name} for ${String(body?.call)} with ${JSON.stringify(body?.input)}` })
+    }
+    if (route === '/claude-ready' && request.method === 'POST') return reply(200, { ok: true })
     const file = url.searchParams.get('path') ?? String(body?.path)
     if (route === '/stat' && request.method === 'GET') {
       return file in files ? reply(200, { kind: 'file', size: files[file]!.length, mode: 0o644, modifiedMs: 0, sha256: sha(file) }) : fail(404, 'NOT_FOUND')
@@ -175,11 +190,46 @@ describe('workspace tools', () => {
     const shot = await $.tool.call({ tool: 'Read', file_path: '/tmp/screens/../screens/shot.png' })
     expect((shot.result as { type: string }).type).toBe('image')
     expect(refusal(await $.tool.call({ tool: 'Write', file_path: '/', content: 'x' }))).toMatch(/root directory, not a file/)
-    // An artifact's Edit goes to cubed's /artifacts route (none here), never to a machine file.
-    expect(refusal(await $.tool.call({ tool: 'Edit', file_path: '/cube/artifacts/plan.md', old_string: 'a', new_string: 'b' }))).toMatch(/File does not exist: \/cube\/artifacts\/plan\.md/)
-    expect(workspace.requests.some(request => request.path === `${BASE}/artifacts` && request.body?.edit !== undefined)).toBe(true)
-    expect(refusal(await $.tool.call({ tool: 'Edit', file_path: '/cube/artifacts/plan.json', old_string: 'a', new_string: 'b' }))).toMatch(/Edit reaches/)
-    expect(refusal(await $.tool.call({ tool: 'Edit', file_path: '/cube/x', old_string: 'a', new_string: 'b' }))).toMatch(/not an artifact path/)
+    // The old artifact paths are no files: a session that remembers them is told of cube's tools.
+    for (const call of [{ tool: 'Edit', file_path: '/cube/artifacts/plan.md', old_string: 'a', new_string: 'b' }, { tool: 'Write', file_path: '/cube/artifacts/plan.md', content: '# x' }, { tool: 'Read', file_path: '/cube/artifacts' }]) {
+      expect(refusal(await $.tool.call(call as never))).toMatch(/is not in the machine: cube keeps artifacts, read and written with the tools mcp__cube__artifact_read, mcp__cube__artifact_write and mcp__cube__artifact_edit/)
+    }
+    expect(workspace.requests.some(request => request.path.includes('/cube'))).toBe(false)
+    expect(reached).toEqual([])
+  })
+
+  test('cube\'s tools are registered as cubed lists them, before the ready', async ($, on) => {
+    const workspace = fakeWorkspace(on, {}, { CUBE_MOD_NONCE: 'n'.repeat(64) })
+    const registered: unknown[] = []
+    on('tool.register', ($, e) => { registered.push(e); return { value: undefined } })
+    on('session.start', () => ({ cwd: ROOT }))
+    await $.session.start({ surface: 'terminal', isInteractive: false, cwd: ROOT } as never)
+    expect(registered).toEqual(TOOLS)
+    expect(workspace.requests.map(request => `${request.method} ${request.path.slice(BASE.length)}`)).toEqual(['GET /tools', 'POST /claude-ready'])
+    expect(workspace.requests[1]!.body).toEqual({ nonce: 'n'.repeat(64) })
+  })
+
+  test('a tool list cubed cannot give means no ready, so no prompt', async ($, on) => {
+    const workspace = fakeWorkspace(on, {}, { CUBE_MOD_NONCE: 'n'.repeat(64) }, null)
+    on('tool.register', () => ({ value: undefined }))
+    on('session.start', () => ({ cwd: ROOT }))
+    await $.session.start({ surface: 'terminal', isInteractive: false, cwd: ROOT } as never)
+    expect(workspace.requests.map(request => `${request.method} ${request.path.slice(BASE.length)}`)).toEqual(['GET /tools'])
+  })
+
+  test('a cube tool call goes to cubed whole, under its tool_use_id, and its answer comes back', async ($, on) => {
+    const workspace = fakeWorkspace(on)
+    const reached = engine(on)
+    const wrote = await $.tool.call({ tool: 'mcp__cube__artifact_write', body: '# plan\n\none' } as never)
+    expect(String(wrote.result)).toMatch(/^cubed ran artifact_write for \S+ with \{"body":"# plan\\n\\none"\}$/)
+    const posted = workspace.requests.find(request => request.path === `${BASE}/tools/artifact_write`)!
+    expect(posted.socketPath).toBe(SOCKET)
+    expect(posted.authorization).toBe(`Bearer ${TOKEN}`)
+    expect(Object.keys(posted.body!).sort()).toEqual(['call', 'input'])
+    expect(String(wrote.result)).toBe(`cubed ran artifact_write for ${String(posted.body!.call)} with {"body":"# plan\\n\\none"}`)
+    // cubed's refusals reach the model as refusals: invalid input, a tool it does not offer.
+    expect(refusal(await $.tool.call({ tool: 'mcp__cube__artifact_read', id: 7 } as never))).toBe('artifact_read: Validation failed for tool "artifact_read":\n  - id: must be string')
+    expect(refusal(await $.tool.call({ tool: 'mcp__cube__artifact_delete', id: 'x' } as never))).toBe('artifact_delete: not_found')
     expect(reached).toEqual([])
   })
 

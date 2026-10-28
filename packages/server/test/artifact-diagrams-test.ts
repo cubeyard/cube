@@ -68,7 +68,7 @@ const store = new ArtifactStore(path.join(root, "artifacts.sqlite"));
 const artifacts = new Artifacts({ store, registry, github: {} as GithubPulls, optchat: async () => null, submit: async () => {} });
 const optchat: ArtifactAuthor = { kind: "optchat" };
 const scope: ArtifactScope = { agent: optchat, authors: [optchat] };
-const write = (input: { id?: string; name?: string; body: string }, requestId: string) => artifacts.write(scope, input, { agent: "optchat", call: requestId }, requestId);
+const write = (input: { id?: string; body: string }, requestId: string) => artifacts.write(scope, input, { agent: "optchat", call: requestId }, requestId);
 const refusedFor = async (run: () => Promise<unknown>, diagram: number) => {
   let caught: unknown;
   await run().catch(error => { caught = error; });
@@ -78,11 +78,11 @@ const refusedFor = async (run: () => Promise<unknown>, diagram: number) => {
   assert.match(caught.message, /do(es)? not draw, so nothing was written/);
 };
 try {
-  await refusedFor(() => write({ name: "plan", body: `# plan\n\n${fence("flowchart LR\n  A[x --> B")}` }, "w-0"), 1);
-  assert.equal(store.named(optchat, "plan"), null, "a refused first write creates no artifact");
+  await refusedFor(() => write({ body: `# plan\n\n${fence("flowchart LR\n  A[x --> B")}` }, "w-0"), 1);
+  assert.equal(store.list({ authors: [optchat] }).length, 0, "a refused first write creates no artifact");
 
   const valid = `# plan\n\n${fence(FLOW)}\n\ntext between\n\n${fence(SEQUENCE)}`;
-  const first = await write({ name: "plan", body: valid }, "w-1");
+  const first = await write({ body: valid }, "w-1");
   assert.equal(first.revision, 1);
   await refusedFor(() => write({ id: first.id, body: valid.replace("B-->>A: hello", "B-->>A") }, "w-2"), 2);
   await refusedFor(() => artifacts.edit(scope, { id: first.id, oldString: "A[draft] --> B[published]", newString: "A[draft --> B" }, { agent: "optchat" }, "e-1"), 1);

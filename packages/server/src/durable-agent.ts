@@ -1,7 +1,7 @@
 /** In-process Pi execution on pi-durable. The host owns activation and the
  * thread's workspace lease; Pi owns every conversation entry, task checkpoint
  * and document. There is no second workflow journal. */
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -17,7 +17,7 @@ import { PROJECT_HOOKS_NOTE } from "../../claude-mod/hooks/tools.ts";
 import { createPiReadTool } from "./pi-read.ts";
 import { createCodemodeTool, type CodemodeLimits, type NestedTool } from "./codemode.ts";
 import { settleOperation, WorkspaceError, type Workspace } from "./workspace.ts";
-import { expandHome, WORKSPACE_ROOT, WorkspaceEnv, workspacePath } from "./workspace-env.ts";
+import { readMachineText, WORKSPACE_ROOT, WorkspaceEnv } from "./workspace-env.ts";
 import { createLogger } from "./log.ts";
 import { RESTART_LIMIT, sendsExtension, settleSends } from "./pi-sends.ts";
 import { piReports, reportText } from "./pi-report.ts";
@@ -191,19 +191,7 @@ export async function openAgent(options: {
     const write = fileTool({ ...createWriteTool(), replay: "safe" }, true);
     const edit = fileTool(createEditTool(), true);
     const codemode = createCodemodeTool({ tools: [read, write, edit, bashTool], key: taskKey, ...(options.codemodeLimits ? { limits: options.codemodeLimits } : {}) });
-    const host = options.hostTools?.({
-      key: taskKey,
-      async readFile(file, limit) {
-        const expanded = expandHome(file);
-        if (expanded === null) throw new Error(`${file}: only ~ and ~/ name a home, the agent's`);
-        const target = workspacePath(path.posix.resolve(WORKSPACE_ROOT, expanded));
-        if (target === ".") throw new Error("path must name a file");
-        const read = await options.workspace.readFile(lease.token, target, { limit: limit + 1 });
-        if (!read.eof || read.content.byteLength > limit) throw new Error(`${file} is larger than ${limit} bytes`);
-        const bytes = Buffer.from(read.content);
-        return { text: bytes.toString("utf8"), path: path.posix.resolve(WORKSPACE_ROOT, target), sha256: createHash("sha256").update(bytes).digest("hex") };
-      },
-    });
+    const host = options.hostTools?.({ key: taskKey, readFile: (file, limit) => readMachineText(options.workspace, lease.token, file, limit) });
     registry.install(defineExtension({
       name: "cube",
       tools: [direct(read), direct(write), direct(edit), bashTool.registration, codemode, ...host?.tools ?? []],

@@ -19,6 +19,7 @@ import type { ThreadTranscript } from "../src/thread-events.ts";
 import { WorkspaceError } from "../src/workspace.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
 import { workspaceRoute } from "../src/workspace-http.ts";
+import { toolsRoute } from "../src/cube-tools.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
 import { WorkspaceClient } from "../../claude-mod/hooks/workspace.ts";
 import { bash, edit, imageInfo, MAX_IMAGE_BYTES, read, write, workspacePath } from "../../claude-mod/hooks/tools.ts";
@@ -38,7 +39,10 @@ const server = http.createServer(async (request, response) => {
   let raw = "";
   for await (const chunk of request) raw += chunk;
   if (parts.slice(0, 4).join("/") !== "api/threads/t1/workspace") { response.writeHead(404); response.end("{}"); return; }
-  const result = await workspaceRoute(workspace, { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body: raw ? JSON.parse(raw) : {}, thread: "t1" });
+  // As cubed's socket: the cube tools the mod registers, none here.
+  const result = parts[4] === "tools" ? await toolsRoute({ method: request.method!, name: parts[5], token: /^Bearer (\S+)$/.exec(request.headers.authorization ?? "")?.[1],
+    body: raw ? JSON.parse(raw) : {}, signal: new AbortController().signal }, token => workspace.lease({ token }).catch(() => null), () => [])
+    : await workspaceRoute(workspace, { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body: raw ? JSON.parse(raw) : {}, thread: "t1" });
   response.writeHead(result.status, { "content-type": "application/json" });
   response.end(JSON.stringify(result.body));
 });
@@ -504,7 +508,7 @@ try {
   assert.equal(workspacePath(scope.root, "~/notes.md"), "/home/agent/notes.md");
   assert.equal(workspacePath(scope.root, "/real/cube/thread/src/a.ts", "/real/cube/thread"), "src/a.ts", "the root with its symlinks resolved is the workspace too");
   assert.equal(workspacePath(scope.root, "/real/cube/thread/src/a.ts"), "/real/cube/thread/src/a.ts");
-  assert.match(String((workspacePath(scope.root, "/workspace/../cube/artifacts/plan.md") as { deny: string }).deny), /cube keeps artifacts at \/cube\/artifacts/);
+  assert.match(String((workspacePath(scope.root, "/workspace/../cube/artifacts/plan.md") as { deny: string }).deny), /cube keeps artifacts, read and written with the tools mcp__cube__artifact_read/);
   assert.deepEqual(workspacePath(scope.root, "~bob/notes.md"), { deny: "~bob/notes.md: only ~ and ~/ name a home, the agent's (/home/agent)" });
   assert.equal(workspacePath(scope.root, "/workspace/../etc/hosts"), "/etc/hosts");
   assert.deepEqual(workspacePath(scope.root, "/home/cube/thread"), { deny: "/home/cube/thread is the workspace root, not a file" });

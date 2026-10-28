@@ -31,6 +31,7 @@ import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-o
 import { PENDING_ID, STEER_LOST, type RunFeed, type ThreadAcceptance, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
 import type { StartFailure } from "./thread-condition.ts";
 import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
+import { piTool } from "./cube-tools.ts";
 import type { Artifacts } from "./artifact-service.ts";
 import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { addUsage, type OptChatUsage } from "./usage-service.ts";
@@ -71,7 +72,7 @@ const CLOSE_JOIN_MS = 2_000;
  * extension() refuses a tool missing here; optchat-replay-test runs each. */
 export const TOOL_REPLAY: Readonly<Record<string, "read" | "keyed">> = {
   zoom: "read", date: "read", projects: "read", runners: "read", threads: "read", archived_threads: "read", history: "read", diagnose: "read", usage: "read", project_hooks: "read", artifact_read: "read",
-  spawn: "keyed", tell: "keyed", archive: "keyed", project_hooks_write: "keyed", artifact_write: "keyed",
+  spawn: "keyed", tell: "keyed", archive: "keyed", project_hooks_write: "keyed", artifact_write: "keyed", artifact_edit: "keyed",
 };
 
 /** Tells to one thread between two messages of the user: unattended
@@ -193,15 +194,16 @@ you act, guess or ask. date(id) gives the date and time of message id.`;
  * threads'; a thread revises any artifact of its project. */
 export const ARTIFACTS_NOTE = `Artifacts: artifact_write makes a document the user reads beside the
 chat, with revisions, comments and confirmed actions; artifact_read reads
-yours and your threads', and you may revise those. Threads can write their
+yours and your threads', and you may revise those (artifact_edit changes a
+part). Threads can write their
 own (a review of their pull request, say); ask for one in a thread's task
 when the result is worth reading at length. A thread can also revise any
 artifact of its project, yours included when you named the project: to have
 the thread that wrote a document update it for the same task (a delta
 review of the same change, say) rather than start another, give it
 the artifact's id and tell it to read the newest revision, then write the
-whole document on top of it (artifact_write with that id, or in Claude Code
-Read and then Write /cube/artifacts/<id>.md). Link an artifact in your reply
+whole document on top of it (artifact_write with that id, or artifact_edit
+with it for a part). Link an artifact in your reply
 as [title](#/a/<id>). Comments the user leaves on yours come to you as a
 message starting "[artifact <id>]"; comments on a thread's go to that
 thread, whoever wrote the revision. ${ARTIFACT_GUIDE}`;
@@ -1901,14 +1903,13 @@ export class OptChat {
       },
     });
     const instructions = path.join(this.options.directory, "AGENTS.md");
+    // An artifact call's key is its durable task's id within this chat
+    // store: the same on replay, unique whatever ids the provider gives.
     const artifacts = this.options.artifacts ? artifactTools({
       artifacts: this.options.artifacts, author: { kind: "optchat" }, agent: "optchat", projects: true,
-      // The durable task's id within this chat store: the same on replay,
-      // unique whatever ids the provider gives tool calls.
-      key: api => `${this.cacheKey}:artifact:${api.taskId}`,
       model: () => this.model ? `${this.model.provider}/${this.model.id}` : undefined,
       readable: async () => [{ kind: "optchat" as const }, ...Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {}).map(thread => ({ kind: "thread" as const, thread }))],
-    }) : [];
+    }).map(tool => piTool(tool, api => `${this.cacheKey}:artifact:${api.taskId}`)) : [];
     return defineExtension({
       name: "optchat",
       tools: [zoom, date, projects, runners, spawn, tell, threads, archivedThreads, history, diagnose, archive, usage, hooks, writeHooks, ...artifacts].map(tool => this.guard(tool)),
