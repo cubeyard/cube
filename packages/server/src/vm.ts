@@ -54,8 +54,11 @@ export interface ThreadMachines {
    * something happened for it now (its idle time starts again).
    * Only protocol-4 VM runners suspend. */
   suspended(thread: Thread): boolean;
-  suspendIfIdle(thread: Thread, busy: () => Promise<string | null>): Promise<boolean>;
+  suspendIfIdle(thread: Thread, busy: () => Promise<string | null>, idleMs?: number): Promise<boolean>;
   touch(thread: Thread): void;
+  /** How long the machine has been idle (machine-idle.ts; 0 while busy);
+   * absent where machines are never suspended. */
+  idleMs?(thread: Thread): number;
   /** Whether a start of the thread's machine is under way in this process
    * (an owner of a `waking` it recorded; Conversations owns the rest). */
   wakeInFlight(thread: Thread): boolean;

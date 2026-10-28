@@ -7,8 +7,8 @@ import { readFailure } from "./thread-failure.ts";
 
 /** `release`: finish a release a crash or a failure left; `check`: the
  * machine of a ready thread is attached (and started when its runner
- * restarted); `start`: start or prepare the machine, or wake one whose agent
- * has a run to go on with; `settle-wake`: a wake no one in this process owns
+ * restarted); `start`: start or prepare the machine (a queued one asks for
+ * its slot again), or wake one whose agent has a run to go on with; `settle-wake`: a wake no one in this process owns
  * (one a restart cut short) is read back from the runner, never continued;
  * `leave`: nothing this round (also while a failed try's pause runs, and
  * once START_TRIES starts failed). */
@@ -51,6 +51,8 @@ export function recoveryStep(thread: Thread, facts: RecoveryFacts): RecoveryStep
   const sleep = thread.vm?.suspension;
   if (sleep) {
     if (facts.owned) return "leave";
+    // A queued thread's start waits its turn, but nothing else starts it.
+    if (sleep.state === "queued") return due && !exhausted ? "start" : "leave";
     if (facts.demand && due && !exhausted) return "start";
     // Not woken this round: a `waking` left by a failed wake would hold its
     // slot through the pause, or for good once the starts stopped.
@@ -62,5 +64,5 @@ export function recoveryStep(thread: Thread, facts: RecoveryFacts): RecoveryStep
 
 /** Whether `recoveryStep` needs to know the thread's demand: only a sleeping
  * machine no one in this process wakes. */
-export const needsDemand = (thread: Thread, owned: boolean) => !thread.archived && !owned && !!thread.vm?.suspension && !releaseUnfinished(thread)
+export const needsDemand = (thread: Thread, owned: boolean) => !thread.archived && !owned && !!thread.vm?.suspension && thread.vm.suspension.state !== "queued" && !releaseUnfinished(thread)
   && !retriesExhausted(thread);

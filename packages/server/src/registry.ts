@@ -8,7 +8,7 @@ import type { NodeBinding, TrustedRunnerHealth } from "./runner-types.ts";
 import type { ThreadAgent } from "./thread-events.ts";
 import type { ThreadSkills } from "./skills.ts";
 import { newPlaceholder } from "./egress-policy.ts";
-import { HOLDS_SLOT_SQL, nextSleep, type MachineSleep, type SleepEvent } from "./machine-sleep.ts";
+import { HOLDS_SLOT_SQL, nextSleep, SINCE_SQL, WAITS_SQL, waitingSince, type MachineSleep, type SleepEvent } from "./machine-sleep.ts";
 import { nextPhase, type PhaseEvent, type ThreadPhase } from "./thread-phase.ts";
 import { newThreadName, type ThreadName } from "./thread-names.ts";
 
@@ -215,6 +215,8 @@ export interface ThreadVm {
 }
 /** Open threads whose machine holds one of its runner's slots (`holdsSlot`). */
 const HOLDS_SLOT = HOLDS_SLOT_SQL;
+/** Open threads in their runner's queue for a slot (`slotWait`). */
+const WAITS = WAITS_SQL;
 /** At most this many startup steps are kept per thread. */
 export const MAX_STARTUP_STEPS = 40;
 /** At most this much of a failed hook's log is kept on its step. */
@@ -300,6 +302,8 @@ export function runnerSlots(runner: Pick<Runner, "maxActiveVms">): number {
 export function pooledRunner(runner: Pick<Runner, "protocol" | "kind">): boolean {
   return runner.protocol === 4 && runner.kind !== "host";
 }
+
+interface RunnerLoad { id: string; runner: Runner; slots: number; active: number; waiting: number; failed: number; fitness: RunnerFitness }
 
 /** Every open (unarchived) thread holds one machine slot on its runner from
  * creation until its release finishes, whatever its workspace state: a failed
@@ -438,7 +442,7 @@ export class Registry {
   }
   /** Runners that can take a thread now, in allocation order. */
   availableRunners(): Runner[] {
-    return this.runnerLoads().filter(load => load.active < load.slots).map(load => load.runner);
+    return this.runnerLoads().filter(load => load.active + load.waiting < load.slots).map(load => load.runner);
   }
   /** Free and total thread machine slots of the allocatable pool, and how
    * many runners have a free one. */
@@ -448,35 +452,52 @@ export class Registry {
       total: loads.reduce((sum, load) => sum + load.slots, 0), runners: loads.filter(load => load.active < load.slots).length };
   }
   /** Allocatable runners (the pool, or those `which` takes) with their open
-   * threads: by fitness (ready, then unverified, then down), then runners
-   * with a failed machine last, then the least loaded, then enrollment order. */
-  private runnerLoads(now = Date.now(), which: (runner: Runner) => boolean = pooledRunner): Array<{ id: string; runner: Runner; slots: number; active: number; failed: number; fitness: RunnerFitness }> {
+   * threads holding a slot (`active`) and waiting for one (`waiting`): by
+   * fitness (ready, then unverified, then down), then runners with a failed
+   * machine last, then the least loaded, then enrollment order. */
+  private runnerLoads(now = Date.now(), which: (runner: Runner) => boolean = pooledRunner): RunnerLoad[] {
     // One pass over the open threads (index thread_open), not per runner.
-    const rows = this.db.prepare(`SELECT r.id,r.data,coalesce(t.active,0) AS active,coalesce(t.failed,0) AS failed,
+    const rows = this.db.prepare(`SELECT r.id,r.data,coalesce(t.active,0) AS active,coalesce(t.failed,0) AS failed,coalesce(w.waiting,0) AS waiting,
         o.last_attempt_at,o.last_contact_at,o.unreachable_since,o.last_error,o.health
       FROM runner r JOIN runner_operator o ON o.runner_id=r.id
       LEFT JOIN (SELECT runner_id,count(*) AS active,sum(json_extract(data, '$.workspaceState')='failed') AS failed
         FROM thread WHERE ${OPEN_THREAD} AND ${HOLDS_SLOT} GROUP BY runner_id) t ON t.runner_id=r.id
+      LEFT JOIN (SELECT runner_id,count(*) AS waiting FROM thread WHERE ${OPEN_THREAD} AND ${WAITS} GROUP BY runner_id) w ON w.runner_id=r.id
       WHERE o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired' ORDER BY r.rowid`).all() as Array<Record<string, unknown>>;
+    const load = (a: RunnerLoad) => (a.active + a.waiting) / a.slots;
     return rows.map(row => ({ row, runner: JSON.parse(String(row.data)) as Runner }))
       // A host runner takes only the threads started on it by name.
       .filter(({ runner }) => which(runner)).map(({ row, runner }) => {
         const { fitness } = runnerFitness(observation(row), now);
-        return { id: String(row.id), runner, slots: runnerSlots(runner), active: Number(row.active), failed: Number(row.failed), fitness };
+        return { id: String(row.id), runner, slots: runnerSlots(runner), active: Number(row.active), waiting: Number(row.waiting), failed: Number(row.failed), fitness };
       }).sort((a, b) => FITNESS_ORDER[a.fitness] - FITNESS_ORDER[b.fitness] || Number(a.failed > 0) - Number(b.failed > 0)
-      || a.active / a.slots - b.active / b.slots || (b.slots - b.active) - (a.slots - a.active));
+      || load(a) - load(b) || (b.slots - b.active) - (a.slots - a.active));
   }
-  /** A runner a thread is started on by name: enrolled, not retiring, with a
-   * free slot (whether it answers now or not: the thread waits for it). */
-  private namedRunner(id: string): { id: string } {
-    const row = this.db.prepare(`SELECT r.id,r.data,(SELECT count(*) FROM thread WHERE runner_id=r.id AND ${OPEN_THREAD} AND ${HOLDS_SLOT}) AS active
-      FROM runner r JOIN runner_operator o ON o.runner_id=r.id
-      WHERE r.id=? AND o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired'`).get(id);
-    if (!row) throw new Error(`no enrolled runner ${id} that takes threads`);
-    const runner = JSON.parse(String(row.data)) as Runner;
-    if (runner.protocol !== 4) throw new Error(`runner ${runner.nodeId} uses protocol 3 (cube-runner), which cube no longer runs; start the thread on a berth runner`);
-    if (Number(row.active) >= runnerSlots(runner)) throw new Error(`runner ${runner.nodeId} has no free thread machine (${row.active} of ${runnerSlots(runner)} in use); archive one of its threads first`);
-    return { id: String(row.id) };
+  /** A runner a thread is started on by name: enrolled, not retiring
+   * (whether it answers now or not, and whether it is full or not: the
+   * thread waits for it). */
+  private namedRunner(id: string): RunnerLoad {
+    const load = this.runnerLoads(Date.now(), () => true).find(candidate => candidate.id === id);
+    if (!load) throw new Error(`no enrolled runner ${id} that takes threads`);
+    if (load.runner.protocol !== 4) throw new Error(`runner ${load.runner.nodeId} uses protocol 3 (cube-runner), which cube no longer runs; start the thread on a berth runner`);
+    return load;
+  }
+  /** Each runner with threads waiting for a slot: their ids in the order
+   * they get one (oldest wait first), and its slots no thread holds. */
+  slotQueue(): Map<string, { waiting: string[]; free: number }> {
+    const queue = new Map<string, { waiting: string[]; free: number }>();
+    const rows = this.db.prepare(`SELECT id,runner_id FROM thread WHERE ${OPEN_THREAD} AND ${WAITS} ORDER BY ${SINCE_SQL},rowid`).all() as Array<{ id: string; runner_id: string }>;
+    for (const row of rows) {
+      let entry = queue.get(row.runner_id);
+      if (!entry) {
+        const runner = this.getRunner(row.runner_id);
+        const active = Number(this.db.prepare(`SELECT count(*) AS n FROM thread WHERE runner_id=? AND ${OPEN_THREAD} AND ${HOLDS_SLOT}`).get(row.runner_id)!.n);
+        entry = { waiting: [], free: runner ? Math.max(0, runnerSlots(runner) - active) : 0 };
+        queue.set(row.runner_id, entry);
+      }
+      entry.waiting.push(row.id);
+    }
+    return queue;
   }
   /** A runner's last observation and what placement may do with it. */
   runnerFitness(id: string, now = Date.now()): { fitness: RunnerFitness; retryAt: number | null; lastContactAt: number | null; unreachableSince: number | null; error: string | null; health: TrustedRunnerHealth | null; retired: boolean } | null {
@@ -677,11 +698,12 @@ export class Registry {
    * (machine-sleep.ts), in one IMMEDIATE transaction: the only writer of
    * `vm.suspension`. A suspended machine frees its slot and a woken one
    * takes it again, so the runner's summary follows in the same transaction.
-   * `wakeAsked` reserves the slot as `createThread` does: with a slot free
-   * on its runner (counting every other open thread that holds one, a new
-   * thread whose machine does not exist yet included) it becomes `waking`
-   * and holds it; otherwise `waking` + `waiting`, holding none, and the
-   * runner is not asked. The sleep it wrote. */
+   * `wakeAsked` reserves the slot as `createThread` does, first come first
+   * served: with a slot free on its runner for it (counting every other open
+   * thread that holds one, a new thread whose machine does not exist yet
+   * included, and every thread waiting since before it) it holds the slot;
+   * otherwise it waits in the queue (`waiting`, keeping its `since`), holding
+   * none, and the runner is not asked. The sleep it wrote. */
   applySleep(threadId: string, event: SleepEvent, now = Date.now()): MachineSleep | undefined {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -692,8 +714,12 @@ export class Registry {
         if (thread.archived) throw new Error("thread not found");
         const runner = this.getRunner(thread.runnerId);
         if (!runner) throw new Error("thread runner allocation is missing");
-        const row = this.db.prepare(`SELECT count(*) AS active FROM thread WHERE runner_id=? AND id<>? AND ${OPEN_THREAD} AND ${HOLDS_SLOT}`).get(thread.runnerId, threadId);
-        slotFree = Number(row!.active) < runnerSlots(runner);
+        const since = waitingSince(thread.vm.suspension, now);
+        const row = this.db.prepare(`SELECT
+            (SELECT count(*) FROM thread WHERE runner_id=?1 AND id<>?2 AND ${OPEN_THREAD} AND ${HOLDS_SLOT}) AS active,
+            (SELECT count(*) FROM thread WHERE runner_id=?1 AND id<>?2 AND ${OPEN_THREAD} AND ${WAITS}
+              AND (${SINCE_SQL} < ?3 OR (${SINCE_SQL} = ?3 AND rowid < (SELECT rowid FROM thread WHERE id=?2)))) AS ahead`).get(thread.runnerId, threadId, since);
+        slotFree = Number(row!.active) + Number(row!.ahead) < runnerSlots(runner);
       }
       const sleep = nextSleep(thread.vm.suspension, event, { now, slotFree });
       const { suspension: _, ...vm } = thread.vm;
@@ -818,12 +844,17 @@ export class Registry {
       }
       // Counting open threads and inserting this one in one IMMEDIATE
       // transaction is the slot reservation: no two creations, in this or
-      // another process, can take a runner's last slot.
-      const load = options.runnerId !== undefined ? this.namedRunner(options.runnerId)
-        : this.runnerLoads().find(candidate => candidate.active < candidate.slots);
-      if (!load) throw new Error(this.runnerLoads().length
-        ? "no free thread machine in the global runner pool (its berth vm runners) — archive an idle thread, enroll another berth vm, raise a runner's limit, or start the thread on a runner by name"
-        : "no berth vm runner in the global runner pool: start the thread on a berth host by name, or enroll a berth vm");
+      // another process, can take a runner's last slot. With no slot free
+      // (the threads waiting for one count as holding theirs), the thread is
+      // queued on the least loaded runner and starts once its turn comes.
+      const loads = options.runnerId !== undefined ? [this.namedRunner(options.runnerId)] : this.runnerLoads();
+      const load = loads.find(candidate => candidate.active + candidate.waiting < candidate.slots) ?? loads[0];
+      if (!load) throw new Error("no berth vm runner in the global runner pool: start the thread on a berth host by name, or enroll a berth vm");
+      const queued = load.active + load.waiting >= load.slots
+        ? nextSleep(undefined, { type: "queued",
+          waiting: `waiting for a free slot on runner ${load.runner.nodeId}: it hosts as many machines as it may; this thread starts once one frees, in the order threads asked` },
+          { now: Date.now(), slotFree: false })
+        : undefined;
       // Drawn inside this transaction, so no two creations give two open
       // threads one name.
       const id = randomUUID();
@@ -835,7 +866,7 @@ export class Registry {
           ...(project.machine && Object.keys(project.machine).length ? { machine: { ...project.machine } } : {}),
           ...(resolved?.skills ? { skills: resolved.skills } : {}) },
         workspaceState: "allocating", workspaceError: null, workspaceBase: null,
-        vm: { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") }, placement: "provisional" } };
+        vm: { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") }, placement: "provisional", ...queued ? { suspension: queued } : {} } };
       this.db.prepare("INSERT INTO thread VALUES (?,?,?,?)").run(thread.id, projectId, load.id, JSON.stringify(thread));
       this.syncRunner(load.id);
       this.db.prepare("INSERT INTO creation VALUES (?,?,?,?)").run(projectId, requestId, thread.id, payload);

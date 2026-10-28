@@ -89,7 +89,10 @@ try {
     assert.deepEqual([named.runnerId, named.pinned], ["berth", true]);
     // The pool is full: neither a free host runner nor the protocol-3 runner takes the thread.
     w.enroll({ name: "host", max: 4 }, "host");
-    assert.throws(() => w.create(), /no free thread machine in the global runner pool \(its berth vm runners\)/, "a full pool never falls back to a host or p3 runner");
+    const queued = w.create();
+    assert.deepEqual([queued.runnerId, queued.vm?.suspension?.state], ["berth", "queued"], "a full pool queues the thread on its berth vm: never a host or p3 runner");
+    w.registry.applyPhase(queued.id, { type: "releaseBegan" });
+    w.registry.applyPhase(queued.id, { type: "released" });
     const onHost = w.create(w.registry.namedRunnerId("node-host"));
     assert.deepEqual([onHost.runnerId, onHost.pinned], ["host", true], "a host runner by name, pinned");
     // The berth vm is down with a free slot: the thread is placed there and
@@ -101,7 +104,7 @@ try {
     const waiting = w.create();
     assert.deepEqual([waiting.runnerId, waiting.pinned], ["berth", undefined], "an unavailable berth vm never falls back to a host or p3 runner");
     w.registry.close();
-    console.log("ok: the pool is the berth vm runners: no host or p3 fallback when there is none, when it is full or down; a host runner by name, pinned; a protocol-3 runner refused even by name");
+    console.log("ok: the pool is the berth vm runners: no host or p3 fallback when there is none, when it is full (queued) or down; a host runner by name, pinned; a protocol-3 runner refused even by name");
   }
 
   // --- what the user and OptChat see while a thread waits ---

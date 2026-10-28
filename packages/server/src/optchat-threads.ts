@@ -244,7 +244,8 @@ export function readThreads(options: { registry: Registry; conversations: Thread
  * wake that failed is said, whatever the sleep still records: the machine
  * sleeps, and the thread's agent cannot go on until it wakes. */
 const sleepText = (sleep: MachineSleep, failure: Failure | null) => failure ? `its machine is suspended and waking it failed: ${failure.text}`
-  : sleep.state === "waking" ? `its machine is being woken${sleep.waiting ? ` (${sleep.waiting})` : ""}` : "its machine is suspended (idle; it wakes when told)";
+  : sleep.state === "waking" ? `its machine is being woken${sleep.waiting ? ` (${sleep.waiting})` : ""}`
+  : sleep.state === "queued" ? `not started yet, ${sleep.waiting}` : "its machine is suspended (idle; it wakes when told)";
 
 /** The condition in `threads` and `history`. A failure is the last try's:
  * cubed's recovery loop tries again, and an agent still open on the

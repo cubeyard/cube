@@ -152,7 +152,7 @@ import { NoMachines } from "./local-guest.ts";
   }
   const machines = new Asked();
   const started = machines.starts;
-  const registry = { listThreads: () => threads, getThread: (id: string) => threads.find(t => t.id === id) ?? null, interruptStartupSteps: () => {} } as unknown as Registry;
+  const registry = { listThreads: () => threads, getThread: (id: string) => threads.find(t => t.id === id) ?? null, interruptStartupSteps: () => {}, slotQueue: () => new Map() } as unknown as Registry;
   const conversations = new Conversations({ registry, directory: fs.mkdtempSync(path.join(os.tmpdir(), "cube-suspend-conv-")), models: createModels(), machines });
   await conversations.boot();
   assert.deepEqual(started.sort(), ["claude", "idle", "working"], "the recovery loop leaves the suspended machine alone, and a wake no one owns (thread-lifecycle-test.ts R1) is not continued");
@@ -423,7 +423,8 @@ try {
   assert.equal(await vms.suspendIfIdle(fresh(thread), idle), true);
   assert.equal(count("machineSuspend"), 1);
   assert.equal(fresh(thread).vm!.suspension?.state, "suspended");
-  assert.equal(fresh(thread).vm!.suspension?.memoryBytes, 123 * 2 ** 20);
+  const slept = fresh(thread).vm!.suspension;
+  assert.equal(slept?.state === "suspended" && slept.memoryBytes, 123 * 2 ** 20);
   assert.equal(vms.running(fresh(thread)), false);
   assert.equal(registry.runnerSlots().free, 2, "B7-2: a suspended machine frees its slot");
   console.log("ok: suspended only after the idle time, never while a command runs between polls or the agent works; then it holds no slot");
@@ -652,7 +653,7 @@ try {
   const saved = fresh(third).vm!.suspension!;
   assert.deepEqual(registry.applySleep(third.id, { type: "wakeAsked", waiting: "waiting for a free slot" }), { ...saved, state: "waking" });
   assert.equal(registry.runnerSlots().free, slots - 1, "waking: its QEMU may be starting");
-  assert.deepEqual(registry.applySleep(third.id, { type: "slotTaken", waiting: "waiting for a free slot" }), { ...saved, state: "waking", waiting: "waiting for a free slot" });
+  assert.deepEqual(registry.applySleep(third.id, { type: "slotTaken", waiting: "waiting for a free slot" }, 42), { ...saved, state: "waking", waiting: "waiting for a free slot", since: 42 });
   assert.equal(registry.runnerSlots().free, slots, "waiting for a slot: none held");
   assert.deepEqual(registry.applySleep(third.id, { type: "wakeDropped" }), saved, "a dropped wake is the same sleep again");
   assert.equal(registry.runnerSlots().free, slots);

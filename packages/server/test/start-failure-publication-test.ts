@@ -106,10 +106,13 @@ try {
     // The wake the restart cut short is read back, as the recovery loop does.
     await cubed.machines.settleWake(fresh(c.id));
     assert.equal(fresh(c.id).vm?.suspension?.state, "suspended");
-    // The runner is full: two new threads hold its two slots.
+    // The runner is full: two new threads hold its two slots, and it
+    // refuses to suspend them (busy), so the wake keeps waiting.
     await conversations.archive(p2.id);
-    await conversations.activate(life.thread().id);
-    await conversations.activate(life.thread().id);
+    for (const holder of [life.thread(), life.thread()]) {
+      berth.busy.add(vmOf(holder.id));
+      await conversations.activate(holder.id);
+    }
     let told: string | undefined;
     conversations.onStartFailure((id, failure) => { if (id === c.id) told = JSON.stringify(failure); });
     told = JSON.stringify(conversations.startFailure(c.id));

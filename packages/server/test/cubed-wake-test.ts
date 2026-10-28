@@ -58,6 +58,13 @@ try {
     catch (error) { return { tries: asked() - before, error: (error as Error).message }; }
   };
 
+  /** While `work` runs, the runner refuses to suspend `holder` (busy): it
+   * keeps the only slot, so a wake waits however idle the holder is. */
+  const holding = async <T>(holder: string, work: () => Promise<T>): Promise<T> => {
+    berth.busy.add(vmOf(holder));
+    try { return await work(); } finally { berth.busy.delete(vmOf(holder)); }
+  };
+
   const a = thread();
   await conversations.activate(a.id);
   await done(a.id);
@@ -66,16 +73,19 @@ try {
   const b = thread();
   await conversations.activate(b.id);
   await done(b.id);
-  const first = await call(a.id);
-  assert.ok(first.tries >= 3 && first.error, `with b on the only slot, a's call waits its whole time, trying again: ${first.tries} tries`);
-  const next = await call(a.id);
-  assert.equal(next.tries, 1, "a later call of the same run tries once");
-  assert.match(next.error ?? "", /this run already waited its whole time for it, a new message waits again/);
+  await holding(b.id, async () => {
+    const first = await call(a.id);
+    assert.ok(first.tries >= 3 && first.error, `with b on the only slot, a's call waits its whole time, trying again: ${first.tries} tries`);
+    const next = await call(a.id);
+    assert.equal(next.tries, 1, "a later call of the same run tries once");
+    assert.match(next.error ?? "", /this run already waited its whole time for it, a new message waits again/);
 
-  await conversations.submit(a.id, "again", "tell-a-again");
-  const renewed = await call(a.id);
-  assert.ok(renewed.tries >= 3, `a new message waits its whole time again: ${renewed.tries} tries`);
-  assert.doesNotMatch(renewed.error ?? "", /already waited its whole time/);
+    await conversations.submit(a.id, "again", "tell-a-again");
+    const renewed = await call(a.id);
+    assert.ok(renewed.tries >= 3, `a new message waits its whole time again: ${renewed.tries} tries`);
+    assert.doesNotMatch(renewed.error ?? "", /already waited its whole time/);
+  });
+  assert.equal(fresh(b.id).vm?.suspension, undefined, "the runner refused to suspend busy b throughout");
 
   await conversations.archive(b.id);
   const resumed = await call(a.id);
@@ -97,7 +107,7 @@ try {
   const c = thread();
   await conversations.activate(c.id);
   await done(c.id);
-  assert.match((await call(a.id)).error ?? "", /^the thread's machine is suspended and could not be resumed/, "the run gives up");
+  assert.match((await holding(c.id, () => call(a.id))).error ?? "", /^the thread's machine is suspended and could not be resumed/, "the run gives up");
   await conversations.archive(c.id);
   await conversations.activate(a.id);
   assert.equal(fresh(a.id).vm?.suspension, undefined, "a start (not the run's call) resumed it");
@@ -105,7 +115,7 @@ try {
   const d = thread();
   await conversations.activate(d.id);
   await done(d.id);
-  const after = await call(a.id);
+  const after = await holding(d.id, () => call(a.id));
   assert.ok(after.tries >= 3, `the machine ran since: a call waits its whole time again: ${after.tries} tries`);
   assert.doesNotMatch(after.error ?? "", /already waited its whole time/);
   console.log("ok: once the machine ran (whoever started it), a run that gave up waits its whole time again");
@@ -117,6 +127,7 @@ try {
   const g = thread();
   await conversations.activate(g.id);
   await done(g.id);
+  berth.busy.add(vmOf(g.id));
   const waiting = call(d.id);
   await until("d's wake waits for a slot", () => !!slotWait(fresh(d.id).vm?.suspension) && conversations.owns(fresh(d.id)));
   const began = Date.now();
@@ -130,6 +141,7 @@ try {
   console.log("ok: an archive during a wake that waits for a slot answers at once; the wake ends and starts nothing more");
 
   // A close ends a wake that waits: the machine stays asleep, nothing more is asked.
+  berth.busy.delete(vmOf(g.id));
   await conversations.archive(g.id);
   const e = thread();
   await conversations.activate(e.id);
@@ -138,6 +150,7 @@ try {
   const f = thread();
   await conversations.activate(f.id);
   await done(f.id);
+  berth.busy.add(vmOf(f.id));
   const closing = conversations.guest(fresh(e.id)).call("stat", { path: "/workspace" }).then(() => null, (error: Error) => error.message);
   await until("e's wake waits for a slot", () => !!slotWait(fresh(e.id).vm?.suspension));
   await app.close();

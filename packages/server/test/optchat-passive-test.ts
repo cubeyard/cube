@@ -58,7 +58,7 @@ const makeThread = (id: string, suspension?: Suspension) => ({
 const registryOf = (threads: Thread[]) => ({
   listThreads: () => threads, getThread: (id: string) => threads.find(thread => thread.id === id) ?? null,
   getProject: () => ({ id: "p", name: "cube" }), interruptStartupSteps: () => {}, beginStartupStep: () => {}, endStartupStep: () => {}, initialPrompt: () => null,
-  runner: () => ({ nodeId: "node", environmentId: 1, configHash: "config" }), runnerSlots: () => ({ free: 0, total: 2 }),
+  runner: () => ({ nodeId: "node", environmentId: 1, configHash: "config" }), runnerSlots: () => ({ free: 0, total: 2 }), slotQueue: () => new Map(),
 }) as unknown as Registry;
 const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as never, latestCommits: async () => ({}) as never };
 

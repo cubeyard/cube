@@ -50,6 +50,7 @@ const members = {
   suspended: (m, t) => m.suspended(t),
   suspendIfIdle: (m, t) => m.suspendIfIdle(t, async () => null),
   touch: (m, t) => m.touch(t),
+  idleMs: (m, t) => m.idleMs?.(t),
   wakeInFlight: (m, t) => m.wakeInFlight(t),
   wakeNow: (m, t) => m.wakeNow(t),
   settleWake: (m, t) => m.settleWake(t),
@@ -59,7 +60,7 @@ const members = {
 /** RunnerMachines' own answers on a retired runner (the old RetiredProtocolMachines'). */
 const gated: Record<keyof typeof members, Outcome> = {
   guest: P3, start: P3, invalidateTemplate: { value: undefined }, release: { value: { retained: true } }, discard: P3, close: { value: undefined },
-  running: { value: false }, dial: P3, suspended: { value: false }, suspendIfIdle: { value: false }, touch: { value: undefined },
+  running: { value: false }, dial: P3, suspended: { value: false }, suspendIfIdle: { value: false }, touch: { value: undefined }, idleMs: { value: 0 },
   wakeInFlight: { value: false }, wakeNow: { value: null }, settleWake: { value: undefined }, diagnose: P3,
   startupLog: { value: null },
 };

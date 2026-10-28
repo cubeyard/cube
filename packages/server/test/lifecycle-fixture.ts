@@ -43,6 +43,8 @@ export class FakeBerth {
   readonly failCreates = new Map<string, string>();
   /** Machines (by id) whose resume from SUSPENDED fails, and with what. */
   readonly failResumes = new Map<string, string>();
+  /** Machines (by id) whose suspend the runner refuses as busy (open streams). */
+  readonly busy = new Set<string>();
   /** How many deletes fail before one succeeds. */
   failDeletes = 0;
   readonly phases = new Map<string, Phase>();
@@ -126,6 +128,7 @@ export class FakeBerth {
       }
       case "machineSuspend":
         if (phase !== Phase.RUNNING) throw new RunnerError("FAILED_PRECONDITION", "busy", "not running");
+        if (this.busy.has(vm)) { this.events.push({ op, vm, from: phase, to: phase }); throw new RunnerError("FAILED_PRECONDITION", "busy", "streams are open"); }
         this.set(op, vm, Phase.SUSPENDED);
         return this.machine(vm);
       case "machineDelete":
@@ -178,9 +181,12 @@ export const project: Project = { id: "p", name: "life", status: "ready", error:
 /** A cubed process over a state directory: a new one is a restart. */
 export interface Cubed { conversations: Conversations; machines: ThreadMachines; close(): Promise<void> }
 
-export function lifecycle(root: string, options: { slots: number; idleMs?: number; wakeWaitMs?: number; kind?: "vm" | "host" }) {
+type FauxResponses = Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0];
+
+/** `responses`: the faux model's answers (default: "done", 2000 times). */
+export function lifecycle(root: string, options: { slots: number; idleMs?: number; wakeWaitMs?: number; kind?: "vm" | "host"; responses?: FauxResponses }) {
   const faux = fauxProvider({ tokensPerSecond: 1_000_000 });
-  faux.setResponses(Array.from({ length: 2000 }, () => fauxAssistantMessage("done")));
+  faux.setResponses(options.responses ?? Array.from({ length: 2000 }, () => fauxAssistantMessage("done")));
   const models = createModels();
   models.setProvider(faux.provider);
   const model = { provider: faux.getModel().provider, id: faux.getModel().id };

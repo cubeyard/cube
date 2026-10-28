@@ -12,7 +12,11 @@
  *   T5  no other registry write can set a sleep or its notice (a compile
  *       error): `updateThreadVm` takes neither, and no whole-row write exists;
  *   T6  a rename changes only the title, so it keeps a sleep written after
- *       its caller read the row, and the runner's summary. */
+ *       its caller read the row, and the runner's summary;
+ *   T7  the runner's queue: a new thread on a full runner is queued, not
+ *       refused; slots go first come first served to new threads and wakes
+ *       alike (no new thread passes a waiting wake, nor a wake a waiting new
+ *       thread), and the order survives a reopened registry. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -34,10 +38,12 @@ const sleeps: Record<string, MachineSleep | undefined> = {
   suspended: { state: "suspended", at: 1, memoryBytes: 64 },
   waking: { state: "waking", at: 1, memoryBytes: 64 },
   waiting: { state: "waking", at: 1, memoryBytes: 64, waiting: WAIT },
+  queued: { state: "queued", waiting: WAIT, since: 2 },
 };
 /** One of each event, typed by the event's kinds: a new kind does not
  * compile until it has a row here and in `expected`. */
 const events: { [K in SleepEvent["type"]]: Extract<SleepEvent, { type: K }> } = {
+  queued: { type: "queued", waiting: WAIT },
   suspended: { type: "suspended", at: 9, memoryBytes: 128 },
   wakeAsked: { type: "wakeAsked", waiting: WAIT },
   slotTaken: { type: "slotTaken", waiting: WAIT },
@@ -46,13 +52,19 @@ const events: { [K in SleepEvent["type"]]: Extract<SleepEvent, { type: K }> } = 
   resumed: { type: "resumed", notice: null },
 };
 /** The sleep after each event, from a sleep saved at 1 with 64 bytes (from
- * running: saved now, with none), with and without a free slot. */
+ * running: saved now, with none), with and without a free slot. A wait
+ * keeps its place: the queued one since 2, the waiting wake (written before
+ * `since`) since its `at`; any other waits from now. A queued thread has
+ * nothing saved: only a start that gets its slot ends its wait. */
 const kept = (from: MachineSleep | undefined) => from ? { at: 1, memoryBytes: 64 } : { at: NOW };
+const since = (from: MachineSleep | undefined) => from === sleeps.waiting ? 1 : NOW;
 const expected: Record<SleepEvent["type"], (from: MachineSleep | undefined, slotFree: boolean) => MachineSleep | undefined> = {
+  queued: from => from?.state === "queued" ? from : { state: "queued", waiting: WAIT, since: NOW },
   suspended: () => ({ state: "suspended", at: 9, memoryBytes: 128 }),
-  wakeAsked: (from, slotFree) => ({ state: "waking", ...kept(from), ...slotFree ? {} : { waiting: WAIT } }),
-  slotTaken: from => ({ state: "waking", ...kept(from), waiting: WAIT }),
-  wakeDropped: from => ({ state: "suspended", ...kept(from) }),
+  wakeAsked: (from, slotFree) => from?.state === "queued" ? slotFree ? undefined : { state: "queued", waiting: WAIT, since: 2 }
+    : { state: "waking", ...kept(from), ...slotFree ? {} : { waiting: WAIT, since: since(from) } },
+  slotTaken: from => from?.state === "queued" ? from : { state: "waking", ...kept(from), waiting: WAIT, since: since(from) },
+  wakeDropped: from => from?.state === "queued" ? from : { state: "suspended", ...kept(from) },
   running: () => undefined,
   resumed: () => undefined,
 };
@@ -113,7 +125,8 @@ registry.applySleep(a, events.suspended, NOW);
 registry.createThread(project.id, "c", model, "hello");
 assert.equal(slotWait(registry.applySleep(a, events.wakeAsked, NOW)), WAIT, "no slot free: the wake waits");
 assert.equal(registry.runnerSlots().free, 0);
-assert.throws(() => registry.createThread(project.id, "d", model, "hello"), /no free thread machine/, "and no placement counts on a's slot");
+assert.equal(registry.createThread(project.id, "d", model, "hello").vm?.suspension?.state, "queued", "and no placement counts on a's slot: a new thread waits");
+assert.equal(registry.runnerSlots().free, 0);
 console.log("ok: T3 a wake reserves a slot only when one is free");
 
 // ---------------------------------------------------------------- T6
@@ -136,7 +149,7 @@ registry.close();
 const raw = new DatabaseSync(file);
 const stored = (id: string) => JSON.parse(String((raw.prepare("SELECT data FROM thread WHERE id=?").get(id) as { data: string }).data)).vm.suspension;
 assert.deepEqual(stored(b), { state: "suspended", at: 7, memoryBytes: 32 }, "the shape v0.3.37 writes");
-assert.deepEqual(stored(a), { state: "waking", at: 9, memoryBytes: 128, waiting: WAIT });
+assert.deepEqual(stored(a), { state: "waking", at: 9, memoryBytes: 128, waiting: WAIT, since: NOW });
 // A row as v0.3.37 wrote it (waking, no memory) reads and changes as any other.
 raw.prepare("UPDATE thread SET data=json_set(data,'$.vm.suspension',json(?)) WHERE id=?").run(JSON.stringify({ state: "waking", at: 3 }), b);
 raw.close();
@@ -160,4 +173,34 @@ export function onlyApplySleepWritesASleep(r: Registry) {
   return contradiction;
 }
 console.log("ok: T5 only applySleep writes a sleep or its notice, and a suspended sleep cannot wait (typecheck)");
+
+// ---------------------------------------------------------------- T7
+{
+  const queueFile = path.join(root, "queue.sqlite");
+  let q = new Registry(queueFile);
+  q.saveProject(project);
+  q.enrollRunner({ nodeId: "node-q", threadId: "q", environmentId: 1, configPath: path.join(root, "q.json"), configHash: "h", maxActiveVms: 1, protocol: 4, kind: "vm" });
+  const sleepIn = (id: string) => q.getThread(id)!.vm?.suspension;
+  const x = q.createThread(project.id, "x", model, "hello").id;
+  assert.equal(sleepIn(x), undefined, "a free slot: x holds it");
+  const y = q.createThread(project.id, "y", model, "hello").id;
+  assert.deepEqual([sleepIn(y)?.state, slotWait(sleepIn(y))?.startsWith("waiting for a free slot on runner node-q")], ["queued", true], "the runner is full: y is queued, not refused");
+  q.applySleep(x, events.suspended, NOW);
+  const z = q.createThread(project.id, "z", model, "hello").id;
+  assert.equal(sleepIn(z)?.state, "queued", "x's freed slot is y's: z does not pass y");
+  const later = Date.now() + 60_000;
+  assert.ok(slotWait(q.applySleep(x, events.wakeAsked, later)), "nor does x's wake, asked after both");
+  assert.equal(q.applySleep(z, events.wakeAsked, later)?.state, "queued", "z asks before y: it waits on");
+  assert.equal(q.applySleep(y, events.wakeAsked, later), undefined, "y, first in the queue, takes the slot");
+  assert.deepEqual([...q.slotQueue()], [["q", { waiting: [z, x], free: 0 }]], "z, then x");
+  q.close();
+  q = new Registry(queueFile);
+  assert.deepEqual([...q.slotQueue()], [["q", { waiting: [z, x], free: 0 }]], "the order survives a reopened registry");
+  q.applySleep(y, events.suspended, later);
+  assert.ok(slotWait(q.applySleep(x, events.wakeAsked, later + 1)), "y's slot is z's: x's wake waits on");
+  assert.equal(q.applySleep(z, events.wakeAsked, later + 1), undefined, "z takes it");
+  assert.equal(q.runnerSlots().total - q.runnerSlots().free, 1, "one slot, held once");
+  q.close();
+  console.log("ok: T7 a full runner queues new threads; slots go first come first served to new threads and wakes, across a reopen");
+}
 fs.rmSync(root, { recursive: true, force: true });

@@ -52,6 +52,9 @@ export function threadCondition(thread: Thread, runtime: ThreadRuntime): ThreadC
   // of its machine lets it go on.
   if (runtime.down) return { kind: "down", failure: { kind: "down", text: runtime.down } };
   const sleep = thread.vm?.suspension ?? null;
+  // A queued thread waits in its runner's queue, whether this process is
+  // asking for its slot now or has not yet: its row says so.
+  if (sleep?.state === "queued") return { kind: "waiting", waiting: sleep.waiting, sleep };
   if (runtime.starting) return { kind: "starting", failure, waiting: runtime.waiting, sleep };
   // An open agent goes on with its run after a later check failed; a
   // machine that failed to wake cannot.

@@ -44,15 +44,21 @@ try {
   assert.equal(b.runnerId, "wide");
   assert.deepEqual([status().activeThreads, status().maxActiveVms, status().allocationState], [2, 2, "allocating"]);
   assert.deepEqual(status().threadIds, [a.id, b.id]);
-  assert.throws(() => registry.createThread("p", "c", model, "c"), /no free thread machine/);
-  assert.deepEqual(slots(), { free: 0, total: 2 });
+  /** A new thread on the full runner: queued, holding no slot; archived again. */
+  const queues = (requestId: string, why: string) => {
+    const queued = registry.createThread("p", requestId, model, requestId);
+    assert.deepEqual([queued.runnerId, queued.vm?.suspension?.state], ["wide", "queued"], why);
+    assert.deepEqual(slots(), { free: 0, total: 2 }, `${why}: it holds no slot`);
+    archive(registry, queued.id);
+  };
+  queues("full", "a full runner queues a new thread");
 
   // A failed machine keeps its slot (its disk may exist) until archived.
   registry.applyPhase(a.id, { type: "ready", base: null });
   registry.applyPhase(b.id, { type: "failed", failure: allocationFailed("boom") });
   assert.deepEqual(registry.runnerCapacity().errors, ["workspace allocation failed: boom"]);
   assert.equal(status().allocationState, "failed");
-  assert.throws(() => registry.createThread("p", "c", model, "c"), /no free thread machine/);
+  queues("failed", "a failed machine's slot is not free");
   archive(registry, b.id);
   assert.deepEqual(slots(), { free: 1, total: 2 }, "archive returns exactly one slot");
   assert.deepEqual(registry.runnerCapacity().errors, []);
@@ -71,7 +77,9 @@ try {
   registry.recordRunnerProbe("other", { health: { ...health, maxActiveVms: 1 } });
   assert.equal(registry.runnerStatuses().find(row => row.id === "other")!.maxActiveVms, 1);
   assert.equal(registry.createThread("p", "f", model, "f").runnerId, "wide");
-  assert.throws(() => registry.createThread("p", "g", model, "g"), /no free thread machine/, "other is full at its new bound of one");
+  const full = registry.createThread("p", "g-full", model, "g");
+  assert.equal(full.vm?.suspension?.state, "queued", "other is full at its new bound of one (and wide at two): queued");
+  archive(registry, full.id);
   registry.recordRunnerSlots("other", 3);
   assert.equal(registry.createThread("p", "g", model, "g").runnerId, "other");
   assert.throws(() => registry.recordRunnerSlots("other", 0), /positive integer/);
@@ -100,16 +108,19 @@ try {
       const registry = new Registry(workerData.filename);
       parentPort.postMessage({ ready: true });
       parentPort.once("message", () => {
-        try { registry.createThread(workerData.projectId, "race", { provider: "fixture", id: "selected" }, "race"); parentPort.postMessage({ ok: true }); }
+        try {
+          const thread = registry.createThread(workerData.projectId, "race", { provider: "fixture", id: "selected" }, "race");
+          parentPort.postMessage({ ok: true, queued: thread.vm?.suspension?.state === "queued" });
+        }
         catch (error) { parentPort.postMessage({ ok: false, error: error.message }); }
         finally { registry.close(); }
       });
     });`;
   const workers = ["r1", "r2", "r3"].map(projectId => {
     const worker = new Worker(source, { eval: true, workerData: { module: new URL("../src/registry.ts", import.meta.url).href, filename: raceFile, projectId } });
-    let ready!: () => void, done!: (value: { ok: boolean; error?: string }) => void;
+    let ready!: () => void, done!: (value: { ok: boolean; error?: string; queued?: boolean }) => void;
     const started = new Promise<void>(resolve => { ready = resolve; });
-    const finished = new Promise<{ ok: boolean; error?: string }>((resolve, reject) => { done = resolve; worker.once("error", reject); });
+    const finished = new Promise<{ ok: boolean; error?: string; queued?: boolean }>((resolve, reject) => { done = resolve; worker.once("error", reject); });
     worker.on("message", message => message.ready ? ready() : done(message));
     return { worker, started, finished };
   });
@@ -117,10 +128,10 @@ try {
   workers.forEach(worker => worker.worker.postMessage("go"));
   const results = await Promise.all(workers.map(worker => worker.finished));
   await Promise.all(workers.map(worker => worker.worker.terminate()));
-  assert.equal(results.filter(result => result.ok).length, 2, JSON.stringify(results));
-  assert.match(results.find(result => !result.ok)!.error!, /no free thread machine/);
+  assert.deepEqual(results.map(result => result.ok ? result.queued : result.error).sort(), [false, false, true], `two hold the slots, the third is queued: ${JSON.stringify(results)}`);
   const raced = new Registry(raceFile);
-  assert.equal(raced.listThreads().length, 2);
+  assert.equal(raced.listThreads().length, 3);
+  assert.equal(raced.runnerSlots().free, 0);
   raced.close();
 
   // --- product: two threads on one runner at once ---
@@ -170,13 +181,17 @@ try {
     const start = (name: string) => call("/api/threads", { projectId, requestId: name, text: `work as ${name}`, model: selected });
     const [one, two] = await Promise.all([start("one"), start("two")]);
     assert.equal(one.status, 200, JSON.stringify(one.body)); assert.equal(two.status, 200, JSON.stringify(two.body));
+    // A full runner queues the third: it waits, saying so, and holds no slot.
     const third = await start("three");
-    assert.notEqual(third.status, 200);
-    assert.match(third.body.error, /no free thread machine/);
+    assert.equal(third.status, 200, JSON.stringify(third.body));
+    const listed = async (id: string) => (await call("/api/threads")).body.threads.find((thread: { id: string }) => thread.id === id);
+    const queued = await listed(third.body.id);
+    assert.deepEqual([queued.state, queued.error, queued.vm.suspension.state], ["starting", null, "queued"]);
+    assert.match(queued.waiting, /^waiting for a free slot on runner node-shared: /);
     const view = (await call("/api/projects")).body.projects[0];
     assert.deepEqual([view.availableSlotCount, view.availableRunnerCount, view.runnerCapacity.slots], [0, 0, { free: 0, total: 2 }]);
     const runners = (await call("/api/runners")).body.runners;
-    assert.deepEqual([runners[0].activeThreads, runners[0].maxActiveVms], [2, 2]);
+    assert.deepEqual([runners[0].activeThreads, runners[0].maxActiveVms], [3, 2], "its open threads, the queued one included, as a suspended one is");
 
     const finished = async (id: string) => until(async () => (await call(`/api/threads/${id}/history`)).body,
       history => history.status.state === "completed", `thread ${id} finishes`);
@@ -188,22 +203,26 @@ try {
     const [s1, s2] = [span(one.body.id), span(two.body.id)];
     assert.ok(s1[0] < s2[1] && s2[0] < s1[1], "both threads' commands ran at the same time");
 
-    // Archiving one frees its slot; a machine that fails to start holds the
-    // freed slot until it is archived too.
+    // Archiving one frees its slot, which goes to the queued third at once.
     assert.equal((await call(`/api/threads/${one.body.id}`, undefined, "DELETE")).status, 200);
+    await finished(third.body.id);
+    assert.equal((await listed(third.body.id)).vm.suspension, undefined, "the third left the queue and ran");
+    // A machine that fails to start holds the freed slot until it is
+    // archived too: until then a new thread waits.
+    assert.equal((await call(`/api/threads/${third.body.id}`, undefined, "DELETE")).status, 200);
     machines.failing.add("work as broken");
     const broken = await start("broken");
     assert.equal(broken.status, 200, JSON.stringify(broken.body));
     await until(async () => app.registry.getThread(broken.body.id)!.workspaceState, state => state === "failed", "the broken machine fails");
-    assert.match((await start("four")).body.error, /no free thread machine/);
-    assert.match((await call("/api/projects")).body.projects[0].runnerCapacity.errors[0], /did not start: fixture/);
-    assert.equal((await call(`/api/threads/${broken.body.id}`, undefined, "DELETE")).status, 200);
     const four = await start("four");
     assert.equal(four.status, 200, JSON.stringify(four.body));
+    assert.equal((await listed(four.body.id)).vm.suspension.state, "queued");
+    assert.match((await call("/api/projects")).body.projects[0].runnerCapacity.errors[0], /did not start: fixture/);
+    assert.equal((await call(`/api/threads/${broken.body.id}`, undefined, "DELETE")).status, 200);
     await finished(four.body.id);
   } finally {
     await app.close();
     await machines.close();
   }
-  console.log("ok: runner slots (spread, bound, failed machines, archive, one-machine runners, process race) and two concurrent threads on one runner over local guests");
+  console.log("ok: runner slots (spread, bound, failed machines, archive, one-machine runners, process race), a full runner's queue over the API, and two concurrent threads on one runner over local guests");
 } finally { fs.rmSync(root, { recursive: true, force: true }); }

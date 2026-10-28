@@ -45,24 +45,32 @@ nothing changes. The row keeps the fields and words cubed always wrote
 
 ```text
 (none) ─create + start─▶ running ─idle 5 min, nothing busy─▶ suspended
+(none) ─create, runner full─▶ queued ─its turn, a slot free─▶ running
+running ─a thread waits for a slot on its runner; idlest, nothing busy─▶ suspended
 suspended ─a start─▶ waking ─the runner resumes it─▶ running
-waking ─runner full─▶ waking + waiting ─a later try─▶ waking
+waking ─runner full─▶ waking + waiting ─its turn, a later try─▶ waking
 running ─the runner restarts─▶ stopped ─recovery's check─▶ running
 running, suspended ─archive─▶ released (deleted, or retained with a reason)
 ```
 
 cubed records only `suspension` (`suspended`, `waking`, `waking` +
-`waiting`); running, starting and suspending live in this process.
+`waiting`, `queued`); running, starting and suspending live in this process.
 `RunnerMachines` reports what happened as one `SleepEvent`, and
 `nextSleep` (`machine-sleep.ts`) is the whole table of what follows:
 
-| event | from any sleep, or none | holds a slot |
-|---|---|---|
-| `suspended` (the runner saved it) | `suspended`, at that time | no |
-| `wakeAsked` (a start resumes it) | `waking`, or `waking` + `waiting` with no slot free | without `waiting` |
-| `slotTaken` (the runner was full after all) | `waking` + `waiting` | no |
-| `wakeDropped` (nothing goes on with the wake) | `suspended`, as saved | no |
-| `running`, `resumed` (with its notice) | none: it runs | yes |
+| event | from any sleep, or none | from `queued` | holds a slot |
+|---|---|---|---|
+| `queued` (a new thread, its runner full) | `queued`, since now | as it was | no |
+| `suspended` (the runner saved it) | `suspended`, at that time | `suspended` | no |
+| `wakeAsked` (a start resumes it, or makes a queued thread's machine) | `waking`, or `waking` + `waiting` with no slot free for it | none (it starts), or as it was | without `waiting` |
+| `slotTaken` (the runner was full after all) | `waking` + `waiting` | as it was | no |
+| `wakeDropped` (nothing goes on with the wake) | `suspended`, as saved | as it was | no |
+| `running`, `resumed` (with its notice) | none: it runs | none | yes |
+
+A sleep with `waiting` (`queued`, or `waking` + `waiting`) is in its
+runner's queue, in the order of its `since`: when it began to wait, kept
+until the wait ends (a `waking` + `waiting` written before the queue has
+none, and its `at` stands in).
 
 `Registry.applySleep` is the only writer: it applies the event in one
 IMMEDIATE transaction with the runner's summary, so a sleep cannot be
@@ -75,12 +83,33 @@ reads the row in its own transaction). `holdsSlot` is the slot rule, and
 (machine-sleep-test, lifecycle-model-test I11). `waking` without `waiting` holds a slot. It is a
 reservation, taken like a new thread's (`wakeAsked`, in one
 IMMEDIATE transaction that counts every other open thread holding a slot on
-the runner): with none free the thread is `waking` + `waiting` and the runner
-is not asked, so a wake never takes the slot of a thread whose machine is
-not created yet. A runner that refuses a slot all the same (another cubed, a
-lowered bound) makes a wake wait the same way, and a new machine wait
-(`RunnerWait`, its boot step `interrupted`), not fail. There is no queue:
-the first try after a slot frees gets it. The reservation is for a wake this
+the runner and every thread waiting since before it): with none free for it
+the thread is `waking` + `waiting` and the runner is not asked, so a wake
+never takes the slot of a thread whose machine is not created yet, nor of
+one that waited longer. A runner that refuses a slot all the same (another
+cubed, a lowered bound) makes a wake wait the same way, and a new machine
+wait (`RunnerWait`, its boot step `interrupted`), not fail.
+
+The queue is these rows, first come first served, new threads and wakes
+alike (machine-sleep-test T7, lifecycle-model-test I13). `createThread`
+places a thread with no slot free (the threads waiting count as holding
+theirs) on the least loaded runner as `queued` (a named runner: on it), in
+the same transaction, instead of refusing it; only a pool with no runner
+refuses. A queued thread's machine is not made and its runner not asked
+until `Conversations.ensureWorkspace` gets its slot (`wakeAsked`);
+`RunnerMachines` refuses to make it before (`RunnerWait`). The recovery
+loop asks for the slot each round; a slot that frees (an idle round's
+suspend, a release) goes to the queue at once (`Conversations.admit`); a
+waking thread's own wake asks again every `retryMs`, and one that gives up
+leaves the queue (`wakeDropped`). While threads wait on a runner, the idle
+round (`suspendIdle`) suspends that runner's machines idlest first, without
+the 5 minutes, until each has a slot: one at a time, with every guard of
+the 5-minute rule (`busy`, commands, the portal, a registered service, the
+32 minutes after a cubed restart, the runner's own refusal). It runs too as
+a thread begins to wait. On a runner with no thread waiting nothing
+changes. A message or a steer to a queued thread is refused with the
+wait's words (no failure, its place kept); archiving one asks its runner
+nothing (thread-queue-test). The reservation is for a wake this
 process runs, never a wish: a `waking` that no
 start or wake of this process owns (a restart cut it short) is read back
 from the runner (`RunnerMachines.settleWake`) and recorded as the runner's
@@ -90,7 +119,8 @@ phase, `suspended` or running. It is not continued.
 
 | Trigger | Starts or wakes |
 |---|---|
-| a new thread (UI, OptChat `spawn`) | yes, once (`activate`) |
+| a new thread (UI, OptChat `spawn`) | yes, once (`activate`); on a full runner it is queued and starts in its turn |
+| a thread waiting for a slot on the runner | suspends the idlest idle machine there at once (the idle round), never a busy one |
 | a message (UI prompt, OptChat `tell`, an artifact comment) | a new one wakes a sleeping machine, and gives a thread whose start failed one more try; a replayed one (a request id the agent already has) wakes nothing |
 | a guest call of the agent's run, a portal connection | yes (`Conversations.wake`, the guest transport's `before`; the portal's `wake`); on a full runner it waits for a slot up to 30 min (`PATIENCE.wakeMs`), once: after that wait gave up, later calls try once and fail at once until the machine runs (whoever starts it) or a new message asks again |
 | an archive's release check | only with a slot free now (`wakeNow`); otherwise the disk is kept unchecked at once, with the reason |
@@ -258,10 +288,20 @@ machine's sleep (packages/web/src/lib/thread-state.ts).
   tries in a row at a time (R13b); a run's guest calls on a full runner
   wait once, not once each (R11); a runner that does not answer (R12,
   R12b, R12c).
+- `packages/server/test/thread-queue-test.ts`: with no thread waiting
+  nothing is suspended early; a new thread on a full runner is queued and
+  the idlest machine suspended at once for it (Q1); an agent at work, a
+  running command, a portal connection and a registered service are not
+  (Q2); a wake waiting since before a new thread goes first, and the new
+  thread is not starved (Q3); a queued thread refuses a message with its
+  wait, keeps its place across a restart, is archived without its runner,
+  and the oldest gets the freed slot (Q4).
 - `packages/server/test/lifecycle-model-test.ts`: seeded random runs of
   creates (some whose machine can never be made), messages and their
   replays, reads, idle and recovery rounds, restarts (with wakes cut short)
-  and archives, checking I1–I6 and I8–I12 after every step (I4
+  and archives (queued threads too), checking I1–I6 and I8–I14 after every
+  step (I13: no slot goes to a thread while one that waited longer still
+  waits; I14: no create fails while a runner exists; I4
   as: the runner holds no more than the registry counts, the registry no
   more than the slots; I10: the row, `threads`, `history` and the overview
   of each thread whose condition holds still while read; I11: the
@@ -295,8 +335,9 @@ machine's sleep (packages/web/src/lib/thread-state.ts).
   every sleep against the table above, the SQL slot rule against
   `holdsSlot` and the runner's summary through a real Registry, the
   persisted shape both ways, that a rename keeps a sleep written after its
-  caller read the row, and (typecheck) that neither `updateThreadVm` nor a
-  whole-row write can set a sleep or its notice.
+  caller read the row, (typecheck) that neither `updateThreadVm` nor a
+  whole-row write can set a sleep or its notice, and the queue's order
+  across new threads, wakes and a reopened registry (T7).
 - Both run over `lifecycle-fixture.ts`: the real Registry and the thread
   runtime createCubed builds (`thread-runtime.ts`: RunnerMachines,
   Conversations and the wake between them), a stand-in `berth vm` with

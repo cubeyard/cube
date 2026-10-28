@@ -260,6 +260,8 @@ export class RunnerMachines implements ThreadMachines {
 
   touch(thread: Thread): void { this.activity.touch(thread.id); }
 
+  idleMs(thread: Thread): number { return this.activity.idleMs(thread.id); }
+
   /** Whether the thread's machine is suspended (or waking). */
   suspended(thread: Thread): boolean { return !this.retired(thread) && !!this.options.registry.getThread(thread.id)?.vm?.suspension; }
 
@@ -317,13 +319,14 @@ export class RunnerMachines implements ThreadMachines {
     this.log.info("wake dropped: no one asks for the machine", { thread: id, phase: machine ? "SUSPENDED" : "gone" });
   }
 
-  /** Suspends the thread's machine when it has been idle for idleMs and
+  /** Suspends the thread's machine when it has been idle for `idleMs` (the
+   * options' idleMs, IDLE_MS, unless a thread waits for its slot) and
    * nothing runs in it: `busy` (the conversation's), its commands, calls and
    * portal connections, and no registered service (asked last, with the
    * suspend's gate up, so nothing starts between). Only a running machine
    * on a runner that says it can suspend, one suspend per runner at a time;
    * a refusal keeps it running. True when it was suspended. */
-  async suspendIfIdle(thread: Thread, busy: () => Promise<string | null>): Promise<boolean> {
+  async suspendIfIdle(thread: Thread, busy: () => Promise<string | null>, idleMs = this.options.idleMs ?? IDLE_MS): Promise<boolean> {
     const current = this.options.registry.getThread(thread.id);
     if (!current || current.archived || current.workspaceState !== "available" || !this.onVm(current) || !this.running(current)) return false;
     if (this.starting.has(thread.id) || this.suspending.has(thread.id)) return false;
@@ -332,7 +335,7 @@ export class RunnerMachines implements ThreadMachines {
     if (!session.capabilities.includes(SUSPEND_CAPABILITY)) return false;
     const refusedBy = this.noSuspend.get(current.runnerId);
     if (refusedBy !== undefined && refusedBy === (session.runner?.softwareVersion ?? "")) return false;
-    if (this.activity.idleMs(thread.id) < (this.options.idleMs ?? IDLE_MS)) return false;
+    if (this.activity.idleMs(thread.id) < idleMs) return false;
     // From here guest calls and starts wait for the outcome (N-207-1).
     let open!: () => void;
     const gate = new Promise<void>(resolve => { open = resolve; });
@@ -451,6 +454,10 @@ export class RunnerMachines implements ThreadMachines {
   }
 
   private async boot(thread: Thread, options: StartOptions): Promise<MachineStart> {
+    // A queued thread's machine is made only once it got its slot
+    // (Conversations asks for it): its runner is not asked before.
+    const queued = this.options.registry.getThread(thread.id)?.vm?.suspension;
+    if (queued?.state === "queued") throw new RunnerWait(queued.waiting);
     const session = this.session(thread);
     const ref = this.ref(thread);
     const node = session.nodeId;

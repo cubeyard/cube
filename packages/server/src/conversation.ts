@@ -360,6 +360,9 @@ export class Conversations {
         if (Date.now() >= deadline) {
           const why = slotWait(after) ?? "its runner did not resume it";
           this.gaveUp.set(id, why);
+          // It no longer waits (its machine never got the slot, so it still
+          // sleeps): its place in the queue goes to the next.
+          if (after.state === "waking" && after.waiting !== undefined) this.registry.applySleep(id, { type: "wakeDropped" });
           throw new Error(`the thread's machine is suspended and could not be resumed: ${why}`
             + (gaveUp ? "; this run already waited its whole time for it, a new message waits again" : ""));
         }
@@ -410,7 +413,12 @@ export class Conversations {
         else if (!this.unansweredSince.has(id)) this.unansweredSince.set(id, this.now());
         const waited = unanswered ? this.now() - this.unansweredSince.get(id)! : 0;
         if (error instanceof RunnerWait && waited < this.patience.startMs) {
-          if (this.waits.get(id) !== message) log.info("waiting for a runner", { thread: id, reason: message });
+          if (this.waits.get(id) !== message) {
+            log.info("waiting for a runner", { thread: id, reason: message });
+            // A thread that begins to wait for a slot need not wait for the
+            // next round to free one.
+            if (slotWait(this.registry.getThread(id)?.vm?.suspension)) void this.suspendIdle();
+          }
           this.waits.set(id, message);
           this.failures.delete(id);
           return;
@@ -500,6 +508,13 @@ export class Conversations {
       const started = await this.machines.start(thread, { onBoot: () => this.checks.delete(id) });
       await this.resume(id, started?.booted ?? false);
       return;
+    }
+    // A queued thread asks for its slot, in turn (Registry.applySleep);
+    // without it, it waits on and its runner is not asked.
+    const queued = thread.vm?.suspension;
+    if (queued?.state === "queued") {
+      const sleep = this.registry.applySleep(id, { type: "wakeAsked", waiting: queued.waiting });
+      if (sleep) throw new RunnerWait(slotWait(sleep)!);
     }
     // An agent opened on this machine before it was ready holds the lease
     // that preparing it needs (agents now open only on ready machines).
@@ -794,25 +809,53 @@ export class Conversations {
   /** Suspends the machines that have been idle for 5 minutes (B7-1; the
    * runner side decides idleness from guest calls, commands and portal
    * connections, machine-idle.ts) and run nothing cubed knows of. Run by
-   * the recovery loop. Each thread's attempt is queued with its commands,
-   * so a message waits for it and then wakes the machine. */
+   * the recovery loop, and when a thread begins to wait for a slot. Each
+   * thread's attempt is queued with its commands, so a message waits for it
+   * and then wakes the machine. On a runner where threads wait for a slot
+   * (`Registry.slotQueue`) the idlest machines go first, without the 5
+   * minutes, until a slot is free for each waiting thread; each freed slot
+   * goes to the queue at once (`admit`). */
   suspendIdle(): Promise<void> {
     if (this.closing) return Promise.resolve();
-    this.suspendRound ??= this.round(Promise.all(this.registry.listThreads().map(thread => this.suspendOne(thread))))
-      .finally(() => { this.suspendRound = null; });
+    this.suspendRound ??= this.round((async () => {
+      const queue = this.registry.slotQueue();
+      const threads = this.registry.listThreads();
+      await Promise.all([
+        ...threads.filter(thread => !queue.has(thread.runnerId)).map(thread => this.suspendOne(thread)),
+        ...[...queue].map(([runnerId, { waiting, free }]) => this.relieve(runnerId, waiting.length - free, threads.filter(thread => thread.runnerId === runnerId))),
+      ]);
+    })()).finally(() => { this.suspendRound = null; });
     return this.suspendRound;
   }
-  private async suspendOne(thread: Thread): Promise<void> {
-    try { await this.suspendIfIdle(thread); } finally { this.publish(thread.id); }
+  /** Suspends `need` idle machines of a runner whose queue lacks slots,
+   * idlest first, one at a time; then its other machines as usual. */
+  private async relieve(runnerId: string, need: number, threads: Thread[]): Promise<void> {
+    const running = threads.filter(thread => !thread.archived && thread.workspaceState === "available" && !thread.vm?.suspension);
+    const idle = new Map(running.map(thread => [thread.id, this.machines.idleMs?.(thread) ?? 0]));
+    for (const thread of running.sort((a, b) => idle.get(b.id)! - idle.get(a.id)!)) {
+      if (this.closing) return;
+      if (await this.suspendOne(thread, need > 0 ? 0 : undefined)) { need--; this.admit(runnerId); }
+    }
   }
-  private async suspendIfIdle(thread: Thread): Promise<void> {
+  /** Starts the queued threads of a runner whose slot may have freed; the
+   * registry gives the slots in turn (a waking one's own wake tries again). */
+  private admit(runnerId: string): void {
+    for (const id of this.registry.slotQueue().get(runnerId)?.waiting ?? []) {
+      const thread = this.registry.getThread(id);
+      if (thread?.vm?.suspension?.state === "queued" && !this.owns(thread)) void this.round(this.activate(id));
+    }
+  }
+  private async suspendOne(thread: Thread, idleMs?: number): Promise<boolean> {
+    try { return await this.suspendIfIdle(thread, idleMs); } finally { this.publish(thread.id); }
+  }
+  private async suspendIfIdle(thread: Thread, idleMs?: number): Promise<boolean> {
     const machines = this.machines;
     const id = thread.id;
     // A wake under way needs no check of its own: while it lasts the
     // machine sleeps (skipped here) or its start runs (an activation, refused
     // below; RunnerMachines' start, refused there).
     const skip = (current: Thread | null) => !current || current.archived || current.workspaceState !== "available" || !!current.vm?.suspension || releaseUnfinished(current);
-    if (skip(thread)) return;
+    if (skip(thread)) return false;
     // The recovery loop's check of a machine that runs is not activity:
     // its end is waited for (B-207-1). A start is.
     // A check that became a start (the machine was down) is not waited for
@@ -824,11 +867,14 @@ export class Conversations {
       clearTimeout(timer);
     }
     const current = this.registry.getThread(id);
-    if (skip(current)) return;
-    if (this.commands.has(id) || this.activations.has(id) || this.archiveHolds.has(id)) { machines.touch(current!); return; }
+    if (skip(current)) return false;
+    if (this.commands.has(id) || this.activations.has(id) || this.archiveHolds.has(id)) { machines.touch(current!); return false; }
     this.suspends.add(id);
-    try { await this.command(id, () => machines.suspendIfIdle(this.registry.getThread(id) ?? current!, () => this.busy(id))); }
-    catch (error) { log.warn("suspending an idle machine failed", { thread: id, error: error instanceof Error ? error.message : String(error) }); }
+    try { return await this.command(id, () => machines.suspendIfIdle(this.registry.getThread(id) ?? current!, () => this.busy(id), idleMs)); }
+    catch (error) {
+      log.warn("suspending an idle machine failed", { thread: id, error: error instanceof Error ? error.message : String(error) });
+      return false;
+    }
     finally { this.suspends.delete(id); }
   }
   /** What cubed runs for the thread now, or null (B7-1, B7-3): a start, an
@@ -1104,6 +1150,8 @@ export class Conversations {
       // in time (or failed): recorded, so it is listed and can be discarded.
       if (released.retained && thread.vm && !thread.vm.retain) this.registry.updateThreadVm(id, { retain: true, retainReason: RUNNER_KEPT });
       this.registry.applyPhase(id, { type: "released" });
+      // Its slot (or its place in the queue) goes to the next in the queue.
+      this.admit(thread.runnerId);
       this.gaveUp.delete(id);
       this.failures.delete(id);
       this.downs.delete(id);
