@@ -178,7 +178,10 @@ export function readBerthSettings(text: string): BerthSettings {
   const image = value("CUBE_BERTH_IMAGE") ?? "";
   const raw = value("CUBE_BERTH_MAX_MACHINES") ?? "";
   const listen = value("CUBE_BERTH_LISTEN") ?? "";
-  const margin = value("CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB") || undefined;
+  // As service.sh reads it (`sed -n 's/^[[:blank:]]*KEY=//p'` in `$(…)`):
+  // every such line's rest, untrimmed, trailing newlines dropped.
+  const margin = text.split("\n").flatMap(line => /^[ \t]*CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=(.*)$/s.exec(line)?.[1] ?? [])
+    .join("\n").replace(/\n+$/, "") || undefined;
   const maxMachines = Number(raw);
   if (!imageAccepted(image) || !/^[1-9]\d?$/.test(raw) || maxMachines > 64 || !loopbackListen(listen)
     || (margin !== undefined && margin !== "off" && !/^[1-9]\d{0,3}$/.test(margin))) {

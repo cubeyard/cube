@@ -154,10 +154,27 @@ try {
   assert.deepEqual(suspend("CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=20"), { status: 0, tail: " --suspend-disk-margin-gib 20", stderr: "" });
   assert.equal(readBerthSettings(`${settings}CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=20\n`).suspendDiskMarginGib, 20);
   assert.deepEqual(suspend("CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB="), { status: 0, tail: " --suspend-disk-margin-gib 2", stderr: "" }, "empty is the default");
-  for (const bad of ["0", "02", "10000", "2 --change-image", "-1", "yes"]) {
-    const refused = suspend(`CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=${bad}`);
-    assert.deepEqual(refused, { status: 78, tail: "", stderr: `cube-berth: ${home}/.cube/berth.env: CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB is 1 to 9999 (GiB) or off\n` }, `${bad}: berth is not started`);
-    assert.throws(() => readBerthSettings(`${settings}CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=${bad}\n`), /is not a berth\.env of cubed's/, `${bad}: cubed refuses it too`);
+  // The same lines mean the same to both: what berth is started with, and
+  // what cubed reads (null: both refuse; the service starts no berth).
+  const KEY = "CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB";
+  const parity: [string, string | null, number | "off" | undefined | null][] = [
+    [`${KEY}=0`, null, null], [`${KEY}=02`, null, null], [`${KEY}=10000`, null, null], [`${KEY}=-1`, null, null], [`${KEY}=yes`, null, null],
+    [`${KEY}=2 --change-image`, null, null], [`${KEY}=*`, null, null], [`${KEY}="off"`, null, null],
+    [` ${KEY}=off`, "", "off"], [`\t${KEY}=off`, "", "off"], [`  ${KEY}=20`, " --suspend-disk-margin-gib 20", 20],
+    [`${KEY}=off `, null, null], [`${KEY}=off\r`, null, null], [`${KEY}= 4`, null, null],
+    [`${KEY}=off\n${KEY}=4`, null, null], [`${KEY}=4\n${KEY}=4`, null, null], [`${KEY}=\n ${KEY}=off`, null, null],
+    [`${KEY}=\n${KEY}=`, " --suspend-disk-margin-gib 2", undefined], [`# ${KEY}=off`, " --suspend-disk-margin-gib 2", undefined],
+  ];
+  for (const [line, tail, read] of parity) {
+    const served = suspend(line);
+    const label = JSON.stringify(line);
+    if (tail === null) {
+      assert.deepEqual(served, { status: 78, tail: "", stderr: `cube-berth: ${home}/.cube/berth.env: ${KEY} is 1 to 9999 (GiB) or off\n` }, `${label}: berth is not started`);
+    } else {
+      assert.deepEqual(served, { status: 0, tail, stderr: "" }, label);
+    }
+    if (read === null) assert.throws(() => readBerthSettings(`${settings}${line}\n`), /is not a berth\.env of cubed's/, `${label}: cubed refuses it too`);
+    else assert.equal(readBerthSettings(`${settings}${line}\n`).suspendDiskMarginGib, read, `${label}: cubed reads what the service passes`);
   }
 
   // cubed's launcher, run as the service would (cubed replaced by printing

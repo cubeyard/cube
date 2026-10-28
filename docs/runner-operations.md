@@ -274,7 +274,9 @@ runner.
   `CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=off` or another number; `init-local`
   writes no such line and keeps one the operator wrote. A `berth vm` started
   by hand or from `install-berth.sh`'s unit has suspend off until it is
-  given the flag. Only then does
+  given the flag. Every suspended machine keeps its memory file (at most its
+  memory) until it resumes or is archived, so idle threads add up on the
+  runner's disk; the margin only stops new saves. Only then does
   the runner say `machine.suspend`, and cubed suspends a thread's machine
   after 5 minutes in which nothing ran: no turn of its agent or its
   background agents, no guest call, no command started and not yet seen to

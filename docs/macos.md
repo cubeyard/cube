@@ -237,6 +237,17 @@ you delete them.
   operations](runner-operations.md#berth-vm-runner-protocol-4)). A save
   needs the machine's memory (4 GiB by default) and 2 GiB more free on
   that disk; with less, the machine keeps running and nothing is deleted.
+- **Saved machines add up on disk.** Each suspended thread keeps its memory
+  file in `~/.cube/berth/<machine id>/memory`, at most its memory (4 GiB by
+  default; how much less on a Mac is not measured yet), until it resumes or
+  is archived, and it holds no slot. So many open, idle threads can fill the
+  disk down to the margin. The margin only stops new saves: then machines
+  keep running, and their own disks, which grow as their threads write,
+  can still take the rest. `du -sh ~/.cube/berth` shows the total. To free
+  space, archive threads you are done with (that deletes the memory file,
+  also when the thread's disk is kept) or send a thread a message (it
+  resumes and its file is deleted). Do not delete files under
+  `~/.cube/berth` yourself.
   `CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=off` in `~/.cube/berth.env` turns
   suspend off, a number (1 to 9999) keeps that many GiB free instead; then
   `brew services restart cubeyard/tap/cube-berth`. Machines saved before

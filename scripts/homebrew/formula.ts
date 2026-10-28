@@ -161,7 +161,7 @@ class CubeBerth < Formula
       fi
       # Suspend is on unless berth.env says off; its margin is the free disk
       # berth keeps beside a machine's memory file when it saves it.
-      margin=$(sed -n 's/^CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=//p' "$home/berth.env")
+      margin=$(sed -n 's/^[[:blank:]]*CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=//p' "$home/berth.env")
       case "\${margin:=${SUSPEND_DISK_MARGIN_GIB}}" in
         off) set -- ;;
         [1-9] | [1-9][0-9] | [1-9][0-9][0-9] | [1-9][0-9][0-9][0-9]) set -- --suspend-disk-margin-gib "$margin" ;;
