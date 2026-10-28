@@ -374,7 +374,7 @@ try {
   releaseHold();
   await until(() => call(`/api/artifacts/${threadArtifact.id}`), value => value.body.comments[0].state === "delivered", "delivered after the turn");
   await idle(piThread);
-  const delivered = prompts.filter(prompt => prompt.includes(`[artifact ${threadArtifact.id.slice(0, 8)}]`));
+  const delivered = prompts.filter(prompt => prompt.includes(`[artifact ${threadArtifact.id}]`));
   assert.equal(delivered.length, 1, "delivered once");
   assert.match(delivered[0]!, /> the guest wrote this/);
   assert.match(delivered[0]!, /comment: who is the guest\?/);
@@ -432,9 +432,9 @@ try {
   const chatHeard = async (pattern: RegExp, count: number, what: string) => (await until(() => call("/api/optchat/history"),
     value => (value.body.events as Array<{ type: string; text?: string }>).filter(event => event.type === "user-message" && pattern.test(event.text ?? "")).length === count, what))
     .body.events.filter((event: { type: string; text?: string }) => event.type === "user-message" && pattern.test(event.text ?? "")).map((event: { text: string }) => event.text) as string[];
-  const [failedNote] = await chatHeard(/^\[artifact [0-9a-f]{8}\] The user confirmed "merge cubeyard\/demo#7".*It did not succeed: could not reach github/, 1, "the chat hears of the failure");
+  const [failedNote] = await chatHeard(/^\[artifact [0-9a-f-]{36}\] The user confirmed "merge cubeyard\/demo#7".*It did not succeed: could not reach github/, 1, "the chat hears of the failure");
   assert.doesNotMatch(failedNote!, /Done:/);
-  await chatHeard(/^\[artifact [0-9a-f]{8}\] The user confirmed "merge cubeyard\/demo#7" \(github\.merge cubeyard\/demo#7 at aaaaaaaaaaaa, squash\) on your artifact "post-merge review".*Done: merged cubeyard\/demo#7/, 1, "the chat hears of the merge");
+  await chatHeard(/^\[artifact [0-9a-f-]{36}\] The user confirmed "merge cubeyard\/demo#7" \(github\.merge cubeyard\/demo#7 at aaaaaaaaaaaa, squash\) on your artifact "post-merge review".*Done: merged cubeyard\/demo#7/, 1, "the chat hears of the merge");
   view = await until(() => call(`/api/artifacts/${review.id}`), value => value.body.notices.length === 2 && value.body.notices.every((notice: any) => notice.state === "delivered"), "both notices delivered");
   assert.deepEqual(view.body.notices.map((notice: any) => notice.target), [{ kind: "optchat" }, { kind: "optchat" }]);
   assert.equal(view.body.notices[0].text, undefined, "the page gets the state, not the message");
@@ -450,12 +450,12 @@ try {
   const mergeNotes = (await until(() => call("/api/artifacts"), value => value.body.artifacts.some((item: any) => item.title === "merge notes"), "the thread's merge notes"))
     .body.artifacts.find((item: any) => item.title === "merge notes");
   await idle(spawned!.id);
-  const threadNotices = () => prompts.filter(prompt => prompt.startsWith(`[artifact ${mergeNotes.id.slice(0, 8)}] The user confirmed`));
+  const threadNotices = () => prompts.filter(prompt => prompt.startsWith(`[artifact ${mergeNotes.id}] The user confirmed`));
   assert.equal(threadNotices().length, 0);
   assert.equal((await call(`/api/artifacts/${mergeNotes.id}/actions/merge-8`, { revision: 1, confirm: "cubeyard/demo#8", requestId: "m8" })).body.state, "succeeded");
   await until(async () => threadNotices(), value => value.length === 1, "the author thread is told");
   assert.match(threadNotices()[0]!, /on your artifact "merge notes".*Done: merged cubeyard\/demo#8 at aaaaaaaaaaaa \(merge\); merge commit cccccccccccc\. Nothing more is asked of you/);
-  await chatHeard(new RegExp(`^\\[artifact ${mergeNotes.id.slice(0, 8)}\\] .* on the artifact "merge notes" of thread \\[${spawned!.id.slice(0, 8)}\\].*Done: merged cubeyard/demo#8`), 1, "the chat that started it is told");
+  await chatHeard(new RegExp(`^\\[artifact ${mergeNotes.id}\\] .* on the artifact "merge notes" of thread \\[${spawned!.id.slice(0, 8)}\\].*Done: merged cubeyard/demo#8`), 1, "the chat that started it is told");
   // Archived, the thread is beyond reach and says so; the chat still hears.
   await idle(spawned!.id);
   await until(() => call(`/api/threads/${spawned!.id}`, undefined, "DELETE"), value => value.status === 200, "archive the chat's thread");

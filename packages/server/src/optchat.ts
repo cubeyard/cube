@@ -204,7 +204,10 @@ review of the same change, say) rather than start another, give it
 the artifact's id and tell it to read the newest revision, then write the
 whole document on top of it (artifact_write with that id, or artifact_edit
 with it for a part). Link an artifact in your reply
-as [title](#/a/<id>). Comments the user leaves on yours come to you as a
+as [title](#/a/<id>), with its whole id as a write, a read or a report
+gives it. A thread's report ends with the artifacts it wrote by id and
+link, as cube recorded them: use those, not a short id or a name the
+thread's own words may give. Comments the user leaves on yours come to you as a
 message starting "[artifact <id>]"; comments on a thread's go to that
 thread, whoever wrote the revision. ${ARTIFACT_GUIDE}`;
 
@@ -437,6 +440,8 @@ const TURN = "optchat.turn";
 const NODE_ENTRY = "optchat.node";
 
 const short = (id: string) => id.slice(0, 8);
+/** The tool call ids among `events`. */
+const callsIn = (events: readonly ThreadEvent[]) => new Set(events.flatMap(event => event.type === "tool-call" ? [event.callId] : []));
 /** An archive call's record of the free machines it last read: no thread id. */
 const FREE = " free";
 /** A tool's text result. */
@@ -1572,7 +1577,23 @@ export class OptChat {
   }
 
   private observe(id: string, transcript: ThreadTranscript): void {
-    this.settle(id, transcript.status, () => threadReport(transcript));
+    const asked = transcript.events.findLastIndex(event => event.type === "user-message");
+    const calls = callsIn(transcript.events.slice(asked + 1));
+    this.settle(id, transcript.status, () => this.withArtifacts(id, calls, threadReport(transcript)));
+  }
+
+  /** A report names the artifacts its thread wrote since the message it
+   * answers by their ids and links, as cube recorded the writes: a reply
+   * that names one by a short id or not at all still hands over the id. */
+  private withArtifacts(id: string, calls: ReadonlySet<string>, report: string): string {
+    if (!this.options.artifacts || !calls.size) return report;
+    try {
+      const written = this.options.artifacts.writtenIn(id, calls);
+      return written ? `${report}\n${written}` : report;
+    } catch (error) {
+      log.warn("a report's artifacts could not be read", { thread: id, error: error instanceof Error ? error.message : String(error) });
+      return report;
+    }
   }
 
   private settle(id: string, status: ThreadStatus, report: () => string): void {
@@ -1595,7 +1616,12 @@ export class OptChat {
   private async reportStored(id: string): Promise<void> {
     try {
       const page: HistoryPage | null | undefined = (await this.options.threads.history(id, { limit: 1 }))?.transcript;
-      if (page) this.settle(id, page.status, () => runReport(page.status, page.answer && page.answer.index > page.asked ? page.answer.text : ""));
+      if (!page) return;
+      // The tool calls after the message the run answers, for the artifacts it wrote.
+      const after = page.total - page.asked - 1;
+      const calls = this.options.artifacts && after > 0 && page.status.state !== "idle" && page.status.state !== "working" && this.reported.get(id) !== page.status.run
+        ? callsIn((await this.options.threads.history(id, { limit: Math.min(after, HISTORY_MAX) }))?.transcript?.events ?? []) : new Set<string>();
+      this.settle(id, page.status, () => this.withArtifacts(id, calls, runReport(page.status, page.answer && page.answer.index > page.asked ? page.answer.text : "")));
     } catch (error) { log.warn("stored report not checked", { thread: id, error }); }
   }
 

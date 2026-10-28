@@ -300,7 +300,7 @@ try {
   await shoot(page, "11a-merge-told");
   await page.goto(`${url}/#/chat`);
   await page.getByText("Merged: cubeyard/demo#7 is in main now.").waitFor({ timeout: 30_000 });
-  const told = (await api("/api/optchat/history")).events.filter((event: { type: string; text?: string }) => event.type === "user-message" && /^\[artifact [0-9a-f]{8}\] The user confirmed/.test(event.text ?? ""))
+  const told = (await api("/api/optchat/history")).events.filter((event: { type: string; text?: string }) => event.type === "user-message" && /^\[artifact [0-9a-f-]{36}\] The user confirmed/.test(event.text ?? ""))
     .map((event: { text: string }) => event.text) as string[];
   assert.equal(told.length, 2, "the failed try and the merge, once each");
   assert.match(told[0]!, /It did not succeed: could not reach github/);

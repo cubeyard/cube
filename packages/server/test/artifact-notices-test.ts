@@ -93,7 +93,7 @@ try {
   chat.open = true;
   await until(() => notices(review)[1]!.state, state => state === "delivered", "the chat is told");
   const toChat = [...chat.got.values()][0]!;
-  assert.match(toChat, /^\[artifact [0-9a-f]{8}\] The user confirmed "merge cubeyard\/cube#116" \(github\.merge cubeyard\/cube#116 at 6a26aa39f9ac, merge\) on the artifact "review" of thread \[eb809312\]/);
+  assert.match(toChat, /^\[artifact [0-9a-f-]{36}\] The user confirmed "merge cubeyard\/cube#116" \(github\.merge cubeyard\/cube#116 at 6a26aa39f9ac, merge\) on the artifact "review" of thread \[eb809312\]/);
   assert.match(toChat, /Done: merged cubeyard\/cube#116 at 6a26aa39f9ac \(merge\); merge commit c35976b12ade\./);
   working.delete(author);
   await until(() => notices(review)[0]!.state, state => state === "delivered", "the thread is told once its turn ends");

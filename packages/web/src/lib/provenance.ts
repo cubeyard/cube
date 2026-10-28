@@ -34,7 +34,8 @@ const STARTED = /^\[([0-9a-f]{8})\] started in (.+?)(?: as [^:]+)?(?:: (.*))?$/;
 const UNSTARTED = /^task (\d+) \((.+?)\) not started: (.*)$/;
 const WRITTEN = /^artifact ([0-9a-f-]{36}) "/;
 const LINKED = /#\/a\/([0-9a-f][0-9a-f-]{7,35})(?![0-9a-f-])/g;
-const COMMENTS = /^\[artifact ([0-9a-f]{8})\]/;
+/** `[artifact <id>]`: the whole id, or its first 8 characters in older messages. */
+const COMMENTS = /^\[artifact ([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)\]/;
 /** A tell the thread took (optchat.ts, tell): sent, queued into its running
  * turn, or already in its conversation (a replayed call). Not "not sent"
  * (refused), not "took it … never reached the agent" (dropped), not an error. */

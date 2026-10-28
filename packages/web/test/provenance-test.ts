@@ -91,6 +91,9 @@ const talk: ThreadEvent[] = [
   { type: "assistant-text", id: "3", text: `see [it](#/a/${ID.review}?rev=1)`, reasoning: false, final: true },
 ];
 assert.deepEqual(mentionsOf(transcriptRows({ events: talk, status: { state: "completed", run: "r", error: null } })).map(mention => [mention.row, mention.artifacts]), [["2", [ID.review.slice(0, 8)]]]);
+// a newer cubed names it by its whole id
+const whole: ThreadEvent[] = [{ type: "user-message", id: "4", text: `[artifact ${ID.review}] The user commented on your artifact` }];
+assert.deepEqual(mentionsOf(transcriptRows({ events: whole, status: { state: "completed", run: "r", error: null } })).map(mention => [mention.row, mention.artifacts]), [["4", [ID.review]]]);
 
 // resolution: the overview's state first, then the list; "not known to cube"
 // only once both were read, the thread is in neither and cube counts lost ones

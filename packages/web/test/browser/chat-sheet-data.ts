@@ -59,7 +59,7 @@ export function chatEvents(options: { filler?: number } = {}): ThreadEvent[] {
     agent("5.3", "Told composer room to go ahead and keep the send key."),
     user("6.0", "write me a short review of today's work"),
     call("6.1", "write-1", "artifact_write", { title: "today's review", body: "# today's review\n\n…" }),
-    result("6.2", "write-1", "artifact_write", `artifact ${ID.review} "today's review" created at revision 1. The user opens it at #/a/${ID.review} (link it in your reply as [today's review](#/a/${ID.review})); their comments come back to you as a message starting "[artifact ${ID.review.slice(0, 8)}]".`),
+    result("6.2", "write-1", "artifact_write", `artifact ${ID.review} "today's review" created at revision 1. The user opens it at #/a/${ID.review} (link it in your reply as [today's review](#/a/${ID.review})); their comments come back to you as a message starting "[artifact ${ID.review}]".`),
     agent("6.3", `Here it is: [today's review](#/a/${ID.review}). The java trust thread failed on its machine; I'll look at it when you want.`),
   ];
 }
