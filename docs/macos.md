@@ -237,23 +237,29 @@ you delete them.
   operations](runner-operations.md#berth-vm-runner-protocol-4)). A save
   needs the machine's memory (4 GiB by default) and 2 GiB more free on
   that disk; with less, the machine keeps running and nothing is deleted.
-- **Saved machines add up on disk.** Each suspended thread keeps its memory
-  file in `~/.cube/berth/<machine id>/memory`, at most its memory (4 GiB by
-  default; how much less on a Mac is not measured yet), until it resumes or
-  is archived, and it holds no slot. So many open, idle threads can fill the
-  disk down to the margin. The margin only stops new saves: then machines
-  keep running, and their own disks, which grow as their threads write,
-  can still take the rest. `du -sh ~/.cube/berth` shows the total. To free
-  space, archive threads you are done with (that deletes the memory file,
-  also when the thread's disk is kept) or send a thread a message (it
-  resumes and its file is deleted). Do not delete files under
-  `~/.cube/berth` yourself.
   `CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=off` in `~/.cube/berth.env` turns
   suspend off, a number (1 to 9999) keeps that many GiB free instead; then
   `brew services restart cubeyard/tap/cube-berth`. Machines saved before
   still resume with suspend off. 2 GiB is the free space berth keeps after
   any image pull; it is a floor for the Mac's disk, not an estimate of
   what saved machines take.
+- **Saved machines add up on disk.** Each suspended thread keeps its memory
+  file in `~/.cube/berth/<machine id>/memory` until it resumes or is
+  archived, and it holds no slot. The file's size (`ls -l`) can be a little
+  more than the machine's memory: 4230.5 MiB for a 4096 MiB machine,
+  measured once on a Mac. The file is sparse, so it takes less disk than
+  that (`du`): about 168 MiB for an almost idle machine in the same run. A
+  machine that was using its memory (a build, a large page cache) can take
+  close to its full size. That is why a save is refused unless the
+  machine's whole memory and the margin are free; the margin covers the
+  little over. So many open, idle threads can fill the disk down to the
+  margin. The margin only stops new saves: then machines keep running, and
+  their own disks, which grow as their threads write, can still take the
+  rest. `du -sh ~/.cube/berth` shows the total. To free space, archive
+  threads you are done with (that deletes the memory file, also when the
+  thread's disk is kept) or send a thread a message (it resumes and its
+  file is deleted; with every slot taken it waits for one). Do not delete
+  files under `~/.cube/berth` yourself.
 
 ## The tap's old v0.1 launcher
 
