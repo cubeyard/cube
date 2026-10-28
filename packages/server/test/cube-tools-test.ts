@@ -174,6 +174,21 @@ try {
   assert.match(await viaClaude("artifact_edit", { id: plan, old_string: "berth keel", new_string: "x" }), /Found \d+ matches of the string to replace, but replace_all is false/);
   assert.equal(store.get(plan)!.head, 3);
 
+  // A line over ARTIFACT_READ_CHARS is shown in parts, every part reachable and said to be one.
+  const long = `# t\n${"x".repeat(130_000)}END\nlast`;
+  const wide = idIn(await viaPi("artifact_write", { body: long }));
+  const head = await viaClaude("artifact_read", { id: wide });
+  assert.match(head, /\n# t\n\[lines 1-5 of 8; artifact_read with offset 6 for the rest\./, "the first page stops before the long line");
+  const part1 = await viaClaude("artifact_read", { id: wide, offset: 6 });
+  assert.equal(part1, `${"x".repeat(ARTIFACT_READ_CHARS)}\n[line 6 goes on in line 7 without a line break: a line over ${ARTIFACT_READ_CHARS} characters is shown in parts; join them when you write the document]\n`
+    + `[lines 6-6 of 8; artifact_read with offset 7 for the rest. artifact_write replaces the whole document, so read all of it before writing it, or change a part with artifact_edit]`);
+  const part2 = await viaPi("artifact_read", { id: wide, offset: 7 });
+  assert.equal(part2, `${"x".repeat(10_000)}END\nlast`, "the rest of the line, END included, then the next line");
+  assert.equal(`${part1.split("\n")[0]}${part2}`, long.split("\n").slice(1).join("\n"), "the parts joined are the text");
+  assert.equal(await viaPi("artifact_read", { id: wide, offset: 6 }), part1, "Pi reads it the same");
+  const exact = idIn(await viaClaude("artifact_write", { body: `# e\n${"y".repeat(ARTIFACT_READ_CHARS)}` }));
+  assert.equal(await viaClaude("artifact_read", { id: exact, offset: 6 }), "y".repeat(ARTIFACT_READ_CHARS), "a line of exactly the limit is whole, with no note");
+
   // ---- the route: only the Claude Code child's lease, only cube's tools ----
   const raw = (token: string | undefined, method: string, name?: string, body: Record<string, unknown> = {}, held = leases) =>
     toolsRoute({ method, name, token, body, signal: new AbortController().signal }, lease(held), () => toolsOf(CLAUDE, "claude-code"));

@@ -25,6 +25,11 @@
  * --tools, the settings hook and dontAsk, also after a resume; invalid input
  * and a tool cube does not offer are refused; a tool list cubed cannot give
  * means no ready, no prompt and no model request.
+ * Part 5 makes one child run session.start twice (Claude Code reloads a
+ * --plugin-dir mod whose file changes when CLAUDE_CODE_PLUGIN_DIR_WATCH=1,
+ * which cubed never passes but this check does): the tools are registered
+ * again and still answer; a reload whose tool list fails writes nothing and
+ * runs nothing on the host.
  *
  *   node scripts/check-claude-fail-closed.ts   (CLAUDE=<path> names the binary) */
 import assert from "node:assert/strict";
@@ -110,6 +115,8 @@ const artifacts = new Artifacts({ store, registry, github: {} as GithubPulls, op
 const cubeTools = () => artifactTools({ artifacts, author: { kind: "thread", thread: "t1" }, agent: "claude-code", readable: async () => [{ kind: "thread", thread: "t1" }] });
 /** Part 4's mutation: cubed cannot list the tools. */
 let toolsFail = false;
+/** How often a mod asked for the tool list: once per session.start. */
+let toolLists = 0;
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url!, "http://localhost");
   let raw = "";
@@ -118,6 +125,7 @@ const server = http.createServer(async (request, response) => {
   const parts = url.pathname.slice(BASE.length).split("/").filter(Boolean).map(decodeURIComponent);
   if (parts[0] === "claude-ready" && raw) nonces.push((JSON.parse(raw) as { nonce: string }).nonce);
   const body = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+  if (parts[0] === "tools" && parts.length === 1) toolLists++;
   if (parts[0] === "tools" && toolsFail) return response.writeHead(500, { "content-type": "application/json" }).end(JSON.stringify({ error: "cube check: no tools", code: "IO_ERROR", completionUnknown: false }));
   const result = parts[0] === "tools"
     ? await toolsRoute({ method: request.method!, name: parts[1], token: /^Bearer (\S+)$/.exec(request.headers.authorization ?? "")?.[1], body, signal: new AbortController().signal },
@@ -383,6 +391,42 @@ try {
     const unlisted = await ClaudeAgent.open({ directory: path.join(temp, "agent-no-tools"), threadId: "t1", workspace, runtime: runtime(mod("cube")), model: "sonnet" });
     try { await refused(unlisted, "the tool list fails"); } finally { await unlisted.close(); toolsFail = false; }
     console.log("ok: a cube tool hook that throws refuses the call; a tool list cubed cannot give means no prompt and no model request");
+  }
+
+  // Part 5: two session.start events in one claude process.
+  {
+    const mine = () => store.list({ authors: [{ kind: "thread", thread: "t1" }] }).length;
+    const folder = path.join(temp, "mod-reload");
+    const agent = await ClaudeAgent.open({ directory: path.join(temp, "agent-reload"), threadId: "t1", workspace, runtime: runtime(mod("cube", folder), { CLAUDE_CODE_PLUGIN_DIR_WATCH: "1" }), model: "sonnet" });
+    const reload = async (what: string) => {
+      const before = toolLists;
+      fs.appendFileSync(path.join(folder, "hooks/register.ts"), "\n");
+      for (const deadline = Date.now() + 30000; toolLists === before; await delay(100)) assert.ok(Date.now() < deadline, `${what}: the mod reloads and its session.start runs again`);
+      await delay(500);
+    };
+    try {
+      tool = "Artifact";
+      const before = mine();
+      assert.equal((await turn(agent, "w1")).state, "completed");
+      const lists = toolLists;
+      await reload("a reload");
+      assert.equal(toolLists, lists + 1, "one more session.start in the same process");
+      let result = await turn(agent, "w2");
+      assert.equal(result.state, "completed", result.error ?? "");
+      assert.match(result.results[0] ?? "", /created at revision 1/, `after a second session.start the tools still answer: ${result.results[0]}`);
+      assert.equal(mine(), before + 2);
+      toolsFail = true;
+      await reload("a reload whose tool list fails");
+      result = await turn(agent, "w3");
+      const w3 = result.results[0] ?? result.error ?? "";
+      assert.doesNotMatch(w3, /created at revision/, `nothing written: ${w3}`);
+      assert.equal(mine(), before + 2, "no artifact written after the failed reload");
+      tool = "Bash";
+      result = await turn(agent, "w4");
+      assert.ok(!hostRan(agent.root), `nothing ran on the host after the failed reload: ${JSON.stringify(result)}`);
+      const w4 = result.results[0] ?? result.error ?? "";
+      console.log(`ok: two session.start events in one claude process: the tools are registered again and answer; after a reload whose tool list fails nothing is written and Bash runs nothing on the host (w3: ${JSON.stringify(w3.slice(0, 160))}; w4: ${JSON.stringify(w4.slice(0, 160))})`);
+    } finally { toolsFail = false; await agent.close(); }
   }
 } finally {
   api.close();

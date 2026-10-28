@@ -275,7 +275,10 @@ at load or in `register`, a missing module, no modules, no folder, another
 lease's token, the previous child's nonce, too late, and both on
 `--resume`): no prompt, no model request and nothing run on the host; and,
 the ready gate bypassed, every host tool refused (ARCHITECTURE.md, "Claude
-Code threads"). `claude plugin validate --strict` passes a `register` that
+Code threads"). Its Part 4 serves cube's own tools on the socket and checks
+the real `claude` registers, offers and calls them (`mcp__cube__*`); Part 5
+makes one child run `session.start` twice (a mod reload, forced with
+`CLAUDE_CODE_PLUGIN_DIR_WATCH=1`, which cubed never passes). `claude plugin validate --strict` passes a `register` that
 throws; `claude plugin test` fails it; the gate refuses it either way. Neither runs in CI (both
 need `claude`); run them for any change to the mod, `claudeArguments` or
 the Claude Code version.

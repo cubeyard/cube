@@ -135,20 +135,33 @@ export function artifactTools(options: {
   return [write, read, edit];
 }
 
-/** Lines of a read, at most ARTIFACT_READ_CHARS characters; a part says it is one. */
+/** Lines of a read, at most ARTIFACT_READ_CHARS characters; a part says it
+ * is one. A line longer than that is split into lines of at most that many,
+ * so all of it can be read, and the read says which lines continue the same
+ * line without a line break. */
 function page(text: string, offset = 1, limit?: number): string {
-  const lines = text.split("\n");
+  const lines: string[] = [];
+  /** Lines (1-based) whose text goes on in the next line, unbroken. */
+  const continued = new Set<number>();
+  for (const line of text.split("\n")) {
+    for (let at = 0; at === 0 || at < line.length; at += ARTIFACT_READ_CHARS) {
+      if (at + ARTIFACT_READ_CHARS < line.length) continued.add(lines.length + 1);
+      lines.push(line.slice(at, at + ARTIFACT_READ_CHARS));
+    }
+  }
   const shown: string[] = [];
   let chars = 0;
   for (const line of lines.slice(offset - 1, limit === undefined ? undefined : offset - 1 + limit)) {
     if (shown.length && chars + line.length + 1 > ARTIFACT_READ_CHARS) break;
-    shown.push(line.slice(0, ARTIFACT_READ_CHARS));
+    shown.push(line);
     chars += line.length + 1;
   }
   const end = offset - 1 + shown.length;
   if (!shown.length) return `[the artifact has ${lines.length} lines; read it with a smaller offset]`;
+  const notes: string[] = [];
+  const split = shown.map((_, index) => offset + index).filter(line => continued.has(line));
   // artifact_write replaces the whole document: a part read must say it is one.
-  return end < lines.length
-    ? `${shown.join("\n")}\n[lines ${offset}-${end} of ${lines.length}; artifact_read with offset ${end + 1} for the rest. artifact_write replaces the whole document, so read all of it before writing it, or change a part with artifact_edit]`
-    : shown.join("\n");
+  if (split.length) notes.push(`line ${split.map(line => `${line} goes on in line ${line + 1}`).join(", ")} without a line break: a line over ${ARTIFACT_READ_CHARS} characters is shown in parts; join them when you write the document`);
+  if (end < lines.length) notes.push(`lines ${offset}-${end} of ${lines.length}; artifact_read with offset ${end + 1} for the rest. artifact_write replaces the whole document, so read all of it before writing it, or change a part with artifact_edit`);
+  return notes.length ? `${shown.join("\n")}\n${notes.map(note => `[${note}]`).join("\n")}` : shown.join("\n");
 }

@@ -202,8 +202,8 @@ artifact of its project, yours included when you named the project: to have
 the thread that wrote a document update it for the same task (a delta
 review of the same change, say) rather than start another, give it
 the artifact's id and tell it to read the newest revision, then write the
-whole document on top of it (artifact_write with that id, or in Claude Code
-Read and then Write /cube/artifacts/<id>.md). Link an artifact in your reply
+whole document on top of it (artifact_write with that id, or artifact_edit
+with it for a part). Link an artifact in your reply
 as [title](#/a/<id>). Comments the user leaves on yours come to you as a
 message starting "[artifact <id>]"; comments on a thread's go to that
 thread, whoever wrote the revision. ${ARTIFACT_GUIDE}`;

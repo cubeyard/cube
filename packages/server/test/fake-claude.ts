@@ -216,7 +216,7 @@ async function turn(text: string, prompted = true): Promise<void> {
       else if (verb === "write") await tool(id, "Write", { file_path: `${env.CUBE_WORKSPACE_ROOT}/${rest[0]}`, content: rest.slice(1).join(" ") }, controller.signal);
       else if (verb === "edit") await tool(id, "Edit", { file_path: `${env.CUBE_WORKSPACE_ROOT}/${rest[0]}`, old_string: rest[1], new_string: rest[2] }, controller.signal);
       else if (verb === "read") await tool(id, "Read", { file_path: `${env.CUBE_WORKSPACE_ROOT}/${rest[0]}` }, controller.signal);
-      // An absolute path (the mod's /cube/artifacts); "\n" in the text is a line break.
+      // An absolute path in the machine; "\n" in the text is a line break.
       else if (verb === "write-at") await tool(id, "Write", { file_path: rest[0], content: rest.slice(1).join(" ").replace(/\\n/g, "\n") }, controller.signal);
       // read-at <path> [offset [limit]]; edit-at <path> <old> <new>, "_" a space.
       else if (verb === "read-at") await tool(id, "Read", { file_path: rest[0], ...rest[1] ? { offset: Number(rest[1]) } : {}, ...rest[2] ? { limit: Number(rest[2]) } : {} }, controller.signal);
