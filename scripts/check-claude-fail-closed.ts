@@ -19,6 +19,12 @@
  * hook and dontAsk refuse every host tool. Its control, the same without
  * those two flags (cubed's arguments before them), runs `pwd` on the host.
  * Part 3 makes the mod's Bash hook throw: its `.catch` refuses the call.
+ * Part 4 serves cube's own tools (cube-tools.ts: the artifact tools over a
+ * real artifact store) on the socket: the mod registers them, the model is
+ * offered them upfront as mcp__cube__*, and a call reaches cubed through
+ * --tools, the settings hook and dontAsk, also after a resume; invalid input
+ * and a tool cube does not offer are refused; a tool list cubed cannot give
+ * means no ready, no prompt and no model request.
  *
  *   node scripts/check-claude-fail-closed.ts   (CLAUDE=<path> names the binary) */
 import assert from "node:assert/strict";
@@ -30,7 +36,13 @@ import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
+import { Artifacts } from "../packages/server/src/artifact-service.ts";
+import { artifactTools } from "../packages/server/src/artifact-tools.ts";
+import { ArtifactStore } from "../packages/server/src/artifacts.ts";
 import { ClaudeAgent, claudeArguments, type ClaudeRuntime } from "../packages/server/src/claude-agent.ts";
+import { toolsRoute } from "../packages/server/src/cube-tools.ts";
+import type { GithubPulls } from "../packages/server/src/github-pulls.ts";
+import type { Registry } from "../packages/server/src/registry.ts";
 import { VmWorkspace } from "../packages/server/src/vm-workspace.ts";
 import { workspaceRoute } from "../packages/server/src/workspace-http.ts";
 import { LeaseStore } from "../packages/server/src/workspace-lease.ts";
@@ -43,7 +55,17 @@ const MARK = "HOST-RAN";
 const TOKEN = `cube-check-${randomBytes(8).toString("hex")}`;
 
 let requests = 0;
-let tool: "Bash" | "Read" = "Bash";
+type Step = "Bash" | "Read" | "Artifact" | "Invalid" | "Unknown";
+let tool: Step = "Bash";
+/** The tools the last model request offered: name, and whether tool search defers it. */
+let offered: Array<{ name: string; deferred: boolean }> = [];
+const CALLS: Record<Step, { name: string; input: Record<string, unknown> }> = {
+  Bash: { name: "Bash", input: { command: `printf ${TOKEN} > ${MARK}; pwd`, description: "where am I" } },
+  Read: { name: "Read", input: { file_path: `/workspace/${MARK}` } },
+  Artifact: { name: "mcp__cube__artifact_write", input: { body: `# check\n\n${TOKEN}` } },
+  Invalid: { name: "mcp__cube__artifact_read", input: { revision: 0 } },
+  Unknown: { name: "mcp__cube__artifact_delete", input: { id: "x" } },
+};
 const api = http.createServer((request, response) => {
   let body = "";
   request.on("data", chunk => { body += chunk; });
@@ -52,13 +74,12 @@ const api = http.createServer((request, response) => {
       response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ input_tokens: 1 }));
       return;
     }
-    const sent = JSON.parse(body) as { tools?: unknown[]; messages: unknown[] };
-    if (sent.tools?.length) requests++;
+    const sent = JSON.parse(body) as { tools?: Array<{ name: string; defer_loading?: boolean }>; messages: unknown[] };
+    if (sent.tools?.length) { requests++; offered = sent.tools.map(item => ({ name: item.name, deferred: item.defer_loading === true })); }
     // One call for each prompt: while the prompts outnumber the results.
     const text = JSON.stringify(sent.messages);
     const call = sent.tools?.length && text.split('"text":"check"').length > text.split('"type":"tool_result"').length
-      ? tool === "Bash" ? { name: "Bash", input: { command: `printf ${TOKEN} > ${MARK}; pwd`, description: "where am I" } } : { name: "Read", input: { file_path: `/workspace/${MARK}` } }
-      : undefined;
+      ? CALLS[tool] : undefined;
     const events: Array<[string, Record<string, unknown>]> = [["message_start", { message: { id: `msg_${requests}`, type: "message", role: "assistant", model: "claude-sonnet-4-5", content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 1 } } }]];
     if (call) {
       events.push(["content_block_start", { index: 0, content_block: { type: "tool_use", id: `toolu_check_${requests}`, name: call.name, input: {} } }],
@@ -82,6 +103,13 @@ const BASE = "/api/threads/t1/workspace";
 const socket = path.join(temp, "workspace.sock");
 /** Every nonce a mod sent, in order. */
 const nonces: string[] = [];
+// cube's tools as cubed offers a Claude Code thread, over a real artifact store.
+const registry = { getThread: (id: string) => id === "t1" ? { id, projectId: "p", archived: false, createdAt: 0 } : null, getProject: () => null, listProjects: () => [] } as unknown as Registry;
+const store = new ArtifactStore(path.join(temp, "artifacts.sqlite"));
+const artifacts = new Artifacts({ store, registry, github: {} as GithubPulls, optchat: async () => null, submit: async () => {} });
+const cubeTools = () => artifactTools({ artifacts, author: { kind: "thread", thread: "t1" }, agent: "claude-code", readable: async () => [{ kind: "thread", thread: "t1" }] });
+/** Part 4's mutation: cubed cannot list the tools. */
+let toolsFail = false;
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url!, "http://localhost");
   let raw = "";
@@ -89,13 +117,18 @@ const server = http.createServer(async (request, response) => {
   if (!url.pathname.startsWith(BASE)) return response.writeHead(404).end("{}");
   const parts = url.pathname.slice(BASE.length).split("/").filter(Boolean).map(decodeURIComponent);
   if (parts[0] === "claude-ready" && raw) nonces.push((JSON.parse(raw) as { nonce: string }).nonce);
-  const result = await workspaceRoute(workspace, { method: request.method!, parts, query: url.searchParams, headers: request.headers, body: raw ? JSON.parse(raw) as Record<string, unknown> : {}, thread: "t1" });
+  const body = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+  if (parts[0] === "tools" && toolsFail) return response.writeHead(500, { "content-type": "application/json" }).end(JSON.stringify({ error: "cube check: no tools", code: "IO_ERROR", completionUnknown: false }));
+  const result = parts[0] === "tools"
+    ? await toolsRoute({ method: request.method!, name: parts[1], token: /^Bearer (\S+)$/.exec(request.headers.authorization ?? "")?.[1], body, signal: new AbortController().signal },
+      token => workspace.lease({ token }).catch(() => null), cubeTools)
+    : await workspaceRoute(workspace, { method: request.method!, parts, query: url.searchParams, headers: request.headers, body, thread: "t1" });
   response.writeHead(result.status, { "content-type": "application/json" }).end(JSON.stringify(result.body));
 });
 await new Promise<void>(resolve => server.listen(socket, resolve));
 
 /** A copy of cube's mod, as cubed lays it, then broken as named. */
-type Kind = "cube" | "missing" | "syntax" | "throws" | "nomodules" | "bash-throws" | "indirect" | "twice" | "register-throws" | "missing-module" | "stale" | "replay" | "late";
+type Kind = "cube" | "missing" | "syntax" | "throws" | "nomodules" | "bash-throws" | "cube-tool-throws" | "indirect" | "twice" | "register-throws" | "missing-module" | "stale" | "replay" | "late";
 function mod(kind: Kind, target = path.join(temp, `mod-${kind}`)): string {
   fs.rmSync(target, { recursive: true, force: true });
   if (kind === "missing") return target;
@@ -118,6 +151,11 @@ function mod(kind: Kind, target = path.join(temp, `mod-${kind}`)): string {
   if (kind === "stale") fs.writeFileSync(register, source.replace(ready, "if (scope && nonce) await scope.client.ready('0'.repeat(64), nonce)"));
   if (kind === "replay") fs.writeFileSync(register, source.replace(ready, "if (scope && nonce) await scope.client.ready(scope.token, (await $.env.get('CUBE_CHECK_REPLAY')) ?? nonce)"));
   if (kind === "late") fs.writeFileSync(register, source.replace(ready, "if (scope && nonce) { await new Promise(resolve => setTimeout(resolve, 4000)); await scope.client.ready(scope.token, nonce) }"));
+  if (kind === "cube-tool-throws") {
+    const hook = "const result = await cubeTool(scope, tool_use_id, String(tool), input)";
+    assert.ok(source.includes(hook));
+    fs.writeFileSync(register, source.replace(hook, "if (scope) throw new Error('cube check: the hook fails'); const result = await cubeTool(scope, tool_use_id, String(tool), input)"));
+  }
   if (kind === "bash-throws") {
     const hook = "const result = await bash(scope, e.tool_use_id, e)";
     assert.ok(source.includes(hook));
@@ -298,8 +336,58 @@ try {
     assert.ok(!hostRan(cwd));
   }
   console.log("ok: a mod hook that throws refuses the call (its .catch), even without the settings hook");
+
+  // Part 4: cube's own tools, registered by the mod and answered by cubed.
+  {
+    const mine = () => store.list({ authors: [{ kind: "thread", thread: "t1" }] });
+    const agent = await ClaudeAgent.open({ directory: path.join(temp, "agent-tools"), threadId: "t1", workspace, runtime: runtime(mod("cube")), model: "sonnet" });
+    try {
+      tool = "Artifact";
+      let result = await turn(agent, "a1");
+      assert.equal(result.state, "completed", result.error ?? "");
+      assert.deepEqual(offered.filter(item => item.name.startsWith("mcp__cube__")), ["artifact_edit", "artifact_read", "artifact_write"].map(name => ({ name: `mcp__cube__${name}`, deferred: false })),
+        "the model is offered cube's tools upfront (Claude Code sorts them by name)");
+      assert.equal(result.results.length, 1);
+      assert.match(result.results[0]!, /^artifact [0-9a-f-]{36} "check" created at revision 1\. The user opens it at #\/a\//, result.results[0]);
+      assert.equal(mine().length, 1);
+      const written = store.revision(mine()[0]!.id, 1)!;
+      assert.equal(written.body, `# check\n\n${TOKEN}`, "the input reached cubed whole");
+      assert.equal(written.provenance.agent, "claude-code");
+      assert.match(String(written.provenance.call), /^toolu_check_\d+$/, "provenance names Claude Code's tool_use_id");
+      tool = "Invalid";
+      result = await turn(agent, "a2");
+      assert.equal(result.state, "completed", result.error ?? "");
+      assert.match(result.results[0] ?? "", /artifact_read: Validation failed for tool "artifact_read":\n {2}- revision: must be >= 1/, result.results[0]);
+      tool = "Unknown";
+      result = await turn(agent, "a3");
+      assert.match(result.results[0] ?? "", /No such tool available: mcp__cube__artifact_delete/, result.results[0]);
+      assert.equal(mine().length, 1, "neither wrote anything");
+      // A new child resumes the session: the tools are registered again.
+      await agent.setModel("opus");
+      tool = "Artifact";
+      result = await turn(agent, "a4");
+      assert.equal(result.state, "completed", result.error ?? "");
+      assert.match(result.results[0] ?? "", /created at revision 1/, result.results[0]);
+      assert.equal(mine().length, 2);
+    } finally { await agent.close(); }
+    console.log("ok: cube's tools: registered by the mod, offered upfront as mcp__cube__*, called through --tools, the settings hook and dontAsk into cubed, also on a resume; invalid input and a tool cube does not offer refused");
+    // Its forwarding hook throws: the .catch refuses, nothing is written.
+    const throws = await ClaudeAgent.open({ directory: path.join(temp, "agent-tool-throws"), threadId: "t1", workspace, runtime: runtime(mod("cube-tool-throws")), model: "sonnet" });
+    try {
+      const result = await turn(throws, "a5");
+      assert.match(result.results[0] ?? "", /the mod failed on this call, so it is refused rather than run on the cubed host/, result.results[0]);
+      assert.equal(mine().length, 2);
+    } finally { await throws.close(); }
+    // cubed cannot list the tools: no ready, so no prompt and no model request.
+    toolsFail = true;
+    const unlisted = await ClaudeAgent.open({ directory: path.join(temp, "agent-no-tools"), threadId: "t1", workspace, runtime: runtime(mod("cube")), model: "sonnet" });
+    try { await refused(unlisted, "the tool list fails"); } finally { await unlisted.close(); toolsFail = false; }
+    console.log("ok: a cube tool hook that throws refuses the call; a tool list cubed cannot give means no prompt and no model request");
+  }
 } finally {
   api.close();
   server.close();
+  artifacts.close();
+  store.close();
   fs.rmSync(temp, { recursive: true, force: true });
 }
