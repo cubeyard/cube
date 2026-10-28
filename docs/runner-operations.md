@@ -268,15 +268,19 @@ runner.
 - **Suspend** (phase 7) is off unless `berth vm` starts with
   `--suspend-disk-margin-gib <GiB>`, which has no default in berth: it is
   the free disk a runner keeps besides a machine's memory file (at least 1
-  GiB; the file can be a little larger than the machine's memory). The
+  GiB). A save is refused unless the machine's whole memory and the margin
+  are free. The file's size can be a little more than the machine's memory
+  (4230.5 MiB for 4096 MiB, measured once on HVF), which the margin covers;
+  it is sparse, so what it takes on disk is usually less, by an amount that
+  depends on what the guest had in memory. Every
+  suspended machine keeps its file until it resumes or is archived, so idle
+  threads add up on the runner's disk; the margin only stops new saves. The
   Homebrew `cube-berth` service passes `--suspend-disk-margin-gib 2` (the
   reserve berth keeps after an image pull) unless `berth.env` says
   `CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=off` or another number; `init-local`
   writes no such line and keeps one the operator wrote. A `berth vm` started
   by hand or from `install-berth.sh`'s unit has suspend off until it is
-  given the flag. Every suspended machine keeps its memory file (at most its
-  memory) until it resumes or is archived, so idle threads add up on the
-  runner's disk; the margin only stops new saves. Only then does
+  given the flag. Only then does
   the runner say `machine.suspend`, and cubed suspends a thread's machine
   after 5 minutes in which nothing ran: no turn of its agent or its
   background agents, no guest call, no command started and not yet seen to
