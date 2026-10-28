@@ -147,7 +147,7 @@ export function parseActions(raw: unknown): ArtifactAction[] {
  * was written on, so the author can find it without guessing. */
 export function commentMessage(artifact: { id: string; title: string; head: number }, comments: readonly ArtifactComment[], hint: string, editedBy?: ArtifactAuthor): string {
   const edited = editedBy ? `; ${authorText(editedBy)} wrote that revision` : "";
-  const lines = [`[artifact ${artifact.id.slice(0, 8)}] The user commented on your artifact "${artifact.title}" (${artifact.id}, now at revision ${artifact.head}${edited}): ${comments.length} comment${comments.length === 1 ? "" : "s"}.`];
+  const lines = [`[artifact ${artifact.id}] The user commented on your artifact "${artifact.title}" (${artifact.id}, now at revision ${artifact.head}${edited}): ${comments.length} comment${comments.length === 1 ? "" : "s"}.`];
   comments.forEach((comment, index) => {
     const { anchor } = comment;
     const stale = comment.revision !== artifact.head ? ` (written on revision ${comment.revision}; the current one is ${artifact.head})` : "";
@@ -176,7 +176,7 @@ export function actionMessage(artifact: { id: string; title: string; author: Art
   const next = target.kind === "thread"
     ? "Nothing more is asked of you. If the outcome calls for follow-up, say what; otherwise answer in one line."
     : "Tell the user only what this changes for them.";
-  return `[artifact ${artifact.id.slice(0, 8)}] The user confirmed ${what} on ${whose} (${artifact.id}, revision ${run.revision}; #/a/${artifact.id}). ${outcome} ${next}`;
+  return `[artifact ${artifact.id}] The user confirmed ${what} on ${whose} (${artifact.id}, revision ${run.revision}; #/a/${artifact.id}). ${outcome} ${next}`;
 }
 
 type Row = Record<string, unknown>;
@@ -317,6 +317,16 @@ export class ArtifactStore {
     const row = this.db.prepare("SELECT artifact, number FROM revisions WHERE request_id = ?").get(requestId) as Row | undefined;
     const revision = row ? this.revision(String(row.artifact), Number(row.number)) : null;
     return revision && sameAuthor(revision.editor, editor) ? revision : null;
+  }
+  /** The newest revision `thread` wrote of each artifact in one of `calls`
+   * (tool call ids), newest artifact first. */
+  writtenIn(thread: string, calls: ReadonlySet<string>): Array<{ artifact: string; number: number }> {
+    if (!calls.size) return [];
+    const rows = this.db.prepare("SELECT artifact, number, json_extract(provenance, '$.call') AS call FROM revisions WHERE json_extract(provenance, '$.thread') = ? ORDER BY created_at DESC, rowid DESC")
+      .all(thread) as Row[];
+    const newest = new Map<string, number>();
+    for (const row of rows) if (calls.has(String(row.call)) && !newest.has(String(row.artifact))) newest.set(String(row.artifact), Number(row.number));
+    return [...newest].map(([artifact, number]) => ({ artifact, number }));
   }
   /** Every revision without its body, oldest first. */
   revisions(id: string): Array<Omit<Revision, "body" | "actions"> & { bytes: number; actions: number }> {

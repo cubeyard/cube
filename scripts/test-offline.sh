@@ -114,6 +114,7 @@ OFFLINE_TESTS=(
   packages/server/test/artifacts-test.ts
   packages/server/test/artifact-notices-test.ts
   packages/server/test/artifact-tools-test.ts
+  packages/server/test/artifact-links-test.ts
   packages/server/test/artifact-sharing-test.ts
   packages/server/test/artifact-diagrams-test.ts
   packages/server/test/cube-tools-test.ts

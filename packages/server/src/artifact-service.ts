@@ -142,7 +142,7 @@ export class Artifacts {
     // A blank id is none: create rather than look up "".
     if (input.id !== undefined && !input.id.trim()) input = { ...input, id: undefined };
     const existing = input.id ? this.store.get(input.id) : null;
-    if (input.id && (!existing || !this.reaches(scope, existing))) throw new ArtifactError(`no artifact ${input.id} you can read`, 404);
+    if (input.id && (!existing || !this.reaches(scope, existing))) throw this.unknown(scope, input.id);
     if (input.base !== undefined && (!Number.isSafeInteger(input.base) || input.base < 1)) throw new ArtifactError("base must be a revision number");
     const projectId = existing ? existing.projectId : this.project(agent, input.project);
     const actions = input.actions === undefined ? undefined : parseActions(input.actions);
@@ -161,7 +161,7 @@ export class Artifacts {
     const author = existing?.author ?? agent;
     const verb = written.unchanged ? "unchanged: the same as revision" : written.created ? "created at revision" : "wrote revision";
     const routed = sameAuthor(author, agent)
-      ? `their comments come back to you as a message starting "[artifact ${revision.artifact.slice(0, 8)}]".`
+      ? `their comments come back to you as a message starting "[artifact ${revision.artifact}]".`
       : `it stays ${authorText(author)}'s artifact: the user's comments on it go to ${authorText(author)}, not to you.`;
     const offered = written.actionsKept
       ? ` Actions kept from revision ${revision.number - 1} (give actions to change them, [] to remove them): ${revision.actions.map(actionText).join("; ")}.`
@@ -180,7 +180,7 @@ export class Artifacts {
     provenance: Provenance, requestId: string): Promise<{ text: string; id: string; revision: number }> {
     const { agent } = scope;
     const existing = this.store.get(input.id);
-    if (!existing || !this.reaches(scope, existing)) throw new ArtifactError(`no artifact ${input.id} you can read`, 404);
+    if (!existing || !this.reaches(scope, existing)) throw this.unknown(scope, input.id);
     // A replayed call finds the revision it wrote, whose text no longer matches.
     const replayed = this.store.requested(agent, requestId);
     if (replayed) return this.write(scope, { id: replayed.artifact, body: replayed.body }, provenance, requestId);
@@ -205,10 +205,10 @@ export class Artifacts {
     if (!id) {
       const list = this.store.list({ authors: scope.authors, project: this.threadProject(scope.agent) });
       if (!list.length) return "no artifacts yet";
-      return list.map(item => `${item.id} "${item.title}" · revision ${item.head} · by ${authorText(item.author)} · ${commentCounts(item)}`).join("\n");
+      return list.map(item => `${item.id} "${item.title}" · revision ${item.head} · by ${authorText(item.author)} · ${commentCounts(item)} · #/a/${item.id}`).join("\n");
     }
     const artifact = this.store.get(id);
-    if (!artifact || !this.reaches(scope, artifact)) throw new ArtifactError(`no artifact ${id} you can read`, 404);
+    if (!artifact || !this.reaches(scope, artifact)) throw this.unknown(scope, id);
     const number = revision ?? artifact.head;
     const shown = this.store.revision(id, number);
     if (!shown) throw new ArtifactError(`no revision ${number}; the artifact has ${artifact.head}`);
@@ -227,6 +227,29 @@ export class Artifacts {
       `--- body of revision ${number} ---`,
       shown.body,
     ].join("\n");
+  }
+
+  /** The refusal of an id `scope` cannot read. When what was given is a
+   * prefix of an artifact's id (8 characters or more), its link or its
+   * path, it names that artifact by its whole id and link, so the agent asks
+   * again with the id; nothing is read on a guess, and a title never names one. */
+  private unknown(scope: ArtifactScope, given: string): ArtifactError {
+    const key = given.trim().toLowerCase().replace(/^#\/a\//, "").replace(/^\/cube\/artifacts\//, "").replace(/\.(md|json)$/, "").replace(/\?.*$/, "");
+    const matches = key.length >= 8 && /^[0-9a-f-]+$/.test(key)
+      ? this.store.list({ authors: scope.authors, project: this.threadProject(scope.agent), limit: 1000 }).filter(item => item.id.startsWith(key)) : [];
+    if (!matches.length) return new ArtifactError(`no artifact ${given} you can read`, 404);
+    const named = matches.map(item => `${item.id} "${item.title}" by ${authorText(item.author)} (#/a/${item.id})`);
+    return new ArtifactError(`no artifact ${given} you can read: an artifact's id is its whole uuid, not a short id or a link. ${given} matches ${named.join("; or ")}. Ask again with ${matches.length === 1 ? "that id" : "one of those ids"}.`, 404);
+  }
+
+  /** The artifacts `thread` wrote in the tool calls `calls`, by id and
+   * link, as its report to OptChat names them: whatever the reply says. */
+  writtenIn(thread: string, calls: ReadonlySet<string>): string {
+    const lines = this.store.writtenIn(thread, calls).slice(0, 10).flatMap(({ artifact, number }) => {
+      const summary = this.store.get(artifact);
+      return summary ? [`- [${summary.title}](#/a/${artifact}): artifact ${artifact}, revision ${number}`] : [];
+    });
+    return lines.length ? `artifacts it wrote in this turn, as cube recorded them (link these, by id):\n${lines.join("\n")}` : "";
   }
 
   /** The user's drafts on `id` go to the author as one message. */

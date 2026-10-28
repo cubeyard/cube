@@ -73,6 +73,28 @@ API) is read from that provenance; the artifact's author never changes.
 Bounds: title 200 characters, body 256 KiB, 8 actions, 500 revisions an
 artifact, 500 artifacts an author.
 
+## An artifact's id and link
+
+An artifact is named by its id, a whole UUID, and opened at `#/a/<id>`; a
+title or a shortened id names nothing. The whole id is given wherever an
+agent may pass an artifact on:
+
+```text
+artifact_write, artifact_edit  -> "artifact <id> ... #/a/<id>"; comments come back as "[artifact <id>]"
+artifact_read (list)           -> each line ends with #/a/<id>
+comments and action notices    -> start "[artifact <id>]" (the whole id; 8 characters before)
+a thread's report to OptChat   -> ends with the artifacts its run wrote, from cube's record:
+                                  "- [<title>](#/a/<id>): artifact <id>, revision n"
+artifact_read/_write/_edit given an id prefix of 8+ characters, a #/a/<id> link or a /cube/artifacts/<id>.md path
+                               -> refused, naming the matching artifacts in scope by id and link;
+                                  nothing is read or written on a guess
+```
+
+The report's list is the revisions whose provenance names the thread and
+one of the run's tool calls (those after the message it answers), the
+newest revision of each artifact, at most 10, whatever the reply calls
+them.
+
 ## Revising someone else's artifact
 
 ```text
@@ -308,6 +330,14 @@ journaled there.
   spawned, to the thread once and to the chat, also once that thread is
   archived; everything across a restart; an archived thread's comments
   undeliverable.
+- `packages/server/test/artifact-links-test.ts`: a Claude Code thread's
+  write and edit over the socket's tool route answering the whole id, link
+  and `[artifact <id>]`; OptChat's read, write and edit given an
+  8-character id, a link or a path refused with the artifact's id and
+  nothing written, a title, a short prefix and another project's artifact
+  naming nothing; the list's links; a thread's report, live and from its
+  stored history, ending with the artifacts its run wrote by id and link,
+  the link reading the artifact in its project.
 - `packages/server/test/cube-tools-test.ts`: both adapters over a real
   store and real leases: the same script (create, page, edit, refusals, a
   write from a file, a missing artifact) gives the same words through Pi
@@ -373,6 +403,9 @@ follows GitHub's REST documentation), and comment placement on very large or
 heavily rewritten documents.
 
 ## Known limits
+
+- A report lists the artifacts written after the message it answers: one
+  written before a message steered into the same run is not in it.
 
 - One action kind. Others (close an issue, re-run CI, archive a thread) need
   their own typed preview and checks.
