@@ -165,7 +165,7 @@ tool's `path`) take any path in the thread's machine, as bash does:
 | any other absolute path: `/home/agent/…`, `/tmp/…`, `~/…` (not `~name`) | that path in the machine | the `agent` account's own permissions (`EACCES` says to use sudo in bash) |
 | `/proc`, `/sys`, `/dev`, or a link that resolves into them | refused (`INVALID_REQUEST`) | — use bash |
 | a path with a `..` part on the wire | refused; the agent side normalises first | — |
-| `/cube/…` in the Claude Code mod (after normalising) | not the machine's: `/cube/artifacts` are cube's work artifacts | — |
+| `/cube/…` in the Claude Code mod (after normalising) | refused, naming cube's artifact tools (artifacts were once files there) | — |
 
 The guest helper resolves every path inside the machine: symlinks are followed
 there (a workspace link may lead out of the workspace and is then reached as
@@ -316,8 +316,12 @@ None of these changes the model's request (checked byte for byte with the
 real CLI). The module must keep exactly one `on('session.start')` and one
 hooks module: Claude Code's check refuses a second unmatched
 `session.start` and then runs without the mod (the gate refuses that
-child), so tools registered at `session.start` (#221's `cubeHooks`) go in
-the same hook as the ready, before it. `scripts/check-claude-fail-closed.ts` runs all three against a
+child), so cube's own tools are registered in the same hook as the ready,
+before it: the mod lists them on the socket (`…/workspace/tools`) and
+registers each, and a list cubed cannot give throws before the ready. Their
+calls (`mcp__cube__<name>`, which `--tools` and the settings hook let reach
+the mod) go to `…/workspace/tools/<name>` under the lease token; cubed
+checks the input and answers (`cube-tools.ts`, "Work artifacts" below). `scripts/check-claude-fail-closed.ts` runs all three against a
 real `claude` and a scripted Messages API, with a control that shows a
 modless `claude` with cubed's earlier arguments running `pwd` on the host.
 Prompts go to stdin under their request ID (a repeated ID is accepted once), stop
@@ -401,11 +405,15 @@ requests only. The details, deviations and gaps are in
 
 ## Work artifacts
 
-`artifact_write` and `artifact_read` are host tools: OptChat's own, and a
-Pi thread's beside its workspace tools (`openAgent`'s `hostTools`); a Claude
-Code thread reaches the same through the mod's `/cube/artifacts/<name>.md`
-paths on the workspace socket, authorized by its lease token (or
-`<id>.md` for an artifact it did not write). OptChat reads and revises its
+`artifact_write`, `artifact_read` and `artifact_edit` are cube's own tools,
+defined once in cubed (`cube-tools.ts`: name, description, TypeBox schema,
+`run`) and offered through two thin adapters: to Pi as Pi tools (OptChat's
+own, and a Pi thread's beside its workspace tools through `openAgent`'s
+`hostTools`), and to a Claude Code thread as `mcp__cube__artifact_*`, which
+its mod registers from the list on the workspace socket and forwards there,
+authorized by its lease token. Both check a call's input with Pi's own
+validator; what a caller may reach is decided where the list is built and
+in `run`, never in an adapter. OptChat reads and revises its
 own and its threads' artifacts, a thread every artifact of its project; a
 revision must be written on the newest one, so a stale write is refused
 rather than lost, and the author, who gets the comments, never changes. A

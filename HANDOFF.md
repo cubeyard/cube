@@ -383,8 +383,9 @@ the history request's error line until the next run.
 
 ## Work artifacts (branch `feat/work-artifacts`)
 
-OptChat and threads write documents for the user (`artifact_write`/
-`artifact_read`; Claude Code threads `Write`/`Read /cube/artifacts/<name>.md`),
+OptChat and threads write documents for the user (`artifact_write`,
+`artifact_read`, `artifact_edit`: one definition in cubed, offered to Pi
+and to Claude Code as `mcp__cube__*`),
 kept with revisions and provenance in `CUBED_STATE/artifacts.sqlite` and
 shown at `#/a/<id>` (list at `#/artifacts`, newest five in the chat panel).
 The body renders as data (Markdown, diffs, Mermaid drawn by Pele as images,

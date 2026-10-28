@@ -18,9 +18,10 @@ packages/server/src/
 ├── artifact-service.ts   # agents' write/read, comment delivery, action preview and run
 ├── artifact-diagrams.ts  # ```mermaid fences checked with Pele before a revision is written
 ├── artifact-diagrams-worker.ts  # Pele off the main thread, under a deadline and a heap cap
-├── artifact-tools.ts     # artifact_write / artifact_read for OptChat and Pi threads
+├── artifact-tools.ts     # artifact_write / artifact_read / artifact_edit, one definition for every agent
+├── cube-tools.ts         # cube's tools: the contract, Pi's adapter and Claude Code's socket route
 └── github-pulls.ts       # a pull request's live state and its merge
-packages/claude-mod/hooks/tools.ts       # /cube/artifacts/<name>.md for Claude Code threads
+packages/claude-mod/hooks/register.ts    # registers cube's tools in Claude Code and forwards their calls
 packages/web/src/lib/artifact-render.ts  # Markdown, diff and diagram placeholders as data
 packages/web/src/lib/diagram.ts          # diagrams drawn by Pele as <img> of their SVG (artifacts and chat)
 packages/web/src/lib/anchor.ts           # selections as anchors, found again or outdated
@@ -31,28 +32,33 @@ packages/web/src/components/ArtifactView.svelte, ArtifactList.svelte
 
 | agent | creates | reads and revises |
 | --- | --- | --- |
-| OptChat | `artifact_write`; `project` names whose repositories actions may use | its own and those of the threads it started (`artifact_read`, `artifact_write` with `id`) |
-| a Pi thread | `artifact_write`, body inline or from a workspace file with `path` | every artifact of its project: its own, other threads', OptChat's that names the project |
-| a Claude Code thread | `Write /cube/artifacts/<name>.md` (or `.json` as `{title?, body, actions?, base?}`) | the same as a Pi thread: `Read`/`Write /cube/artifacts/<name>.md` for its own, `<id>.md` for any; `Read /cube/artifacts` lists them |
+| OptChat | `artifact_write`; `project` names whose repositories actions may use | its own and those of the threads it started (`artifact_read`, `artifact_write` or `artifact_edit` with `id`) |
+| a thread, Pi or Claude Code | `artifact_write`, body inline or from a file in its machine with `path` | every artifact of its project: its own, other threads', OptChat's that names the project |
 | the browser | nothing | everything; it comments, sends comments and confirms actions, and never writes a revision (cubed has no users; see SECURITY.md) |
 
 One cubed is one user's cube, and inside it the project is the sharing
 boundary: an agent asking for an artifact outside its scope (another
 project's, or OptChat's without a project) is told there is no such
 artifact it can read, as if there were none. A thread's artifacts belong to
-its project. The Claude Code mod reaches cubed on the private workspace
-socket; the thread's lease token, which cubed holds for that Claude Code
-child, is the authorization, and the routes refuse a Pi thread's lease. A
-name in the form of an artifact id (`/cube/artifacts/<id>.md`) is that
-artifact, never a new one. `/cube/artifacts` is not in the machine: Bash
-does not reach it. Read pages an artifact's text (header and body, uncut)
-with `offset` and `limit` like a file, at most 2,000 lines and 120,000
-characters at once, and says which lines it showed when it is not the end.
-Edit on `<name>.md` is a new revision cubed writes on the newest one, by
-the same rules as a write: on the revision the agent last read, refused
-(409) when another is newer, once per `tool_use_id`, actions kept. A long
-artifact changes by a few lines without the whole document being read or
-written again.
+its project.
+
+The three tools are defined once (`artifactTools`, `cube-tools.ts`) and
+offered to Pi as Pi tools and to Claude Code as `mcp__cube__artifact_*`:
+its mod lists them on cubed's private workspace socket at `session.start`,
+registers them before it says it is ready, and forwards each call there.
+The thread's lease token, which cubed holds for that Claude Code child, is
+the authorization, and the route refuses a Pi thread's lease. Both check
+the input with Pi's own validator, so a call means the same and is refused
+with the same words whichever agent made it. `artifact_read` shows an
+artifact's text (header and body) at most 120,000 characters at once, and
+`offset` and `limit` page a longer one by lines, saying which lines it
+showed when it is not the end. `artifact_edit` is a new revision cubed
+writes on the newest one, by the same rules as a write: on the revision the
+agent last read, refused (409) when another is newer, once per call,
+actions kept. A long artifact changes by a few lines without the whole
+document being read or written again. Claude Code threads once reached
+artifacts as files under `/cube/artifacts`; such a path is now refused
+with the tools' names, for a session that remembers it.
 
 Every write is a whole new revision; older ones stay readable at
 `#/a/<id>?rev=<n>`, with their body and actions as written. A write with the
@@ -134,9 +140,8 @@ data (`renderArtifact`):
 
 ## Diagrams are checked before a revision is written
 
-Every write (`artifact_write` inline or from a workspace `path`, OptChat's
-`artifact_write`, Claude Code's `Write` of `<name>.md` or `.json` and its
-`Edit`) passes through `Artifacts.write`, which finds the body's
+Every write (`artifact_write` inline or from a file with `path`, and
+`artifact_edit`, whichever agent calls them) passes through `Artifacts.write`, which finds the body's
 ` ```mermaid ` fences as the page does (the same `marked` version and
 options, the info string's first word) and draws each with Pele, with the
 page's options, before the store is touched. If one does not draw, nothing
@@ -303,14 +308,16 @@ journaled there.
   spawned, to the thread once and to the chat, also once that thread is
   archived; everything across a restart; an archived thread's comments
   undeliverable.
-- `packages/server/test/claude-artifact-edit-test.ts`: the mod's Read and
-  Edit over the service with a real store: a 125,573-character artifact
-  read in a 20-line window (3,077 characters; the whole text before), two
-  pages reaching its last line, Edit as the reviewer's revision with the
-  author and actions kept, a replayed Edit writing once, an Edit after the
-  author's newer revision refused and then landing on it after a reread,
-  unread, ambiguous, missing and other-project Edits refused, writing
-  nothing.
+- `packages/server/test/cube-tools-test.ts`: both adapters over a real
+  store and real leases: the same script (create, page, edit, refusals, a
+  write from a file, a missing artifact) gives the same words through Pi
+  and Claude Code; invalid input refused with the same validator message
+  and nothing written; a repeated call (a Pi task replayed, a Claude Code
+  `tool_use_id` repeated) writes once; a 125,573-character artifact read in
+  a 20-line window and to its last line, edited on the revision read and
+  refused after a newer one; the route refusing no token, another token, a
+  Pi lease, a released lease and a tool it does not offer; an abandoned
+  call writing nothing.
 - `packages/server/test/artifact-sharing-test.ts`: the service over a real
   store with fakes: a thread revising OptChat's artifact and another
   thread's of its project, OptChat its thread's; another project's thread
@@ -356,9 +363,12 @@ journaled there.
   then confirmed once, the chat told of the failure and of the merge once each
   and the page saying `told optchat`, no sideways scroll on the phone. `CUBE_SCREENSHOTS=<dir>` keeps the screenshots.
 
-Not verified: a real model writing artifacts, a real Claude Code session
-using `/cube/artifacts` (the mod's functions run offline under the fake
-`claude`), a merge against GitHub itself (its API is faked; the request shape
+`node scripts/check-claude-fail-closed.ts` (Part 4) runs the real `claude`
+against a scripted Messages API on loopback: it is offered the three tools
+upfront as `mcp__cube__*`, its call reaches cubed and writes a revision,
+also after a resume, and a tool list cubed cannot give means no prompt.
+
+Not verified: a real model writing artifacts, a merge against GitHub itself (its API is faked; the request shape
 follows GitHub's REST documentation), and comment placement on very large or
 heavily rewritten documents.
 
