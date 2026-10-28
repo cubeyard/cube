@@ -23,7 +23,7 @@ import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWork
 import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import type { GuestTransport } from "./guest-transport.ts";
-import { RESTART_GUARD_MS } from "./machine-idle.ts";
+import { abortable, RESTART_GUARD_MS } from "./machine-idle.ts";
 import { slotWait } from "./machine-sleep.ts";
 import { startFailureOf, threadCondition, type StartFailure, type ThreadCondition } from "./thread-condition.ts";
 import { allocationFailed, FailedTry, readFailure, releaseFailed, startFailed, type Failure } from "./thread-failure.ts";
@@ -169,6 +169,9 @@ export class Conversations {
   private readonly startedAt = Date.now();
   /** Wakes under way, one per thread (`wake`). */
   private readonly wakes = new Map<string, Promise<void>>();
+  /** Ends every wait for the thread's wake under way at once (`resume`:
+   * the machine booted again under it), whatever the waiting call. */
+  private readonly wakeEnds = new Map<string, AbortController>();
   /** Threads whose wake waited the whole `wakeMs` in vain, and why: until
    * the machine runs (whoever starts it) or a new message asks for it, a
    * guest call tries once and fails at once, so the run's later tool calls
@@ -348,7 +351,8 @@ export class Conversations {
   wake(id: string): Promise<void> {
     if (!this.registry.getThread(id)?.vm?.suspension) return Promise.resolve();
     const pending = this.wakes.get(id);
-    if (pending) return pending;
+    if (pending) return abortable(pending, this.wakeEnds.get(id)?.signal);
+    const end = new AbortController();
     const waking = (async () => {
       const gaveUp = this.gaveUp.has(id);
       const deadline = gaveUp ? Date.now() : Math.max(Date.now(), this.startedAt + this.patience.restartMs) + this.patience.wakeMs;
@@ -374,9 +378,10 @@ export class Conversations {
         }
         await delay(this.patience.retryMs);
       }
-    })().finally(() => { this.wakes.delete(id); this.publish(id); });
+    })().finally(() => { this.wakes.delete(id); this.wakeEnds.delete(id); this.publish(id); });
     this.wakes.set(id, waking);
-    return waking;
+    this.wakeEnds.set(id, end);
+    return abortable(waking, end.signal);
   }
   /** Boots the thread's machine, provisions it once and opens its agent.
    * Concurrent calls share one activation. */
@@ -609,10 +614,15 @@ export class Conversations {
       // The machine booted again: from here this is a start.
       this.checks.delete(id);
       // A wake under way is this start, and the agent's run waits in it (a
-      // guest call's `before`): closing the agent would wait for that run.
-      // The run is stopped first, which ends its wait (its commands went
-      // with the old boot: the thread says it restarted from its disk).
-      if (this.wakes.has(id)) {
+      // guest call's `before`, any call, with or without an abort signal of
+      // its own): closing the agent would wait for that run. Every wait for
+      // the wake ends here, unsent, and the run is stopped, so the close
+      // does not wait for it (its commands went with the old boot: the
+      // thread says it restarted from its disk). A call made from here on
+      // finds the machine running and goes to it.
+      const end = this.wakeEnds.get(id);
+      if (end) {
+        end.abort(new Error("the thread's machine started again from its disk: its saved state could not be restored; running commands were interrupted"));
         const [pi, claude] = await Promise.all([this.agents.get(id)?.catch(() => null), this.claudes.get(id)?.catch(() => null)]);
         await Promise.all([pi?.conversation.abort(context), claude?.stop()].map(stop => stop?.catch(() => {})));
       }

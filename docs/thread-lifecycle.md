@@ -153,10 +153,15 @@ this process never saw that boot run (a cubed restart since the suspend):
 an agent already open on it goes on, its run included (thread-queue-test
 Q5, lifecycle-model-test seed 13; review B1). A machine its runner started
 from its disk instead (`SnapshotDropped`) booted again, and its open agent
-is closed and reopened; when a run of it waits for this very start (a
-guest call's wake), that run is stopped first, since the close would wait
-for it and its commands went with the old boot (Q6). A guest call's wait
-for a wake ends when the call is aborted.
+is closed and reopened. When a run of it waits for this very start (a
+guest call's wake), the start first ends every wait for that wake, unsent,
+whatever the call and whether or not it carries an abort signal (a new
+workspace's `hello`, `exec`, `cancel`, Claude Code's close), then stops the
+run (a Pi run ends `stopped`, a Claude Code turn `failed`), since the close
+would wait for it and its commands went with the old boot; calls made from
+then on reach the running machine under its current epoch (Q6, Q6b after a
+restart, queue-claude-test C2; a restored snapshot: Q5, C1). A guest
+call's wait for a wake also ends when the call itself is aborted.
 
 `recoveryStep` is the recovery loop's rule:
 

@@ -27,6 +27,10 @@
  *       machine from its disk (a real new boot): the waiting run is stopped
  *       rather than waited for, the thread says it restarted from its disk,
  *       and the next message runs.
+ *   Q6b the same after a cubed restart before the message (review B1′): the
+ *       run's first guest calls carry no abort signal of their own (the new
+ *       workspace's `hello`); the start ends every wait for the wake, the
+ *       run is stopped, and the next two messages run.
  *   Q7  a wake on a full runner just after cubed started (when no machine
  *       running from before may be suspended yet) does not give up before
  *       that protection ends: its patience counts from then; later it
@@ -259,6 +263,41 @@ try {
     w.sound("Q6");
     console.log("ok: Q6 a machine that boots from its disk under a run waiting for its wake stops that run instead of waiting for it; the next message runs");
   }
+  // ---------------------------------------------------------------- Q6b
+  {
+    const w = world("q6b", 1, 20_000);
+    worlds.push(w);
+    const a = await w.running();
+    w.clock.now += 61_000;
+    await w.cubed.conversations.suspendIdle();
+    assert.equal(w.phase(a.id), Phase.SUSPENDED);
+    const holder = await w.running();
+    w.berth.busy.add(w.vmOf(holder.id));
+    await w.restart();
+    await w.cubed.conversations.boot();
+    const status = async () => (await w.cubed.conversations.storedHistory(a.id, { limit: 1 }))?.status.state;
+    const bounded = <T>(what: string, work: Promise<T>) => Promise.race([work,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${what} did not finish in 20 s`)), 20_000).unref())]);
+    const first = w.cubed.conversations.submit(a.id, "work slowly", "cold-1");
+    await until("a's run waits for its wake", () => !!slotWait(w.fresh(a.id).vm?.suspension) && w.cubed.conversations.owns(w.fresh(a.id)));
+    w.berth.dropSnapshots.add(w.vmOf(a.id));
+    w.berth.busy.delete(w.vmOf(holder.id));
+    await bounded("the holder's archive", w.cubed.conversations.archive(holder.id));
+    await bounded("the first message", first);
+    await w.settled(a.id);
+    assert.equal(await status(), "stopped", "the run that waited for a machine that booted from its disk was stopped");
+    assert.match(w.fresh(a.id).vm?.notice?.text ?? "", /^restarted from its disk/);
+    await until("the agent reopened", () => !w.cubed.conversations.owns(w.fresh(a.id)));
+    for (const request of ["cold-2", "cold-3"]) {
+      await bounded(request, w.cubed.conversations.submit(a.id, request === "cold-2" ? "work slowly" : "again", request));
+      await w.settled(a.id);
+      assert.equal(await status(), "completed", `${request} runs on the machine that booted from its disk`);
+    }
+    assert.equal(w.berth.creates(w.vmOf(a.id)), 1, "the same machine, not a new one");
+    w.sound("Q6b");
+    console.log("ok: Q6b after a restart, a run waiting for a machine that boots from its disk is stopped, every wait for the wake ended; the next messages run");
+  }
+
   // ---------------------------------------------------------------- Q7
   {
     const WAKE = 600, RESTART = 2_500;

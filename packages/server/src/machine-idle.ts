@@ -32,7 +32,7 @@ export const DEFAULT_EXEC_TIMEOUT_MS = 30 * 60 * 1000;
  * `Unknown` is no operation with that key: nothing runs under it). */
 const RUNNING = new Set(["Accepted", "Running"]);
 /** `work`, or the reason `signal` gives once it aborts first. */
-function abortable<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+export function abortable<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return work;
   if (signal.aborted) { work.catch(() => {}); return Promise.reject(signal.reason); }
   return new Promise<T>((resolve, reject) => {
