@@ -95,6 +95,12 @@ export function readFormulaInputs(tag: string, assets: string, publicKeyPem: Buf
   return { tag, cubed, berth, keel };
 }
 
+/** The free disk (GiB) cube-berth's service has berth keep beside a
+ * machine's memory file when it suspends it, unless berth.env sets
+ * CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB: the reserve berth keeps for every
+ * image pull (FREE_RESERVE in packages/berth/src/image.rs). */
+const SUSPEND_DISK_MARGIN_GIB = 2;
+
 /** Formula/cube-berth.rb: the runner, `berth vm`, with keel's kernel and
  * base for arm64, QEMU and erofs-utils from Homebrew, and a user service
  * that starts it with what `cubed runners init-local` wrote. Its version is
@@ -153,10 +159,22 @@ class CubeBerth < Formula
         sleep 60
         exit 78
       fi
+      # Suspend is on unless berth.env says off; its margin is the free disk
+      # berth keeps beside a machine's memory file when it saves it.
+      margin=$(sed -n 's/^CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=//p' "$home/berth.env")
+      case "\${margin:=${SUSPEND_DISK_MARGIN_GIB}}" in
+        off) set -- ;;
+        [1-9] | [1-9][0-9] | [1-9][0-9][0-9] | [1-9][0-9][0-9][0-9]) set -- --suspend-disk-margin-gib "$margin" ;;
+        *)
+          echo "cube-berth: $home/berth.env: CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB is 1 to 9999 (GiB) or off" >&2
+          sleep 60
+          exit 78
+          ;;
+      esac
       exec "#{opt_bin}/berth" vm --dir "$home/berth" \\\\
         --qemu "#{formula_opt_bin("qemu")}/qemu-system-aarch64" --qemu-img "#{formula_opt_bin("qemu")}/qemu-img" \\\\
         --mkfs-erofs "#{formula_opt_bin("erofs-utils")}/mkfs.erofs" --keel "#{opt_libexec}/keel" \\\\
-        --image "$image" --max-machines "$machines" --listen "$listen"
+        --image "$image" --max-machines "$machines" --listen "$listen" "$@"
     SH
     chmod 0755, libexec/"service.sh"
   end

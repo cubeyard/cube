@@ -452,7 +452,9 @@ try {
   // without --image moves berth.env to the default, keeps the earlier file
   // beside it, starts nothing and changes nothing else; then it is set up.
   const settingsPath = path.join(plain, "berth.env");
-  const asBefore = fs.readFileSync(settingsPath, "utf8").replace("CUBE_BERTH_IMAGE=default", `CUBE_BERTH_IMAGE=${rawDebian}`);
+  // The operator turned suspend off there: the move keeps that.
+  const asBefore = fs.readFileSync(settingsPath, "utf8").replace("CUBE_BERTH_IMAGE=default", `CUBE_BERTH_IMAGE=${rawDebian}`)
+    + "CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=off\n";
   fs.writeFileSync(settingsPath, asBefore, { mode: 0o600 });
   const brokenSnapshot = snapshot(plain);
   // N2: berth refuses the default there (it also served an image of the
@@ -479,7 +481,7 @@ try {
   assert.doesNotMatch(recovering.stdout, /already set up and enrolled/);
   assert.deepEqual(calls().slice(callsBeforeRecovery), [`image check --dir ${path.join(plain, "berth")} --image default`], "only berth's check runs; nothing is started");
   assert.match(recovering.stdout, /one berth cannot prove never ready is left as it was and says so in its events\.log\. Nothing was deleted\./);
-  assert.deepEqual(readBerthSettings(fs.readFileSync(settingsPath, "utf8")), { image: "default", maxMachines: 2, listen: plainAddress });
+  assert.deepEqual(readBerthSettings(fs.readFileSync(settingsPath, "utf8")), { image: "default", maxMachines: 2, listen: plainAddress, suspendDiskMarginGib: "off" });
   const keptFiles = fs.readdirSync(plain).filter(name => name.startsWith("berth.env.official-debian."));
   assert.equal(keptFiles.length, 1);
   assert.equal(fs.readFileSync(path.join(plain, keptFiles[0]!), "utf8"), asBefore, "the earlier file is kept as it was");

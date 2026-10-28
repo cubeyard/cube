@@ -718,7 +718,8 @@ keel's `read` of `~/.cache/cube` at the current epoch;
 `berth host` keeps its hooks' logs on that host and shows none.
 
 Suspend and resume are built (phase 7, `machine_suspend`; off unless a
-runner starts with `--suspend-disk-margin-gib`). A suspended machine stays so until
+runner starts with `--suspend-disk-margin-gib`, which the Homebrew
+`cube-berth` service passes by default). A suspended machine stays so until
 something needs it; who may start or wake a machine, and what the recovery
 loop does with each thread, is in docs/thread-lifecycle.md. The machine's
 sleep (`vm.suspension`) changes only by a typed event through

@@ -134,14 +134,31 @@ try {
   const started = serve();
   assert.equal(started.status, 0, started.stderr);
   assert.equal(started.stdout.trim(), `berth vm --dir ${home}/.cube/berth --qemu ${root}/opt/qemu/bin/qemu-system-aarch64 --qemu-img ${root}/opt/qemu/bin/qemu-img`
-    + ` --mkfs-erofs ${root}/opt/erofs-utils/bin/mkfs.erofs --keel ${root}/opt/cube-berth/libexec/keel --image ${image} --max-machines 2 --listen 127.0.0.1:7781`);
+    + ` --mkfs-erofs ${root}/opt/erofs-utils/bin/mkfs.erofs --keel ${root}/opt/cube-berth/libexec/keel --image ${image} --max-machines 2 --listen 127.0.0.1:7781`
+    + " --suspend-disk-margin-gib 2", "a berth.env that says nothing of suspend (every one before it could) turns it on, keeping 2 GiB free");
   assert.deepEqual(readBerthSettings(settings), { image, maxMachines: 2, listen: "127.0.0.1:7781" }, "what the service reads is what cubed reads");
   // A normal install records berth's own default image, passed as it is.
   fs.writeFileSync(path.join(home, ".cube/berth.env"), settings.replace(image, "default"));
   const plain = serve();
   assert.equal(plain.status, 0, plain.stderr);
-  assert.match(plain.stdout.trim(), / --image default --max-machines 2 --listen 127\.0\.0\.1:7781$/);
+  assert.match(plain.stdout.trim(), / --image default --max-machines 2 --listen 127\.0\.0\.1:7781 --suspend-disk-margin-gib 2$/);
   assert.equal(readBerthSettings(settings.replace(image, "default")).image, "default");
+  // The operator's word on suspend: off, or another margin, as cubed reads it.
+  const suspend = (line: string) => {
+    fs.writeFileSync(path.join(home, ".cube/berth.env"), `${settings}${line}\n`);
+    const run = serve();
+    return { status: run.status, tail: run.stdout.trim().replace(/^.* --listen 127\.0\.0\.1:7781/, ""), stderr: run.stderr };
+  };
+  assert.deepEqual(suspend("CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=off"), { status: 0, tail: "", stderr: "" }, "off: berth vm without --suspend-disk-margin-gib");
+  assert.equal(readBerthSettings(`${settings}CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=off\n`).suspendDiskMarginGib, "off");
+  assert.deepEqual(suspend("CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=20"), { status: 0, tail: " --suspend-disk-margin-gib 20", stderr: "" });
+  assert.equal(readBerthSettings(`${settings}CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=20\n`).suspendDiskMarginGib, 20);
+  assert.deepEqual(suspend("CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB="), { status: 0, tail: " --suspend-disk-margin-gib 2", stderr: "" }, "empty is the default");
+  for (const bad of ["0", "02", "10000", "2 --change-image", "-1", "yes"]) {
+    const refused = suspend(`CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=${bad}`);
+    assert.deepEqual(refused, { status: 78, tail: "", stderr: `cube-berth: ${home}/.cube/berth.env: CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB is 1 to 9999 (GiB) or off\n` }, `${bad}: berth is not started`);
+    assert.throws(() => readBerthSettings(`${settings}CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=${bad}\n`), /is not a berth\.env of cubed's/, `${bad}: cubed refuses it too`);
+  }
 
   // cubed's launcher, run as the service would (cubed replaced by printing
   // its environment): the portal is on loopback under *.localhost unless the

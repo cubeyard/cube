@@ -172,7 +172,7 @@ rather than change them. New machines get the project's size, else
 | `~/.cube-host` | cubed's state: projects, threads and their transcripts, OptChat, artifacts (and, from protocol 3, the old gateway's CA, unused) |
 | `~/.cube/berth` | the runner's key, journal, machine disks, templates and layer cache |
 | `~/.cube/berth.json`, `~/.cube/berth.control.key` | cubed's config and key for reaching the runner |
-| `~/.cube/berth.env` | the image and the machines at once the service starts the runner with |
+| `~/.cube/berth.env` | the image, the machines at once and (optionally) the suspend margin the service starts the runner with |
 | `~/.pi/agent` | model credentials (Pi's) |
 | `/opt/homebrew/var/log/cubed.log`, `cube-berth.log` | the services' logs |
 
@@ -230,9 +230,19 @@ you delete them.
   what berth checks on its channel and network, and a QEMU escape has your
   account's authority ([security](security.md)).
 - It is in the pool, so threads that name no runner are placed on it.
-- Suspend is off, as for every `berth vm` started without
-  `--suspend-disk-margin-gib` ([runner
-  operations](runner-operations.md#berth-vm-runner-protocol-4)).
+- Suspend is on: the service starts berth with
+  `--suspend-disk-margin-gib 2`, so cubed saves a machine nothing has used
+  for 5 minutes to `~/.cube/berth` and frees its slot, and the thread
+  resumes where it was when it is needed ([runner
+  operations](runner-operations.md#berth-vm-runner-protocol-4)). A save
+  needs the machine's memory (4 GiB by default) and 2 GiB more free on
+  that disk; with less, the machine keeps running and nothing is deleted.
+  `CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=off` in `~/.cube/berth.env` turns
+  suspend off, a number (1 to 9999) keeps that many GiB free instead; then
+  `brew services restart cubeyard/tap/cube-berth`. Machines saved before
+  still resume with suspend off. 2 GiB is the free space berth keeps after
+  any image pull; it is a floor for the Mac's disk, not an estimate of
+  what saved machines take.
 
 ## The tap's old v0.1 launcher
 
