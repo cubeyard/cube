@@ -167,22 +167,31 @@ function loopbackListen(listen: string): boolean {
   return !!port && listen.split(":")[0]!.split(".").every(octet => Number(octet) <= 255) && Number(port[1]) >= 1 && Number(port[1]) <= 65535;
 }
 
-/** `berth.env`: what the service passes to `berth vm` besides the paths. */
-export function readBerthSettings(text: string): { image: string; maxMachines: number; listen: string } {
+/** `berth.env`: what the service passes to `berth vm` besides the paths.
+ * `suspendDiskMarginGib` is there only when the operator wrote
+ * `CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB` (a number of GiB, or `off`);
+ * without it the service uses its default (scripts/homebrew/formula.ts). */
+export interface BerthSettings { image: string; maxMachines: number; listen: string; suspendDiskMarginGib?: number | "off" }
+
+export function readBerthSettings(text: string): BerthSettings {
   const value = (name: string) => text.split("\n").map(line => line.trim()).find(line => line.startsWith(`${name}=`))?.slice(name.length + 1);
   const image = value("CUBE_BERTH_IMAGE") ?? "";
   const raw = value("CUBE_BERTH_MAX_MACHINES") ?? "";
   const listen = value("CUBE_BERTH_LISTEN") ?? "";
+  const margin = value("CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB") || undefined;
   const maxMachines = Number(raw);
-  if (!imageAccepted(image) || !/^[1-9]\d?$/.test(raw) || maxMachines > 64 || !loopbackListen(listen)) {
-    throw new Error("is not a berth.env of cubed's (CUBE_BERTH_IMAGE=default or <registry/repository@sha256:…>, CUBE_BERTH_MAX_MACHINES=1…64, CUBE_BERTH_LISTEN=127.x.x.x:<port>)");
+  if (!imageAccepted(image) || !/^[1-9]\d?$/.test(raw) || maxMachines > 64 || !loopbackListen(listen)
+    || (margin !== undefined && margin !== "off" && !/^[1-9]\d{0,3}$/.test(margin))) {
+    throw new Error("is not a berth.env of cubed's (CUBE_BERTH_IMAGE=default or <registry/repository@sha256:…>, CUBE_BERTH_MAX_MACHINES=1…64, CUBE_BERTH_LISTEN=127.x.x.x:<port>, optionally CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=1…9999 or off)");
   }
-  return { image, maxMachines, listen };
+  return { image, maxMachines, listen, ...(margin === undefined ? {} : { suspendDiskMarginGib: margin === "off" ? "off" : Number(margin) }) };
 }
 
-function berthSettingsText(image: string, maxMachines: number, listen: string): string {
+function berthSettingsText({ image, maxMachines, listen, suspendDiskMarginGib }: BerthSettings): string {
   return "# Written once by `cubed runners init-local`; the cube-berth service starts berth vm with these.\n"
-    + `CUBE_BERTH_IMAGE=${image}\nCUBE_BERTH_MAX_MACHINES=${maxMachines}\nCUBE_BERTH_LISTEN=${listen}\n`;
+    + "# It suspends idle machines; CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=off turns that off, a number sets the GiB of disk kept free beside a saved machine.\n"
+    + `CUBE_BERTH_IMAGE=${image}\nCUBE_BERTH_MAX_MACHINES=${maxMachines}\nCUBE_BERTH_LISTEN=${listen}\n`
+    + (suspendDiskMarginGib === undefined ? "" : `CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=${suspendDiskMarginGib}\n`);
 }
 
 /** Why berth could not bind its UDP listen address now, or null if it
@@ -252,7 +261,7 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   const conflict = (what: string) => new Error(`${what}; init-local changes nothing that is there (a runner is never rebound): give the recorded value, or another --home`);
 
   // What is there already, and whether it belongs together.
-  let recorded: ReturnType<typeof readBerthSettings> | null = null;
+  let recorded: BerthSettings | null = null;
   if (exists(files.settings)) {
     try { recorded = readBerthSettings(fs.readFileSync(files.settings, "utf8")); } catch (error) { throw new Error(`${files.settings} ${(error as Error).message}`); }
   }
@@ -331,7 +340,7 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
     fs.copyFileSync(files.settings, kept, fs.constants.COPYFILE_EXCL);
     fs.chmodSync(kept, 0o600);
     const temporary = `${files.settings}.tmp-${process.pid}`;
-    fs.writeFileSync(temporary, berthSettingsText(DEFAULT_LOCAL_BERTH_IMAGE, recorded.maxMachines, recorded.listen), { mode: 0o600, flag: "wx" });
+    fs.writeFileSync(temporary, berthSettingsText({ ...recorded, image: DEFAULT_LOCAL_BERTH_IMAGE }), { mode: 0o600, flag: "wx" });
     fs.renameSync(temporary, files.settings);
     log(`${files.settings} named ${recorded.image}, official Debian alone, on which no thread machine gets ready: it now names cube's default image (official Debian trixie, prepared by berth); the earlier file is ${kept}`);
     recorded = { ...recorded, image: DEFAULT_LOCAL_BERTH_IMAGE };
@@ -359,7 +368,7 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
         if (options.image === undefined) {
           throw new Error(`${files.settings} is gone, and runner ${nodeId} is enrolled: give --image as it was (default, or your own image's pinned reference) to write it again`);
         }
-        fs.writeFileSync(files.settings, berthSettingsText(image, maxMachines, listen), { mode: 0o600, flag: "wx" });
+        fs.writeFileSync(files.settings, berthSettingsText({ image, maxMachines, listen }), { mode: 0o600, flag: "wx" });
         log(`wrote ${files.settings}`);
       }
       result.already = recorded !== null && recovered === null;
@@ -443,7 +452,7 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
     if (ready && !recorded) {
       // berth runs on this image and listens here: what the service starts
       // it with from now on.
-      fs.writeFileSync(files.settings, berthSettingsText(image, maxMachines, listen), { mode: 0o600, flag: "wx" });
+      fs.writeFileSync(files.settings, berthSettingsText({ image, maxMachines, listen }), { mode: 0o600, flag: "wx" });
       log(`wrote ${files.settings}`);
     }
     if (config) {

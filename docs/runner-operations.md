@@ -61,7 +61,7 @@ keel has no default. Everything goes under `<home>`:
 |---|---|
 | `berth/` | berth's `--dir`: its key, journal, machine disks, layer cache |
 | `berth.control.key` | cubed's control key for it (`berth keygen`, 0600) |
-| `berth.env` | `CUBE_BERTH_IMAGE`, `CUBE_BERTH_MAX_MACHINES` and `CUBE_BERTH_LISTEN`, what the service starts it with (0600) |
+| `berth.env` | `CUBE_BERTH_IMAGE`, `CUBE_BERTH_MAX_MACHINES` and `CUBE_BERTH_LISTEN`, what the service starts it with (0600); the operator may add `CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB` (`off`, or 1 to 9999 GiB; without it the Homebrew service passes 2) |
 | `berth.json` | the version-2 protocol-4 config cubed reads (0600; binding `node-berth-<host>`, the same id, environment 1) |
 
 It creates only what is missing, in this order: a check that the listen
@@ -266,9 +266,15 @@ runner.
   from a tarball, say) stops trusting the runner's HTTPS until the
   project's resume hook imports the new CA or the thread is new.
 - **Suspend** (phase 7) is off unless `berth vm` starts with
-  `--suspend-disk-margin-gib <GiB>`, which has no default: it is the free
-  disk a runner keeps besides a machine's memory file (at least 1 GiB; the
-  file can be a little larger than the machine's memory). Only then does
+  `--suspend-disk-margin-gib <GiB>`, which has no default in berth: it is
+  the free disk a runner keeps besides a machine's memory file (at least 1
+  GiB; the file can be a little larger than the machine's memory). The
+  Homebrew `cube-berth` service passes `--suspend-disk-margin-gib 2` (the
+  reserve berth keeps after an image pull) unless `berth.env` says
+  `CUBE_BERTH_SUSPEND_DISK_MARGIN_GIB=off` or another number; `init-local`
+  writes no such line and keeps one the operator wrote. A `berth vm` started
+  by hand or from `install-berth.sh`'s unit has suspend off until it is
+  given the flag. Only then does
   the runner say `machine.suspend`, and cubed suspends a thread's machine
   after 5 minutes in which nothing ran: no turn of its agent or its
   background agents, no guest call, no command started and not yet seen to
