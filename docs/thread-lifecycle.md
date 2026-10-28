@@ -91,7 +91,11 @@ cubed, a lowered bound) makes a wake wait the same way, and a new machine
 wait (`RunnerWait`, its boot step `interrupted`), not fail.
 
 The queue is these rows, first come first served, new threads and wakes
-alike (machine-sleep-test T7, lifecycle-model-test I13). `createThread`
+alike (machine-sleep-test T7, lifecycle-model-test I13). It is each
+runner's own, not the pool's: a queued thread stays on its runner, and a
+slot that frees on another runner goes to a thread there (a new one
+included) while the older one waits for its own (machine-sleep-test T8);
+on one runner, as on a Mac, the two are the same. `createThread`
 places a thread with no slot free (the threads waiting count as holding
 theirs) on the least loaded runner as `queued` (a named runner: on it), in
 the same transaction, instead of refusing it; only a pool with no runner
@@ -134,8 +138,25 @@ started directly, and that start's error answers the call. `RunnerMachines`
 does the runner operations (start or resume, suspend, release) and never
 decides to wake. One clock (`PATIENCE`, 30 min) bounds both waits for a
 runner: a new thread's start on a VM runner that does not answer, and a
-wake on a full runner. A close ends a wake that waits; a wake of a machine
-that runs asks the runner nothing (cubed-wake-test).
+wake on a full runner. A wake's 30 minutes count from the end of cubed's
+restart protection (`PATIENCE.restartMs`, the 32 minutes in which a machine
+running from before may not be suspended, machine-idle.ts
+`RESTART_GUARD_MS`): a wake on a full runner just after a restart keeps its
+place until a slot can be freed at all, and waits at most 62 minutes, not
+a time in which it cannot succeed (thread-queue-test Q7). A new thread in
+the queue has no bound: it holds nothing and asks its runner nothing. A
+close ends a wake that waits; a wake of a machine that runs asks the
+runner nothing (cubed-wake-test).
+
+A resume that restored the snapshot is the boot that was saved, also when
+this process never saw that boot run (a cubed restart since the suspend):
+an agent already open on it goes on, its run included (thread-queue-test
+Q5, lifecycle-model-test seed 13; review B1). A machine its runner started
+from its disk instead (`SnapshotDropped`) booted again, and its open agent
+is closed and reopened; when a run of it waits for this very start (a
+guest call's wake), that run is stopped first, since the close would wait
+for it and its commands went with the old boot (Q6). A guest call's wait
+for a wake ends when the call is aborted.
 
 `recoveryStep` is the recovery loop's rule:
 
@@ -288,7 +309,7 @@ machine's sleep (packages/web/src/lib/thread-state.ts).
   tries in a row at a time (R13b); a run's guest calls on a full runner
   wait once, not once each (R11); a runner that does not answer (R12,
   R12b, R12c).
-- `packages/server/test/thread-queue-test.ts`: with no thread waiting
+- `packages/server/test/thread-queue-test.ts`: Q5 to Q7 above; with no thread waiting
   nothing is suspended early; a new thread on a full runner is queued and
   the idlest machine suspended at once for it (Q1); an agent at work, a
   running command, a portal connection and a registered service are not

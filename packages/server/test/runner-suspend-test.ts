@@ -136,7 +136,20 @@ import { NoMachines } from "./local-guest.ts";
   await activity.guest("w", { call: async () => { order.push("call"); return { header: {}, body: Buffer.alloc(0) }; }, close: async () => {} },
     async () => { order.push("before"); }).call("hello", {});
   assert.deepEqual(order, ["before", "call"]);
-  console.log("ok: machine-idle: a machine first seen running is busy for the longest command and the grace (B-207-2); a command is busy from exec until a get says it ended (also between polls), or until its own timeout and the grace; calls and portal connections while open");
+  // A call whose wait for `before` is aborted ends with the abort, before
+  // the wake does; one aborted already does not wait at all.
+  let wakeUp!: () => void;
+  const waking = new Promise<void>(resolve => { wakeUp = resolve; });
+  const unanswered = { call: async () => { order.push("sent"); return { header: {}, body: Buffer.alloc(0) }; }, close: async () => {} };
+  const stop = new AbortController();
+  const waited = activity.guest("w", unanswered, () => waking).call("hello", {}, { signal: stop.signal }).then(() => "answered", (error: Error) => error.message);
+  stop.abort(new Error("stopped"));
+  assert.equal(await waited, "stopped");
+  assert.equal(await activity.guest("w", unanswered, () => Promise.reject(new Error("closing"))).call("hello", {}, { signal: stop.signal }).catch((error: Error) => error.message), "stopped");
+  wakeUp();
+  await delay(10);
+  assert.deepEqual(order, ["before", "call"], "neither call was sent");
+  console.log("ok: machine-idle: a machine first seen running is busy for the longest command and the grace (B-207-2); a command is busy from exec until a get says it ended (also between polls), or until its own timeout and the grace; calls and portal connections while open; a call's wait for a wake ends with its abort");
 }
 
 // ------------------------------------------------ 2. conversation.ts
@@ -379,7 +392,7 @@ const IDLE = 300;
 const sessionNow = () => new RunnerSession(config, { log: quiet });
 let session = sessionNow();
 // The wiring cubed runs: Conversations own the wake (their guest transports' `before`).
-const runtime = threadRuntime({ registry, threads: path.join(root, "threads"), models: createModels(), patience: { retryMs: 50, wakeMs: 10000 },
+const runtime = threadRuntime({ registry, threads: path.join(root, "threads"), models: createModels(), patience: { retryMs: 50, wakeMs: 10000, restartMs: 0 },
   runner: { session: () => session, policy, idleMs: IDLE, suspendTimeoutMs: 400, log: quiet } });
 const vms = runtime.machines as RunnerMachines;
 const conversations = runtime.conversations;

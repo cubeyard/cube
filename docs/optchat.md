@@ -981,7 +981,9 @@ artifact of a thread it started.
   reports that once.
   A running thread holds one of its runner's machine slots (a runner hosts up
   to its `maxActiveVms`); a spawn beyond the free slots is queued and starts
-  in its turn, saying it waits for a free slot.
+  in its turn, saying it waits for a free slot. A `tell` to a thread still
+  queued is refused with that wait (nothing is lost; tell it again once it
+  runs). Each runner has its own queue.
 - **Stop** aborts a running turn and cancels the wait of every pending
   message. Those messages, and any steered one the abort withdrew before Pi
   placed it, are written to the log as unanswered user messages, as in the

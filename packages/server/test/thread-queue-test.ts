@@ -16,7 +16,21 @@
  *   Q4  queued threads: a message or a steer is refused with the wait's
  *       words (no failure, no runner asked, the place kept); a restart keeps
  *       the order; archiving a queued thread asks the runner nothing; a freed
- *       slot goes to the oldest, then the next. */
+ *       slot goes to the oldest, then the next.
+ *   Q5  after a cubed restart, a message to a suspended thread on a full
+ *       runner: its run waits for the wake; once a slot frees the runner
+ *       resumes the snapshot (the same boot), the run goes on without its
+ *       agent being closed, and a later message runs too (review B1: the
+ *       resume was taken for a new boot, whose closing of the agent waited
+ *       for the run that waited for the wake).
+ *   Q6  the same wait where the runner cannot use the snapshot and boots the
+ *       machine from its disk (a real new boot): the waiting run is stopped
+ *       rather than waited for, the thread says it restarted from its disk,
+ *       and the next message runs.
+ *   Q7  a wake on a full runner just after cubed started (when no machine
+ *       running from before may be suspended yet) does not give up before
+ *       that protection ends: its patience counts from then; later it
+ *       gives up after its patience, as before (review S2). */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -40,8 +54,8 @@ const responses = Array.from({ length: 400 }, () => (request: Context) => {
     : fauxAssistantMessage("done");
 });
 
-function world(name: string, slots: number, wakeWaitMs = 600) {
-  const life = lifecycle(path.join(root, name), { slots, wakeWaitMs, responses });
+function world(name: string, slots: number, wakeWaitMs = 600, restartMs = 0) {
+  const life = lifecycle(path.join(root, name), { slots, wakeWaitMs, restartMs, responses });
   const { berth, fresh, vmOf } = life;
   let cubed: Cubed = life.start();
   const phase = (id: string) => berth.phases.get(vmOf(id));
@@ -188,6 +202,100 @@ try {
     assert.equal(w.phase(q1.id), Phase.SUSPENDED, "then q1, idle, made room for q3");
     w.sound("Q4");
     console.log("ok: Q4 a queued thread refuses a message or a steer with its wait, keeps its place across a restart, is archived without its runner; the oldest gets the freed slot, then the next");
+  }
+  // ---------------------------------------------------------------- Q5
+  {
+    const w = world("q5", 1, 20_000);
+    worlds.push(w);
+    const a = await w.running();
+    w.clock.now += 61_000;
+    await w.cubed.conversations.suspendIdle();
+    assert.equal(w.phase(a.id), Phase.SUSPENDED);
+    const holder = await w.running();
+    w.berth.busy.add(w.vmOf(holder.id));
+    await w.restart();
+    await w.cubed.conversations.boot();
+    const bounded = <T>(what: string, work: Promise<T>) => Promise.race([work,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${what} did not finish in 20 s`)), 20_000).unref())]);
+    const status = async () => (await w.cubed.conversations.storedHistory(a.id, { limit: 1 }))?.status.state;
+    const first = w.cubed.conversations.submit(a.id, "work slowly", "after-restart-1");
+    await until("a's run waits for its wake", () => !!slotWait(w.fresh(a.id).vm?.suspension) && w.cubed.conversations.owns(w.fresh(a.id)));
+    w.berth.busy.delete(w.vmOf(holder.id));
+    assert.deepEqual((await bounded("the holder's archive", w.cubed.conversations.archive(holder.id))).retained, false);
+    await bounded("the first message", first);
+    await w.settled(a.id);
+    assert.equal(await status(), "completed", "the message's run finished on the resumed machine");
+    assert.equal(w.berth.resumes(w.vmOf(a.id)), 1, "resumed once, from its snapshot");
+    assert.equal(w.cubed.conversations.owns(w.fresh(a.id)), false, "no activation or wake is left");
+    await bounded("the second message", w.cubed.conversations.submit(a.id, "again", "after-restart-2"));
+    await w.settled(a.id);
+    assert.equal(await status(), "completed", "a later message runs too");
+    w.sound("Q5");
+    console.log("ok: Q5 after a restart, a message to a suspended thread on a full runner waits for its wake, then runs once a slot frees; the next message runs too");
+  }
+  // ---------------------------------------------------------------- Q6
+  {
+    const w = world("q6", 1, 20_000);
+    worlds.push(w);
+    const a = await w.running();
+    w.clock.now += 61_000;
+    await w.cubed.conversations.suspendIdle();
+    const holder = await w.running();
+    w.berth.busy.add(w.vmOf(holder.id));
+    const status = async () => (await w.cubed.conversations.storedHistory(a.id, { limit: 1 }))?.status.state;
+    const first = w.cubed.conversations.submit(a.id, "work slowly", "dropped-1");
+    await until("a's run waits for its wake", () => !!slotWait(w.fresh(a.id).vm?.suspension) && w.cubed.conversations.owns(w.fresh(a.id)));
+    w.berth.dropSnapshots.add(w.vmOf(a.id));
+    w.berth.busy.delete(w.vmOf(holder.id));
+    await w.cubed.conversations.archive(holder.id);
+    await first;
+    await w.settled(a.id);
+    assert.equal(await status(), "stopped", "the run that waited for a machine that booted again was stopped, not waited for");
+    assert.match(w.fresh(a.id).vm?.notice?.text ?? "", /^restarted from its disk/);
+    await until("the agent reopened", () => !w.cubed.conversations.owns(w.fresh(a.id)));
+    await w.cubed.conversations.submit(a.id, "again", "dropped-2");
+    await w.settled(a.id);
+    assert.equal(await status(), "completed", "the next message runs");
+    w.sound("Q6");
+    console.log("ok: Q6 a machine that boots from its disk under a run waiting for its wake stops that run instead of waiting for it; the next message runs");
+  }
+  // ---------------------------------------------------------------- Q7
+  {
+    const WAKE = 600, RESTART = 2_500;
+    const w = world("q7", 1, WAKE, RESTART);
+    worlds.push(w);
+    const a = await w.running();
+    w.clock.now += 61_000;
+    await w.cubed.conversations.suspendIdle();
+    const holder = await w.running();
+    w.berth.busy.add(w.vmOf(holder.id));
+    await w.restart();
+    const call = async () => {
+      const began = Date.now();
+      const result = await w.cubed.conversations.guest(w.fresh(a.id)).call("stat", { path: "/workspace" }).then(() => "answered", (error: Error) => error.message);
+      return { result, ms: Date.now() - began };
+    };
+    const early = call();
+    await new Promise(resolve => setTimeout(resolve, WAKE * 2));
+    assert.ok(slotWait(w.fresh(a.id).vm?.suspension) && w.cubed.conversations.owns(w.fresh(a.id)), "past its own patience, within the restart protection, the wake still waits in the queue");
+    w.berth.busy.delete(w.vmOf(holder.id));
+    await w.cubed.conversations.archive(holder.id);
+    const { result, ms } = await early;
+    assert.equal(result, "answered", "and gets the freed slot");
+    assert.ok(ms > WAKE, `it waited past ${WAKE} ms: ${ms} ms`);
+    await w.settled(a.id);
+    // Past the protection a wake is bounded by its patience alone.
+    await new Promise(resolve => setTimeout(resolve, RESTART));
+    w.clock.now += 61_000;
+    await w.cubed.conversations.suspendIdle();
+    assert.equal(w.phase(a.id), Phase.SUSPENDED);
+    const other = await w.running();
+    w.berth.busy.add(w.vmOf(other.id));
+    const late = await call();
+    assert.match(late.result, /^the thread's machine is suspended and could not be resumed: waiting for a free slot/);
+    assert.ok(late.ms >= WAKE && late.ms < WAKE + 2_000, `it gave up after its patience: ${late.ms} ms`);
+    w.sound("Q7");
+    console.log("ok: Q7 a wake just after a cubed restart keeps its place until the restart protection ends, then is bounded by its patience as before");
   }
 } finally {
   for (const w of worlds) { await w.cubed.close().catch(() => {}); w.berth.stopAll(); }

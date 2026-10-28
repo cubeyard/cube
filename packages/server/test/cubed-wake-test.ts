@@ -33,7 +33,7 @@ const health: TrustedRunnerHealth = { lifecycle: "ready", draining: false, error
   retainedVms: 0, retainedBytes: 0, softwareVersion: "stand-in", protocolVersion: 4, kind: "vm" };
 const app = await createCubed({ state: path.join(root, "state"), models, claude: null, gateway: null, skillSource: null, now: () => clock.now,
   runnerHealth: async () => health,
-  patience: { retryMs: 50, wakeMs: 600 },
+  patience: { retryMs: 50, wakeMs: 600, restartMs: 0 },
   runner: { session: () => berth.session(), log: quiet, templates: { enabled: false, ttlMs: 0 }, idleMs: 60_000 } });
 try {
   const { registry, conversations } = app;

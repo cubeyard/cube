@@ -513,6 +513,10 @@ export class RunnerMachines implements ThreadMachines {
         // never takes the slot of a thread whose machine is not created yet.
         if (!holdsSlot(this.options.registry.applySleep(thread.id, { type: "wakeAsked", waiting }))) throw full();
       } else if (suspension) this.options.registry.applySleep(thread.id, { type: "running" });
+      // A snapshot the runner restored is the boot it saved, also when this
+      // process never saw that boot (a cubed restart since the suspend): its
+      // agent goes on, it is not a machine that booted again.
+      let sameBoot = false;
       const startAndWait = async () => {
         let started: Machine;
         try { started = await session.machine({ case: "machineStart", value: { ref, fence: this.fence(thread), ...start } }); }
@@ -524,7 +528,7 @@ export class RunnerMachines implements ThreadMachines {
           }
           throw error;
         }
-        if (resuming) this.resumed(thread, started, node);
+        if (resuming) sameBoot = this.resumed(thread, started, node);
         return this.ready(session, ref);
       };
       const ready = created ? await this.step(thread, startAndWait) : await startAndWait();
@@ -536,7 +540,7 @@ export class RunnerMachines implements ThreadMachines {
       if (machine.status?.phase !== MachineStatus_Phase.RUNNING) {
         this.activity.started(thread.id);
       }
-      const booted = this.boots.get(thread.id) !== boot;
+      const booted = !sameBoot && this.boots.get(thread.id) !== boot;
       this.boots.set(thread.id, boot);
       if (booted) this.events.record(thread.id, "ready", `boot ${boot.slice(0, 8)} of ${what} ${node}`);
       return { booted };
@@ -854,18 +858,21 @@ export class RunnerMachines implements ThreadMachines {
   /** After `machine_start` on a suspended machine: it runs again, resumed
    * (the same boot) or, when the runner could not use its snapshot, from
    * its disk (B7-5: a notice, and running commands were interrupted). */
-  private resumed(thread: Thread, machine: Machine, node: string): void {
+  /** Records a resume; true when the runner restored the snapshot (the
+   * same boot), false when it started the machine from its disk. */
+  private resumed(thread: Thread, machine: Machine, node: string): boolean {
     const dropped = machine.status?.conditions.find(condition => condition.type === "SnapshotDropped");
     if (dropped) {
       const text = dropped.reason === "version" ? RESTARTED_AFTER_UPDATE : RESTARTED;
       this.options.registry.applySleep(thread.id, { type: "resumed", notice: { text, at: Date.now() } });
       this.events.record(thread.id, "restarted from its disk", `runner ${node} could not use the snapshot (${safeText(dropped.reason, 32)}: ${safeText(dropped.message, 256)})`);
       this.log.warn("snapshot dropped; the machine started from its disk", { thread: thread.id, runner: node, reason: dropped.reason });
-      return;
+      return false;
     }
     // A notice of an earlier cold start is old news now (N-207-6).
     this.options.registry.applySleep(thread.id, { type: "resumed", notice: null });
     this.events.record(thread.id, "resumed", `on VM runner ${node}, the same boot`);
+    return true;
   }
 
   /** The portal's connection to `port` of the thread's machine, at its

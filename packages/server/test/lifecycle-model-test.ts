@@ -32,7 +32,7 @@
  *
  * and at the end, every message request id is in its thread's store once.
  * LIFECYCLE_SEEDS (comma-separated) picks the seeds; LIFECYCLE_STEPS the
- * length of a run. */
+ * length of a run. A step that hangs fails, naming the step. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -45,8 +45,13 @@ import { START_TRIES } from "../src/thread-recovery.ts";
 import { holdsSlot } from "../src/machine-sleep.ts";
 import { lifecycle, until, Phase, RUNNER, type Cubed } from "./lifecycle-fixture.ts";
 
-const seeds = (process.env.LIFECYCLE_SEEDS ?? "1,2").split(",").map(Number);
-const steps = Number(process.env.LIFECYCLE_STEPS ?? 28);
+// Seed 13 restarts cubed, then messages a sleeping thread on a full runner
+// whose slot frees in step 29 (review B1: the wake's start once waited for
+// the run that waited for the wake).
+const seeds = (process.env.LIFECYCLE_SEEDS ?? "1,2,13").split(",").map(Number);
+const steps = Number(process.env.LIFECYCLE_STEPS ?? 30);
+/** A step that does not finish in this long is a hang, said as one. */
+const STEP_MS = 120_000;
 
 function random(seed: number) {
   let state = seed >>> 0;
@@ -214,7 +219,9 @@ for (const seed of seeds) {
     for (let step = 0; step < steps; step++) {
       const name = choose();
       const order = queue();
-      await actions[name]!();
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([actions[name]!(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`step ${step} (${name}) did not finish in ${STEP_MS / 1000} s`)), STEP_MS); })])
+        .finally(() => clearTimeout(timer));
       const still = new Set(queue());
       for (const id of [...order, ...still]) queuedSeen.add(id);
       for (const [k, id] of order.entries()) {

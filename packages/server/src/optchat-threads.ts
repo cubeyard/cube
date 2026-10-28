@@ -41,7 +41,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         + `; hooks: ${hookSummary(project.hooks)}`);
       return [
         lines.length ? `projects:\n${lines.join("\n")}` : "no projects: the user creates them under projects",
-        `free thread machines: ${slots.free} of ${slots.total} in the pool (its berth vm runners, for threads that name no runner; an open thread holds one until it is archived; `
+        `free thread machines: ${slots.free} of ${slots.total} in the pool (its berth vm runners, for threads that name no runner; a running thread holds one; a new thread with none free is queued and starts in its turn; `
           + "a host runner takes threads only by name; runners has each runner's version, state and slots)",
         `models: ${models.map(model => `${model.provider}/${model.id}`).join(", ") || "none connected"}`,
       ].join("\n");

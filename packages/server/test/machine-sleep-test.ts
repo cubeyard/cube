@@ -16,7 +16,12 @@
  *   T7  the runner's queue: a new thread on a full runner is queued, not
  *       refused; slots go first come first served to new threads and wakes
  *       alike (no new thread passes a waiting wake, nor a wake a waiting new
- *       thread), and the order survives a reopened registry. */
+ *       thread), and the order survives a reopened registry;
+ *   T8  with several runners the queue is each runner's own (a queued thread
+ *       stays on its runner; a slot that frees on another runner goes to a
+ *       new thread there, while the older one waits): first come first
+ *       served per runner, not across the pool; a thread queued on a full
+ *       pool goes to the runner with the fewest threads waiting per slot. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -202,5 +207,27 @@ console.log("ok: T5 only applySleep writes a sleep or its notice, and a suspende
   assert.equal(q.runnerSlots().total - q.runnerSlots().free, 1, "one slot, held once");
   q.close();
   console.log("ok: T7 a full runner queues new threads; slots go first come first served to new threads and wakes, across a reopen");
+}
+// ---------------------------------------------------------------- T8
+{
+  const q = new Registry(path.join(root, "pool.sqlite"));
+  q.saveProject(project);
+  for (const name of ["a", "b"]) q.enrollRunner({ nodeId: `node-${name}`, threadId: name, environmentId: 1, configPath: path.join(root, `${name}.json`), configHash: name, maxActiveVms: 1, protocol: 4, kind: "vm" });
+  const create = (request: string) => q.createThread(project.id, request, model, "hello");
+  const [t1, t2] = [create("t1"), create("t2")];
+  assert.deepEqual([t1.runnerId, t2.runnerId].sort(), ["a", "b"], "one thread on each runner's slot");
+  const older = create("older");
+  assert.equal(older.vm?.suspension?.state, "queued");
+  const next = create("next");
+  assert.deepEqual([next.vm?.suspension?.state, next.runnerId !== older.runnerId], ["queued", true], "the next queued thread goes to the runner with no one waiting yet");
+  const [onOlder, other] = [older.runnerId, older.runnerId === "a" ? "b" : "a"];
+  const holderOther = [t1, t2].find(t => t.runnerId === other)!;
+  q.applySleep(holderOther.id, events.suspended, NOW);
+  assert.equal(q.applySleep(next.id, events.wakeAsked, Date.now() + 60_000), undefined, `${other}'s freed slot goes to its own queue (next)`);
+  assert.equal(q.getThread(older.id)!.runnerId, onOlder, "the older thread stays queued on its own runner");
+  assert.ok(slotWait(q.applySleep(older.id, events.wakeAsked, Date.now() + 60_000)), `and waits there while ${onOlder} is full`);
+  assert.deepEqual([...q.slotQueue()], [[onOlder, { waiting: [older.id], free: 0 }]], "the queue is per runner");
+  q.close();
+  console.log("ok: T8 with several runners each runner has its own queue: first come first served per runner, not across the pool");
 }
 fs.rmSync(root, { recursive: true, force: true });

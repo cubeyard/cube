@@ -142,7 +142,7 @@ export class VmWorkspace implements Workspace {
     await this.require("exec.cancel");
     return operation(key, await this.state("cancel", { id: this.operationId(key), epoch }, true));
   }
-  async readFile(token: string, file: string, options: { offset?: number; limit?: number } = {}): Promise<WorkspaceFile> {
+  async readFile(token: string, file: string, options: { offset?: number; limit?: number; signal?: AbortSignal } = {}): Promise<WorkspaceFile> {
     this.leases.verify(token);
     const limits = await this.require("fs.read");
     await this.path(file, limits);
@@ -150,7 +150,8 @@ export class VmWorkspace implements Workspace {
       throw invalid(`read limit is at most ${limits.maxReadBytes} bytes`);
     }
     if (options.offset !== undefined && (!Number.isSafeInteger(options.offset) || options.offset < 0)) throw invalid("invalid offset");
-    const { header, body } = await this.call("read", { path: file, ...options }, false);
+    const { signal, ...range } = options;
+    const { header, body } = await this.call("read", { path: file, ...range }, false, signal);
     if (!Number.isSafeInteger(header.size) || header.offset !== (options.offset ?? 0) || typeof header.eof !== "boolean"
       || header.length !== body.length || typeof header.sha256 !== "string" || !SHA.test(header.sha256)) throw malformed();
     return { content: body, offset: header.offset as number, size: header.size as number, eof: header.eof, sha256: header.sha256 };

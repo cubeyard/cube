@@ -23,6 +23,7 @@ import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWork
 import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import type { GuestTransport } from "./guest-transport.ts";
+import { RESTART_GUARD_MS } from "./machine-idle.ts";
 import { slotWait } from "./machine-sleep.ts";
 import { startFailureOf, threadCondition, type StartFailure, type ThreadCondition } from "./thread-condition.ts";
 import { allocationFailed, FailedTry, readFailure, releaseFailed, startFailed, type Failure } from "./thread-failure.ts";
@@ -44,8 +45,11 @@ const RUNNER_PATIENCE_MS = 30 * 60_000;
  * - `wakeMs`: a suspended machine's wake for a guest call or a portal
  *   connection on a full runner, trying again every `retryMs`; once per
  *   run: after it gave up, later calls try once until the machine runs or a
- *   new message asks again. */
-export const PATIENCE = { startMs: RUNNER_PATIENCE_MS, wakeMs: RUNNER_PATIENCE_MS, retryMs: 5_000 };
+ *   new message asks again. Its time counts from the end of `restartMs`
+ *   after cubed started: until then no machine running from before may be
+ *   suspended to free a slot (machine-idle.ts RESTART_GUARD_MS), so a wake
+ *   waits at most `restartMs` + `wakeMs`, not a time that cannot succeed. */
+export const PATIENCE = { startMs: RUNNER_PATIENCE_MS, wakeMs: RUNNER_PATIENCE_MS, retryMs: 5_000, restartMs: RESTART_GUARD_MS };
 /** Why a disk the release check let go is kept all the same. */
 /** The threads' part of cubed's close (Conversations.close). */
 export const THREADS_CLOSE_MS = 9_000;
@@ -161,6 +165,8 @@ export class Conversations {
   private closing = false;
   private readonly now: () => number;
   private readonly patience: typeof PATIENCE;
+  /** When this process's Conversations began (`PATIENCE.restartMs`). */
+  private readonly startedAt = Date.now();
   /** Wakes under way, one per thread (`wake`). */
   private readonly wakes = new Map<string, Promise<void>>();
   /** Threads whose wake waited the whole `wakeMs` in vain, and why: until
@@ -345,7 +351,7 @@ export class Conversations {
     if (pending) return pending;
     const waking = (async () => {
       const gaveUp = this.gaveUp.has(id);
-      const deadline = Date.now() + (gaveUp ? 0 : this.patience.wakeMs);
+      const deadline = gaveUp ? Date.now() : Math.max(Date.now(), this.startedAt + this.patience.restartMs) + this.patience.wakeMs;
       for (;;) {
         if (this.closing) throw new Error("cubed is closing; the thread's machine stays suspended");
         const thread = this.registry.getThread(id);
@@ -602,6 +608,14 @@ export class Conversations {
       if (!booted) { this.resumed.add(id); return; }
       // The machine booted again: from here this is a start.
       this.checks.delete(id);
+      // A wake under way is this start, and the agent's run waits in it (a
+      // guest call's `before`): closing the agent would wait for that run.
+      // The run is stopped first, which ends its wait (its commands went
+      // with the old boot: the thread says it restarted from its disk).
+      if (this.wakes.has(id)) {
+        const [pi, claude] = await Promise.all([this.agents.get(id)?.catch(() => null), this.claudes.get(id)?.catch(() => null)]);
+        await Promise.all([pi?.conversation.abort(context), claude?.stop()].map(stop => stop?.catch(() => {})));
+      }
       await this.closeAgents(id);
       log.warn(this.downs.has(id) ? "the machine booted again; the agent is down and stays closed" : "the machine booted again; the agent reopens after the resume hooks", { thread: id });
     }
