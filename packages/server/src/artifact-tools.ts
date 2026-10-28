@@ -144,9 +144,12 @@ function page(text: string, offset = 1, limit?: number): string {
   /** Lines (1-based) whose text goes on in the next line, unbroken. */
   const continued = new Set<number>();
   for (const line of text.split("\n")) {
-    for (let at = 0; at === 0 || at < line.length; at += ARTIFACT_READ_CHARS) {
-      if (at + ARTIFACT_READ_CHARS < line.length) continued.add(lines.length + 1);
-      lines.push(line.slice(at, at + ARTIFACT_READ_CHARS));
+    for (let at = 0, end; at === 0 || at < line.length; at = end) {
+      end = at + ARTIFACT_READ_CHARS;
+      // Never between the halves of a surrogate pair: each part must survive UTF-8.
+      if (end < line.length && /[\uD800-\uDBFF]/.test(line[end - 1]!)) end--;
+      if (end < line.length) continued.add(lines.length + 1);
+      lines.push(line.slice(at, end));
     }
   }
   const shown: string[] = [];

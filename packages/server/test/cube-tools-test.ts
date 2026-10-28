@@ -189,6 +189,19 @@ try {
   const exact = idIn(await viaClaude("artifact_write", { body: `# e\n${"y".repeat(ARTIFACT_READ_CHARS)}` }));
   assert.equal(await viaClaude("artifact_read", { id: exact, offset: 6 }), "y".repeat(ARTIFACT_READ_CHARS), "a line of exactly the limit is whole, with no note");
 
+  // A part never ends between the halves of a surrogate pair: each survives UTF-8 and the parts rejoin.
+  const astral = `${"x".repeat(ARTIFACT_READ_CHARS - 1)}😀tail`;
+  const emoji = idIn(await viaClaude("artifact_write", { body: `# s\n${astral}` }));
+  const utf8 = (text: string) => Buffer.from(text, "utf8").toString("utf8");
+  for (const read of [viaPi, viaClaude]) {
+    const first = (await read("artifact_read", { id: emoji, offset: 6 })).split("\n")[0]!;
+    const rest = await read("artifact_read", { id: emoji, offset: 7 });
+    assert.equal(first, "x".repeat(ARTIFACT_READ_CHARS - 1), "the part stops before the emoji, not inside it");
+    assert.equal(rest, "😀tail");
+    assert.equal(utf8(first) + utf8(rest), astral, "both parts survive UTF-8 and rejoin the line");
+  }
+  assert.equal(await viaPi("artifact_read", { id: emoji, offset: 6 }), await viaClaude("artifact_read", { id: emoji, offset: 6 }));
+
   // ---- the route: only the Claude Code child's lease, only cube's tools ----
   const raw = (token: string | undefined, method: string, name?: string, body: Record<string, unknown> = {}, held = leases) =>
     toolsRoute({ method, name, token, body, signal: new AbortController().signal }, lease(held), () => toolsOf(CLAUDE, "claude-code"));

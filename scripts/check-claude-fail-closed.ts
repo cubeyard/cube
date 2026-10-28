@@ -28,8 +28,11 @@
  * Part 5 makes one child run session.start twice (Claude Code reloads a
  * --plugin-dir mod whose file changes when CLAUDE_CODE_PLUGIN_DIR_WATCH=1,
  * which cubed never passes but this check does): the tools are registered
- * again and still answer; a reload whose tool list fails writes nothing and
- * runs nothing on the host.
+ * again and still answer. A reload whose tool list fails does not end the
+ * session (the ready gate is for the start only): the earlier registration
+ * stays, and a call still goes to cubed, which authorizes and answers each
+ * one by the lease (here this check refuses it, as its tool routes are
+ * failing); Bash stays available, in the guest workspace.
  *
  *   node scripts/check-claude-fail-closed.ts   (CLAUDE=<path> names the binary) */
 import assert from "node:assert/strict";
@@ -419,13 +422,13 @@ try {
       await reload("a reload whose tool list fails");
       result = await turn(agent, "w3");
       const w3 = result.results[0] ?? result.error ?? "";
-      assert.doesNotMatch(w3, /created at revision/, `nothing written: ${w3}`);
-      assert.equal(mine(), before + 2, "no artifact written after the failed reload");
+      assert.match(w3, /artifact_write: cube check: no tools/, `the call still reached cubed, which refused it: ${w3}`);
+      assert.equal(mine(), before + 2, "cubed refused the call, so nothing was written");
       tool = "Bash";
       result = await turn(agent, "w4");
-      assert.ok(!hostRan(agent.root), `nothing ran on the host after the failed reload: ${JSON.stringify(result)}`);
-      const w4 = result.results[0] ?? result.error ?? "";
-      console.log(`ok: two session.start events in one claude process: the tools are registered again and answer; after a reload whose tool list fails nothing is written and Bash runs nothing on the host (w3: ${JSON.stringify(w3.slice(0, 160))}; w4: ${JSON.stringify(w4.slice(0, 160))})`);
+      assert.deepEqual(result.results, [guest.workspace], "Bash still runs, in the guest workspace (pwd is the guest's)");
+      assert.ok(!hostRan(agent.root), "and not on the host");
+      console.log("ok: two session.start events in one claude process: the tools are registered again and answer; a reload whose tool list fails leaves the session and the earlier registration, each call still goes to cubed, which answers it by the lease (here refuses), and Bash still runs in the guest workspace");
     } finally { toolsFail = false; await agent.close(); }
   }
 } finally {
