@@ -140,8 +140,9 @@ const directory = path.join(root, "optchat");
 const MODEL = process.env.CUBE_TEST_OPTCHAT_MODEL ?? "claude-opus-5-5";
 // Skills as cubed gives them: a section and a tool in every request, the
 // same while the skill settings are.
-const skills = { async list() { return [{ name: "delegating", description: "Hand work to threads.", surface: "optchat" as const, url: "https://example.invalid/skills", commit: "a".repeat(40), dir: "skills/delegating" }]; },
-  async read() { return "# delegating\n"; } };
+const skills = { current: () => ({ key: "skills", settled: Promise.resolve(),
+  skills: [{ name: "delegating", description: "Hand work to threads.", surface: "optchat" as const, url: "https://example.invalid/skills", commit: "a".repeat(40), dir: "skills/delegating" }] }),
+async read() { return "# delegating\n"; } };
 const open = () => OptChat.open({ directory, models, model: async () => ({ provider: "anthropic", id: MODEL }), threads, skills,
   limits: { view: 24_000, low: 12_000, compaction: 8_000, compactionLow: 4_000, retryMs: 50, watchMs: 50 } });
 async function until(check: () => boolean, what: string) {

@@ -32,7 +32,7 @@ import { PENDING_ID, STEER_LOST, type RunFeed, type ThreadAcceptance, type Threa
 import type { StartFailure } from "./thread-condition.ts";
 import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
 import { piTool } from "./cube-tools.ts";
-import { optchatSkillsPrompt, type OptChatSkills } from "./skills.ts";
+import { optchatSkillsPrompt, settledWithin, SKILLS_WAIT_MS, type OptChatSkills } from "./skills.ts";
 import type { Artifacts } from "./artifact-service.ts";
 import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { addUsage, type OptChatUsage } from "./usage-service.ts";
@@ -76,8 +76,8 @@ export const TOOL_REPLAY: Readonly<Record<string, "read" | "keyed">> = {
   spawn: "keyed", tell: "keyed", archive: "keyed", project_hooks_write: "keyed", artifact_write: "keyed", artifact_edit: "keyed",
 };
 
-/** How long a request waits for the skills to resolve before it goes without them. */
-const SKILLS_WAIT_MS = 10_000;
+/** OptChat's skills section as last sent at a turn's start, in its directory. */
+const SKILLS_FILE = "skills-section.json";
 
 /** Tells to one thread between two messages of the user: unattended
  * follow-up is bounded; the user's next message allows more. */
@@ -753,6 +753,14 @@ export class OptChat {
     const directory = this.options.directory;
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     this.media = new MediaStore(path.join(directory, "media"));
+    if (this.options.skills) {
+      try {
+        const stored = JSON.parse(fs.readFileSync(path.join(directory, SKILLS_FILE), "utf8")) as { key?: unknown; text?: unknown };
+        if (typeof stored.key === "string" && (typeof stored.text === "string" || stored.text === null)) this.skillsBaseline = { key: stored.key, text: stored.text };
+      } catch { /* none stored yet */ }
+      // Started now, so the first turn rarely waits for it.
+      this.options.skills.current();
+    }
     this.storage = await openStorage(path.join(directory, "pi.sqlite"));
     const registry = createRegistry();
     registry.install(this.extension());
@@ -1728,12 +1736,50 @@ export class OptChat {
     return { threads, archived: { shown: recent.length, total: archived.length }, unknown: ids.filter(id => !first.get(id)).length };
   }
 
+  /** The skills section last sent at a turn's start, as stored in
+   * SKILLS_FILE: the configuration it was resolved for and its text (null:
+   * none listed). A turn whose list is not resolved yet sends it again. */
+  private skillsBaseline: { key: string; text: string | null } | null = null;
+  /** Configurations a turn's start has waited for once already. */
+  private readonly skillsWaited = new Set<string>();
   private skillsError = "";
-  /** Logs a skills resolution that failed, once until it changes. */
-  private skillsUnresolved(error: unknown): void {
-    const message = errorText(error);
-    if (message !== this.skillsError) log.warn("skills not resolved; the prompt lists none until they are", { error: message });
-    this.skillsError = message;
+
+  /** The skills section. Within a turn it is what the turn's first request
+   * showed, byte for byte: a list resolved later never patches the prompt
+   * mid-turn. At a turn's start (Pi shows nothing yet: each turn is a fresh
+   * context) it is the resolved list; else, without waiting, the baseline
+   * of the same configuration (the pins make it the list); else, once per
+   * configuration, the list after at most SKILLS_WAIT_MS; else the baseline
+   * of an earlier configuration, or none if there never was one. So an
+   * unresolved list costs one wait per configuration, never a wait per
+   * request, and a list once shown is never dropped. */
+  private async skillsSection(skills: OptChatSkills, shown: Readonly<Record<string, string>>): Promise<string | undefined> {
+    if (Object.hasOwn(shown, "master")) return shown.skills;
+    const now = skills.current();
+    if (!now.skills && now.error === undefined && this.skillsBaseline?.key !== now.key && !this.skillsWaited.has(now.key)) {
+      this.skillsWaited.add(now.key);
+      await settledWithin(now.settled, this.options.limits?.skillsWaitMs ?? SKILLS_WAIT_MS);
+    }
+    if (now.skills) {
+      this.skillsError = "";
+      const text = optchatSkillsPrompt(now.skills);
+      if (this.skillsBaseline?.key !== now.key || this.skillsBaseline.text !== text) this.saveSkillsBaseline({ key: now.key, text });
+      return text ?? undefined;
+    }
+    if (this.skillsBaseline?.key === now.key) return this.skillsBaseline.text ?? undefined;
+    const why = now.error ?? "not resolved yet";
+    if (why !== this.skillsError) log.warn("skills not resolved; a turn's start sends the last list it sent, if any", { error: why, last: this.skillsBaseline ? "kept" : "none" });
+    this.skillsError = why;
+    return this.skillsBaseline?.text ?? undefined;
+  }
+
+  private saveSkillsBaseline(baseline: { key: string; text: string | null }): void {
+    this.skillsBaseline = baseline;
+    const file = path.join(this.options.directory, SKILLS_FILE);
+    try {
+      fs.writeFileSync(`${file}.next`, `${JSON.stringify(baseline)}\n`, { mode: 0o600 });
+      fs.renameSync(`${file}.next`, file);
+    } catch (error) { log.warn("the skills section was not stored; a restart before the skills resolve sends none", { error: errorText(error) }); }
   }
 
   /** The model the compactor calls now: its own, else the chat's. */
@@ -2024,23 +2070,7 @@ export class OptChat {
         section("master", () => MASTER, { tag: false }),
         section("hooks", () => HOOKS_NOTE, { tag: false }),
         ...artifacts.length ? [section("artifacts", () => ARTIFACTS_NOTE, { tag: false })] : [],
-        ...skills ? [section("skills", async () => {
-          // Rendered before every request; the list is resolved once per
-          // skill settings, so the prompt changes only when they do. A list
-          // that cannot be resolved, or not in SKILLS_WAIT_MS (a source's
-          // mirror being fetched), leaves the section out until it can; the
-          // resolution goes on for the next request.
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          try {
-            const wait = this.options.limits?.skillsWaitMs ?? SKILLS_WAIT_MS;
-            const listed = await Promise.race([skills.list(),
-              new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(`not resolved in ${wait} ms`)), wait); })]);
-            this.skillsError = "";
-            return optchatSkillsPrompt(listed) ?? undefined;
-          }
-          catch (error) { this.skillsUnresolved(error); return undefined; }
-          finally { clearTimeout(timer); }
-        }, { tag: false })] : [],
+        ...skills ? [section("skills", input => this.skillsSection(skills, input.shown), { tag: false })] : [],
         section("view", () => VIEW_DOC, { tag: false }),
         // The user's own instructions; constant unless they edit the file.
         section("user", () => {

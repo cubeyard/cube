@@ -79,7 +79,7 @@ async function until(check: () => boolean, what: string) {
   assert.ok(check(), what);
 }
 
-const skills = { async list() { return []; }, async read(name: string, file = "SKILL.md") { return `${name}/${file}`; } };
+const skills = { current: () => ({ key: "skills", skills: [], settled: Promise.resolve() }), async read(name: string, file = "SKILL.md") { return `${name}/${file}`; } };
 const chat = await OptChat.open({ directory: path.join(root, "chat"), models, model: async () => ({ provider: faux.getModel().provider, id: faux.getModel().id }), threads, artifacts, skills });
 try {
   const inner = chat as unknown as { harness: Harness; extension(): { tools: ToolRegistration[] }; guard(tool: ToolRegistration): ToolRegistration };

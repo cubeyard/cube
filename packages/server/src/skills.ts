@@ -321,37 +321,55 @@ export function skillInstallScripts(skills: ThreadSkills): string[] {
  * repositories' own `.agents/skills` belong to their threads and are not
  * read. */
 export interface OptChatSkills {
-  /** The listed skills, sorted by id; the same while the settings are. */
-  list(signal?: AbortSignal): Promise<ResolvedSkill[]>;
+  /** The resolution of the skill settings as they are now, never waited
+   * for here: shared by every caller and cancelled by none, started once
+   * per configuration, and again only SKILLS_RETRY_MS after one failed. */
+  current(): SkillsResolution;
   /** A file of a listed skill, `file` relative to its folder (SKILL.md by
    * default; `../<id>/…` reaches another installed skill, as in a thread),
-   * from character `at`; or why it cannot be read. */
+   * from character `at`; or why it cannot be read. Waits at most
+   * SKILLS_WAIT_MS for a resolution under way; `signal` ends only this
+   * caller's wait. */
   read(name: string, file?: string, at?: number, signal?: AbortSignal): Promise<string>;
 }
+/** One configuration's resolution: `key` names it (the default source as in
+ * effect and the settings), `skills` the listed ones once it succeeded,
+ * `error` why it failed; `settled` resolves either way and never rejects. */
+export interface SkillsResolution { readonly key: string; readonly skills?: ResolvedSkill[]; readonly error?: string; readonly settled: Promise<void> }
 /** The characters skill() answers at once; a longer file comes in pages. */
 export const SKILL_PAGE = 30_000;
+/** How long a caller waits for a resolution under way. */
+export const SKILLS_WAIT_MS = 10_000;
+/** How long a failed resolution is the answer before one is tried again. */
+export const SKILLS_RETRY_MS = 60_000;
 
 /** OptChat's skills from the skill settings as they are now: resolved once
- * per configuration (pins make it the same answer every time), again
- * after a change, and again after a resolution that failed. */
-export function optchatSkills(deps: { git: SkillGit; source: () => SkillSource | null; config: () => SkillsConfig }): OptChatSkills {
-  let memo: { key: string; resolved: Promise<ThreadSkills> } | null = null;
-  const resolved = (signal?: AbortSignal) => {
+ * per configuration (pins make it the same answer every time). */
+export function optchatSkills(deps: { git: SkillGit; source: () => SkillSource | null; config: () => SkillsConfig; waitMs?: number; retryMs?: number }): OptChatSkills {
+  type Entry = { key: string; resolved?: ThreadSkills; skills?: ResolvedSkill[]; error?: string; failedAt?: number; settled: Promise<void> };
+  let memo: Entry | null = null;
+  const current = (): Entry => {
     const config = deps.config();
     const source = defaultSource(deps.source(), config);
     const key = JSON.stringify([source, config]);
-    if (memo?.key !== key) {
-      const entry = { key, resolved: resolveSkills(deps.git, source, config, signal) };
-      entry.resolved.catch(() => { if (memo === entry) memo = null; });
-      memo = entry;
-    }
-    return memo.resolved;
+    if (memo?.key === key && !(memo.failedAt !== undefined && Date.now() - memo.failedAt >= (deps.retryMs ?? SKILLS_RETRY_MS))) return memo;
+    // No caller's signal: one caller giving up never fails the others.
+    const entry: Entry = { key, settled: Promise.resolve() };
+    entry.settled = resolveSkills(deps.git, source, config).then(
+      resolved => { entry.resolved = resolved; entry.skills = listedForOptChat(resolved); },
+      error => { entry.error = error instanceof Error ? error.message : String(error); entry.failedAt = Date.now(); });
+    memo = entry;
+    return entry;
   };
   return {
-    list: async signal => listedForOptChat(await resolved(signal)),
+    current,
     async read(name, file = "SKILL.md", at = 0, signal) {
-      const all = await resolved(signal);
-      if (!listedForOptChat(all).some(skill => skill.name === name)) {
+      const entry = current();
+      if (!entry.resolved && entry.error === undefined) await settledWithin(entry.settled, deps.waitMs ?? SKILLS_WAIT_MS, signal);
+      if (entry.error !== undefined) return `your skills could not be resolved (${entry.error}); cube tries again within a minute`;
+      const all = entry.resolved;
+      if (!all) return "your skills are still being resolved (a source is being fetched); try again in a minute";
+      if (!entry.skills!.some(skill => skill.name === name)) {
         return `no skill ${JSON.stringify(name)} is listed for you; your skills are the ones in your prompt's <available_skills>`;
       }
       // `<id>/<file>`, so `../<other>/…` names another skill's folder.
@@ -361,20 +379,37 @@ export function optchatSkills(deps: { git: SkillGit; source: () => SkillSource |
       if (posix.isAbsolute(file) || !owner) return `${JSON.stringify(file)} is not a file of a skill: give a path relative to the skill's folder, such as SKILL.md or references/notes.md`;
       const relative = target.slice(slash + 1);
       const files = await deps.git.listFilesAtCommit(owner.url, owner.commit, owner.dir) ?? [];
-      const entry = files.find(each => each.path === `${owner.dir}/${relative}`);
-      if (!entry) {
+      const found = files.find(each => each.path === `${owner.dir}/${relative}`);
+      if (!found) {
         const names = files.map(each => each.path.slice(owner.dir.length + 1)).sort();
         return `${owner.name} has no file ${relative}; its files: ${names.join(", ")}`;
       }
-      const text = await deps.git.readFileAtCommit(owner.url, owner.commit, entry.path);
+      const text = await deps.git.readFileAtCommit(owner.url, owner.commit, found.path);
       if (text === null) throw new Error(`${owner.url} at ${owner.commit} could not be read`);
-      if (text.includes("\0")) return `${owner.name}/${relative} is not text (${entry.size} bytes)`;
+      if (text.includes("\0")) return `${owner.name}/${relative} is not text (${found.size} bytes)`;
       if (!Number.isSafeInteger(at) || at < 0 || (at > 0 && at >= text.length)) return `no characters from ${at} in ${owner.name}/${relative}: it has ${text.length}`;
-      const stop = Math.min(text.length, at + SKILL_PAGE);
+      let stop = Math.min(text.length, at + SKILL_PAGE);
+      // A page never ends between the two halves of a surrogate pair.
+      if (stop < text.length && /[\uD800-\uDBFF]/.test(text[stop - 1]!)) stop--;
       const page = text.slice(at, stop);
       return stop < text.length ? `${page}\n[characters ${at + 1}-${stop} of ${text.length}; go on with at = ${stop}]` : page;
     },
   };
+}
+
+/** Resolves when `settled` does, after `ms` or when `signal` aborts (then
+ * throws its reason), whichever is first. */
+export async function settledWithin(settled: Promise<void>, ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    await Promise.race([settled, new Promise<void>(resolve => { timer = setTimeout(resolve, ms); }),
+      ...signal ? [new Promise<never>((_resolve, reject) => { onAbort = () => reject(signal.reason); signal.addEventListener("abort", onAbort, { once: true }); })] : []]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal!.removeEventListener("abort", onAbort);
+  }
 }
 
 function listedForOptChat(skills: ThreadSkills): ResolvedSkill[] {

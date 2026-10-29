@@ -127,30 +127,64 @@ description, without a path. Its `skill(name, path?, at?)` tool reads one,
 read only, on the host at the skill's pinned commit:
 
 - `skill(name)` gives the listed skill's `SKILL.md`; `path` a file relative
-  to its folder. `../<id>/…` reaches another installed skill, as a link does
-  in a thread; any other path out of a skill's folder, an absolute one, a
-  skill not listed (a `thread` or hidden one) or a file not in the folder
-  is answered with why, and a missing file with the folder's files. A file
-  longer than 30,000 characters comes a page at a time, from `at`.
+  to its folder. `name` must be listed. A path may leave that folder only as
+  `../<id>/…`, into another installed skill's folder, as a link does in a
+  thread; that reaches any installed skill, a `thread` or hidden one too
+  (its text, nothing more). An absolute path, any other path out of the
+  folder, or a file not in it is answered with why, and a missing file with
+  the folder's files. A file longer than 30,000 characters comes a page at a
+  time, from `at`; a page never ends inside a character.
 - Progressive disclosure, as in a thread: no skill's body is in the prompt;
   the model reads one when a request matches its description.
-- The list follows the settings, not a thread's start: resolved once per
-  configuration (the commits are pinned, so the same configuration lists the
-  same skills, across turns and restarts, byte for byte) and again after a
-  save. A save that changes the list changes OptChat's system prompt once,
-  as an edit of its `AGENTS.md` does, and the providers' prompt caches write
-  it again once. A resolution that fails (a source's mirror cannot be
-  fetched) leaves the section out, logs it once and is tried again before the
-  next request. A request waits at most 10 seconds for one (a new pin's
-  commit being fetched into the host mirror) and goes without the section
-  past that; the resolution goes on, and a later request lists the skills,
-  which changes the prompt once more.
+- One resolution per configuration (the default source as in effect and
+  the saved settings), shared by the prompt and `skill`: started when the
+  chat opens and when a configuration is first asked for, cancelled by no
+  caller (a `skill` call cut off ends only its own wait). One that fails is
+  the answer for a minute, then tried again: a source out of reach costs one
+  fetch a minute, not one per request.
+
+### The section within a turn, across turns and restarts
+
+The list is cache-sensitive (it sits before the view), so it changes only
+at a turn's start and never drops a list it has shown:
+
+- **Within a turn** every request sends the section the turn's first
+  request sent, byte for byte. A list that resolves mid-turn waits for the
+  next turn; the prompt is never patched mid-turn.
+- **At a turn's start**: the resolved list. If it is not resolved, the
+  section last sent at a turn's start, stored in
+  `<CUBED_STATE>/optchat/skills-section.json`: for the same configuration
+  without waiting (the pins make it the same list), so a restart with a cold
+  mirror or an unreachable source sends the same bytes. For a configuration
+  not resolved yet (a save, or a release that moves the default pin), the
+  first turn's start waits once, at most 10 seconds; if it is still not
+  resolved, that turn and the next ones send the last stored section (or
+  none, on a chat that never had one), and the first turn after it resolves
+  sends the new list. So a list that is slow or never resolves costs one
+  bounded wait per configuration, never one per request or per turn.
+- **Rewrites**: a save that changes the list changes OptChat's system prompt
+  once, as an edit of its `AGENTS.md` does, and the providers' prompt caches
+  write it again once. Upgrading to this cubed changes the prefix once too:
+  the `skill` tool and, while the default source has an `optchat` skill
+  (`briefing-a-thread`), the section are new. A configuration that only
+  resolves after its first turn's wait changes it once more, at that later
+  turn's start.
+- Until a new configuration resolves, the stored section may name skills
+  of the earlier one; `skill` answers from the configuration as it is now
+  (it says when that is still resolving or failed).
+
+### Trust and scope
+
+- A skill's text is instructions OptChat follows, from the sources in the
+  settings, cubeyard/skills by default: the same trust as a thread's skills,
+  now in the agent that starts threads and saves project hooks. Add only
+  sources you trust. "A skill adds no permission" is a statement about cube,
+  not a check: it adds no tool, but nothing stops a skill's text from asking
+  OptChat to use the tools it has (`spawn`, `tell`, `project_hooks_write`,
+  artifacts), as the user's own words could.
 - A repository's own `.agents/skills` are its threads', not OptChat's:
-  OptChat spans projects and reads none of them.
-- A skill is instructions for how OptChat works. It adds no tool and no
-  permission: OptChat still only starts, tells and reads threads, and it
-  never passes a skill to a thread; a thread gets its own skills when it
-  starts.
+  OptChat spans projects and reads none of them. OptChat never passes a
+  skill to a thread; a thread gets its own skills when it starts.
 - OptChat runs on Pi only (any provider pi-ai offers); Claude Code is never
   OptChat's agent, so there is no second path to keep in step.
 
