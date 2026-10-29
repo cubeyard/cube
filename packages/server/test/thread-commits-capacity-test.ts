@@ -114,6 +114,23 @@ try {
   assert.equal(thread(gone1).workspaceState, "failed", "the exhausted one is left as it was");
   console.log("ok: a retry takes a slot behind the waiting threads, then starts at the upstream's commit");
   await settled();
+
+  // A slot that frees while a queued thread's own activation is under way
+  // (it counted the slots just before) is not lost: admit asks again once
+  // that activation ends, without waiting for a recovery round.
+  app.registry.enrollRunner({ nodeId: "node-one", threadId: "one", environmentId: 2, configPath: "/private/one.json", configHash: "one", maxActiveVms: 1, protocol: 4, kind: "vm" });
+  const holder = app.registry.createThread("ok", "holder", model, "hello", "pi", { latest: true, runnerId: app.registry.namedRunnerId("node-one") }).id;
+  const waiter = app.registry.createThread("ok", "waiter", model, "hello", "pi", { latest: true, runnerId: app.registry.namedRunnerId("node-one") }).id;
+  assert.equal(queued(waiter), true);
+  const counting = app.conversations.activate(waiter);
+  assert.equal(queued(waiter), true, "its activation found no slot");
+  app.registry.applyPhase(holder, { type: "failed", failure: { kind: "allocation", text: "workspace allocation failed: test" } });
+  (app.conversations as unknown as { admit(runnerId: string): void }).admit(thread(waiter).runnerId);
+  await counting;
+  await until("the waiting thread takes the freed slot", () => !queued(waiter), 5_000);
+  await until("and starts", () => thread(waiter).workspaceState === "available");
+  console.log("ok: a slot freed while the queued thread's activation counted is not lost");
+  await settled();
 } finally {
   await app.close();
 }
