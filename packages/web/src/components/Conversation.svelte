@@ -484,6 +484,14 @@
     }
   }
 
+  /** A press on the send or stop key leaves the focus in the field that has
+   * it: the key goes disabled or away at once, and the focus with it would
+   * fall to the page, where the next typed or pasted words (a dictation
+   * app's) land nowhere. The press is still a click. */
+  function keepComposerFocus(event: MouseEvent): void {
+    if (document.activeElement === composer) event.preventDefault();
+  }
+
   function onComposerKeydown(event: KeyboardEvent): void {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
       event.preventDefault();
@@ -655,11 +663,11 @@
           title="enter to send · shift enter for a new line"
           rows="1"
         ></textarea>
-        <button class="send-key" type="submit" title="send · enter" aria-label="send message" disabled={!canSend}>
+        <button class="send-key" type="submit" title="send · enter" aria-label="send message" disabled={!canSend} onmousedown={keepComposerFocus}>
           <Icon name="arrow" size={16} />
         </button>
       </div>
-      {#if working || waiting}<button class="key stop-key" type="button" disabled={stopping} onclick={stop}>{stopping ? "stopping…" : "stop"}</button>{/if}
+      {#if working || waiting}<button class="key stop-key" type="button" disabled={stopping} onmousedown={keepComposerFocus} onclick={stop}>{stopping ? "stopping…" : "stop"}</button>{/if}
     </div>
   </form>
   {#if viewing}
