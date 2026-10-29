@@ -100,7 +100,7 @@ try {
     body: JSON.stringify({ name: "terra", repositories: [{ url: repository, base: "main" }] }) })).json() as { project: { id: string; status: string } }).project;
   assert.equal(project.status, "ready");
   const threads = cubeThreads({ registry: app.registry, conversations: app.conversations,
-    catalog: async () => [{ provider: faux.getModel().provider, id: faux.getModel().id }],
+    catalog: () => [{ provider: faux.getModel().provider, id: faux.getModel().id }],
     runners: () => observeRunners(app.registry, 60_000) });
   const until = async (what: string, check: () => boolean, ms = 60000) => {
     const deadline = Date.now() + ms;

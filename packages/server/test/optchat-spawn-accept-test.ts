@@ -8,9 +8,10 @@
  *     share one fetch, three queue in the order asked and fetch nothing;
  *   - a replay answers the same threads and starts nothing;
  *   - one call mixing a working project on a named runner, a project whose
- *     upstream is gone, an unknown project and an unknown model: the bad
- *     tasks are refused one by one, the rest accepted; the working ones
- *     start, the gone ones fail in their commits step;
+ *     upstream is gone, an unknown project and an unknown model: the
+ *     unknown project is refused, the rest accepted; the working ones start,
+ *     the gone one fails in its commits step, the unknown model's in its
+ *     model step;
  *   - a start failure that lasts reaches the chat once, also after the
  *     chat is opened again.
  *
@@ -72,7 +73,7 @@ project("a", `ssh://stand-in${a.url}`);
 project("b", b.url);
 project("gone", path.join(root, "missing"));
 
-const threads = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [model], runners: () => ({ runners: [] }) as never });
+const threads = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: () => [model], runners: () => ({ runners: [] }) as never });
 const chatAt = () => OptChat.open({ directory: path.join(root, "chat"), models, model: async () => model, threads, limits: { node: 64, retryMs: 50, watchMs: 20, startGraceMs: 200 } });
 let chat = await chatAt();
 const thread = (short: string) => app.registry.listThreads().find(each => each.id.startsWith(short))!;
@@ -139,12 +140,12 @@ try {
   // One call, mixed tasks.
   const mixed = await call([
     { project: "b", task: "m1", runner: "node-named" }, { project: "gone", task: "m2", runner: "node-named" }, { project: "nowhere", task: "m3" },
-    { project: "b", task: "m4", model: "faux/none" }, { project: "b", task: "m5", runner: "node-named" }]);
+    { project: "b", task: "m4", model: "faux/none", runner: "node-named" }, { project: "b", task: "m5", runner: "node-named" }]);
   const mixedLines = mixed.text.split("\n");
   assert.equal(mixedLines.length, 5, mixed.text);
   assert.match(mixedLines[2]!, /^task 3 \(nowhere\) not started: no project nowhere$/);
-  assert.match(mixedLines[3]!, /^task 4 \(b\) not started: model faux\/none unavailable; selectable models: /);
-  const [m1, m2, m5] = ids(mixed.text);
+  assert.match(mixedLines[3]!, /^\[[0-9a-f]{8}\] accepted in b: m4$/, "a model the catalog lacks is the start's to refuse, not the call's");
+  const [m1, m2, m4, m5] = ids(mixed.text);
   assert.deepEqual([m1, m2, m5].map(id => thread(id!).runnerId), ["named", "named", "named"], "on the runner named");
   assert.deepEqual([m1, m2, m5].map(id => thread(id!).pinned), [true, true, true]);
   for (const id of [m1!, m5!]) await until(`${id} becomes ready`, () => thread(id).workspaceState === "available");
@@ -152,7 +153,9 @@ try {
   await until("the gone project's start fails", () => thread(m2!).workspaceState === "failed");
   assert.match(thread(m2!).workspaceError!, /^workspace allocation failed: fetching the latest default branch of .*missing failed: /);
   assert.deepEqual(commitSteps(m2!), ["failed"]);
-  console.log("ok: a mixed call refuses its bad tasks one by one; its working threads start on the runner named, its gone project's fails in the commits step");
+  await until("the unknown model's start fails", () => thread(m4!).workspaceState === "failed");
+  assert.match(thread(m4!).workspaceError!, /^workspace allocation failed: model faux\/none is not in the model catalog; selectable models: faux\/faux-1; it holds no runner slot until cube tries again$/);
+  console.log("ok: a mixed call refuses an unknown project at once; its working threads start on the runner named; the gone project's fails in the commits step, the unknown model's in the model step");
 
   // The lasting failure reaches the chat once, and not again from a reopened chat.
   const m2Id = thread(m2!).id;

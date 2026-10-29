@@ -68,7 +68,7 @@ app.registry.saveProject({ id: "p", name: "p", status: "ready", error: null, rev
 const asked = new Map<string, number>();
 /** Tasks spawned without a start: their agent opens only when the test says. */
 const later = new Set<string>();
-const base = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [piModel], runners: () => ({ runners: [] }) as never });
+const base = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: () => [piModel], runners: () => ({ runners: [] }) as never });
 const threads: OptThreads = {
   ...base,
   async events(id) { asked.set(id, (asked.get(id) ?? 0) + 1); return base.events(id); },

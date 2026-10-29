@@ -934,38 +934,56 @@ failure) nor recovery rounds send its request again; then archives it.
   asks for it. A protocol-3 runner (`cube-runner`, retired) takes none.
 - A spawned thread runs on the host's preferred model unless the task names
   one; `claude · max` models start Claude Code threads.
-- `spawn` answers once each task's thread is accepted: checked against the
-  project, model and runner and stored with its place in the queue, all on
-  this host (`[id] accepted in <project>: <title>`). A task refused there is
-  `task <n> (<project>) not started: <why>`. Everything else happens as the
-  thread starts, in the background: once its turn in the queue comes, its
-  first step (`commits`) fetches the latest commits of the project revision
-  it was accepted at and resolves its skills. Threads of one project revision
-  starting together share one fetch; a later start fetches again. A fetch
-  that fails is a failed start, retried like a machine's, and reported to
-  the chat once it lasts (`[id] failed to start …`); until its next try the
-  thread holds no runner slot, so the threads queued behind it start
-  (docs/thread-lifecycle.md). Each git command is bounded (10 min), and so
-  is a wait for another operation on the same repository's mirror (a
-  project check, another thread's fetch; 10 min), so a hung upstream fails
-  the try instead of holding the slot without end.
-- What `spawn` does not promise. Its answer does not wait for
-  git, but its validation reads the model catalog, which runs a
-  provider's key command (a `!command` key in Pi's `auth.json`)
-  synchronously, up to 10 s each, the first time this cubed process sees
-  that command (`ModelRuntime.create` runs the ones present at start; one
-  saved later runs on the next read). `thread accepted validateMs` shows it.
+- `spawn` (and `POST /api/threads`) answers once each task's thread is
+  accepted: its project and runner checked and the thread stored with its
+  place in the queue, all on this host, reading no model catalog
+  (`[id] accepted in <project>: <title>`). A model asked for is taken as
+  written (`provider/id`; one not in that form is refused); none asked for:
+  the preferred model of the catalog as cubed last read it (at its start,
+  and at every later read). A task refused there is
+  `task <n> (<project>) not started: <why>`: an unknown project or runner,
+  a malformed model, or no model known at all.
+- Everything else happens as the thread starts, in the background, once its
+  turn in the queue comes. Its `model` step reads the live catalog: a model
+  not in it, or one whose provider has no working credential, fails the
+  start and says which. Then its `commits` step fetches the latest commits
+  of the project revision it was accepted at and resolves its skills.
+  Threads of one project revision starting together share one fetch; a
+  later start fetches again. A step that fails is a failed start, retried
+  like a machine's, and reported to the chat once it lasts (`[id] failed to
+  start …`, after the start grace of 2 min: an unknown model or a missing
+  key used to be refused by the call itself); until its next try the thread
+  holds no runner slot, so the threads queued behind it start
+  (docs/thread-lifecycle.md). Each git command is bounded (10 min). Of the
+  waits for another operation on the same repository's mirror (a project
+  check, another thread's fetch), those of the `commits` step are bounded
+  too (10 min) and end on cubed's close: the repository's fetch
+  (`prepareRepository`) and the skills' mirrors (`ensureMirror`). Other
+  mirror work (seeding a workspace, a push, a branch sync) still waits for
+  the lock without a bound.
+- What this does not promise. Accepting a thread runs no provider key
+  command, but the `model` step does, in cubed's own process: Pi runs a
+  key stored as a `!command` in its `auth.json` with `execSync` (up to 10 s),
+  the first time the process reads it (`ModelRuntime.create` runs the ones
+  present at start; one saved later runs on the next catalog read). That
+  stops cubed's event loop (every request, every thread) for as long as the
+  command runs, once per command; moving it from the call to the start
+  moved it, it did not end it. The thread's first model request would run
+  it the same way. Pi reads an `auth.json` edited by hand again in the
+  background, so the read just after an edit may still see the old keys.
   A thread that joins a fetch under way gets the commits that fetch finds,
   which may be from a little before it was accepted; a queued thread gets
   upstream's commits when its slot frees. A cubed older than this one reads
   an accepted thread's `allocation.latest` as unknown and starts it at the
-  project's last checked commits: downgrading is not supported. The timings
-  in the tests are synthetic (a held upstream, a faux model); they do not
-  explain any measured chat latency. cubed's log has where
-  the time went: `threads thread accepted` (`validateMs`, `createMs`) and
-  `optchat spawn answered` for the call; `threads repository fetched` (lock
-  wait, `ls-remote`, fetch, resolve), `threads latest commits` and
-  `threads commits resolved` (`ms`, `sinceAcceptedMs`) for the start.
+  project's last checked commits without checking its model: downgrading
+  is not supported. The timings in the tests are synthetic (a held
+  upstream, a faux model, a `sleep` key command); they do not explain any
+  measured chat latency. cubed's log has where the time went:
+  `threads thread accepted` (`validateMs`, `createMs`) and `optchat spawn
+  answered` for the call; `threads model checked` (`ms`), `threads
+  repository fetched` (lock wait, `ls-remote`, fetch, resolve), `threads
+  latest commits` and `threads commits resolved` (`ms`, `sinceAcceptedMs`)
+  for the start.
 
 Routes: `GET /api/optchat/history`, `GET /api/optchat/stream` (the thread event
 model), `POST /api/optchat/prompt {text, requestId, images?}` (`images`: ids of

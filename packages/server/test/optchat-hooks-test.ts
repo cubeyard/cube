@@ -292,7 +292,7 @@ try {
   fs.rmSync(go);
   const checking = post(`/api/projects/${slow.id}/check`, {});
   await until(() => fs.existsSync(held), Boolean, "the check is under way");
-  const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [],
+  const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: () => [],
     runners: () => observeRunners(app.registry, 60_000) });
   assert.match(await adapter.writeHooks!("slow", { preSetup: "echo during-check" }, "check-1"), /^saved preSetup/);
   fs.writeFileSync(go, "");

@@ -95,7 +95,7 @@ try {
     assert.equal(await label.innerText(), "machine startup");
     await label.click();
     await panel.waitFor();
-    assert.deepEqual(await panel.locator("details.startup-step code").allInnerTexts(), ["latest commits", "prepare · try 1", "prepare · try 2", "resume"]);
+    assert.deepEqual(await panel.locator("details.startup-step code").allInnerTexts(), ["model", "latest commits", "prepare · try 1", "prepare · try 2", "resume"]);
     await shot(page, `${size}-4-reopened`);
     await panel.locator("button.startup-close").click();
     await panel.waitFor({ state: "detached" });

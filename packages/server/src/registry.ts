@@ -236,11 +236,12 @@ export interface ThreadVm {
    * started again from its disk because its snapshot could not be used). */
   notice?: { text: string; at: number };
 }
-/** An accepted thread whose commits failed before it had a machine: it has
- * nothing on its runner, so it holds no slot and no place in the queue,
- * and an upstream that keeps failing (also once its retries stop) does not
- * hold capacity from the threads behind it. Its next try takes a slot
- * only behind every thread waiting (`retakeSlot`). */
+/** An accepted thread whose start failed before it had a machine (its
+ * `model` or `commits` step, while `allocation.latest` is still there): it
+ * has nothing on its runner, so it holds no slot and no place in the queue,
+ * and a model or an upstream that keeps failing (also once its retries
+ * stop) does not hold capacity from the threads behind it. Its next try
+ * takes a slot only behind every thread waiting (`retakeSlot`). */
 const COMMITS_FAILED = "(json_extract(data, '$.workspaceState') = 'failed' AND json_extract(data, '$.allocation.latest') IS NOT NULL)";
 /** Open threads whose machine holds one of its runner's slots (`holdsSlot`),
  * but for one whose commits failed. */
@@ -255,7 +256,7 @@ export const STEP_LOG_BYTES = 4096;
  * build machine; `boot`: the thread's machine boots until its guest answers;
  * `prepare`: checkout, pre-setup and setup (one try per `attempt`);
  * `resume`: the resume hooks. */
-export type StartupStepName = "commits" | "lookup" | "build-boot" | "build-prepare" | "build-seal" | "build-publish" | "boot" | "prepare" | "resume";
+export type StartupStepName = "model" | "commits" | "lookup" | "build-boot" | "build-prepare" | "build-seal" | "build-publish" | "boot" | "prepare" | "resume";
 export interface StartupStep {
   name: StartupStepName;
   /** The preparation try (its command's key is `cube:provision:<attempt>`). */
@@ -839,7 +840,7 @@ export class Registry {
       return written;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
-  /** A thread whose commits failed (it holds no slot) takes one for its
+  /** A thread whose start failed before it had a machine (it holds no slot) takes one for its
    * next try, if one is free behind every thread waiting on its runner:
    * it was not waiting, so it goes last. True when it holds one now (or
    * never gave one up); false: it waits for the next try, holding none. */

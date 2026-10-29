@@ -106,7 +106,7 @@ async function open(machines: CountedMachines) {
   const app = await createCubed({ state, models, machines, claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")],
     claudeOptions: { stopGraceMs: 2000 }, gateway: null });
   const threads = {
-    ...cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [piModel], runners: () => ({ runners: [] }) as never }),
+    ...cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: () => [piModel], runners: () => ({ runners: [] }) as never }),
     // A spawn as cubeThreads makes one, on a runner of its own (one slot each).
     async spawn(task: { task: string }, requestId: string) {
       const claude = task.task === "CLAUDE_HELD";
@@ -159,7 +159,7 @@ assert.deepEqual([Q, H, C].map(id => reportsOf(id).length), [1, 0, 0], "before t
 const after = new CountedMachines(machinesRoot);
 ({ app, chat } = await open(after));
 after.onResume = id => { app.registry.applySleep(id, { type: "running" }); };
-const threads = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [piModel], runners: () => ({ runners: [] }) as never });
+const threads = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: () => [piModel], runners: () => ({ runners: [] }) as never });
 try {
   await until(() => reportsOf(H).length === 1 && reportsOf(C).length === 1, "H's and C's stored runs report after the restart");
   await delay(1500);

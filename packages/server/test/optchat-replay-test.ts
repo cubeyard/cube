@@ -31,7 +31,7 @@ models.setProvider(faux.provider);
 
 const registry = new Registry(path.join(root, "registry.sqlite"));
 registry.saveProject({ id: "demo", name: "demo", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
-const real = cubeThreads({ registry, conversations: {} as never, catalog: async () => [], runners: () => ({ runners: [] }) as never });
+const real = cubeThreads({ registry, conversations: {} as never, catalog: () => [], runners: () => ({ runners: [] }) as never });
 const store = new ArtifactStore(path.join(root, "artifacts.sqlite"));
 const artifacts = new Artifacts({ store, registry, github: {} as GithubPulls, optchat: async () => null, submit: async () => {} });
 
@@ -225,7 +225,7 @@ try {
     { id: "r1", projectId: "fetch", position: 0, url: REPO, base: "main", checkoutName: "fetch", status: "ready", error: null, resolvedBase: "main", baseOid: "a".repeat(40), checkedAt: 1 }] });
   const activated: string[] = [];
   const accepting = cubeThreads({ registry, conversations: { activate: async (id: string) => { activated.push(id); } } as never, runners: () => ({ runners: [] }) as never,
-    catalog: async () => [{ provider: "faux", id: "faux-1" }] as never });
+    catalog: () => [{ provider: "faux", id: "faux-1" }] as never });
   const accepted = await accepting.spawn({ project: "fetch", task: "accept" }, "optchat:accept:0");
   assert.deepEqual(registry.getThread(accepted.id)!.allocation.latest, { bases: ["main"] }, "accepted with its commits still to resolve");
   assert.deepEqual(activated, [accepted.id], "and its start set off");

@@ -67,6 +67,7 @@ OFFLINE_TESTS=(
   packages/server/test/startup-steps-test.ts
   packages/server/test/thread-start-commits-test.ts
   packages/server/test/thread-commits-capacity-test.ts
+  packages/server/test/thread-model-check-test.ts
   packages/server/test/durable-agent-test.ts
   packages/server/test/codemode-test.ts
   packages/server/test/pi-read-test.ts

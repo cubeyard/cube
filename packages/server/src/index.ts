@@ -336,7 +336,8 @@ export async function createCubed(options: {
   const settings = new SettingsStore(path.join(options.state, "settings.json"));
   const git = new GitService(path.join(options.state, "repositories"));
   const latestCommits = latestCommitsOf({ git, skills: () => settings.get().skills, skillSource: options.skillSource ?? null });
-  const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, latestCommits, ...options.machines ? { machines: options.machines } : {}, ...options.now ? { now: options.now } : {},
+  let modelProblem: (model: ModelSelection) => Promise<string | null> = async () => null;
+  const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, latestCommits, modelProblem: model => modelProblem(model), ...options.machines ? { machines: options.machines } : {}, ...options.now ? { now: options.now } : {},
     ...options.patience ? { patience: options.patience } : {}, runner: { policy, ...options.runner }, claude: claudeCommand ? {
     command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
   } : null, portal: thread => portal!.guest(thread),
@@ -372,8 +373,32 @@ export async function createCubed(options: {
     return runnerView(id)!;
   };
   const catalog = async () => (await models.getAvailable()).map(({ provider, id }) => ({ provider, id }));
+  /** What a new thread may start with as cubed last read it (`threadCatalog`):
+   * a thread is accepted against it without reading the catalog, which may
+   * run a provider's key command (`!command` in Pi's auth.json). */
+  let knownCatalog: readonly ModelSelection[] = [];
   /** What a new thread may start with: Pi's models, then claude · max. */
-  const threadCatalog = async () => [...await catalog(), ...(conversations.claudeAvailable ? CLAUDE_MODELS : [])];
+  const threadCatalog = async () => {
+    knownCatalog = [...await catalog(), ...(conversations.claudeAvailable ? CLAUDE_MODELS : [])];
+    return [...knownCatalog];
+  };
+  /** Why a thread cannot start with its model, checked as it starts (the
+   * live catalog: a key command not run yet runs here), or null. */
+  modelProblem = async (model: ModelSelection) => {
+    const available = await threadCatalog();
+    if (available.some(each => each.provider === model.provider && each.id === model.id)) return null;
+    const selectable = `selectable models: ${available.map(each => `${each.provider}/${each.id}`).join(", ") || "none, connect a model provider"}`;
+    if (model.provider === CLAUDE_PROVIDER) {
+      return CLAUDE_MODELS.some(each => each.id === model.id) ? `model ${model.provider}/${model.id} needs Claude Code, which this host does not run; ${selectable}`
+        : `model ${model.provider}/${model.id} is not one cube knows; ${selectable}`;
+    }
+    return models.getModel(model.provider, model.id)
+      ? `model ${model.provider}/${model.id} is known, but its provider has no working credential (its key or key command in Pi's auth.json, or its environment); ${selectable}`
+      : `model ${model.provider}/${model.id} is not in the model catalog; ${selectable}`;
+  };
+  // The catalog as cubed starts: Pi ran the key commands present when it
+  // made its model runtime, so this read runs none of them again.
+  await threadCatalog().catch(() => {});
   let optchat: Promise<{ chat: OptChat; events: OptChatEvents }> | null = null;
   // Read-only usage accounting over the agents' own records.
   const usage = new UsageService({
@@ -407,7 +432,7 @@ export async function createCubed(options: {
   const diagnostics = (id: string) => threadDiagnostics({ registry, conversations, version: `${versionInfo().version} (${versionInfo().commit})`,
     machine: thread => machines.diagnose(thread),
     runner: runnerId => observeRunners(registry, probeIntervalMs).runners.find(runner => runner.id === runnerId) ?? null }, id);
-  const optchatThreads = { ...cubeThreads({ registry, conversations, catalog: threadCatalog, runners: () => observeRunners(registry, probeIntervalMs) }), usage: usageQuery,
+  const optchatThreads = { ...cubeThreads({ registry, conversations, catalog: () => knownCatalog, runners: () => observeRunners(registry, probeIntervalMs) }), usage: usageQuery,
     diagnose: async (id: string) => { const bundle = await diagnostics(id); return bundle && formatDiagnostics(bundle); } };
   artifacts = new Artifacts({ store: new ArtifactStore(path.join(options.state, "artifacts.sqlite")), registry,
     github: options.githubPulls ?? githubPulls({ token: () => github.token() }),
@@ -571,6 +596,19 @@ export async function createCubed(options: {
         const selected = candidate ? available.find(model => model.provider === candidate.provider && model.id === candidate.id) : preferredModel(available);
         if (!selected) throw new Error("connect a model provider first");
         return selected;
+      };
+      /** A new thread's model without reading the catalog: the one asked
+       * for (checked as the thread starts), or the preferred one of the
+       * catalog as cubed last read it. */
+      const requested = (input: unknown): ModelSelection => {
+        if (input === undefined || input === null) {
+          const preferred = preferredModel([...knownCatalog]);
+          if (!preferred) throw new Error("connect a model provider first");
+          return preferred;
+        }
+        const candidate = input as Partial<ModelSelection>;
+        if (typeof candidate.provider !== "string" || !candidate.provider || typeof candidate.id !== "string" || !candidate.id) throw new Error("model must be { provider, id }");
+        return { provider: candidate.provider, id: candidate.id };
       };
       if (url.pathname === "/api/health" && method === "GET") {
         return json({ lifecycle: "ready", ...versionInfo(), gateway: gateway ? (gateway.unavailable ? "unavailable" : "ready") : "none", portal: portal.state });
@@ -815,7 +853,7 @@ export async function createCubed(options: {
           return response.end(request.headers["if-none-match"] === etag ? undefined : list);
         }
         if (!id && method === "POST") {
-          const model = await selection(body.model);
+          const model = requested(body.model);
           const projectId = text("projectId");
           const requestId = text("requestId");
           const prompt = text("text");

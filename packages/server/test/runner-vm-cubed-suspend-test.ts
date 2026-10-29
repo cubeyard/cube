@@ -481,7 +481,7 @@ try {
   });
   assert.equal(ready.status, "ready", ready.error ?? "");
   const threads = cubeThreads({ registry: app.registry, conversations: app.conversations,
-    catalog: async () => [{ provider: faux.getModel().provider, id: faux.getModel().id }],
+    catalog: () => [{ provider: faux.getModel().provider, id: faux.getModel().id }],
     runners: () => observeRunners(app.registry, 60_000) });
   assert.ok(app.gateway, "cubed started its gateway");
   await app.gateway.ready();

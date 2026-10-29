@@ -1708,7 +1708,7 @@ export class OptChat {
     });
     const spawn = defineTool({
       name: "spawn",
-      description: "Start one thread per task (one goal, one result; another pull request, question or review is a new task), in parallel, and answer their ids at once: each is accepted, then fetches the project's latest commits and starts in the background. Each thread is a coding agent with its own machine and a checkout of the project; it does not see this chat. Its report comes back later as a message starting \"[id] \", and so does a start that keeps failing.",
+      description: "Start one thread per task (one goal, one result; another pull request, question or review is a new task), in parallel, and answer their ids at once: each is accepted, then checks its model, fetches the project's latest commits and starts in the background. Each thread is a coding agent with its own machine and a checkout of the project; it does not see this chat. Its report comes back later as a message starting \"[id] \", and so does a start that keeps failing (a model it cannot run, a repository it cannot fetch).",
       parameters: Type.Object({ tasks: Type.Array(Type.Object({
         project: Type.String({ description: "Project name or id" }),
         task: Type.String({ description: "The whole task, self-contained" }),

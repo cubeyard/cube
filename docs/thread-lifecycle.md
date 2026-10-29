@@ -18,7 +18,7 @@ changes one names its owner here; a test that checks one is listed under
 allocating, failed ─a try fails─▶ failed ─a try succeeds─▶ available
 available, failed ─archive─▶ releasing ─released (frees the slot)─▶ archived
 releasing ─release fails─▶ failed ("workspace release failed: …") ─retried─▶ archived
-allocating ─its commits fail (no machine yet: gives up its slot)─▶ failed ─retaken (a slot free behind the queue)─▶ allocating
+allocating ─its model or commits step fails (no machine yet: gives up its slot)─▶ failed ─retaken (a slot free behind the queue)─▶ allocating
 ```
 
 `archived` is terminal: nothing starts, wakes or calls its machine again;
@@ -83,7 +83,7 @@ a whole row from a caller's copy (a title changes by `renameThread`, which
 reads the row in its own transaction). `holdsSlot` is the slot rule, and
 `HOLDS_SLOT_SQL` the same rule for the registry's counts
 (machine-sleep-test, lifecycle-model-test I11), but for one row: an
-accepted thread whose `commits` step failed before it had a machine
+accepted thread whose `model` or `commits` step failed before it had a machine
 (`failed` with `allocation.latest`) holds no slot and no place in the queue,
 during its retries and after they stop, and its failure starts the queued
 threads of its runner at once. Its next try takes a slot only if one is

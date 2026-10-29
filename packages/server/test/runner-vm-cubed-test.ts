@@ -282,7 +282,7 @@ try {
   });
   assert.equal(ready.status, "ready", ready.error ?? "");
   const threads = cubeThreads({ registry: app.registry, conversations: app.conversations,
-    catalog: async () => [{ provider: faux.getModel().provider, id: faux.getModel().id }],
+    catalog: () => [{ provider: faux.getModel().provider, id: faux.getModel().id }],
     runners: () => observeRunners(app.registry, 60_000) });
 
   // spawn naming berth vm: the template build, then boot, boot documents, policy, checkout and hooks

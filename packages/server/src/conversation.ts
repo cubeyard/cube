@@ -116,6 +116,9 @@ export interface ConversationsOptions {
    * start (index.ts, latestCommitsOf); absent where no thread is accepted
    * with `latest` (fixtures). */
   latestCommits?: (allocation: UnresolvedAllocation, signal: AbortSignal) => Promise<ResolvedRepositories>;
+  /** Why an accepted thread cannot start with its model (index.ts), or
+   * null; asked before its commits. Absent: not checked (fixtures). */
+  modelProblem?: (model: ModelSelection) => Promise<string | null>;
 }
 export class Conversations {
   private readonly registry: Registry;
@@ -170,6 +173,7 @@ export class Conversations {
   /** Aborted by the close: stops the fetches of commits under way. */
   private readonly stopping = new AbortController();
   private readonly latestCommits: ConversationsOptions["latestCommits"] | null;
+  private readonly modelProblem: ConversationsOptions["modelProblem"] | null;
   private readonly now: () => number;
   private readonly patience: typeof PATIENCE;
   /** When this process's Conversations began (`PATIENCE.restartMs`). */
@@ -206,6 +210,7 @@ export class Conversations {
     this.patience = { ...PATIENCE, ...options.patience };
     this.portal = options.portal ?? (() => ({ reason: "this cube installation has no portal" }));
     this.latestCommits = options.latestCommits ?? null;
+    this.modelProblem = options.modelProblem ?? null;
   }
   /** Whether claude-code threads can run on this host. */
   get claudeAvailable(): boolean { return this.claude !== null; }
@@ -528,10 +533,11 @@ export class Conversations {
       await this.resume(id, started?.booted ?? false);
       return;
     }
-    // Its commits failed on an earlier try, and with them its slot went:
-    // this try takes one only behind every thread waiting for one.
+    // Its last try failed before it had a machine (its model or its
+    // commits), and with that its slot went: this try takes one only
+    // behind every thread waiting for one.
     if (thread.allocation.latest && thread.workspaceState === "failed") {
-      if (!this.registry.retakeSlot(id)) throw new RunnerWait("its last try could not fetch its latest commits; it tries again once its runner has a slot no waiting thread needs");
+      if (!this.registry.retakeSlot(id)) throw new RunnerWait("its last try failed before it had a machine; it tries again once its runner has a slot no waiting thread needs");
       thread = this.thread(id);
     }
     // A queued thread asks for its slot, in turn (Registry.applySleep);
@@ -596,8 +602,10 @@ export class Conversations {
       throw new FailedTry(failure, { cause: error });
     }
   }
-  /** The `commits` step: pins the thread to its repositories' latest
-   * commits and its skills. Concurrent or repeated starts converge (the
+  /** The `model` step, then the `commits` step: the thread's model is one
+   * this host can run (checked here, not when the thread was accepted, so a
+   * key command runs here, if at all); then the thread is pinned to its
+   * repositories' latest commits and its skills. Concurrent or repeated starts converge (the
    * first write wins); a start cut off before the write fetches again. A
    * failure is a failed try like a machine's, retried by the recovery loop,
    * and gives up the thread's slot (Registry), so the threads queued on
@@ -605,9 +613,19 @@ export class Conversations {
    * next cubed retries. */
   private async resolveCommits(id: string, latest: UnresolvedAllocation["latest"]): Promise<Thread> {
     const thread = this.thread(id);
-    const started = performance.now();
-    this.registry.beginStartupStep(id, { name: "commits", detail: `the latest ${latest.bases.map(base => base ?? "default branch").join(", ")} and the skills` });
+    let step: "model" | "commits" = "model";
     try {
+      if (this.modelProblem) {
+        const checking = performance.now();
+        this.registry.beginStartupStep(id, { name: "model", detail: `${thread.model.provider}/${thread.model.id}` });
+        const problem = await this.modelProblem(thread.model);
+        if (problem) throw new Error(problem);
+        this.registry.endStartupStep(id, { name: "model", state: "ok" });
+        log.info("model checked", { thread: id, model: `${thread.model.provider}/${thread.model.id}`, ms: Math.round(performance.now() - checking) });
+      }
+      step = "commits";
+      const started = performance.now();
+      this.registry.beginStartupStep(id, { name: "commits", detail: `the latest ${latest.bases.map(base => base ?? "default branch").join(", ")} and the skills` });
       if (!this.latestCommits) throw new Error("this cubed resolves no commits");
       const resolved = this.registry.resolveCommits(id, await this.latestCommits({ ...thread.allocation, latest }, this.stopping.signal));
       const ms = Math.round(performance.now() - started);
@@ -618,7 +636,7 @@ export class Conversations {
     } catch (error) {
       if (this.closing) throw new RunnerWait("cubed is closing; the thread's commits are fetched when it starts again", { cause: error });
       const message = `${error instanceof Error ? error.message : String(error)}; it holds no runner slot until cube tries again`;
-      this.registry.endStartupStep(id, { name: "commits", state: "failed", detail: message });
+      this.registry.endStartupStep(id, { name: step, state: "failed", detail: message });
       const failure = allocationFailed(new Error(message, { cause: error }));
       this.registry.applyPhase(id, { type: "failed", failure });
       this.admit(thread.runnerId);

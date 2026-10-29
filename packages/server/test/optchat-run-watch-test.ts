@@ -84,7 +84,7 @@ const app = await createCubed({ state: path.join(root, "state"), models, machine
   claudeOptions: { stopGraceMs: 2000 }, gateway: null });
 app.registry.enrollRunner({ nodeId: "node-r", threadId: "r", environmentId: 1, configPath: "/private/r.json", configHash: "r", maxActiveVms: 4, protocol: 4, kind: "vm" } as never);
 app.registry.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
-const base = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [piModel], runners: () => ({ runners: [] }) as never });
+const base = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: () => [piModel], runners: () => ({ runners: [] }) as never });
 const gate = path.join(root, "never");
 /** By thread: events() asks, watches refused, watches begun. */
 const asked = new Map<string, number>(), refused = new Map<string, number>(), watches = new Map<string, number>();
