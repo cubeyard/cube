@@ -7,8 +7,10 @@
  * opens on its own, the failed one standing open with its output. While
  * the thread works a run grows a call at a time, its line says `waiting`
  * or `running` and names the command that moves, and the reader's choice
- * holds; a message steered in mid-run splits it; a stopped run says `no
- * result`. Nothing scrolls sideways under a long command. Desktop and
+ * holds; a reader focused on a lone call keeps the focus, on the run's
+ * line, when a second call folds it into a run; a message steered in
+ * mid-run splits it; a stopped run says `no result`. Nothing scrolls
+ * sideways under a long command. Desktop and
  * phone, Chromium and WebKit where Playwright has it. Screenshots go to
  * CUBE_SCREENSHOTS when it is set. Needs a built UI (pnpm build). */
 import assert from "node:assert/strict";
@@ -119,17 +121,22 @@ try {
     const lone = page.locator(`${ACTIVE} .transcript-column > .tool-strip[data-anchor='call:s0']`);
     await lone.waitFor();
     assert.equal(await isOpen(lone), true, `${size.name}: one call waiting stands open, as before`);
+    // a keyboard reader on that line: when a second call folds them into a run, the focus moves to the run's line
+    await lone.locator(":scope > summary").focus();
     host.set([...asked, call("4.1", "s0", "pnpm --filter gateway build"), result("4.2", "s0", "built"), call("4.3", "s1", "pnpm --filter gateway test")], { state: "working" });
     const live = groups(page).nth(1);
     await live.waitFor();
     assert.match(await live.locator(":scope > summary").innerText(), /^2 tools called\s+waiting\s+bash\s+pnpm --filter gateway test\s*$/, `${size.name}: the waiting command is named`);
     assert.equal(await isOpen(live), false, `${size.name}: a live run comes folded`);
+    assert.equal(await page.evaluate(() => { const active = document.activeElement; return !!active?.matches("details.tool-group > summary") && !!active.parentElement!.querySelector("[data-anchor='call:s0']"); }), true,
+      `${size.name}: the focus is on the run's line, not lost to the page`);
     assert.ok(await page.locator(`${ACTIVE} .working-line`, { hasText: "working…" }).isVisible(), `${size.name}: the thread still says it works`);
     host.set([...asked, call("4.1", "s0", "pnpm --filter gateway build"), result("4.2", "s0", "built"), call("4.3", "s1", "pnpm --filter gateway test"),
       result("4.4", "s1", "1 passing", false, false)], { state: "working" });
     await live.locator(":scope > summary .tool-state", { hasText: "running" }).waitFor();
-    await live.locator(":scope > summary").click();
-    assert.equal(await isOpen(live), true, `${size.name}: a press opens the live run`);
+    // enter, with the focus where the regrouping left it, opens the live run
+    await page.keyboard.press("Enter");
+    assert.equal(await isOpen(live), true, `${size.name}: enter opens the live run`);
     assert.ok(await live.getByText("1 passing").isVisible(), `${size.name}: inside, the running call shows its output as it streams`);
     // a message steered in mid-run splits it: nothing groups across it
     const ran = [...asked, call("4.1", "s0", "pnpm --filter gateway build"), result("4.2", "s0", "built"), call("4.3", "s1", "pnpm --filter gateway test"),

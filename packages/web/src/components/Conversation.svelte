@@ -513,6 +513,36 @@
     for (const tool of group.tools) chosen.set(groupChoiceKey(tool.callId), open);
   }
 
+  /** A tool line that held the focus when a frame came: the calls it stands
+   * for (one strip's, or every call of a run). A frame that regroups them
+   * (a lone call joined by a second, an earlier page reaching back into a
+   * run) draws a new element, and the focus would fall to the page. */
+  let focusedCalls: string[] = [];
+  $effect.pre(() => {
+    void shown;
+    const active = document.activeElement;
+    const line = active instanceof HTMLElement && active.matches("summary") && column?.contains(active) ? active.parentElement : null;
+    focusedCalls = !line ? []
+      : line.matches(".tool-strip[data-anchor]") ? [line.dataset.anchor!]
+      : line.matches(".tool-group") ? [...line.querySelectorAll<HTMLElement>(".tool-strip[data-anchor]")].map(strip => strip.dataset.anchor!)
+      : [];
+  });
+  // ...and after the frame it goes to the line that stands for them now:
+  // the call's own line if it shows, else the folded run it is in.
+  $effect(() => {
+    void shown;
+    const calls = focusedCalls;
+    focusedCalls = [];
+    if (!calls.length || (document.activeElement && document.activeElement !== document.body)) return;
+    for (const anchor of calls) {
+      const strip = column?.querySelector<HTMLElement>(`.tool-strip[data-anchor="${CSS.escape(anchor)}"]`);
+      if (!strip) continue;
+      const folded = strip.parentElement?.closest<HTMLDetailsElement>("details.tool-group:not([open])");
+      (folded ?? strip).querySelector<HTMLElement>(":scope > summary")?.focus({ preventScroll: true });
+      return;
+    }
+  });
+
   const toolStateLabel: Record<ToolState, string> = { waiting: "waiting", running: "running", done: "done", error: "error", open: "no result" };
 </script>
 
