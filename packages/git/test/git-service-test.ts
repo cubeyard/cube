@@ -143,6 +143,47 @@ console.log("1c ok: auth classification — github stderr recognized, canonical 
   console.log("1d ok: abort propagates to the git process runner");
 }
 
+// --- 1e. A prepareRepository behind another operation on the same mirror
+// waits a bounded time, and its wait ends on its abort; either way it runs
+// no git, and the operations behind it keep their turn.
+{
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const calls: string[] = [];
+  const gated: ProcessRunner = async (_file, args) => {
+    calls.push(args.find((arg) => arg === "ls-remote" || arg === "remote" || arg === "clone" || arg === "rev-parse") ?? args.join(" "));
+    await held;
+    throw new Error("upstream gone");
+  };
+  const service = new GitService(path.join(tmp, "repos-lock-wait"), gated, { mirrorLockWaitMs: 150 });
+  // The bound's timer does not keep a process alive on its own.
+  const alive = setInterval(() => {}, 1_000);
+  const url = "https://github.com/x/lock.git";
+  const first = service.prepareRepository(url, null);
+  void first.catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  const started = performance.now();
+  await assert.rejects(service.prepareRepository(url, null),
+    /^Error: waited 0 s for another git operation on the mirror of https:\/\/github\.com\/x\/lock\.git \(a project check or another thread's fetch\)$/);
+  const waited = performance.now() - started;
+  assert.ok(waited >= 140 && waited < 2_000, `the wait ended at its bound (${Math.round(waited)} ms)`);
+  const cut = new AbortController();
+  const cancelled = service.prepareRepository(url, "main", cut.signal);
+  cut.abort(new Error("cubed is closing"));
+  await assert.rejects(cancelled, /^Error: cubed is closing$/);
+  const behind = service.prepareRepository(url, null);
+  release();
+  await assert.rejects(first, /upstream gone/);
+  await assert.rejects(behind, /upstream gone/);
+  clearInterval(alive);
+  assert.deepEqual(calls, ["ls-remote", "ls-remote"], "only the first and the one behind the cut waits ran git");
+  console.log("1e ok: a mirror lock wait is bounded and cancellable, and the queue behind it keeps its turn");
+}
+
+// --- 1f. A git command killed at its timeout says so.
+await assert.rejects(defaultRunner("sleep", ["5"], { timeoutMs: 200 }), /^Error: sleep 5 failed: did not finish within 0 s$/);
+console.log("1f ok: a command past its timeout names the timeout");
+
 // --- upstream fixture: bare repo with two commits on main, one on a topic
 const upstream = path.join(tmp, "upstream.git");
 git(tmp, "init", "--bare", "-b", "main", upstream);
