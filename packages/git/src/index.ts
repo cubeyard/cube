@@ -304,7 +304,7 @@ export class GitService {
   // Serialize all work on one mirror path: two concurrent thread creations
   // for the same URL must not both clone into (or fetch/push against) it.
   private readonly mirrorLocks = new Map<string, Promise<unknown>>();
-  /** How long prepareRepository waits for another operation's mirror lock. */
+  /** How long prepareRepository and ensureMirror wait for another operation's mirror lock. */
   private readonly mirrorLockWaitMs: number;
 
   constructor(reposRoot: string, runner: ProcessRunner = defaultRunner, options: { mirrorLockWaitMs?: number } = {}) {
@@ -360,7 +360,9 @@ export class GitService {
    * later `remote update` would run against. */
   async ensureMirror(url: string, signal?: AbortSignal): Promise<string> {
     const mirror = this.mirrorPathFor(url);
+    const wait = this.boundedWait(url, signal);
     return this.withMirrorLock(mirror, async () => {
+      wait.acquired();
       signal?.throwIfAborted();
       if (fs.existsSync(mirror)) {
         await this.git(["--git-dir", mirror, "remote", "update", "--prune"], NETWORK_TIMEOUT_MS, undefined, signal);
@@ -368,7 +370,17 @@ export class GitService {
       }
       await this.cloneMirrorAtomic(url, mirror, signal);
       return mirror;
-    });
+    }, wait.signal).finally(wait.acquired);
+  }
+
+  /** A wait for `url`'s mirror lock that ends on `signal` or after
+   * `mirrorLockWaitMs` (like one network command), naming what it waited
+   * for; `acquired` ends the bound once the lock is held. */
+  private boundedWait(url: string, signal?: AbortSignal): { signal: AbortSignal; acquired: () => void } {
+    const bound = new AbortController();
+    const timer = setTimeout(() => bound.abort(new Error(`waited ${Math.round(this.mirrorLockWaitMs / 1000)} s for another git operation on the mirror of ${url} (a project check or another thread's fetch)`)), this.mirrorLockWaitMs);
+    timer.unref();
+    return { signal: signal ? AbortSignal.any([signal, bound.signal]) : bound.signal, acquired: () => clearTimeout(timer) };
   }
 
   /** `<oid>:<relPath>` from the host mirror of `url`: the blob's text, or
@@ -421,15 +433,12 @@ export class GitService {
     // stops its git. The wait itself is bounded like one network command:
     // the operation ahead (a project check, another thread's fetch) is
     // named, not waited for without end.
-    const bound = new AbortController();
-    const timer = setTimeout(() => bound.abort(new Error(`waited ${Math.round(this.mirrorLockWaitMs / 1000)} s for another git operation on the mirror of ${url} (a project check or another thread's fetch)`)), this.mirrorLockWaitMs);
-    timer.unref();
-    const waiting = signal ? AbortSignal.any([signal, bound.signal]) : bound.signal;
+    const wait = this.boundedWait(url, signal);
     return this.withMirrorLock(mirror, () => {
-      clearTimeout(timer);
+      wait.acquired();
       timing.lock = performance.now() - queued;
       return Effect.runPromise(this.prepareRepositoryLocked(url, mirror, requestedBase, timing), signal ? { signal } : undefined);
-    }, waiting).finally(() => clearTimeout(timer));
+    }, wait.signal).finally(wait.acquired);
   }
 
   private readonly prepareRepositoryLocked = Effect.fn("GitService.prepareRepository")(

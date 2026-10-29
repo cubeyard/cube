@@ -180,6 +180,33 @@ console.log("1c ok: auth classification — github stderr recognized, canonical 
   console.log("1e ok: a mirror lock wait is bounded and cancellable, and the queue behind it keeps its turn");
 }
 
+// --- 1e2. ensureMirror (the skills' mirrors) waits the same way.
+{
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let ran = 0;
+  const gated: ProcessRunner = async () => { ran++; await held; throw new Error("skills upstream gone"); };
+  const service = new GitService(path.join(tmp, "repos-lock-wait-mirror"), gated, { mirrorLockWaitMs: 150 });
+  const alive = setInterval(() => {}, 1_000);
+  const url = "https://github.com/x/skills-lock.git";
+  const first = service.ensureMirror(url);
+  void first.catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(service.ensureMirror(url),
+    /^Error: waited 0 s for another git operation on the mirror of https:\/\/github\.com\/x\/skills-lock\.git \(a project check or another thread's fetch\)$/);
+  const cut = new AbortController();
+  const cancelled = service.ensureMirror(url, cut.signal);
+  cut.abort(new Error("cubed is closing"));
+  await assert.rejects(cancelled, /^Error: cubed is closing$/);
+  const behind = service.ensureMirror(url);
+  release();
+  await assert.rejects(first, /skills upstream gone/);
+  await assert.rejects(behind, /skills upstream gone/);
+  clearInterval(alive);
+  assert.equal(ran, 2, "only the first and the one behind the cut waits ran git");
+  console.log("1e2 ok: ensureMirror's lock wait is bounded and cancellable too");
+}
+
 // --- 1f. A git command killed at its timeout says so.
 await assert.rejects(defaultRunner("sleep", ["5"], { timeoutMs: 200 }), /^Error: sleep 5 failed: did not finish within 0 s$/);
 console.log("1f ok: a command past its timeout names the timeout");
