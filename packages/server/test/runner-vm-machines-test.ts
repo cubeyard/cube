@@ -500,13 +500,16 @@ try {
     }
     clearInterval(flapper);
     const flapMs = Date.now() - flapping;
+    // A relay path held for a read: the reads above may all miss the relay phase (CI saw direct, none, direct, none, ...).
+    paths = () => snapshot("https://relay.example.org./", true, 41);
+    await until(() => logged(changing.lines, "runner path changed").at(-1)?.remote === "https://relay.example.org./");
+    assert.equal(logged(changing.lines, "runner path changed").at(-1)!.kind, "relay", "a relay path is kind=relay");
     paths = () => snapshot("198.51.100.4:7777", false, 77);
     await until(() => logged(changing.lines, "runner path changed").at(-1)?.remote === "198.51.100.4:7777");
     const changes = logged(changing.lines, "runner path changed");
     assert.ok(changes.length - 1 <= Math.ceil((Date.now() - flapping) / 100) + 1, `${changes.length - 1} lines for ${flaps} changes in ${flapMs} ms`);
     assert.ok(slowest < 1000, `a call while the path changed took ${slowest} ms`);
     assert.deepEqual([changes.at(-1)!.kind, changes.at(-1)!.rttMs], ["direct", "77"], "the path in use last wins");
-    assert.ok(changes.some(line => line.kind === "relay" && line.remote === "https://relay.example.org./"), "a relay path is kind=relay");
     paths = () => snapshot("198.51.100.4:7777", false, 5);
     await delay(300);
     assert.equal(logged(changing.lines, "runner path changed").length, changes.length, "the same path, its RTT changed, logs nothing");
