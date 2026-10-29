@@ -16,8 +16,12 @@ export const COMPACTION_LOW = 16_000;
 export const UNBUILT = 8;
 export const CAP = 30_000;
 
-export type MessageKind = "user" | "talk" | "tool" | "echo" | "note";
+export type MessageKind = "user" | "work" | "talk" | "tool" | "echo" | "note";
 export type LogMessage = { kind: MessageKind; text: string; date: number };
+/** The Pi entry kind of a report to the chat (a thread's, or an artifact
+ * action's outcome): a user message to the model, logged as work. Reports
+ * logged before it are `pi.user` entries and stay user. */
+export const WORK_ENTRY = "optchat.work";
 /** A view part: tree node `(l, i)`, covering messages `[i·2^l, (i+1)·2^l)`. */
 export type Part = { l: number; i: number };
 

@@ -21,7 +21,7 @@ import { agents } from "./claude-agent.ts";
 import { createLogger } from "./log.ts";
 import { compactNode, Spent, spent, TRIES, type Round } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
-import { CAP, capText, Memory, pages, type LogMessage, type Part } from "./optchat-memory.ts";
+import { CAP, capText, Memory, pages, WORK_ENTRY, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import { imageNote } from "./thread-images.ts";
 import { countCut, markSent, RESTART_LIMIT, SendsDoc, settleSends } from "./pi-sends.ts";
@@ -175,8 +175,9 @@ export const VIEW_DOC = `The view: the whole chat between OptChat and the user, 
 
 A summary tags each item with its kind: user (the user's words), talk
 (OptChat's replies), tool (OptChat's tool calls), echo (their results), note
-(memories from before this chat), or work (the report of a thread, which
-the log holds as a user message starting "[id] "). A short message is its
+(memories from before this chat), or work (a report to you: a thread's,
+starting "[id] ", or an artifact action's outcome; an older report may
+show as a user message starting "[id] "). A short message is its
 own line, word for word. Recent lines cover one message each; the older
 the messages, the more a line covers. A message not summarized yet shows
 as "(not summarized yet: zoom it)". No message appears in full, not even
@@ -454,10 +455,14 @@ export const ZOOM_ECHO = "(the zoomed lines: a copy of earlier messages of this 
  * the media store, which the request hook fills in for the model. */
 const userContent = (item: Pick<PendingItem, "text" | "images">) => !item.images?.length ? item.text
   : [...item.text ? [{ type: "text" as const, text: item.text }] : [], ...item.images.map(image => ({ type: "image" as const, mimeType: image.mimeType, data: mediaData(image.id) }))];
-const userEntry = (item: Pick<PendingItem, "text" | "images">) => ({ kind: "pi.user", model: [{ role: "user" as const, content: userContent(item), timestamp: Date.now() }] });
+/** A report's entry is WORK_ENTRY; its model message is still the user's
+ * role, the only one a provider takes for it. */
+const inputEntry = (item: Pick<PendingItem, "requestId">) => isReport(item.requestId) ? { entry: { kind: WORK_ENTRY } } : {};
+const userEntry = (item: Pick<PendingItem, "text" | "images" | "requestId">) => ({ kind: isReport(item.requestId) ? WORK_ENTRY : "pi.user", model: [{ role: "user" as const, content: userContent(item), timestamp: Date.now() }] });
+const USER_ENTRIES = new Set(["pi.user", WORK_ENTRY]);
 /** The store ids an entry's user messages refer to. */
 export function entryImages(entry: EntryRecord): string[] {
-  if (entry.kind !== "pi.user") return [];
+  if (!USER_ENTRIES.has(entry.kind)) return [];
   return (entry.model ?? []).flatMap(message => message.role !== "user" || typeof message.content === "string" ? []
     : message.content.flatMap(part => part.type === "image" ? [mediaId(part.data)].filter(id => id !== null) : []));
 }
@@ -477,10 +482,11 @@ const textOf = (content: Message["content"]) => typeof content === "string" ? co
  * caught at the next open (`shape`) and refused. */
 export function entryMessages(entry: EntryRecord, page = 0): LogMessage[] {
   const out: LogMessage[] = [];
-  const paged = (kind: "user" | "talk", text: string, date: number) => { for (const part of page ? pages(text, page) : [text]) out.push({ kind, text: part, date }); };
+  const paged = (kind: "user" | "work" | "talk", text: string, date: number) => { for (const part of page ? pages(text, page) : [text]) out.push({ kind, text: part, date }); };
   for (const message of entry.model ?? []) {
     const date = message.timestamp;
     if (entry.kind === "pi.user" && message.role === "user") paged("user", textOf(message.content), date);
+    else if (entry.kind === WORK_ENTRY && message.role === "user") paged("work", textOf(message.content), date);
     else if (entry.kind === "pi.assistant" && message.role === "assistant") {
       // A failed attempt is retried and never reaches the model again; an
       // aborted one ran none of its tool calls.
@@ -1379,7 +1385,7 @@ export class OptChat {
           doc.images = { ...doc.images, [item.requestId]: ids };
         }, context);
       }
-      await this.conversation.submit({ type: "input", content: userContent(item), requestId: item.requestId, whenBusy: "steer" }, context);
+      await this.conversation.submit({ type: "input", content: userContent(item), ...inputEntry(item), requestId: item.requestId, whenBusy: "steer" }, context);
       if (!isReport(item.requestId)) await this.markUser(item.requestId);
       await this.harness.commit(async tx => {
         const doc = await tx.doc(PendingDoc);
@@ -1424,7 +1430,7 @@ export class OptChat {
       for (const item of batch.slice(0, -1)) {
         if (!await this.known(item.requestId)) await conversation.submit({ type: "write", requestId: item.requestId, entry: userEntry(item) }, context);
       }
-      await conversation.submit({ type: "input", content: userContent(last), requestId: last.requestId, whenBusy: "steer" }, context);
+      await conversation.submit({ type: "input", content: userContent(last), ...inputEntry(last), requestId: last.requestId, whenBusy: "steer" }, context);
     }
     // The turn is the user's when the user wrote in it: its last message, or
     // one written into it here (not one an earlier run already took).

@@ -67,8 +67,9 @@ export const SCALE = "user: the bakery site must keep prices in NOK and show all
 
 const PROMPT = `You write the memory of OptChat, an AI agent that works for one user in one
 endless chat, through tools and threads. Each message has a kind: user
-(the user's words; but one starting "[id] " is a thread's report),
-talk (OptChat's replies), tool (OptChat's tool calls), echo (tool results), note
+(the user's words; but an older one starting "[id] " is a thread's
+report), work (a report to OptChat: a thread's, or an artifact action's
+outcome), talk (OptChat's replies), tool (OptChat's tool calls), echo (tool results), note
 (memories from before this chat).
 
 Over the messages grows a binary tree of one-line summaries. First, each
