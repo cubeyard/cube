@@ -276,7 +276,17 @@ runner.
   the disk (its disk is sparse and overcommitted). The runners page and
   OptChat show each VM runner's free space, what builds may still write,
   and `low` below 4 × the reserve; each machine's `events.log` has a `disk:`
-  line per create, build, suspend and publish. Deploy cubed before a berth
+  line per create, build, suspend and publish. A new thread that names no
+  runner goes to a runner whose last report does not say it refuses new
+  machines for disk, before one that does (a runner that does not answer
+  still comes after both; a free slot still comes before ranking, so a
+  refusing runner with the only free slot takes the thread; a disk the
+  runner does not report is no refusal). A thread started on a runner by
+  name stays there, and a placed thread never moves. Limits: a disk wait has
+  no time limit (only the operator makes room); the waiting thread holds its
+  slot, so threads that wait for disk can keep suspended threads on that
+  runner from waking; and a build machine left stopped keeps its template
+  disk's size committed until it is deleted. Deploy cubed before a berth
   with this check: an older cubed shows the refusal as waiting for a free
   slot (it still waits; only the words are wrong).
 - **Suspend** (phase 7) is off unless `berth vm` starts with

@@ -4,7 +4,7 @@
  * what neither says is listed as unknown, never guessed. Nothing here
  * contacts a runner: the background probe keeps the reports current. */
 import fs from "node:fs";
-import type { RunnerDisk, TrustedRunnerHealth } from "./runner-types.ts";
+import { diskState, LOW_RESERVES, type DiskState, type RunnerDisk, type TrustedRunnerHealth } from "./runner-types.ts";
 import { pooledRunner, type Registry, type RunnerContactStatus } from "./registry.ts";
 
 /** A report older than this many probe intervals is stale even if the latest
@@ -17,19 +17,6 @@ export const NOT_REPORTED = [
   "self-update: when the runner's updater last ran, what it found and whether an upgrade is pending",
   "nested virtualization: whether the runner host is itself a virtual machine and whether thread machines get KVM/HVF",
 ] as const;
-
-/** A VM runner's disk as its report says: `refusing` while berth refuses
- * new machines (free less committed below its reserve, or too few inodes),
- * `low` below 4 × the reserve, `unknown` when the runner does not say. */
-export type DiskState = "ok" | "low" | "refusing" | "unknown";
-const LOW_RESERVES = 4;
-
-export function diskState(disk: RunnerDisk | undefined): DiskState {
-  if (!disk || disk.freeBytes === null || disk.reserveBytes === null) return "unknown";
-  const usable = disk.freeBytes - (disk.committedBytes ?? 0);
-  if (usable < disk.reserveBytes || (disk.freeInodes !== null && disk.reserveInodes !== null && disk.freeInodes < disk.reserveInodes)) return "refusing";
-  return usable < LOW_RESERVES * disk.reserveBytes ? "low" : "ok";
-}
 
 /** cubed's own disk (its state directory, its temporary directory): only
  * looked at, never a reason to refuse anything. null: not measured. */

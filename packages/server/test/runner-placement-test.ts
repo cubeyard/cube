@@ -70,6 +70,49 @@ try {
     console.log("ok: runner fitness from timestamped observations; creation prefers fresh ready runners, stale reports are unverified, failed runners last");
   }
 
+  // --- a runner that reports refusing new machines for want of disk ---
+  {
+    const GiB = 2 ** 30;
+    const disk = (freeBytes: number | null) => ({ freeBytes, freeInodes: null, committedBytes: 0, reserveBytes: 2 * GiB, reserveInodes: 10_000 });
+    const full = { ...ready(4), disk: disk(GiB) };
+    const roomy = { ...ready(4), disk: disk(100 * GiB) };
+    // full answers ready but refuses new machines; roomy has room and already one thread: roomy.
+    const w = world("disk", [{ name: "full", max: 4 }, { name: "roomy", max: 4 }]);
+    w.registry.recordRunnerProbe("full", { health: full });
+    w.registry.recordRunnerProbe("roomy", { health: roomy });
+    assert.equal(w.create("roomy").runnerId, "roomy");
+    assert.deepEqual([w.create().runnerId, w.create().runnerId], ["roomy", "roomy"], "a disk-refusing runner is ranked after one with room, though less loaded");
+    // By name the thread stays on the runner it names, disk or not.
+    const pinned = w.create("full");
+    assert.deepEqual([pinned.runnerId, pinned.pinned], ["full", true]);
+    // roomy full (4 of 4): a free slot on full beats a queue on roomy, as before (slots first).
+    assert.equal(w.create().runnerId, "roomy");
+    const spill = w.create();
+    assert.deepEqual([spill.runnerId, spill.vm?.suspension], ["full", undefined], "the refusing runner still takes a thread when no other has a slot");
+    // Its next report says there is room: ranked by load again, as before.
+    w.registry.recordRunnerProbe("full", { health: { ...ready(4), disk: disk(100 * GiB) } });
+    assert.equal(w.create().runnerId, "full");
+
+    // Behind a runner never heard from (unverified), ahead of one that is down.
+    const v = world("disk-fitness", [{ name: "full", max: 4 }, { name: "unheard", max: 4 }, { name: "gone", max: 4 }]);
+    v.registry.recordRunnerProbe("full", { health: full });
+    v.registry.recordRunnerProbe("gone", { error: "NODE_UNAVAILABLE" });
+    assert.equal(v.create().runnerId, "unheard", "an unverified runner beats one that refuses for disk");
+    v.registry.recordRunnerProbe("unheard", { error: "NODE_UNAVAILABLE" });
+    assert.equal(v.create().runnerId, "full", "a disk-refusing runner that answers beats runners that are down");
+
+    // Unknown is no refusal: an older berth (no disk) and an unmeasured disk rank by load as before.
+    const u = world("disk-unknown", [{ name: "old", max: 4 }, { name: "unmeasured", max: 4 }, { name: "ok", max: 4 }]);
+    u.registry.recordRunnerProbe("old", { health: ready(4) });
+    u.registry.recordRunnerProbe("unmeasured", { health: { ...ready(4), disk: disk(null) } });
+    u.registry.recordRunnerProbe("ok", { health: roomy });
+    for (const id of ["ok", "ok"]) assert.equal(u.create(id).runnerId, id);
+    assert.equal(u.create("unmeasured").runnerId, "unmeasured");
+    // Loads old 0, unmeasured 1, ok 2: old, then old again (a tie goes to enrollment order), then unmeasured before ok.
+    assert.deepEqual([u.create().runnerId, u.create().runnerId, u.create().runnerId], ["old", "old", "unmeasured"], "unknown disk keeps the load order");
+    console.log("ok: placement ranks a runner that reports refusing new machines for disk after runners that can take one, before runners that are down; by name, slots first and unknown disk as before");
+  }
+
   // --- the pool is the berth vm runners; a host runner only by name; a protocol-3 runner never ---
   {
     const w = world("pool", [{ name: "a", max: 2 }], true);

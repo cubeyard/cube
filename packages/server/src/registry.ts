@@ -4,7 +4,7 @@ import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { ModelSelection } from "./models.ts";
-import type { NodeBinding, TrustedRunnerHealth } from "./runner-types.ts";
+import { diskState, type NodeBinding, type TrustedRunnerHealth } from "./runner-types.ts";
 import type { ThreadAgent } from "./thread-events.ts";
 import type { ThreadSkills } from "./skills.ts";
 import { newPlaceholder } from "./egress-policy.ts";
@@ -46,6 +46,11 @@ export function runnerFitness(observed: { lastAttemptAt: number | null; lastCont
   return { fitness: lastContactAt && now - lastContactAt <= RUNNER_FRESH_MS ? "ready" : "unverified", retryAt: null };
 }
 const FITNESS_ORDER: Record<RunnerFitness, number> = { ready: 0, unverified: 1, down: 2 };
+/** Placement's first key: a runner that can take a machine (ready or
+ * unverified), then one whose last report says it refuses new machines for
+ * want of disk (it answers, and may get room), then one that is down. A
+ * disk the runner does not report is no refusal. */
+const placementTier = (load: { fitness: RunnerFitness; diskRefusing: boolean }) => load.fitness === "down" ? 2 : load.diskRefusing ? 1 : 0;
 
 export interface ProjectRepository {
   id: string; projectId: string; position: number; url: string; base: string | null;
@@ -303,7 +308,7 @@ export function pooledRunner(runner: Pick<Runner, "protocol" | "kind">): boolean
   return runner.protocol === 4 && runner.kind !== "host";
 }
 
-interface RunnerLoad { id: string; runner: Runner; slots: number; active: number; waiting: number; failed: number; fitness: RunnerFitness }
+interface RunnerLoad { id: string; runner: Runner; slots: number; active: number; waiting: number; failed: number; fitness: RunnerFitness; diskRefusing: boolean }
 
 /** Every open (unarchived) thread holds one machine slot on its runner from
  * creation until its release finishes, whatever its workspace state: a failed
@@ -453,7 +458,8 @@ export class Registry {
   }
   /** Allocatable runners (the pool, or those `which` takes) with their open
    * threads holding a slot (`active`) and waiting for one (`waiting`): by
-   * fitness (ready, then unverified, then down), then runners with a failed
+   * placementTier (able to take a machine, then refusing new machines for
+   * disk, then down), then fitness (ready before unverified), then runners with a failed
    * machine last, then the least loaded, then enrollment order. */
   private runnerLoads(now = Date.now(), which: (runner: Runner) => boolean = pooledRunner): RunnerLoad[] {
     // One pass over the open threads (index thread_open), not per runner.
@@ -468,9 +474,11 @@ export class Registry {
     return rows.map(row => ({ row, runner: JSON.parse(String(row.data)) as Runner }))
       // A host runner takes only the threads started on it by name.
       .filter(({ runner }) => which(runner)).map(({ row, runner }) => {
-        const { fitness } = runnerFitness(observation(row), now);
-        return { id: String(row.id), runner, slots: runnerSlots(runner), active: Number(row.active), waiting: Number(row.waiting), failed: Number(row.failed), fitness };
-      }).sort((a, b) => FITNESS_ORDER[a.fitness] - FITNESS_ORDER[b.fitness] || Number(a.failed > 0) - Number(b.failed > 0)
+        const observed = observation(row);
+        const { fitness } = runnerFitness(observed, now);
+        return { id: String(row.id), runner, slots: runnerSlots(runner), active: Number(row.active), waiting: Number(row.waiting), failed: Number(row.failed), fitness,
+          diskRefusing: diskState(observed.health?.disk) === "refusing" };
+      }).sort((a, b) => placementTier(a) - placementTier(b) || FITNESS_ORDER[a.fitness] - FITNESS_ORDER[b.fitness] || Number(a.failed > 0) - Number(b.failed > 0)
       || load(a) - load(b) || (b.slots - b.active) - (a.slots - a.active));
   }
   /** A runner a thread is started on by name: enrolled, not retiring

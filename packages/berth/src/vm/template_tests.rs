@@ -439,6 +439,27 @@ async fn a_build_counts_what_other_builds_may_still_write() {
     let vdd = runner.machine_dir(BUILD).join(template::DISK);
     let (allocated, apparent) = disk::size(&vdd).unwrap();
     assert_eq!((allocated, apparent), (0, GIB));
+    // An ordinary machine needs only the reserve, but not out of the build's
+    // 1 GiB still to come: 3 GiB − 1 free leaves a byte short of 2 GiB.
+    set_free(Some(3 * GIB - 1));
+    let refused = create(&runner, USER, base(), false).await.unwrap_err();
+    assert_eq!(
+        reason(refused),
+        (Code::ResourceExhausted, "disk_space".into())
+    );
+    assert!(!runner.state.lock().unwrap().machines.contains_key(USER));
+    set_free(Some(3 * GIB));
+    create(&runner, USER, base(), false).await.unwrap();
+    assert!(
+        events(&runner, USER).contains(&format!(
+            "op=create outcome=ok path={} free_before={} inodes_before=unknown committed_estimate={GIB} need=0 reserve={}",
+            lab.path().display(),
+            3 * GIB,
+            2 * GIB
+        )),
+        "{}",
+        events(&runner, USER)
+    );
     // The second needs 1 + 2 GiB besides the first's 1 GiB still to come.
     set_free(Some(4 * GIB - MIB));
     let capacity = runner

@@ -10,9 +10,9 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createModels } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
-import type { TrustedRunnerHealth, VmLimits } from "../src/runner-types.ts";
+import { diskState, type TrustedRunnerHealth, type VmLimits } from "../src/runner-types.ts";
 import { Registry, type Project } from "../src/registry.ts";
-import { describeRunners, diskState, localDisk, NOT_REPORTED, observeRunners } from "../src/runner-observe.ts";
+import { describeRunners, localDisk, NOT_REPORTED, observeRunners } from "../src/runner-observe.ts";
 
 const GiB = 2 ** 30;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-runner-observe-"));
