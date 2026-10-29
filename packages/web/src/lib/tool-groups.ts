@@ -2,9 +2,9 @@ import type { ToolState, TranscriptRow } from "./transcript.ts";
 
 type ToolRow = Extract<TranscriptRow, { kind: "tool" }>;
 
-/** What the chat draws: a row as it is, or a run of tool calls folded to
- * one line. Rows keep their order; a group only wraps rows that stand next
- * to each other. */
+/** What a conversation draws (the chat's and a thread's): a row as it is,
+ * or a run of tool calls folded to one line. Rows keep their order; a group
+ * only wraps rows that stand next to each other. */
 export type Shown =
   | { kind: "row"; row: TranscriptRow }
   /** `key`: the first call's id (`callId` outlives a renumbered row id);
@@ -20,8 +20,9 @@ export const GROUP_MIN = 2;
 const folds = (row: TranscriptRow): row is ToolRow => row.kind === "tool" && !row.images?.length;
 
 /** Folds each run of consecutive tool calls into one group. A run is tool
- * rows with nothing between them but the model's reasoning (which streams
- * and is never saved, so a saved run and the same run live fold alike);
+ * rows with nothing between them but the model's reasoning, folded in its
+ * place (the chat's reasoning only streams and is never saved; a thread's
+ * is saved, so a saved run and the same run live fold alike in both);
  * prose, a user message, a report, a message being sent or a call that
  * returned images ends it, as does reasoning after the last call. Runs of
  * fewer than `GROUP_MIN` calls stay rows. */

@@ -337,7 +337,7 @@
     {#if gone}
       <div class="conversation-gone"><p>this thread is no longer active.</p><a class="key" href="#/threads">back to threads</a></div>
     {:else}
-      <Conversation sheet {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy}
+      <Conversation sheet foldTools {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy}
         waitingText={composerWaiting(summary)}
         notice={summary?.agent === "claude-code" || isClaude(modelState?.selected) ? `claude · max — ${CLAUDE_DURABILITY}` : null} />
     {/if}
