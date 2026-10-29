@@ -943,7 +943,25 @@ failure) nor recovery rounds send its request again; then archives it.
   it was accepted at and resolves its skills. Threads of one project revision
   starting together share one fetch; a later start fetches again. A fetch
   that fails is a failed start, retried like a machine's, and reported to
-  the chat once it lasts (`[id] failed to start …`). cubed's log has where
+  the chat once it lasts (`[id] failed to start …`); until its next try the
+  thread holds no runner slot, so the threads queued behind it start
+  (docs/thread-lifecycle.md). Each git command is bounded (10 min), and so
+  is a wait for another operation on the same repository's mirror (a
+  project check, another thread's fetch; 10 min), so a hung upstream fails
+  the try instead of holding the slot without end.
+- What `spawn` does not promise. Its answer does not wait for
+  git, but its validation reads the model catalog, which runs a
+  provider's key command (a `!command` key in Pi's `auth.json`)
+  synchronously, up to 10 s each, the first time this cubed process sees
+  that command (`ModelRuntime.create` runs the ones present at start; one
+  saved later runs on the next read). `thread accepted validateMs` shows it.
+  A thread that joins a fetch under way gets the commits that fetch finds,
+  which may be from a little before it was accepted; a queued thread gets
+  upstream's commits when its slot frees. A cubed older than this one reads
+  an accepted thread's `allocation.latest` as unknown and starts it at the
+  project's last checked commits: downgrading is not supported. The timings
+  in the tests are synthetic (a held upstream, a faux model); they do not
+  explain any measured chat latency. cubed's log has where
   the time went: `threads thread accepted` (`validateMs`, `createMs`) and
   `optchat spawn answered` for the call; `threads repository fetched` (lock
   wait, `ls-remote`, fetch, resolve), `threads latest commits` and

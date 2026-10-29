@@ -221,8 +221,15 @@ export interface ThreadVm {
    * started again from its disk because its snapshot could not be used). */
   notice?: { text: string; at: number };
 }
-/** Open threads whose machine holds one of its runner's slots (`holdsSlot`). */
-const HOLDS_SLOT = HOLDS_SLOT_SQL;
+/** An accepted thread whose commits failed before it had a machine: it has
+ * nothing on its runner, so it holds no slot and no place in the queue,
+ * and an upstream that keeps failing (also once its retries stop) does not
+ * hold capacity from the threads behind it. Its next try takes a slot
+ * only behind every thread waiting (`retakeSlot`). */
+const COMMITS_FAILED = "(json_extract(data, '$.workspaceState') = 'failed' AND json_extract(data, '$.allocation.latest') IS NOT NULL)";
+/** Open threads whose machine holds one of its runner's slots (`holdsSlot`),
+ * but for one whose commits failed. */
+const HOLDS_SLOT = `(${HOLDS_SLOT_SQL} AND NOT ${COMMITS_FAILED})`;
 /** Open threads in their runner's queue for a slot (`slotWait`). */
 const WAITS = WAITS_SQL;
 /** At most this many startup steps are kept per thread. */
@@ -811,6 +818,28 @@ export class Registry {
       this.syncRunner(thread.runnerId);
       this.db.exec("COMMIT");
       return written;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  /** A thread whose commits failed (it holds no slot) takes one for its
+   * next try, if one is free behind every thread waiting on its runner:
+   * it was not waiting, so it goes last. True when it holds one now (or
+   * never gave one up); false: it waits for the next try, holding none. */
+  retakeSlot(threadId: string): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const thread = this.getThread(threadId);
+      if (!thread) throw new Error("thread not found");
+      if (thread.archived || thread.workspaceState !== "failed" || !thread.allocation.latest) { this.db.exec("COMMIT"); return true; }
+      const runner = this.getRunner(thread.runnerId);
+      if (!runner) throw new Error("thread runner allocation is missing");
+      const row = this.db.prepare(`SELECT
+          (SELECT count(*) FROM thread WHERE runner_id=?1 AND ${OPEN_THREAD} AND ${HOLDS_SLOT}) AS active,
+          (SELECT count(*) FROM thread WHERE runner_id=?1 AND ${OPEN_THREAD} AND ${WAITS}) AS waiting`).get(thread.runnerId)!;
+      if (Number(row.active) + Number(row.waiting) >= runnerSlots(runner)) { this.db.exec("COMMIT"); return false; }
+      this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, ...nextPhase(phaseOf(thread), { type: "retaken" }) }), threadId);
+      this.syncRunner(thread.runnerId);
+      this.db.exec("COMMIT");
+      return true;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   initialPrompt(threadId: string): string {

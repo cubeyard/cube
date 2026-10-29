@@ -18,6 +18,7 @@ changes one names its owner here; a test that checks one is listed under
 allocating, failed ─a try fails─▶ failed ─a try succeeds─▶ available
 available, failed ─archive─▶ releasing ─released (frees the slot)─▶ archived
 releasing ─release fails─▶ failed ("workspace release failed: …") ─retried─▶ archived
+allocating ─its commits fail (no machine yet: gives up its slot)─▶ failed ─retaken (a slot free behind the queue)─▶ allocating
 ```
 
 `archived` is terminal: nothing starts, wakes or calls its machine again;
@@ -34,6 +35,7 @@ Conversations reports what happened as one `PhaseEvent`, and `nextPhase`
 | `trySucceeded` | no `retry` |
 | `releaseBegan` (an archive decided the disk) | `releasing`, no error, no `retry` (the release's own tries count from here) |
 | `released` | `archived`, its slot free |
+| `retaken` (a thread whose commits failed took a slot again for its next try) | `allocating`, no error; `retry` stays |
 | any, once `archived` | unchanged |
 
 `Registry.applyPhase` is the only writer: it applies the event in one
@@ -80,7 +82,14 @@ registry write sets either: `updateThreadVm` takes neither, and none writes
 a whole row from a caller's copy (a title changes by `renameThread`, which
 reads the row in its own transaction). `holdsSlot` is the slot rule, and
 `HOLDS_SLOT_SQL` the same rule for the registry's counts
-(machine-sleep-test, lifecycle-model-test I11). `waking` without `waiting` holds a slot. It is a
+(machine-sleep-test, lifecycle-model-test I11), but for one row: an
+accepted thread whose `commits` step failed before it had a machine
+(`failed` with `allocation.latest`) holds no slot and no place in the queue,
+during its retries and after they stop, and its failure starts the queued
+threads of its runner at once. Its next try takes a slot only if one is
+free behind every thread waiting (`Registry.retakeSlot`, `retaken`);
+otherwise it stays `failed`, counts no try, and the recovery loop asks
+again. `waking` without `waiting` holds a slot. It is a
 reservation, taken like a new thread's (`wakeAsked`, in one
 IMMEDIATE transaction that counts every other open thread holding a slot on
 the runner and every thread waiting since before it): with none free for it

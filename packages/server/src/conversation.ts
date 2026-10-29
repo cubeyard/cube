@@ -528,6 +528,12 @@ export class Conversations {
       await this.resume(id, started?.booted ?? false);
       return;
     }
+    // Its commits failed on an earlier try, and with them its slot went:
+    // this try takes one only behind every thread waiting for one.
+    if (thread.allocation.latest && thread.workspaceState === "failed") {
+      if (!this.registry.retakeSlot(id)) throw new RunnerWait("its last try could not fetch its latest commits; it tries again once its runner has a slot no waiting thread needs");
+      thread = this.thread(id);
+    }
     // A queued thread asks for its slot, in turn (Registry.applySleep);
     // without it, it waits on and its runner is not asked.
     const queued = thread.vm?.suspension;
@@ -593,8 +599,10 @@ export class Conversations {
   /** The `commits` step: pins the thread to its repositories' latest
    * commits and its skills. Concurrent or repeated starts converge (the
    * first write wins); a start cut off before the write fetches again. A
-   * failure is a failed try like a machine's, retried by the recovery loop;
-   * one cut off by cubed's close is no failure, and the next cubed retries. */
+   * failure is a failed try like a machine's, retried by the recovery loop,
+   * and gives up the thread's slot (Registry), so the threads queued on
+   * its runner go on; one cut off by cubed's close is no failure, and the
+   * next cubed retries. */
   private async resolveCommits(id: string, latest: UnresolvedAllocation["latest"]): Promise<Thread> {
     const thread = this.thread(id);
     const started = performance.now();
@@ -609,9 +617,11 @@ export class Conversations {
       return resolved;
     } catch (error) {
       if (this.closing) throw new RunnerWait("cubed is closing; the thread's commits are fetched when it starts again", { cause: error });
-      this.registry.endStartupStep(id, { name: "commits", state: "failed", detail: `${error instanceof Error ? error.message : String(error)}; cube tries again` });
-      const failure = allocationFailed(error);
+      const message = `${error instanceof Error ? error.message : String(error)}; it holds no runner slot until cube tries again`;
+      this.registry.endStartupStep(id, { name: "commits", state: "failed", detail: message });
+      const failure = allocationFailed(new Error(message, { cause: error }));
       this.registry.applyPhase(id, { type: "failed", failure });
+      this.admit(thread.runnerId);
       throw new FailedTry(failure, { cause: error });
     }
   }
@@ -899,11 +909,16 @@ export class Conversations {
     }
   }
   /** Starts the queued threads of a runner whose slot may have freed; the
-   * registry gives the slots in turn (a waking one's own wake tries again). */
+   * registry gives the slots in turn (a waking one's own wake tries again).
+   * One whose activation is under way may have counted the slots before
+   * this one freed: it asks again once that ends. */
   private admit(runnerId: string): void {
     for (const id of this.registry.slotQueue().get(runnerId)?.waiting ?? []) {
       const thread = this.registry.getThread(id);
-      if (thread?.vm?.suspension?.state === "queued" && !this.owns(thread)) void this.round(this.activate(id));
+      if (thread?.vm?.suspension?.state !== "queued") continue;
+      const pending = this.activations.get(id);
+      if (pending) void this.round(pending.then(() => this.activate(id)));
+      else if (!this.owns(thread)) void this.round(this.activate(id));
     }
   }
   private async suspendOne(thread: Thread, idleMs?: number): Promise<boolean> {
