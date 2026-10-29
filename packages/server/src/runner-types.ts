@@ -34,6 +34,17 @@ export interface TrustedRunnerHealth {
   /** The largest machine it accepts; absent when the runner names none
    * (berth host) or the report predates cubed keeping it. */
   limits?: VmLimits;
+  /** The file system of a VM runner's directory as it measured it
+   * (`Capacity.disk_*`); absent from a runner that does not report it. */
+  disk?: RunnerDisk;
+}
+
+/** null: the runner did not say (a failed measurement, no inode count),
+ * never 0. `committedBytes` is the runner's estimate of what template
+ * builds may still write. */
+export interface RunnerDisk {
+  freeBytes: number | null; freeInodes: number | null; committedBytes: number | null;
+  reserveBytes: number | null; reserveInodes: number | null;
 }
 
 export const TEMPLATE_STATES = ["publishing", "ready", "removing"] as const;

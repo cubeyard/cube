@@ -96,6 +96,8 @@
   }
 
   const bytes = (value: number) => value >= 1e9 ? `${(value / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(value / 1e6))} MB`;
+  const gib = (value: number | null) => value === null ? "unknown" : `${(value / 2 ** 30).toFixed(1)} GiB`;
+  const diskCopy = { ok: "ok", low: "low", refusing: "refusing new machines", unknown: "unknown" } as const;
   /** Enrolled with protocol 3 (cube-runner): never contacted, retired without a check. */
   const legacy = (runner: RunnerStatus) => observation(runner)?.protocol === 3;
   const canRetire = (runner: RunnerStatus) => runner.allocationState === "available" && runner.activeThreads === 0 &&
@@ -184,6 +186,10 @@
               {:else}never observed{/if}
               {#if runner.health} · machines {runner.health.activeVms} of {runner.health.maxActiveVms} · running {runner.health.runningVms} · retained {runner.health.retainedVms ? `${runner.health.retainedVms} (${bytes(runner.health.retainedBytes)})` : 0}{/if}
             </span>
+            {#if observation(runner)?.report?.disk}
+              {@const disk = observation(runner)!.report!.disk!}
+              <span class:error={disk.state === "refusing"}>disk: {gib(disk.freeBytes)} free · {gib(disk.committedBytes)} committed to template builds · {diskCopy[disk.state]}</span>
+            {/if}
             {#if runner.error}<span class="error">{runner.error}</span>{/if}
             {#if runner.retiredAt}
               <span>retired <time title={new Date(runner.retiredAt).toLocaleString()}>{relTime(runner.retiredAt)} ago</time> · {runner.retirementReason}</span>

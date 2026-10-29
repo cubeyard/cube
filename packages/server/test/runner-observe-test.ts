@@ -12,8 +12,9 @@ import { createModels } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
 import type { TrustedRunnerHealth, VmLimits } from "../src/runner-types.ts";
 import { Registry, type Project } from "../src/registry.ts";
-import { describeRunners, NOT_REPORTED, observeRunners } from "../src/runner-observe.ts";
+import { describeRunners, diskState, localDisk, NOT_REPORTED, observeRunners } from "../src/runner-observe.ts";
 
+const GiB = 2 ** 30;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-runner-observe-"));
 const limits: VmLimits = { maxFrameBytes: 1 << 20, requestTimeoutMs: 30_000, maxVcpus: 4, maxMemoryMiB: 8192, maxDiskGiB: 64, maxSeedBytes: 65536, maxActiveVms: 2 };
 // What cubed recorded before it kept the hello's fields.
@@ -55,7 +56,8 @@ try {
 
     const at = 1_000_000;
     registry.recordRunnerProbe("wide", { health: { ...legacy, softwareVersion: "0.8.0", maxActiveVms: 2, activeVms: 2, runningVms: 2,
-      platform: "linux-x86_64", capabilities: ["node.hello", "node.status", "template.publish"], limits } }, at);
+      platform: "linux-x86_64", capabilities: ["node.hello", "node.status", "template.publish"], limits,
+      disk: { freeBytes: 10 * GiB, freeInodes: 500_000, committedBytes: 3 * GiB, reserveBytes: 2 * GiB, reserveInodes: 10_000 } } }, at);
     registry.createThread("p", "one", { provider: "fixture", id: "m" }, "one", "pi", undefined, { runnerId: "wide" });
     registry.createThread("p", "two", { provider: "fixture", id: "m" }, "two", "pi", undefined, { runnerId: "wide" });
     view = observeRunners(registry, 60_000, at + 30_000);
@@ -69,6 +71,28 @@ try {
     // Two threads started on the wider runner by name; the silent one is assumed to have one slot.
     assert.deepEqual([wide.slots.reserved, view.runners.find(row => row.id === "silent")!.slots.reserved], [2, 0]);
     assert.deepEqual(wide.unknown, [], "a fresh, complete report leaves only the protocol's unknowns");
+    // 10 GiB free less 3 GiB committed is under 4 × the 2 GiB reserve.
+    assert.deepEqual(wide.report?.disk, { freeBytes: 10 * GiB, freeInodes: 500_000, committedBytes: 3 * GiB, reserveBytes: 2 * GiB, reserveInodes: 10_000, state: "low" });
+    assert.match(describeRunners(view), /node-wide[^]*\n {2}disk: 10\.0 GiB free, 3\.0 GiB of it committed to template builds \(an estimate\), 500000 inodes free; reserve 2\.0 GiB; low\n/);
+
+    // The disk's state, as berth's rule (disk.rs) decides a new machine; unknown is never zero.
+    const disk = (freeBytes: number | null, committedBytes: number | null, freeInodes: number | null = null) =>
+      diskState({ freeBytes, freeInodes, committedBytes, reserveBytes: 2 * GiB, reserveInodes: 10_000 });
+    assert.deepEqual([disk(8 * GiB, 0), disk(8 * GiB - 1, 0), disk(2 * GiB, 0), disk(2 * GiB - 1, 0), disk(5 * GiB, 3 * GiB + 1),
+      disk(100 * GiB, 0, 9_999), disk(100 * GiB, 0, 10_000), disk(null, 0), disk(2 * GiB, null), diskState(undefined)],
+    ["ok", "low", "low", "refusing", "refusing", "refusing", "ok", "unknown", "low", "unknown"]);
+    // A report without disk fields (an older berth): unknown, said so.
+    registry.enrollRunner(runner("older"));
+    registry.recordRunnerProbe("older", { health: { ...legacy, platform: "linux-x86_64", capabilities: [], limits } }, at);
+    const undisked = observeRunners(registry, 60_000, at + 1000).runners.find(row => row.id === "older")!;
+    assert.equal(undisked.report?.disk, null);
+    assert.deepEqual(undisked.unknown, ["disk: the runner does not report its free space (a berth before it did)"]);
+    registry.beginRunnerRetirement("older");
+    registry.finishRunnerRetirement("older", "test", at, at + 1);
+    // cubed's own directories, measured for real (nothing is written).
+    const own = localDisk(root);
+    assert.ok(own.freeBytes !== null && own.freeBytes > 0, JSON.stringify(own));
+    assert.deepEqual(localDisk(path.join(root, "missing")), { freeBytes: null, freeInodes: null, low: false });
 
     // Without a newer probe the same report grows stale.
     const old = observeRunners(registry, 60_000, at + 10 * 60_000).runners.find(row => row.id === "wide")!;

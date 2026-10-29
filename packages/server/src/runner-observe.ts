@@ -3,7 +3,8 @@
  * (`node.status` and the `node.hello` before it) or from cubed's registry;
  * what neither says is listed as unknown, never guessed. Nothing here
  * contacts a runner: the background probe keeps the reports current. */
-import type { TrustedRunnerHealth } from "./runner-types.ts";
+import fs from "node:fs";
+import type { RunnerDisk, TrustedRunnerHealth } from "./runner-types.ts";
 import { pooledRunner, type Registry, type RunnerContactStatus } from "./registry.ts";
 
 /** A report older than this many probe intervals is stale even if the latest
@@ -16,6 +17,31 @@ export const NOT_REPORTED = [
   "self-update: when the runner's updater last ran, what it found and whether an upgrade is pending",
   "nested virtualization: whether the runner host is itself a virtual machine and whether thread machines get KVM/HVF",
 ] as const;
+
+/** A VM runner's disk as its report says: `refusing` while berth refuses
+ * new machines (free less committed below its reserve, or too few inodes),
+ * `low` below 4 × the reserve, `unknown` when the runner does not say. */
+export type DiskState = "ok" | "low" | "refusing" | "unknown";
+const LOW_RESERVES = 4;
+
+export function diskState(disk: RunnerDisk | undefined): DiskState {
+  if (!disk || disk.freeBytes === null || disk.reserveBytes === null) return "unknown";
+  const usable = disk.freeBytes - (disk.committedBytes ?? 0);
+  if (usable < disk.reserveBytes || (disk.freeInodes !== null && disk.reserveInodes !== null && disk.freeInodes < disk.reserveInodes)) return "refusing";
+  return usable < LOW_RESERVES * disk.reserveBytes ? "low" : "ok";
+}
+
+/** cubed's own disk (its state directory, its temporary directory): only
+ * looked at, never a reason to refuse anything. null: not measured. */
+export function localDisk(directory: string): { freeBytes: number | null; freeInodes: number | null; low: boolean } {
+  try {
+    const stat = fs.statfsSync(directory);
+    const freeBytes = stat.bavail * stat.bsize, freeInodes = stat.files > 0 ? stat.ffree : null;
+    return { freeBytes, freeInodes, low: freeBytes < LOW_RESERVES * LOCAL_RESERVE || (freeInodes !== null && freeInodes < LOCAL_RESERVE_INODES) };
+  } catch { return { freeBytes: null, freeInodes: null, low: false }; }
+}
+/** berth's reserve and inode floor (disk.rs). */
+const LOCAL_RESERVE = 2 * 2 ** 30, LOCAL_RESERVE_INODES = 10_000;
 
 export interface RunnerReport {
   /** When cubed received it, and whether it is the current state. */
@@ -35,6 +61,8 @@ export interface RunnerReport {
   capabilities: string[] | null;
   /** The largest machine the runner accepts. */
   vmLimits: { maxVcpus: number; maxMemoryMiB: number; maxDiskGiB: number } | null;
+  /** Its directory's file system; null when the runner does not report it. */
+  disk: (RunnerDisk & { state: DiskState }) | null;
 }
 
 export interface RunnerObservation {
@@ -115,7 +143,9 @@ export function observeRunners(registry: Registry, probeIntervalMs: number, now 
         platform: health.platform ?? null, os: known?.os ?? hostOs ?? null, arch: known?.arch ?? hostArch ?? null, accelerator: known?.accelerator ?? null,
         capabilities: health.capabilities ? [...health.capabilities] : null,
         vmLimits: health.limits ? { maxVcpus: health.limits.maxVcpus, maxMemoryMiB: health.limits.maxMemoryMiB, maxDiskGiB: health.limits.maxDiskGiB } : null,
+        disk: health.disk ? { ...health.disk, state: diskState(health.disk) } : null,
       };
+      if (!health.disk && !host && runner?.protocol === 4) unknown.push("disk: the runner does not report its free space (a berth before it did)");
       if (!health.platform) unknown.push("platform, capabilities and machine limits: the last report predates cubed keeping them; the next probe fills them in");
       else if (!known && !host) unknown.push(`os, architecture and accelerator: platform ${health.platform} is not one cubed knows`);
       if (!report.fresh) unknown.push("current state: the report below is the last one received, not the runner's state now");
@@ -174,6 +204,14 @@ const ago = (ms: number) => ms < 90_000 ? `${Math.round(ms / 1000)} s ago` : ms 
  * (the runner's config), which stay in the operator's API. */
 const errorCode = (error: string) => /^[A-Z_]{3,40}$/.test(error) ? error : "probe failed; details in /api/runners";
 
+const gb = (bytes: number | null) => bytes === null ? "unknown" : `${(bytes / 2 ** 30).toFixed(1)} GiB`;
+/** A runner's disk for people: what it measured, and what it means for new machines. */
+export function diskText(disk: RunnerDisk & { state: DiskState }): string {
+  const state = { ok: "ok", low: "low", refusing: "refusing new machines", unknown: "unknown" }[disk.state];
+  return `${gb(disk.freeBytes)} free, ${gb(disk.committedBytes)} of it committed to template builds (an estimate), `
+    + `${disk.freeInodes === null ? "inodes unknown" : `${disk.freeInodes} inodes free`}; reserve ${gb(disk.reserveBytes)}; ${state}`;
+}
+
 /** The observation as text for a model: facts first, unknowns spelled out. */
 export function describeRunners(view: RunnersObservation): string {
   const listed = view.runners.filter(runner => runner.retirement !== "retired");
@@ -215,6 +253,7 @@ export function describeRunners(view: RunnersObservation): string {
         + `lifecycle ${report.lifecycle}${report.draining ? " (draining: refuses new machines)" : ""}${report.error ? `, error ${report.error}` : ""}`);
       lines.push(`  machines on the runner: ${report.activeVms} active, ${report.runningVms} running, at most ${report.maxActiveVms} at once (its effective bound); `
         + `${report.retainedVms} retained disks`);
+      if (report.disk) lines.push(`  disk: ${diskText(report.disk)}`);
       if (report.vmLimits) lines.push(`  largest machine: ${report.vmLimits.maxVcpus} vCPUs, ${report.vmLimits.maxMemoryMiB} MiB, ${report.vmLimits.maxDiskGiB} GiB disk`);
     }
     lines.push(`  cubed's slots: ${slots.reserved} reserved by open threads of ${slots.total}${slots.totalSource === "assumed" ? " (assumed: the runner never advertised a bound)" : ""}, `

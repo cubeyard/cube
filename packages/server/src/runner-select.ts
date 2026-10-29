@@ -10,7 +10,7 @@
 import { Runner_Kind, Runner_Lifecycle } from "./gen/runner_pb.js";
 import type { Runner } from "./registry.ts";
 import { runnerSession } from "./runner-session.ts";
-import type { TrustedRunnerHealth } from "./runner-types.ts";
+import type { RunnerDisk, TrustedRunnerHealth } from "./runner-types.ts";
 
 export function runnerProtocol(runner: Pick<Runner, "protocol">): 3 | 4 { return runner.protocol === 4 ? 4 : 3; }
 
@@ -51,5 +51,13 @@ export async function runnerHealth(runner: Runner): Promise<TrustedRunnerHealth>
     platform: [described.platform?.os, described.platform?.arch].filter(Boolean).join("-"),
     capabilities: hello.capabilities,
     ...limits,
+    ...capacity && capacity.diskReserveBytes !== undefined ? { disk: runnerDisk(capacity) } : {},
   };
+}
+
+const known = (value: bigint | undefined) => value === undefined ? null : Number(value);
+/** A runner before `Capacity.disk_*` sets none of them: no disk at all. */
+function runnerDisk(capacity: { diskFreeBytes?: bigint; diskFreeInodes?: bigint; diskCommittedBytes?: bigint; diskReserveBytes?: bigint; diskReserveInodes?: bigint }): RunnerDisk {
+  return { freeBytes: known(capacity.diskFreeBytes), freeInodes: known(capacity.diskFreeInodes), committedBytes: known(capacity.diskCommittedBytes),
+    reserveBytes: known(capacity.diskReserveBytes), reserveInodes: known(capacity.diskReserveInodes) };
 }

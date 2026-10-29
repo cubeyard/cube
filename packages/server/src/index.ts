@@ -34,7 +34,7 @@ import { OptChat, OptChatEvents } from "./optchat.ts";
 import { isMediaId, MEDIA_LIMITS, MediaError } from "./optchat-media.ts";
 import { createLogger } from "./log.ts";
 import { cubeThreads } from "./optchat-threads.ts";
-import { observeRunners } from "./runner-observe.ts";
+import { diskState, localDisk, observeRunners } from "./runner-observe.ts";
 import { formatDiagnostics, threadDiagnostics } from "./vm-diagnostics.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
@@ -199,6 +199,7 @@ const IMAGE_HEADERS = {
 } as const;
 
 const spawnLog = createLogger("threads");
+const runnersLog = createLogger("runners");
 /** Whole milliseconds for a log line; undefined (a stage not reached) is left out. */
 const ms = (value: number | undefined) => value === undefined ? undefined : Math.round(value);
 
@@ -347,7 +348,12 @@ export async function createCubed(options: {
     // A protocol-3 runner is never contacted: its row keeps what it last said.
     if (runnerProtocol(runner) === 3) return current!;
     try {
-      registry.recordRunnerProbe(id, { health: await runnerHealth(runner) });
+      const health = await runnerHealth(runner);
+      const [before, after] = [diskState(current?.health?.disk), diskState(health.disk)];
+      registry.recordRunnerProbe(id, { health });
+      if (after !== before && health.disk) {
+        runnersLog[after === "low" || after === "refusing" ? "warn" : "info"]("runner disk", { runner: runner.nodeId, state: after, was: before, ...health.disk });
+      }
     } catch (error) {
       registry.recordRunnerProbe(id, { error: errorText(error) });
     }
@@ -922,10 +928,17 @@ export async function createCubed(options: {
   // last manual check, and a runner that updated itself still shows its old
   // version. One pass at a time; requests to one runner are serialized anyway.
   let probing = false;
+  // Whether cubed's own state and temporary directories were low last time.
+  const ownDisk = new Map<string, boolean>();
   const probeRunners = async () => {
     if (probing) return;
     probing = true;
     try {
+      for (const [what, directory] of [["state", options.state], ["tmp", os.tmpdir()]] as const) {
+        const disk = localDisk(directory);
+        if (disk.low !== (ownDisk.get(what) ?? false)) runnersLog[disk.low ? "warn" : "info"]("cubed disk", { what, directory, ...disk });
+        ownDisk.set(what, disk.low);
+      }
       for (const runner of registry.runnerStatuses()) {
         // A protocol-3 runner is never contacted; its last report stays as it was.
         const enrolled = registry.getRunner(runner.id);
