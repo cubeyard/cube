@@ -628,7 +628,14 @@ in later.
   block (`scripts/check-claude-memory.ts`, real `claude`; without the mod's
   bound Claude Code 2.1.312 held the prompt about 30 s). An open that does
   not end is waited out once: while it is still pending, later requests and
-  calls answer at once.
+  calls answer at once. That holds per thread: another thread giving up (a
+  Claude Code route after 5 s) does not cut a Pi thread's wait short, so its
+  first request captures rather than put the "cannot be read" text in its
+  baseline. When its own wait runs out or the open fails, Pi does put that
+  text there, and the later capture is one patch of the `memory` section
+  alone (`pi-memory-baseline-test`): kept in place after the cached prefix on
+  a model that takes later system messages, folded into the leading prompt
+  (one full cache write) on any other.
 - **Reading on.** `memory_zoom(id, n, at)` and `memory_date(id)` are cube
   tools (Pi, and `mcp__cube__memory_*` in Claude Code) over OptChat's live
   memory: OptChat's own `zoom` and `date`, any message, newer than the view

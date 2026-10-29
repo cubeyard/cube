@@ -21,7 +21,8 @@ const TOOLS = [
 
 /** The routes cubed serves, in memory: files, keyed commands and writes,
  * cube's tools (each call answered with what reached it) and the ready. */
-function fakeWorkspace(on: On, files: Record<string, string> = {}, env: Record<string, string> = {}, tools: unknown = TOOLS, memory?: string | null) {
+/** `memory`: the route's text; undefined fails it, `late` answers after that many ms of the test's clock. */
+function fakeWorkspace(on: On, files: Record<string, string> = {}, env: Record<string, string> = {}, tools: unknown = TOOLS, memory?: string | null | { late: number; text: string }) {
   const requests: Request[] = []
   const operations = new Map<string, { request: string; reply: Reply }>()
   const shas = new Map<string, number>()
@@ -29,6 +30,7 @@ function fakeWorkspace(on: On, files: Record<string, string> = {}, env: Record<s
   const reply = (status: number, body: unknown): Reply => ({ value: { status, ok: status < 300, headers: {}, text: JSON.stringify(body) } })
   const fail = (status: number, code: string) => reply(status, { error: code.toLowerCase(), code, completionUnknown: false })
   mock.env(on, { CUBE_WORKSPACE_SOCKET: SOCKET, CUBE_WORKSPACE_PATH: BASE, CUBE_WORKSPACE_TOKEN: TOKEN, CUBE_WORKSPACE_ROOT: ROOT, ...env })
+  const clock = mock.clock(on)
   on('http.fetch', ($, e) => {
     const url = new URL(e.url)
     const body = e.init?.body === undefined ? undefined : JSON.parse(e.init.body) as Record<string, unknown>
@@ -64,7 +66,11 @@ function fakeWorkspace(on: On, files: Record<string, string> = {}, env: Record<s
       return reply(200, { text: `cubed ran ${name} for ${String(body?.call)} with ${JSON.stringify(body?.input)}` })
     }
     if (route === '/claude-ready' && request.method === 'POST') return reply(200, { ok: true })
-    if (route === '/memory' && request.method === 'GET') return memory === undefined ? fail(500, 'IO_ERROR') : reply(200, { text: memory })
+    if (route === '/memory' && request.method === 'GET') {
+      if (memory === undefined) return fail(500, 'IO_ERROR')
+      if (memory !== null && typeof memory === 'object') { const late = memory; return clock.sleep(late.late).then(() => reply(200, { text: late.text })) }
+      return reply(200, { text: memory })
+    }
     const file = url.searchParams.get('path') ?? String(body?.path)
     if (route === '/stat' && request.method === 'GET') {
       return file in files ? reply(200, { kind: 'file', size: files[file]!.length, mode: 0o644, modifiedMs: 0, sha256: sha(file) }) : fail(404, 'NOT_FOUND')
@@ -83,7 +89,7 @@ function fakeWorkspace(on: On, files: Record<string, string> = {}, env: Record<s
     }
     return fail(404, 'NOT_FOUND')
   })
-  return { requests, files }
+  return { requests, files, clock }
 }
 
 /** Beneath every plugin: a call the mod passes on reaches "the engine". */
@@ -340,6 +346,27 @@ describe('workspace tools', () => {
     fakeWorkspace(on, { 'AGENTS.md': 'run the tests\n' })
     on('prompt.context', ($, e) => ({ blocks: e.blocks }))
     expect((await $.prompt.context({ blocks: [] })).blocks.map(block => block.name)).toEqual(['cubeWorkspace'])
+  })
+
+  test('a memory answer slower than the mod waits leaves the memory out, the workspace block whole, after 8 s', async ($, on) => {
+    const { clock } = fakeWorkspace(on, { 'AGENTS.md': 'run the tests\n' }, {}, TOOLS, { late: 60_000, text: 'Chat memory: too late' })
+    on('prompt.context', ($, e) => ({ blocks: e.blocks }))
+    let settled = false
+    const context = $.prompt.context({ blocks: [] }).finally(() => { settled = true })
+    await clock.advance(7_900)
+    expect(settled).toBe(false)
+    await clock.advance(100)
+    const blocks = (await context).blocks
+    expect(blocks.map(block => block.name)).toEqual(['cubeWorkspace'])
+    expect(blocks[0]!.text).toMatch(/run the tests/)
+  })
+
+  test('a memory answer within the wait is used', async ($, on) => {
+    const { clock } = fakeWorkspace(on, {}, {}, TOOLS, { late: 3_000, text: 'Chat memory: in time' })
+    on('prompt.context', ($, e) => ({ blocks: e.blocks }))
+    const context = $.prompt.context({ blocks: [] })
+    await clock.advance(3_000)
+    expect((await context).blocks.map(block => block.name)).toEqual(['cubeMemory', 'cubeWorkspace'])
   })
 
   test('the thread\'s skills follow the workspace instructions', async ($, on) => {

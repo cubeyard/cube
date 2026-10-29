@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { setTimeout as delay } from "node:timers/promises";
 import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
 import type { ToolExecutionApi } from "@earendil-works/pi-durable";
 import { CUBE_TOOL_PREFIX, cubeTool as forward, type ToolScope } from "../../claude-mod/hooks/tools.ts";
@@ -181,6 +182,32 @@ The view below is the chat through message 2 (2026-10-29T10:02:00.000Z), capture
   at = performance.now();
   assert.match((await threads.text(later.id, "claude-code", { waitMs: 50 }))!, /cannot be read right now \(OptChat is still opening\); the next request tries again, and mcp__cube__memory_zoom/);
   assert.ok(performance.now() - at < 1_000, "the route's wait is its own");
+  // A Claude Code thread's route gives up at its own short wait while a Pi
+  // thread shares the open: the Pi thread waits its own bound and its first
+  // request captures, so its baseline never holds the "cannot be read" text
+  // (which a later capture would replace with a patch). The Claude Code
+  // thread captures at its next prompt, from the same open.
+  const routed = registry.createThread("p", "shared-claude", model, "a claude code thread");
+  const waiting2 = registry.createThread("p", "shared-pi", model, "a pi thread");
+  let release!: (value: ChatMemory) => void;
+  // As openOptchat: one open, memoized.
+  const shared = new Promise<ChatMemory>(resolve => { release = resolve; });
+  opening = () => shared;
+  threads = memory(registry, 5_000);
+  opens = 0;
+  assert.match((await threads.text(routed.id, "claude-code", { waitMs: 50 }))!, /cannot be read right now \(OptChat is still opening\)/);
+  at = performance.now();
+  const piFirst = threads.text(waiting2.id, "pi");
+  await delay(150);
+  release(chat);
+  const piText = (await piFirst)!;
+  assert.ok(performance.now() - at >= 140, "the pi request waited past the route's give-up");
+  assert.doesNotMatch(piText, /cannot be read/, "the pi thread's first request has the memory, not the transient text");
+  assert.match(piText, /^Chat memory:[^]*through message 3 \(/);
+  assert.equal(registry.threadMemory(waiting2.id)!.text, piText, "and it is what was frozen");
+  const routedNext = (await threads.text(routed.id, "claude-code", { waitMs: 50 }))!;
+  assert.match(routedNext, /mcp__cube__memory_zoom[^]*through message 3 \(/, "the claude code thread captures at its next prompt");
+  assert.equal(registry.threadMemory(routed.id)!.text, routedNext);
   threads = memory();
   opening = async () => chat;
   assert.match((await threads.text(later.id, "pi"))!, /through message 3 \(/, "captured once OptChat opens");

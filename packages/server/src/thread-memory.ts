@@ -62,8 +62,8 @@ function captured(memory: Memory, at: number, tool: (name: string) => string): s
 const reason = (error: unknown) => redactHook(error instanceof Error ? error.message : String(error));
 
 export class ThreadMemory {
-  /** The open waited for now, and whether a wait for it already ran out. */
-  private opening: { promise: Promise<ChatMemory>; waited: boolean } | null = null;
+  /** The open waited for now, and the threads whose wait for it already ran out. */
+  private opening: { promise: Promise<ChatMemory>; waited: Set<string> } | null = null;
   private readonly options: {
     registry: Pick<Registry, "threadMemory" | "captureMemory">;
     /** OptChat, opened if it is not (index.ts `openOptchat`). */
@@ -75,13 +75,17 @@ export class ThreadMemory {
   constructor(options: ThreadMemory["options"]) { this.options = options; }
 
   /** OptChat, waited for at most `waitMs` and until `signal` aborts (which
-   * rejects with its reason). An open that does not end is waited out once:
-   * while it is still pending, later waits end at once, so a hung open never
-   * holds every request and call for the whole wait again. */
-  private async open(waitMs: number, signal?: AbortSignal): Promise<ChatMemory> {
+   * rejects with its reason). An open that does not end is waited out once
+   * per thread: while it is still pending, that thread's later waits end at
+   * once, so a hung open never holds its every request and call for the
+   * whole wait again. Another thread's wait running out (a Claude Code
+   * route's 5 s) does not cut this one's short: a Pi thread waits its own
+   * bound and captures, rather than put the "cannot be read" text in its
+   * baseline and patch it later. */
+  private async open(thread: string, waitMs: number, signal?: AbortSignal): Promise<ChatMemory> {
     signal?.throwIfAborted();
     if (!this.opening) {
-      const opening = { promise: this.options.chat(), waited: false };
+      const opening = { promise: this.options.chat(), waited: new Set<string>() };
       this.opening = opening;
       const done = () => { if (this.opening === opening) this.opening = null; };
       opening.promise.then(done, done);
@@ -90,7 +94,7 @@ export class ThreadMemory {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let aborted: (() => void) | undefined;
     const ended = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => { opening.waited = true; reject(new Error("OptChat is still opening")); }, opening.waited ? 0 : waitMs);
+      timer = setTimeout(() => { opening.waited.add(thread); reject(new Error("OptChat is still opening")); }, opening.waited.has(thread) ? 0 : waitMs);
       aborted = () => reject(signal!.reason ?? new Error("aborted"));
       signal?.addEventListener("abort", aborted, { once: true });
     });
@@ -111,7 +115,7 @@ export class ThreadMemory {
     if (row.text !== null) return row.text;
     const tool = agent === "claude-code" ? (name: string) => `mcp__cube__${name}` : (name: string) => name;
     let chat: ChatMemory;
-    try { chat = await this.open(wait.waitMs ?? this.options.waitMs ?? MEMORY_WAIT_MS, wait.signal); }
+    try { chat = await this.open(thread, wait.waitMs ?? this.options.waitMs ?? MEMORY_WAIT_MS, wait.signal); }
     catch (error) {
       if (wait.signal?.aborted) throw error;
       return `${memoryDoc(tool)}\nThe chat cannot be read right now (${reason(error)}); the next request tries again, and ${tool("memory_zoom")} reads it once OptChat is open.`;
@@ -127,7 +131,7 @@ export class ThreadMemory {
     if (!this.has(thread)) return [];
     const read = async (signal?: AbortSignal): Promise<Memory | string> => {
       let chat: ChatMemory;
-      try { chat = await this.open(this.options.waitMs ?? MEMORY_WAIT_MS, signal); }
+      try { chat = await this.open(thread, this.options.waitMs ?? MEMORY_WAIT_MS, signal); }
       catch (error) {
         if (signal?.aborted) throw error;
         return `chat memory unavailable now: ${reason(error)}`;

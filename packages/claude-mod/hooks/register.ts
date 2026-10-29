@@ -49,14 +49,16 @@ async function workspace($: Pick<EngineInterface, 'env' | 'http'>, signal?: Abor
   return { client, token, root, ...(realRoot ? { realRoot } : {}), ...(signal ? { signal } : {}) }
 }
 
-/** Longer than cubed's own wait on the route (MEMORY_PROMPT_WAIT_MS, 5 s). */
+/** Longer than cubed's own wait on the route (MEMORY_PROMPT_WAIT_MS, 5 s),
+ * within a hook's budget (10 s, which a `$.clock` wait counts against). */
 const MEMORY_WAIT_MS = 8000
 
 /** The thread's memory text, or null: none, an error, or no answer within MEMORY_WAIT_MS. Never rejects. */
-function optchatMemory(scope: ToolScope): Promise<string | null> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const late = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), MEMORY_WAIT_MS) })
-  return Promise.race([scope.client.memory(scope.token).catch(() => null), late]).finally(() => clearTimeout(timer))
+function optchatMemory($: Pick<EngineInterface, 'clock'>, scope: ToolScope): Promise<string | null> {
+  const answered = new AbortController()
+  const asked = scope.client.memory(scope.token).catch(() => null).finally(() => answered.abort())
+  const late = $.clock.sleep(MEMORY_WAIT_MS, { signal: answered.signal }).then(() => null, () => null)
+  return Promise.race([asked, late])
 }
 
 export const register: Register = on => {
@@ -120,7 +122,7 @@ export const register: Register = on => {
     if (!scope) return context
     // OptChat's memory, asked for first and read beside the instructions;
     // bounded here too, so a slow or failing answer only leaves it out.
-    const memory = optchatMemory(scope)
+    const memory = optchatMemory($, scope)
     const sections = [
       `You are working in a cube thread. ${scope.root} (also ${VIRTUAL_ROOT}) is the thread workspace in the thread's own virtual machine: ` +
       'Read, Write and Edit address files there, and Bash runs commands there with the workspace root as its working directory. ' +
