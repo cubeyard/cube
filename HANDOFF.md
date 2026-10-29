@@ -436,9 +436,15 @@ confirmed exact commit (`skills.defaultCommit`), without a cube release. Verifie
 git and bash, a Pi thread on a local guest; `skills-browser-test.ts`), in
 `test-vm-e2e.ts` on Linux/KVM (a Pi and a Claude Code thread's guest fetch
 the pinned skills through the gateway), and the default source resolved and
-installed from GitHub by the same commands outside provisioning. Not done:
-OptChat reading `optchat`/`both` skills, the repository's own
-`.agents/skills`, a real model choosing to read a skill. A private source outside GitHub resolves on the host but
+installed from GitHub by the same commands outside provisioning. OptChat
+lists its `optchat`/`both` skills and reads them with `skill`, on the host
+at their pinned commits (`optchat-skills-test.ts`: real cubed and
+OptChat.open, real git, faux model; the prompt the same across turns and
+restarts, a cold mirror and an unreachable source too, never patched
+mid-turn, changed once by a save; a hanging or failing list costs one
+bounded wait per configuration, one fetch a minute). The upgrade changes
+OptChat's prefix once (the `skill` tool and section). Not done: the repository's own `.agents/skills`, a real model
+choosing to read a skill. A private source outside GitHub resolves on the host but
 fails in the machine, which has no credentials for it.
 
 ## Runner protocol 4, berth and keel (2026-10-10)

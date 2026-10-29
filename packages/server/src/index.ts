@@ -27,7 +27,7 @@ import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { SettingsStore, type SettingsView } from "./settings.ts";
-import { checkDefaultUpdate, DEFAULT_SKILL_SOURCE, defaultSource, parseSkillsConfig, resolveProjectSkills, resolveSkills, type SkillGit, type SkillsConfig, type SkillSource } from "./skills.ts";
+import { checkDefaultUpdate, DEFAULT_SKILL_SOURCE, defaultSource, optchatSkills, parseSkillsConfig, resolveProjectSkills, resolveSkills, type SkillGit, type SkillsConfig, type SkillSource } from "./skills.ts";
 import { UpdateService } from "./update-service.ts";
 import { versionInfo } from "./version.ts";
 import { OptChat, OptChatEvents } from "./optchat.ts";
@@ -485,7 +485,8 @@ export async function createCubed(options: {
   const openOptchat = () => optchat ??= OptChat.open({
     directory: path.join(options.state, "optchat"), models, threads: optchatThreads,
     model: async () => preferredModel(await catalog()), compactor: async () => (await compactorChoice()).model,
-    artifacts: artifactService, ...options.optchatRetryMs ? { limits: { retryMs: options.optchatRetryMs } } : {},
+    artifacts: artifactService, skills: optchatSkills({ git, source: () => options.skillSource ?? null, config: () => settings.get().skills }),
+    ...options.optchatRetryMs ? { limits: { retryMs: options.optchatRetryMs } } : {},
   }).then(chat => ({ chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) }))
     .catch(error => {
       optchat = null;

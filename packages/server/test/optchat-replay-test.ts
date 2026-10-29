@@ -79,7 +79,8 @@ async function until(check: () => boolean, what: string) {
   assert.ok(check(), what);
 }
 
-const chat = await OptChat.open({ directory: path.join(root, "chat"), models, model: async () => ({ provider: faux.getModel().provider, id: faux.getModel().id }), threads, artifacts });
+const skills = { current: () => ({ key: "skills", skills: [], settled: Promise.resolve() }), async read(name: string, file = "SKILL.md") { return `${name}/${file}`; } };
+const chat = await OptChat.open({ directory: path.join(root, "chat"), models, model: async () => ({ provider: faux.getModel().provider, id: faux.getModel().id }), threads, artifacts, skills });
 try {
   const inner = chat as unknown as { harness: Harness; extension(): { tools: ToolRegistration[] }; guard(tool: ToolRegistration): ToolRegistration };
   const harness = inner.harness;
@@ -108,6 +109,7 @@ try {
     spawn: { args: { tasks: [{ project: "demo", task: "one" }, { project: "demo", task: "two" }] } },
     zoom: { args: { id: 0, n: 1 } },
     date: { args: { id: 0 } },
+    skill: { args: { name: "delegating", path: "notes.md" } },
     projects: { args: {} },
     runners: { args: {} },
     threads: { args: {} },

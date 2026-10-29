@@ -56,7 +56,7 @@ try {
     `file://${root} @${source.commit.slice(0, 12)} /skills cube's default · pinned by this cube check for update`);
   assert.deepEqual(await names(page), ["briefing-a-thread", "poteto-mode", "prove-it-works"]);
   assert.deepEqual(await page.locator(".skills .skill .title").allTextContents(), ["Poteto Mode"], "only a SKILL.md name unlike its id is shown apart");
-  assert.deepEqual(await page.locator(".skills .skill .tag").allTextContents(), ["chat (not read yet)", "threads", "threads"]);
+  assert.deepEqual(await page.locator(".skills .skill .tag").allTextContents(), ["chat", "threads", "threads"]);
   assert.match(await page.locator(".skills .skill .provenance").last().textContent() ?? "", new RegExp(`@${source.commit.slice(0, 12)} /skills/prove-it-works`));
   assert.match(await page.locator(".skipped").textContent() ?? "", /skills\/odd: SKILL.md name must be 1 to 64 characters/);
   await shoot(page, "desktop-skills");

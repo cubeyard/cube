@@ -388,8 +388,10 @@ thread starts, beside its repositories' commits, and keeps the winners with
 their provenance in the thread's allocation. Provisioning installs them in
 the machine as `~/.cube/skills/<name>/` before the checkout, and both Pi and
 Claude Code list them in the prompt by name, description and path only.
-Their `metadata.cube.surface` marks skills for OptChat, which does not read
-them yet. [docs/skills.md](docs/skills.md).
+Their `metadata.cube.surface` says which agent gets them: OptChat lists
+the `optchat` and `both` ones by name and description and reads one with
+its `skill` tool, on the host at its pinned commit; it installs nothing.
+[docs/skills.md](docs/skills.md).
 
 ## OptChat
 
