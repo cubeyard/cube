@@ -299,6 +299,8 @@ export async function createCubed(options: {
   artifactRetryMs?: number;
   /** OptChat's compactor retry, for tests. */
   optchatRetryMs?: number;
+  /** How long a thread's first prompt waits for OptChat (MEMORY_WAIT_MS), for tests. */
+  memoryWaitMs?: number;
   /** The skill source before the user's (docs/skills.md); none when absent.
    * The cubed command passes DEFAULT_SKILL_SOURCE. */
   skillSource?: SkillSource | null;
@@ -337,7 +339,7 @@ export async function createCubed(options: {
     ...memory.tools(thread)];
   // OptChat's memory for every thread created since it exists: OptChat is
   // opened for it (as at boot), never a browser or a turn.
-  const memory = new ThreadMemory({ registry, chat: async () => (await openOptchat()).chat });
+  const memory = new ThreadMemory({ registry, chat: async () => (await openOptchat()).chat, ...options.memoryWaitMs ? { waitMs: options.memoryWaitMs } : {} });
   const settings = new SettingsStore(path.join(options.state, "settings.json"));
   const git = new GitService(path.join(options.state, "repositories"));
   const latestCommits = latestCommitsOf({ git, skills: () => settings.get().skills, skillSource: options.skillSource ?? null });

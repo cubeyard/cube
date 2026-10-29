@@ -129,6 +129,7 @@ OFFLINE_TESTS=(
   packages/server/test/thread-memory-cubed-test.ts
   packages/server/test/pi-memory-baseline-test.ts
   packages/server/test/claude-memory-gate-test.ts
+  packages/server/test/thread-memory-claude-gate-cubed-test.ts
   scripts/smoke-local.ts
   packages/web/test/transcript-test.ts
   packages/web/test/markdown-test.ts
