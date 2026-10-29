@@ -89,8 +89,9 @@ export const MASTER = `You are OptChat, an AI agent that works for one user in a
 never ends. You are the user's interface to cube. You never write code,
 run commands or touch files yourself, and you have no machine: you get
 work done by starting threads. A thread is a coding agent with its own
-virtual machine and a checkout of one project. It does not see this chat,
-so give each one a complete task that stands on its own. Follow the
+virtual machine and a checkout of one project. It sees this chat only as
+context it may read, never as its instructions, so give each one a
+complete task that stands on its own. Follow the
 user's instructions at the end of this prompt: they say who the user is,
 how their projects are organized and how they want work done.
 
@@ -137,7 +138,8 @@ or a warm context never justify reusing a thread for a new task. The
 ordinary steps of one task stay in its thread.
 Every task is a full brief: the goal; the project and the pull request,
 branch or artifact ids; the user's rules and preferences that apply,
-restated (the thread sees neither this chat nor your instructions); what
+restated (a new thread sees this chat as context only, never as its
+instructions); what
 is in and out of scope; the deliverable; when to stop; and whether it is
 to explore, design, implement or review. Exploring or designing is not
 implementing: no code, branch or pull request unless the task says so. A
@@ -668,6 +670,8 @@ export class OptChat {
 
   /** The chat as the Pi adapter of the thread event model reads it. */
   get agent() { return { conversation: this.conversation, storage: this.storage }; }
+  /** Names this chat for as long as its store lives (`optchat-<uuid>`, the providers' cache key too). */
+  get identity(): string { return this.cacheKey; }
   /** Why the chat cannot go on right now, if it cannot. */
   failure(): string | null {
     return this.down ?? (this.compactorError ? `summarizing: ${this.compactorError}` : null) ?? this.requestError;
@@ -1736,10 +1740,7 @@ export class OptChat {
       description: "The date and time of message id (the cube host's local time).",
       parameters: Type.Object({ id: Type.Integer({ minimum: 0 }) }),
       replay: "safe",
-      execute: async args => {
-        const message = this.memory.messages[args.id];
-        return text(message ? new Date(message.date).toString() : `No message ${args.id}.`);
-      },
+      execute: async args => text(this.memory.date(args.id)),
     });
     const projects = defineTool({
       name: "projects",
@@ -1759,7 +1760,7 @@ export class OptChat {
     });
     const spawn = defineTool({
       name: "spawn",
-      description: "Start one thread per task (one goal, one result; another pull request, question or review is a new task), in parallel, and answer their ids at once: each is accepted, then checks its model, fetches the project's latest commits and starts in the background. Each thread is a coding agent with its own machine and a checkout of the project; it does not see this chat. Its report comes back later as a message starting \"[id] \", and so does a start that keeps failing (a model it cannot run, a repository it cannot fetch).",
+      description: "Start one thread per task (one goal, one result; another pull request, question or review is a new task), in parallel, and answer their ids at once: each is accepted, then checks its model, fetches the project's latest commits and starts in the background. Each thread is a coding agent with its own machine and a checkout of the project; it sees this chat only as context, so the task must stand on its own. Its report comes back later as a message starting \"[id] \", and so does a start that keeps failing (a model it cannot run, a repository it cannot fetch).",
       parameters: Type.Object({ tasks: Type.Array(Type.Object({
         project: Type.String({ description: "Project name or id" }),
         task: Type.String({ description: "The whole task, self-contained" }),

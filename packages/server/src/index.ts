@@ -44,7 +44,8 @@ import { threadUsageText, usageText, UsageService } from "./usage-service.ts";
 import { ARTIFACT_LIMITS, ArtifactError, ArtifactStore, isArtifactId } from "./artifacts.ts";
 import { Artifacts } from "./artifact-service.ts";
 import { ARTIFACT_GUIDE, artifactTools } from "./artifact-tools.ts";
-import { piTool, toolsRoute } from "./cube-tools.ts";
+import { claudeCodeOnly, piTool, toolsRoute } from "./cube-tools.ts";
+import { MEMORY_PROMPT_WAIT_MS, ThreadMemory } from "./thread-memory.ts";
 import { readMachineText } from "./workspace-env.ts";
 import { githubPulls, type GithubPulls } from "./github-pulls.ts";
 import { Portal, portalSettings, type PortalSettings } from "./portal.ts";
@@ -298,6 +299,8 @@ export async function createCubed(options: {
   artifactRetryMs?: number;
   /** OptChat's compactor retry, for tests. */
   optchatRetryMs?: number;
+  /** How long a thread's first prompt waits for OptChat (MEMORY_WAIT_MS), for tests. */
+  memoryWaitMs?: number;
   /** The skill source before the user's (docs/skills.md); none when absent.
    * The cubed command passes DEFAULT_SKILL_SOURCE. */
   skillSource?: SkillSource | null;
@@ -331,19 +334,25 @@ export async function createCubed(options: {
   /** A thread's cube tools, the same list for its Pi and its Claude Code
    * agent: its own artifacts and its project's; a body may come from a file
    * in its machine. */
-  const threadTools = (thread: string, agent: "pi" | "claude-code", readFile: (file: string) => Promise<{ text: string; path: string; sha256: string }>) =>
-    artifactTools({ artifacts: artifacts!, author: { kind: "thread", thread }, agent, readable: async () => [{ kind: "thread", thread }], readFile });
+  const threadTools = (thread: string, agent: "pi" | "claude-code", readFile: (file: string) => Promise<{ text: string; path: string; sha256: string }>) => [
+    ...artifactTools({ artifacts: artifacts!, author: { kind: "thread", thread }, agent, readable: async () => [{ kind: "thread", thread }], readFile }),
+    ...memory.tools(thread)];
+  // OptChat's memory for every thread created since it exists: OptChat is
+  // opened for it (as at boot), never a browser or a turn.
+  const memory = new ThreadMemory({ registry, chat: async () => (await openOptchat()).chat, ...options.memoryWaitMs ? { waitMs: options.memoryWaitMs } : {} });
   const settings = new SettingsStore(path.join(options.state, "settings.json"));
   const git = new GitService(path.join(options.state, "repositories"));
   const latestCommits = latestCommitsOf({ git, skills: () => settings.get().skills, skillSource: options.skillSource ?? null });
   let modelProblem: (model: ModelSelection) => Promise<string | null> = async () => null;
-  const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, latestCommits, modelProblem: model => modelProblem(model), ...options.machines ? { machines: options.machines } : {}, ...options.now ? { now: options.now } : {},
+  const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, latestCommits, modelProblem: model => modelProblem(model),
+    claudeBeforePrompt: (id, signal) => memory.text(id, "claude-code", { signal, final: true }), ...options.machines ? { machines: options.machines } : {}, ...options.now ? { now: options.now } : {},
     ...options.patience ? { patience: options.patience } : {}, runner: { policy, ...options.runner }, claude: claudeCommand ? {
     command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
   } : null, portal: thread => portal!.guest(thread),
   hostTools: thread => ({ readFile, key }) => ({
     note: `artifact_write, artifact_read and artifact_edit keep documents for the user (work artifacts). ${ARTIFACT_GUIDE}`,
     tools: threadTools(thread.id, "pi", file => readFile(file, ARTIFACT_LIMITS.body)).map(tool => piTool(tool, key)),
+    ...memory.has(thread.id) ? { memory: (signal: AbortSignal | undefined) => memory.text(thread.id, "pi", signal ? { signal } : {}) } : {},
   }) });
   portal = new Portal({ settings: options.portal === undefined ? portalSettings() : options.portal, directory: path.join(options.state, "portal"),
     registry, machines, wake: thread => conversations.wake(thread.id), archiving: id => conversations.archivingNow(id) });
@@ -940,6 +949,7 @@ export async function createCubed(options: {
       const thread = registry.getThread(parts[2]);
       if (!thread || thread.archived) return json({ error: "thread not found", code: "NOT_FOUND", completionUnknown: false }, 404);
       const body = await readJson(request);
+      const bearer = () => /^Bearer ([^\s]+)$/.exec(request.headers.authorization ?? "")?.[1];
       // A Claude Code thread's cube tools (cube-tools.ts), which its mod
       // registers and forwards: the lease token cubed holds for that
       // thread's child is the authorization.
@@ -947,10 +957,21 @@ export async function createCubed(options: {
         const workspace = conversations.workspace(thread.id);
         const abandoned = new AbortController();
         response.once("close", () => { if (!response.writableFinished) abandoned.abort(); });
-        const result = await toolsRoute({ method: request.method!, name: parts[5], token: /^Bearer ([^\s]+)$/.exec(request.headers.authorization ?? "")?.[1], body, signal: abandoned.signal },
+        const result = await toolsRoute({ method: request.method!, name: parts[5], token: bearer(), body, signal: abandoned.signal },
           token => workspace.lease({ token }).catch(() => null),
           token => threadTools(thread.id, "claude-code", file => readMachineText(workspace, token, file, ARTIFACT_LIMITS.body)));
         return json(result.body, result.status);
+      }
+      // A Claude Code thread's memory text (thread-memory.ts), which its mod puts in each prompt's context.
+      if (parts[4] === "memory" && parts.length === 5 && request.method === "GET") {
+        const workspace = conversations.workspace(thread.id);
+        const refused = await claudeCodeOnly(bearer(), token => workspace.lease({ token }).catch(() => null));
+        if (refused) return json(refused.body, refused.status);
+        // Frozen by cubed's gate before the prompt (claudeBeforePrompt), so
+        // this reads the same bytes; bounded in case no gate ran.
+        const abandoned = new AbortController();
+        response.once("close", () => { if (!response.writableFinished) abandoned.abort(); });
+        return json({ text: await memory.text(thread.id, "claude-code", { waitMs: MEMORY_PROMPT_WAIT_MS, signal: abandoned.signal }) });
       }
       // The thread names the Claude Code mod's ready here, on this socket only.
       const result = await workspaceRoute(conversations.workspace(thread.id), { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body, thread: thread.id });

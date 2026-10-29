@@ -4,7 +4,7 @@
  * by tool_use_id, and refuses what would act on the cubed host instead. Every
  * file path names a file in that machine: the workspace, or with an absolute
  * path anywhere else in it; none is opened on the host. It also registers
- * cube's own tools (artifacts) as cubed lists them and forwards their calls
+ * cube's own tools (artifacts, OptChat's memory) as cubed lists them and forwards their calls
  * to cubed, which defines and answers them (packages/server/src/cube-tools.ts).
  *
  * cubed passes the workspace through the environment: a Unix socket that
@@ -47,6 +47,18 @@ async function workspace($: Pick<EngineInterface, 'env' | 'http'>, signal?: Abor
     },
   })
   return { client, token, root, ...(realRoot ? { realRoot } : {}), ...(signal ? { signal } : {}) }
+}
+
+/** Longer than cubed's own wait on the route (MEMORY_PROMPT_WAIT_MS, 5 s),
+ * within a hook's budget (10 s, which a `$.clock` wait counts against). */
+const MEMORY_WAIT_MS = 8000
+
+/** The thread's memory text, or null: none, an error, or no answer within MEMORY_WAIT_MS. Never rejects. */
+function optchatMemory($: Pick<EngineInterface, 'clock'>, scope: ToolScope): Promise<string | null> {
+  const answered = new AbortController()
+  const asked = scope.client.memory(scope.token).catch(() => null).finally(() => answered.abort())
+  const late = $.clock.sleep(MEMORY_WAIT_MS, { signal: answered.signal }).then(() => null, () => null)
+  return Promise.race([asked, late])
 }
 
 export const register: Register = on => {
@@ -108,6 +120,9 @@ export const register: Register = on => {
     const context = await next(e)
     const scope = await workspace($)
     if (!scope) return context
+    // OptChat's memory, asked for first and read beside the instructions;
+    // bounded here too, so a slow or failing answer only leaves it out.
+    const memory = optchatMemory($, scope)
     const sections = [
       `You are working in a cube thread. ${scope.root} (also ${VIRTUAL_ROOT}) is the thread workspace in the thread's own virtual machine: ` +
       'Read, Write and Edit address files there, and Bash runs commands there with the workspace root as its working directory. ' +
@@ -124,7 +139,10 @@ export const register: Register = on => {
     // The thread's skills, installed in its machine; cubed renders the list.
     const skills = await $.env.get('CUBE_SKILLS_PROMPT')
     if (skills) sections.push(skills)
-    return { ...context, blocks: [...context.blocks, { name: 'cubeWorkspace', text: sections.join('\n\n') }] }
+    // Frozen per thread, so it goes before the parts read again from the machine.
+    const text = await memory
+    const blocks = text ? [{ name: 'cubeMemory', text }] : []
+    return { ...context, blocks: [...context.blocks, ...blocks, { name: 'cubeWorkspace', text: sections.join('\n\n') }] }
   })
 
   // Last, once every hook above is in: cube's own tools are registered as

@@ -160,8 +160,8 @@ export class Memory {
   built(l: number, i: number): boolean { return this.nodes.has(key(l, i)); }
   node(l: number, i: number): string | undefined { return this.nodes.get(key(l, i)); }
   private partText(part: Part): string { return this.node(part.l, part.i) ?? PLACEHOLDER; }
-  /** A view line as rendered: `id+n|text` with its newline. */
-  private line(part: Part): string { return `${start(part)}+${2 ** part.l}|${flat(this.partText(part))}`; }
+  /** A view line as rendered: `id+n|text`. */
+  line(part: Part): string { return `${start(part)}+${2 ** part.l}|${flat(this.partText(part))}`; }
   private lineBytes(part: Part): number { return bytes(this.line(part)) + 1; }
   /** A compaction view line as the compactor reads it: no id, with its
    * newline. An unbuilt line is never read, so it counts nothing yet. */
@@ -347,5 +347,11 @@ export class Memory {
     }
     const l = Math.log2(n) - 1, i = (2 * id) / n;
     return [{ l, i }, { l, i: i + 1 }].map(part => this.line(part)).join("\n");
+  }
+
+  /** The `date` tool: when message id was logged, in the host's local time. */
+  date(id: number): string {
+    const message = this.messages[id];
+    return message ? new Date(message.date).toString() : `No message ${id}.`;
   }
 }

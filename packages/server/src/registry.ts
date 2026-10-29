@@ -394,6 +394,8 @@ export class Registry {
           retiring_at INTEGER, retired_at INTEGER, retirement_reason TEXT);
         CREATE TABLE IF NOT EXISTS runner_audit(id INTEGER PRIMARY KEY, runner_id TEXT NOT NULL REFERENCES runner(id),
           action TEXT NOT NULL, at INTEGER NOT NULL, evidence TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS thread_memory(thread_id TEXT PRIMARY KEY REFERENCES thread(id),
+          chat TEXT, length INTEGER, captured_at INTEGER, text TEXT);
         CREATE INDEX IF NOT EXISTS thread_open ON thread(json_extract(data, '$.archived'), runner_id);
         PRAGMA user_version=${REGISTRY_SCHEMA};`);
       this.db.exec(`UPDATE runner SET state='available',error=NULL WHERE state='failed' AND thread_id IS NULL
@@ -690,6 +692,19 @@ export class Registry {
   runnerAudit(id: string): Array<{ action: string; at: number; evidence: unknown }> {
     return (this.db.prepare("SELECT action,at,evidence FROM runner_audit WHERE runner_id=? ORDER BY id").all(id) as Array<{ action: string; at: number; evidence: string }>).map(row => ({ ...row, evidence: JSON.parse(row.evidence) }));
   }
+  /** A thread's OptChat memory (thread-memory.ts): null for a thread
+   * created before memory existed; `text` null until it is captured. */
+  threadMemory(id: string): ThreadMemoryRow | null {
+    const row = this.db.prepare("SELECT chat, length, captured_at, text FROM thread_memory WHERE thread_id=?").get(id) as
+      { chat: string | null; length: number | null; captured_at: number | null; text: string | null } | undefined;
+    return row ? { chat: row.chat, length: row.length, capturedAt: row.captured_at, text: row.text } : null;
+  }
+  /** Freezes a thread's memory once; the first text stays, later ones change
+   * nothing. `chat` null: a fallback frozen without a view of any chat. */
+  captureMemory(id: string, memory: { chat: string | null; length: number | null; capturedAt: number; text: string }): void {
+    this.db.prepare("UPDATE thread_memory SET chat=?, length=?, captured_at=?, text=? WHERE thread_id=? AND text IS NULL")
+      .run(memory.chat, memory.length, memory.capturedAt, memory.text, id);
+  }
   getThread(id: string): Thread | null { return this.parse(this.db.prepare("SELECT data FROM thread WHERE id=?").get(id)); }
   listThreads(): Thread[] { return this.db.prepare("SELECT data FROM thread ORDER BY rowid DESC").all().map(row => this.parse<Thread>(row)!); }
   /** Renames the thread, in one IMMEDIATE transaction that changes only its
@@ -917,6 +932,8 @@ export class Registry {
         workspaceState: "allocating", workspaceError: null, workspaceBase: null,
         vm: { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") }, placement: "provisional", ...queued ? { suspension: queued } : {} } };
       this.db.prepare("INSERT INTO thread VALUES (?,?,?,?)").run(thread.id, projectId, load.id, JSON.stringify(thread));
+      // Every thread created from here on reads OptChat's memory (thread-memory.ts); one created before has no row.
+      this.db.prepare("INSERT INTO thread_memory(thread_id) VALUES (?)").run(thread.id);
       this.syncRunner(load.id);
       this.db.prepare("INSERT INTO creation VALUES (?,?,?,?)").run(projectId, requestId, thread.id, payload);
       this.db.exec("COMMIT");
@@ -947,6 +964,8 @@ export class Registry {
   }
   close(): void { this.db.close(); }
 }
+
+export type ThreadMemoryRow = { chat: string | null; length: number | null; capturedAt: number | null; text: string | null };
 
 const phaseOf = (thread: Thread): ThreadPhase => ({ workspaceState: thread.workspaceState, workspaceError: thread.workspaceError, workspaceBase: thread.workspaceBase,
   ...thread.retry ? { retry: thread.retry } : {}, archived: thread.archived });
