@@ -45,7 +45,7 @@ import { ARTIFACT_LIMITS, ArtifactError, ArtifactStore, isArtifactId } from "./a
 import { Artifacts } from "./artifact-service.ts";
 import { ARTIFACT_GUIDE, artifactTools } from "./artifact-tools.ts";
 import { claudeCodeOnly, piTool, toolsRoute } from "./cube-tools.ts";
-import { ThreadMemory } from "./thread-memory.ts";
+import { MEMORY_PROMPT_WAIT_MS, ThreadMemory } from "./thread-memory.ts";
 import { readMachineText } from "./workspace-env.ts";
 import { githubPulls, type GithubPulls } from "./github-pulls.ts";
 import { Portal, portalSettings, type PortalSettings } from "./portal.ts";
@@ -349,7 +349,7 @@ export async function createCubed(options: {
   hostTools: thread => ({ readFile, key }) => ({
     note: `artifact_write, artifact_read and artifact_edit keep documents for the user (work artifacts). ${ARTIFACT_GUIDE}`,
     tools: threadTools(thread.id, "pi", file => readFile(file, ARTIFACT_LIMITS.body)).map(tool => piTool(tool, key)),
-    ...memory.has(thread.id) ? { memory: () => memory.text(thread.id, "pi") } : {},
+    ...memory.has(thread.id) ? { memory: (signal: AbortSignal | undefined) => memory.text(thread.id, "pi", signal ? { signal } : {}) } : {},
   }) });
   portal = new Portal({ settings: options.portal === undefined ? portalSettings() : options.portal, directory: path.join(options.state, "portal"),
     registry, machines, wake: thread => conversations.wake(thread.id), archiving: id => conversations.archivingNow(id) });
@@ -958,7 +958,7 @@ export async function createCubed(options: {
           token => workspace.lease({ token }).catch(() => null),
           token => threadTools(thread.id, "claude-code", file => readMachineText(workspace, token, file, ARTIFACT_LIMITS.body)));
         // The mod lists the tools at session.start: the memory's capture starts then, before the first prompt asks for it.
-        if (result.status === 200 && parts.length === 5) void memory.text(thread.id, "claude-code").catch(() => {});
+        if (result.status === 200 && parts.length === 5 && request.method === "GET") void memory.text(thread.id, "claude-code").catch(() => {});
         return json(result.body, result.status);
       }
       // A Claude Code thread's memory text (thread-memory.ts), which its mod puts in each prompt's context.
@@ -966,7 +966,10 @@ export async function createCubed(options: {
         const workspace = conversations.workspace(thread.id);
         const refused = await claudeCodeOnly(bearer(), token => workspace.lease({ token }).catch(() => null));
         if (refused) return json(refused.body, refused.status);
-        return json({ text: await memory.text(thread.id, "claude-code") });
+        // Bounded: the prompt goes on without the memory this time rather than wait.
+        const abandoned = new AbortController();
+        response.once("close", () => { if (!response.writableFinished) abandoned.abort(); });
+        return json({ text: await memory.text(thread.id, "claude-code", { waitMs: MEMORY_PROMPT_WAIT_MS, signal: abandoned.signal }) });
       }
       // The thread names the Claude Code mod's ready here, on this socket only.
       const result = await workspaceRoute(conversations.workspace(thread.id), { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body, thread: thread.id });

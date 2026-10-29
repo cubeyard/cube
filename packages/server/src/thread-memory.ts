@@ -10,8 +10,11 @@ import { end, start, UNBUILT, type Memory } from "./optchat-memory.ts";
 import { redactHook } from "./project-hooks.ts";
 import type { Registry } from "./registry.ts";
 
-/** How long a thread's first request, or a memory tool call, waits for OptChat to open (a long log reads for a while). */
+/** How long a Pi thread's request, or a memory tool call, waits for OptChat to open (a long log reads for a while). */
 export const MEMORY_WAIT_MS = 60_000;
+/** How long the Claude Code mod's memory route waits: its prompt goes on
+ * without the memory that time, its workspace block untouched. */
+export const MEMORY_PROMPT_WAIT_MS = 5_000;
 
 /** The chat as a thread reads it: OptChat's identity and its memory. */
 export interface ChatMemory { identity: string; memory: Memory }
@@ -56,50 +59,61 @@ function captured(memory: Memory, at: number, tool: (name: string) => string): s
   return redactHook(`${memoryDoc(tool)}\n${source}${total ? `\n${startView(memory)}` : ""}`);
 }
 
-async function within<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("OptChat is still opening")), ms); });
-  try { return await Promise.race([promise, late]); }
-  finally { clearTimeout(timer); }
-}
-
 const reason = (error: unknown) => redactHook(error instanceof Error ? error.message : String(error));
 
 export class ThreadMemory {
-  private readonly capturing = new Map<string, Promise<string>>();
+  /** The open waited for now, and whether a wait for it already ran out. */
+  private opening: { promise: Promise<ChatMemory>; waited: boolean } | null = null;
   private readonly options: {
     registry: Pick<Registry, "threadMemory" | "captureMemory">;
     /** OptChat, opened if it is not (index.ts `openOptchat`). */
     chat: () => Promise<ChatMemory>;
+    /** The wait for a Pi request and a tool call; MEMORY_WAIT_MS by default. */
     waitMs?: number;
     now?: () => number;
   };
   constructor(options: ThreadMemory["options"]) { this.options = options; }
+
+  /** OptChat, waited for at most `waitMs` and until `signal` aborts (which
+   * rejects with its reason). An open that does not end is waited out once:
+   * while it is still pending, later waits end at once, so a hung open never
+   * holds every request and call for the whole wait again. */
+  private async open(waitMs: number, signal?: AbortSignal): Promise<ChatMemory> {
+    signal?.throwIfAborted();
+    if (!this.opening) {
+      const opening = { promise: this.options.chat(), waited: false };
+      this.opening = opening;
+      const done = () => { if (this.opening === opening) this.opening = null; };
+      opening.promise.then(done, done);
+    }
+    const opening = this.opening;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let aborted: (() => void) | undefined;
+    const ended = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { opening.waited = true; reject(new Error("OptChat is still opening")); }, opening.waited ? 0 : waitMs);
+      aborted = () => reject(signal!.reason ?? new Error("aborted"));
+      signal?.addEventListener("abort", aborted, { once: true });
+    });
+    try { return await Promise.race([opening.promise, ended]); }
+    finally { clearTimeout(timer); if (aborted) signal?.removeEventListener("abort", aborted); }
+  }
 
   /** Whether the thread reads OptChat's memory: it was created since memory exists. */
   has(thread: string): boolean { return this.options.registry.threadMemory(thread) !== null; }
 
   /** The thread's memory text for its prompt, or null without memory. The
    * first one captured stays for the thread's life, across restarts, so its
-   * prompt keeps its cache; while OptChat cannot open it says why, and the
-   * next request tries again. */
-  async text(thread: string, agent: "pi" | "claude-code"): Promise<string | null> {
+   * prompt keeps its cache; until then it says why it cannot be read, and
+   * the next request tries again. An abort rejects. */
+  async text(thread: string, agent: "pi" | "claude-code", wait: { waitMs?: number; signal?: AbortSignal } = {}): Promise<string | null> {
     const row = this.options.registry.threadMemory(thread);
     if (!row) return null;
     if (row.text !== null) return row.text;
-    let capture = this.capturing.get(thread);
-    if (!capture) {
-      capture = this.capture(thread, agent).finally(() => this.capturing.delete(thread));
-      this.capturing.set(thread, capture);
-    }
-    return capture;
-  }
-
-  private async capture(thread: string, agent: "pi" | "claude-code"): Promise<string> {
     const tool = agent === "claude-code" ? (name: string) => `mcp__cube__${name}` : (name: string) => name;
     let chat: ChatMemory;
-    try { chat = await within(this.options.chat(), this.options.waitMs ?? MEMORY_WAIT_MS); }
+    try { chat = await this.open(wait.waitMs ?? this.options.waitMs ?? MEMORY_WAIT_MS, wait.signal); }
     catch (error) {
+      if (wait.signal?.aborted) throw error;
       return `${memoryDoc(tool)}\nThe chat cannot be read right now (${reason(error)}); the next request tries again, and ${tool("memory_zoom")} reads it once OptChat is open.`;
     }
     const at = (this.options.now ?? Date.now)();
@@ -111,10 +125,13 @@ export class ThreadMemory {
    * read the live chat: any message, newer than the thread's view too. */
   tools(thread: string): CubeTool[] {
     if (!this.has(thread)) return [];
-    const read = async (): Promise<Memory | string> => {
+    const read = async (signal?: AbortSignal): Promise<Memory | string> => {
       let chat: ChatMemory;
-      try { chat = await within(this.options.chat(), this.options.waitMs ?? MEMORY_WAIT_MS); }
-      catch (error) { return `chat memory unavailable now: ${reason(error)}`; }
+      try { chat = await this.open(this.options.waitMs ?? MEMORY_WAIT_MS, signal); }
+      catch (error) {
+        if (signal?.aborted) throw error;
+        return `chat memory unavailable now: ${reason(error)}`;
+      }
       const view = this.options.registry.threadMemory(thread)?.chat;
       if (view && view !== chat.identity) return "chat memory unavailable: this thread's view came from an earlier chat, which cubed no longer has";
       return chat.memory;
@@ -126,8 +143,8 @@ export class ThreadMemory {
         description: "Read the user's chat with OptChat (the Chat memory in your context), read only: open line id+n into the two lines of n/2 under it; "
           + "n = 1 gives message id whole, one over 30,000 characters a page from character at. Any message of the chat, newer than your view too.",
         parameters: Type.Object({ id: Type.Integer({ minimum: 0 }), n: Type.Integer({ minimum: 1 }), at: Type.Optional(Type.Integer({ minimum: 0 })) }),
-        run: async input => {
-          const memory = await read();
+        run: async (input, call) => {
+          const memory = await read(call.signal);
           if (typeof memory === "string") return memory;
           const answer = memory.zoom(input.id, input.n, input.at ?? 0);
           return redactHook(answer.startsWith("No line") ? `${answer}${count(memory)}` : answer);
@@ -137,8 +154,8 @@ export class ThreadMemory {
         name: "memory_date",
         description: "The date and time of message id of the user's chat with OptChat (the cube host's local time), read only.",
         parameters: Type.Object({ id: Type.Integer({ minimum: 0 }) }),
-        run: async input => {
-          const memory = await read();
+        run: async (input, call) => {
+          const memory = await read(call.signal);
           return typeof memory === "string" ? memory : memory.date(input.id);
         },
       }),

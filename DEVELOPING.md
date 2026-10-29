@@ -282,6 +282,10 @@ makes one child run `session.start` twice (a mod reload, forced with
 throws; `claude plugin test` fails it; the gate refuses it either way. Neither runs in CI (both
 need `claude`); run them for any change to the mod, `claudeArguments` or
 the Claude Code version.
+`node scripts/check-claude-memory.ts` runs the real `claude` the same way for OptChat's memory: with
+memory, none, a failing, a slow and a hung memory route, the first model
+request keeps the whole workspace block (orientation, AGENTS.md, skills),
+the memory before it when there is one, and the hung one is bounded.
 
 Runner operations are installation-global. `GET /api/runners` returns persisted
 contact and the current global allocation snapshot without private adapter paths;

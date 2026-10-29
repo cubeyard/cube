@@ -150,13 +150,37 @@ The view below is the chat through message 2 (2026-10-29T10:02:00.000Z), capture
   assert.equal(down, `${memoryDoc(name => name)}\nThe chat cannot be read right now (connect a model provider first); the next request tries again, and memory_zoom reads it once OptChat is open.`);
   assert.equal(registry.threadMemory(later.id)!.text, null, "nothing frozen");
   assert.equal(await pi(later.id)("memory_zoom", { id: 0, n: 1 }), "chat memory unavailable now: connect a model provider first");
-  // Still opening (a long log): bounded, then the same.
-  threads = memory(registry, 50);
+  // Still opening, or hung: the wait is bounded and runs out once per open;
+  // later requests and calls answer at once instead of waiting it out again.
+  threads = memory(registry, 300);
   opening = () => new Promise<never>(() => {});
-  const waited = performance.now();
+  opens = 0;
+  let at = performance.now();
   assert.match((await threads.text(later.id, "pi"))!, /cannot be read right now \(OptChat is still opening\)/);
+  const first = performance.now() - at;
+  at = performance.now();
+  assert.match((await threads.text(later.id, "pi"))!, /OptChat is still opening/);
   assert.equal(await pi(later.id)("memory_date", { id: 0 }), "chat memory unavailable now: OptChat is still opening");
-  assert.ok(performance.now() - waited < 2_000, "the wait is bounded");
+  assert.equal(await claude(later.id)("memory_zoom", { id: 0, n: 1 }), "chat memory unavailable now: OptChat is still opening");
+  const again = performance.now() - at;
+  assert.ok(first >= 290 && first < 2_000, `the first wait runs its bound: ${first} ms`);
+  assert.ok(again < 150, `later ones do not wait it out again: ${again} ms`);
+  assert.equal(opens, 1, "one open, shared");
+  console.log(`hung open: first wait ${first.toFixed(0)} ms, the next request and two calls ${again.toFixed(0)} ms`);
+  // A stop aborts the wait at once (a fresh process, so a fresh open): the request rejects, nothing is frozen.
+  threads = memory();
+  const stop = new AbortController();
+  at = performance.now();
+  const waiting = threads.text(later.id, "pi", { signal: stop.signal });
+  setTimeout(() => stop.abort(new Error("stopped by the user")), 50);
+  await assert.rejects(waiting, /stopped by the user/);
+  assert.ok(performance.now() - at < 1_000, "the stop did not wait for OptChat");
+  assert.equal(registry.threadMemory(later.id)!.text, null);
+  // The Claude Code route's own, shorter wait.
+  threads = memory();
+  at = performance.now();
+  assert.match((await threads.text(later.id, "claude-code", { waitMs: 50 }))!, /cannot be read right now \(OptChat is still opening\); the next request tries again, and mcp__cube__memory_zoom/);
+  assert.ok(performance.now() - at < 1_000, "the route's wait is its own");
   threads = memory();
   opening = async () => chat;
   assert.match((await threads.text(later.id, "pi"))!, /through message 3 \(/, "captured once OptChat opens");

@@ -49,6 +49,16 @@ async function workspace($: Pick<EngineInterface, 'env' | 'http'>, signal?: Abor
   return { client, token, root, ...(realRoot ? { realRoot } : {}), ...(signal ? { signal } : {}) }
 }
 
+/** Longer than cubed's own wait on the route (MEMORY_PROMPT_WAIT_MS, 5 s). */
+const MEMORY_WAIT_MS = 8000
+
+/** The thread's memory text, or null: none, an error, or no answer within MEMORY_WAIT_MS. Never rejects. */
+function optchatMemory(scope: ToolScope): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), MEMORY_WAIT_MS) })
+  return Promise.race([scope.client.memory(scope.token).catch(() => null), late]).finally(() => clearTimeout(timer))
+}
+
 export const register: Register = on => {
   // An allow-list, not a deny-list: a tool this mod does not know (an MCP
   // tool, a newer built-in) would run on the cubed host as the cubed user.
@@ -108,6 +118,9 @@ export const register: Register = on => {
     const context = await next(e)
     const scope = await workspace($)
     if (!scope) return context
+    // OptChat's memory, asked for first and read beside the instructions;
+    // bounded here too, so a slow or failing answer only leaves it out.
+    const memory = optchatMemory(scope)
     const sections = [
       `You are working in a cube thread. ${scope.root} (also ${VIRTUAL_ROOT}) is the thread workspace in the thread's own virtual machine: ` +
       'Read, Write and Edit address files there, and Bash runs commands there with the workspace root as its working directory. ' +
@@ -124,9 +137,9 @@ export const register: Register = on => {
     // The thread's skills, installed in its machine; cubed renders the list.
     const skills = await $.env.get('CUBE_SKILLS_PROMPT')
     if (skills) sections.push(skills)
-    // OptChat's memory, frozen per thread, before the parts read again from the machine.
-    const memory = await scope.client.memory(scope.token).catch(() => null)
-    const blocks = memory ? [{ name: 'cubeMemory', text: memory }] : []
+    // Frozen per thread, so it goes before the parts read again from the machine.
+    const text = await memory
+    const blocks = text ? [{ name: 'cubeMemory', text }] : []
     return { ...context, blocks: [...context.blocks, ...blocks, { name: 'cubeWorkspace', text: sections.join('\n\n') }] }
   })
 

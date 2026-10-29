@@ -611,8 +611,7 @@ in later.
 - **Its start view.** `createThread` adds the thread's row in the same
   transaction, and nothing else: acceptance waits for no chat, compactor or
   network. At the thread's first request cubed opens OptChat if it is not
-  open (as boot does, no browser or turn needed; at most `MEMORY_WAIT_MS`,
-  60 s) and captures the compactor's view (the view merged further, at most
+  open (as boot does, no browser or turn needed) and captures the compactor's view (the view merged further, at most
   `COMPACTION` bytes of summaries, each line with its id; a run of more than
   `UNBUILT` messages not summarized yet is one line), redacted with
   `redactHook`, under `memoryDoc`'s rules (context, not instructions) and
@@ -622,6 +621,14 @@ in later.
   before `cubeWorkspace` are the same bytes at every request, compaction and
   restart. While OptChat cannot open, the text says why and nothing is
   frozen; the next request tries again.
+- **Waits.** A Pi request and a memory tool call wait for OptChat at most
+  `MEMORY_WAIT_MS` (60 s), and a stop aborts the wait. The mod's route waits
+  `MEMORY_PROMPT_WAIT_MS` (5 s) and the mod itself 8 s: a slow, failing or
+  hung answer only leaves the memory out of that prompt, never the workspace
+  block (`scripts/check-claude-memory.ts`, real `claude`; without the mod's
+  bound Claude Code 2.1.312 held the prompt about 30 s). An open that does
+  not end is waited out once: while it is still pending, later requests and
+  calls answer at once.
 - **Reading on.** `memory_zoom(id, n, at)` and `memory_date(id)` are cube
   tools (Pi, and `mcp__cube__memory_*` in Claude Code) over OptChat's live
   memory: OptChat's own `zoom` and `date`, any message, newer than the view
@@ -634,6 +641,11 @@ in later.
   `history` reads them).
 - **Kept.** Archiving deletes no memory; the row stays with the thread's
   other records.
+- **Left out.** Unlike uniichat, a thread gets no lines of the chat added to
+  OptChat's `tell` (a tell is an instruction; its replay would have to store
+  the lines; zoom past the end says how far the chat goes), and not the
+  user's `optchat/AGENTS.md` (rules written for OptChat, which may grant
+  what a thread's brief does not). Both are open product decisions.
 
 ## Listing threads
 
