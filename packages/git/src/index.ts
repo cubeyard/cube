@@ -72,6 +72,12 @@ export interface PreparedRepository {
   baseOid: string;
 }
 
+/** Where one prepareRepository's time went, in milliseconds: waiting for
+ * the mirror lock, discovering the remote default (`ls-remote`; 0 for an
+ * explicit base), refreshing the mirror (`remote update` or the first
+ * clone) and resolving the commit. For logs; a stage not reached is absent. */
+export type PrepareTiming = Partial<Record<"lock" | "discover" | "fetch" | "resolve", number>>;
+
 export interface SyncedBranch {
   branch: string;
   oid: string;
@@ -388,20 +394,27 @@ export class GitService {
   /** Capture a fresh remote branch tip, then import its objects. Default-branch
    * discovery must query the remote: fetching does not update a bare mirror's HEAD.
    * The mirror lock covers refresh and resolution, including concurrent threads. */
-  prepareRepository(url: string, requestedBase?: string | null, signal?: AbortSignal): Promise<PreparedRepository> {
+  prepareRepository(url: string, requestedBase?: string | null, signal?: AbortSignal, timing: PrepareTiming = {}): Promise<PreparedRepository> {
     const mirror = this.mirrorPathFor(url);
+    const queued = performance.now();
     // An abort while waiting for the lock starts nothing; one during it stops its git.
     return this.withMirrorLock(mirror, () => {
+      timing.lock = performance.now() - queued;
       signal?.throwIfAborted();
-      return Effect.runPromise(this.prepareRepositoryLocked(url, mirror, requestedBase), signal ? { signal } : undefined);
+      return Effect.runPromise(this.prepareRepositoryLocked(url, mirror, requestedBase, timing), signal ? { signal } : undefined);
     });
   }
 
   private readonly prepareRepositoryLocked = Effect.fn("GitService.prepareRepository")(
-    function*(this: GitService, url: string, mirror: string, requestedBase?: string | null) {
+    function*(this: GitService, url: string, mirror: string, requestedBase: string | null | undefined, timing: PrepareTiming) {
+      let at = performance.now();
+      const lap = (stage: keyof PrepareTiming) => { const now = performance.now(); timing[stage] = now - at; at = now; };
       const target = yield* this.discoverTarget(url, requestedBase);
+      lap("discover");
       yield* this.refreshMirror(url, mirror);
+      lap("fetch");
       const baseOid = yield* this.resolveCommit(mirror, target);
+      lap("resolve");
       return { base: target.base, baseOid };
     },
   );

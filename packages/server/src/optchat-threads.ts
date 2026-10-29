@@ -3,6 +3,7 @@
  * named: the only way onto a host runner), with its own machine. */
 import { agents, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { ThreadWorking, type Conversations, type ThreadReader } from "./conversation.ts";
+import { createLogger } from "./log.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
 import { ARCHIVED_MAX, ARCHIVED_PAGE, THREAD_NOTE, type ObservedThread, type OptThreads } from "./optchat.ts";
 import { describeProjectHooks, findProject, writeProjectHooks } from "./project-hooks.ts";
@@ -12,6 +13,8 @@ import type { MachineSleep } from "./machine-sleep.ts";
 import { failureOf, type ThreadCondition } from "./thread-condition.ts";
 import type { Failure } from "./thread-failure.ts";
 import { threadNameText } from "./thread-names.ts";
+
+const log = createLogger("threads");
 
 /** How long the overview waits for one thread's stored state. */
 const OBSERVE_MS = 2000;
@@ -55,7 +58,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
     async runners() {
       return describeRunners(options.runners());
     },
-    async spawn(task, requestId, signal) {
+    async spawn(task, requestId, signal, batch = new Map()) {
       const project = registry.listProjects().find(candidate => candidate.id === task.project)
         ?? registry.listProjects().find(candidate => candidate.name.toLowerCase() === task.project.toLowerCase());
       if (!project) throw new Error(`no project ${task.project}`);
@@ -75,7 +78,13 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       }
       const text = `${task.task}\n\n${THREAD_NOTE}`;
       const runnerId = task.runner ? registry.namedRunnerId(task.runner) : undefined;
-      const commits = await options.latestCommits(project.id, signal);
+      // A project changed during the call is fetched again at its new revision.
+      const waiting = performance.now();
+      const key = `${project.id}@${project.revision}`;
+      const shared = batch.has(key);
+      if (!shared) batch.set(key, options.latestCommits(project.id, signal));
+      const commits = await batch.get(key)!;
+      const fetched = performance.now();
       // Aborted (OptChat closing or stopped): no thread and no machine start.
       signal?.throwIfAborted();
       let thread = registry.createThread(project.id, requestId, model, text, model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi",
@@ -85,6 +94,8 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       const spawned = text.replace(/\s+/g, " ").slice(0, 80);
       if (title !== spawned && registry.renameThread(thread.id, title, spawned)) thread = { ...thread, title };
       void conversations.activate(thread.id);
+      log.info("thread created", { thread: thread.id, project: project.id, request: requestId, sharedCommits: shared,
+        commitsMs: Math.round(fetched - waiting), registryMs: Math.round(performance.now() - fetched) });
       return { id: thread.id, title: thread.title ?? "untitled" };
     },
     async tell(id, text, requestId) {

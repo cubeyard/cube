@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Models } from "@earendil-works/pi-ai";
-import { GitService, normalizeRepoUrl } from "@cube/git";
+import { GitService, normalizeRepoUrl, type PrepareTiming } from "@cube/git";
 import { NO_HOOKS, projectHooks, projectMachine, Registry, threadAgent, type Project, type ResolvedRepositories, type Runner, type Thread } from "./registry.ts";
 import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { PATIENCE, THREADS_CLOSE_MS } from "./conversation.ts";
@@ -198,6 +198,10 @@ const IMAGE_HEADERS = {
   "content-disposition": "inline",
 } as const;
 
+const spawnLog = createLogger("threads");
+/** Whole milliseconds for a log line; undefined (a stage not reached) is left out. */
+const ms = (value: number | undefined) => value === undefined ? undefined : Math.round(value);
+
 /** A new thread starts at the latest commits, not at the project's last
  * check: each repository's configured branch (or the default branch the
  * remote advertises now) is fetched and resolved again. A failure starts
@@ -208,15 +212,20 @@ export function latestCommitsOf(deps: { registry: Registry; git: SkillGit & Pick
     const project = deps.registry.getProject(projectId);
     if (!project) throw new Error("project not found");
     if (project.status !== "ready") throw new Error("check the project before starting a thread");
+    const started = performance.now();
     const repositories = await Promise.all(project.repositories.map(async repository => {
+      const timing: PrepareTiming = {};
       try {
-        const result = await deps.git.prepareRepository(repository.url, repository.base, signal);
+        const result = await deps.git.prepareRepository(repository.url, repository.base, signal, timing);
+        spawnLog.info("repository fetched", { project: projectId, url: repository.url, lockMs: ms(timing.lock), lsRemoteMs: ms(timing.discover),
+          fetchMs: ms(timing.fetch), resolveMs: ms(timing.resolve) });
         return { url: repository.url, base: result.base, baseOid: result.baseOid };
       } catch (error) {
         signal?.throwIfAborted();
         throw Object.assign(new Error(`fetching the latest ${repository.base ?? "default branch"} of ${repository.url} failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
       }
     }));
+    const fetched = performance.now();
     const saved = deps.skills();
     const skills = await (async () => {
       const installed = await resolveSkills(deps.git, defaultSource(deps.skillSource, saved), saved, signal);
@@ -229,6 +238,7 @@ export function latestCommitsOf(deps: { registry: Registry; git: SkillGit & Pick
       signal?.throwIfAborted();
       throw Object.assign(new Error(`resolving the skills failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
     });
+    spawnLog.info("latest commits", { project: projectId, repositoriesMs: ms(fetched - started), skillsMs: ms(performance.now() - fetched), ms: ms(performance.now() - started) });
     return { projectRevision: project.revision, repositories, skills };
   };
 }
