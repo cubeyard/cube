@@ -50,7 +50,8 @@ async function fakeRunner(nodeId: string, controlKey: SecretKey) {
           seen.hellos += 1;
           await stream.send.writeAll(frame(HelloAnswerSchema, { protocol: 4, runner: { nodeId, kind: Runner_Kind.VM, softwareVersion: "0.1.0",
             lifecycle: Runner_Lifecycle.READY, platform: { os: "linux", arch: "x86_64" }, network: { mode: "loopback" },
-            limits: { maxMachines: 2, maxVcpus: 4, maxMemoryMib: 8192, maxDiskGib: 64 }, capacity: { machinesActive: 0, retained: 0 } } }));
+            limits: { maxMachines: 2, maxVcpus: 4, maxMemoryMib: 8192, maxDiskGib: 64 }, capacity: { machinesActive: 0, retained: 0,
+              diskFreeBytes: 5n << 30n, diskCommittedBytes: 0n, diskReserveBytes: 2n << 30n, diskReserveInodes: 10_000n } } }));
           await stream.send.finish();
         } else if (opened.kind.case === "watch") {
           // berth answers a watch with RESET and keeps the stream for changes.
@@ -172,6 +173,8 @@ try {
   const second = await runnerHealth(runner);
   assert.deepEqual([first.lifecycle, second.maxActiveVms], ["ready", 2]);
   assert.deepEqual(first.limits, { maxVcpus: 4, maxMemoryMiB: 8192, maxDiskGiB: 64 }, "a VM runner's hello limits are its largest machine");
+  assert.deepEqual(first.disk, { freeBytes: 5 * 2 ** 30, freeInodes: null, committedBytes: 0, reserveBytes: 2 * 2 ** 30, reserveInodes: 10_000 },
+    "a committed 0 the runner sent stays 0; inodes it did not send are unknown");
   assert.equal(a.connections.length, before + 1, "the cached session is reused, not reopened");
   const daemonConnection = a.connections.at(-1)!;
   await within(new Promise<void>(resolve => { const poll = () => daemonConnection.watches ? resolve() : setTimeout(poll, 10); poll(); }), 5000, "the session watched");

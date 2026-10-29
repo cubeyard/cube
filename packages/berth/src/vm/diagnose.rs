@@ -940,7 +940,8 @@ impl VmRunner {
             "os": std::env::consts::OS,
             "network": self.options.network,
             "directory": directory.display().to_string(),
-            "freeBytes": free.as_ref().ok(),
+            "freeBytes": free.as_ref().ok().map(|space| space.bytes),
+            "freeInodes": free.as_ref().ok().and_then(|space| space.inodes),
             "freeBytesError": free.as_ref().err().map(|e| e.to_string()),
             "keel": {
                 "dir": self.options.keel.display().to_string(),

@@ -12,18 +12,45 @@ pub(super) const OWNER: &str = "thread-1";
 pub(super) const BUILD: &str = "00000000000000b1";
 pub(super) const USER: &str = "00000000000000c1";
 
-pub(super) fn plenty(_: &Path) -> std::io::Result<u64> {
-    Ok(u64::MAX)
+/// `bytes` free, and no inode count (as btrfs).
+pub(super) fn free(bytes: u64) -> std::io::Result<disk::Space> {
+    Ok(disk::Space {
+        bytes,
+        inodes: None,
+    })
+}
+
+thread_local! {
+    /// What [`settable`] measures on this test's thread (a `tokio::test`
+    /// runs the runner on it); None: the measurement fails.
+    static FREE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+pub(super) fn set_free(bytes: Option<u64>) {
+    FREE.with(|free| free.set(bytes));
+}
+
+pub(super) fn settable(_: &Path) -> std::io::Result<disk::Space> {
+    FREE.with(|free| free.get())
+        .map_or_else(|| Err(std::io::Error::other("statvfs: not here")), free)
+}
+
+pub(super) fn events(runner: &VmRunner, id: &str) -> String {
+    std::fs::read_to_string(runner.machine_dir(id).join("events.log")).unwrap_or_default()
+}
+
+pub(super) fn plenty(_: &Path) -> std::io::Result<disk::Space> {
+    free(u64::MAX)
 }
 
 /// 3 GiB free: a 1 GiB template disk needs 1 + 2 (B-8 C2).
-fn three_gib(_: &Path) -> std::io::Result<u64> {
-    Ok(3 << 30)
+fn three_gib(_: &Path) -> std::io::Result<disk::Space> {
+    free(3 << 30)
 }
 
 /// A byte short of that.
-fn short_of_three_gib(_: &Path) -> std::io::Result<u64> {
-    Ok((3 << 30) - 1)
+fn short_of_three_gib(_: &Path) -> std::io::Result<disk::Space> {
+    free((3 << 30) - 1)
 }
 
 fn diff_id(n: u8) -> DiffId {
@@ -134,7 +161,7 @@ impl Lab {
         &self,
         image: image::Reference,
         cache_bytes: u64,
-        free_space: fn(&Path) -> std::io::Result<u64>,
+        free_space: fn(&Path) -> std::io::Result<disk::Space>,
     ) -> Arc<VmRunner> {
         self.runner_with(image, cache_bytes, free_space, None, 8)
             .await
@@ -145,7 +172,7 @@ impl Lab {
         &self,
         image: image::Reference,
         cache_bytes: u64,
-        free_space: fn(&Path) -> std::io::Result<u64>,
+        free_space: fn(&Path) -> std::io::Result<disk::Space>,
         suspend_disk_margin_gib: Option<u64>,
         max_machines: u32,
     ) -> Arc<VmRunner> {
@@ -298,9 +325,9 @@ async fn a_build_machine_is_made_from_the_base_and_needs_room_for_its_disk() {
         (Code::ResourceExhausted, "disk_space".into())
     );
     assert!(
-        refused
-            .message
-            .contains("its size + 2 GiB = 3221225472 bytes"),
+        refused.message.starts_with(
+            "a build machine's template disk needs 1.0 GiB and a reserve of 2.0 GiB free in "
+        ),
         "{}",
         refused.message
     );
@@ -316,18 +343,177 @@ async fn a_build_machine_is_made_from_the_base_and_needs_room_for_its_disk() {
         .await
         .unwrap_err();
     assert_eq!(reason(refused), (Code::InvalidArgument, "build".into()));
-    assert!(build_room(3 << 30, 1).is_ok() && build_room((3 << 30) - 1, 1).is_err());
-    // 1 × the disk + 2 GiB, not B-7's 3 × + 2: a 32 GiB disk needs 34 GiB.
-    assert!(build_room(34 << 30, 32).is_ok());
-    let short = build_room((34 << 30) - 1, 32).unwrap_err();
+}
+
+#[tokio::test]
+async fn a_new_machine_needs_the_reserve_and_nothing_is_made_until_there_is_room() {
+    let lab = Lab::new();
+    let runner = lab
+        .runner(pull(lab.path(), 1, &[1]), 16 << 30, settable)
+        .await;
+    set_free(Some(disk::RESERVE - 1));
+    let refused = runner
+        .create(proto::MachineCreate {
+            r#ref: Some(reference(USER)),
+            fence: fence(1),
+            spec: Some(proto::MachineSpec {
+                source: Some(base()),
+                ..Default::default()
+            }),
+        })
+        .await
+        .unwrap_err();
     assert_eq!(
-        reason(short.clone()),
+        reason(refused.clone()),
         (Code::ResourceExhausted, "disk_space".into())
     );
     assert!(
-        short.message.contains(&format!("= {} bytes", 34u64 << 30)),
+        refused
+            .message
+            .starts_with("a new machine needs 0.0 GiB and a reserve of 2.0 GiB free in "),
         "{}",
-        short.message
+        refused.message
+    );
+    assert!(!runner.machine_dir(USER).exists());
+    assert!(!runner.state.lock().unwrap().machines.contains_key(USER));
+    // Room again: the same call goes through.
+    set_free(Some(disk::RESERVE));
+    create(&runner, USER, base(), false).await.unwrap();
+    let log = events(&runner, USER);
+    let line = log.lines().find(|line| line.contains(" disk: ")).unwrap();
+    assert!(
+        line.contains(&format!(
+            "disk: op=create outcome=ok path={} free_before={} inodes_before=unknown committed_estimate=0 need=0 reserve={} free_after={} ms=",
+            lab.path().display(),
+            disk::RESERVE,
+            disk::RESERVE,
+            disk::RESERVE
+        )),
+        "{line}"
+    );
+}
+
+#[tokio::test]
+async fn an_unmeasured_disk_lets_a_new_machine_through_but_not_a_build() {
+    let lab = Lab::new();
+    let runner = lab
+        .runner(pull(lab.path(), 1, &[1]), 16 << 30, settable)
+        .await;
+    set_free(None);
+    create(&runner, USER, base(), false).await.unwrap();
+    assert!(
+        events(&runner, USER).contains("op=create outcome=ok path=/")
+            && events(&runner, USER)
+                .contains("free_before=unknown inodes_before=unknown committed_estimate=0"),
+        "{}",
+        events(&runner, USER)
+    );
+    let refused = create(&runner, BUILD, base(), true).await.unwrap_err();
+    assert_eq!(reason(refused), (Code::Internal, "io".into()));
+    assert!(!runner.machine_dir(BUILD).join(template::DISK).exists());
+    // Unknown in the report too, never zero.
+    let capacity = runner
+        .runner(&runner.state.lock().unwrap())
+        .capacity
+        .unwrap();
+    assert_eq!(
+        (capacity.disk_free_bytes, capacity.disk_free_inodes),
+        (None, None)
+    );
+}
+
+/// A build's sparse template disk may still be filled: what it may still
+/// take is not free for the next build, and stops being counted as it is
+/// written.
+#[tokio::test]
+async fn a_build_counts_what_other_builds_may_still_write() {
+    const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
+    const SECOND: &str = "00000000000000b2";
+    let lab = Lab::new();
+    let runner = lab
+        .runner(pull(lab.path(), 1, &[1]), 16 << 30, settable)
+        .await;
+    set_free(Some(3 * GIB));
+    create(&runner, BUILD, base(), true).await.unwrap();
+    let vdd = runner.machine_dir(BUILD).join(template::DISK);
+    let (allocated, apparent) = disk::size(&vdd).unwrap();
+    assert_eq!((allocated, apparent), (0, GIB));
+    // An ordinary machine needs only the reserve, but not out of the build's
+    // 1 GiB still to come: 3 GiB − 1 free leaves a byte short of 2 GiB.
+    set_free(Some(3 * GIB - 1));
+    let refused = create(&runner, USER, base(), false).await.unwrap_err();
+    assert_eq!(
+        reason(refused),
+        (Code::ResourceExhausted, "disk_space".into())
+    );
+    assert!(!runner.state.lock().unwrap().machines.contains_key(USER));
+    set_free(Some(3 * GIB));
+    create(&runner, USER, base(), false).await.unwrap();
+    assert!(
+        events(&runner, USER).contains(&format!(
+            "op=create outcome=ok path={} free_before={} inodes_before=unknown committed_estimate={GIB} need=0 reserve={}",
+            lab.path().display(),
+            3 * GIB,
+            2 * GIB
+        )),
+        "{}",
+        events(&runner, USER)
+    );
+    // The second needs 1 + 2 GiB besides the first's 1 GiB still to come.
+    set_free(Some(4 * GIB - MIB));
+    let capacity = runner
+        .runner(&runner.state.lock().unwrap())
+        .capacity
+        .unwrap();
+    assert_eq!(
+        (
+            capacity.disk_free_bytes,
+            capacity.disk_free_inodes,
+            capacity.disk_committed_bytes,
+            capacity.disk_reserve_bytes,
+            capacity.disk_reserve_inodes,
+        ),
+        (
+            Some(4 * GIB - MIB),
+            None,
+            Some(GIB),
+            Some(2 * GIB),
+            Some(10_000)
+        )
+    );
+    let refused = create(&runner, SECOND, base(), true).await.unwrap_err();
+    assert_eq!(
+        reason(refused),
+        (Code::ResourceExhausted, "disk_space".into())
+    );
+    assert!(!runner.machine_dir(SECOND).join(template::DISK).exists());
+    assert!(!runner.state.lock().unwrap().machines.contains_key(SECOND));
+    // The first build writes 2 MiB of its template: 1 MiB short no more.
+    {
+        use std::os::unix::fs::FileExt;
+        let file = std::fs::OpenOptions::new().write(true).open(&vdd).unwrap();
+        file.write_all_at(&vec![1u8; 2 * MIB as usize], 0).unwrap();
+        file.sync_all().unwrap();
+    }
+    let written = disk::size(&vdd).unwrap().0;
+    assert!(written >= 2 * MIB, "{written}");
+    let capacity = runner
+        .runner(&runner.state.lock().unwrap())
+        .capacity
+        .unwrap();
+    assert_eq!(capacity.disk_committed_bytes, Some(GIB - written));
+    create(&runner, SECOND, base(), true).await.unwrap();
+    assert!(
+        events(&runner, SECOND).contains(&format!(
+            "op=build outcome=ok path={} free_before={} inodes_before=unknown committed_estimate={} need={GIB} reserve={}",
+            lab.path().display(),
+            4 * GIB - MIB,
+            GIB - written,
+            2 * GIB
+        )),
+        "{}",
+        events(&runner, SECOND)
     );
 }
 

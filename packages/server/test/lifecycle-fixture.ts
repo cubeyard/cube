@@ -49,6 +49,8 @@ export class FakeBerth {
   readonly busy = new Set<string>();
   /** How many deletes fail before one succeeds. */
   failDeletes = 0;
+  /** berth's disk room refusal (`RESOURCE_EXHAUSTED disk_space`) for every new machine, while set. */
+  diskShort: string | null = null;
   readonly phases = new Map<string, Phase>();
   readonly events: RunnerEvent[] = [];
   /** Every request the runner answered or refused, by op and machine (`machineGet:<vm>`). */
@@ -103,6 +105,8 @@ export class FakeBerth {
         if (phase !== undefined) return this.machine(vm);
         const fails = this.failCreates.get(vm);
         if (fails) { this.events.push({ op, vm, from: null, to: null }); throw new RunnerError("INTERNAL", "", fails); }
+        // berth's disk room (disk.rs): refused before anything of the machine is made.
+        if (this.diskShort) { this.events.push({ op, vm, from: null, to: null }); throw new RunnerError("RESOURCE_EXHAUSTED", "disk_space", this.diskShort); }
         if (this.holding() >= this.slots) { this.events.push({ op, vm, from: null, to: null }); this.refuse("RESOURCE_EXHAUSTED", "the runner hosts as many machines as it may"); }
         const guest = this.guestOf(vm);
         const hooks = path.join(guest.root, "hooks");
