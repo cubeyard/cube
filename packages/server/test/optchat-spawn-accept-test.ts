@@ -167,7 +167,8 @@ try {
   const report = (await chat.pending()).find(item => item.requestId === `report:${m2Id}:start`)?.text
     ?? await chat.agent.conversation.commit(async tx => {
       const submission = await tx.submissionByRequest(chat.agent.conversation.id, `report:${m2Id}:start`);
-      const entry = submission?.type === "input" && submission.entry !== undefined ? await tx.entry(submission.entry) : undefined;
+      // A turn's input, or written into its batch beside another waiting message.
+      const entry = submission?.entry !== undefined ? await tx.entry(submission.entry) : undefined;
       const content = entry?.model?.[0]?.content;
       return typeof content === "string" ? content : Array.isArray(content) ? content.map(part => part.type === "text" ? part.text : "").join("") : "";
     }, context);

@@ -16,7 +16,7 @@ export const COMPACTION_LOW = 16_000;
 export const UNBUILT = 8;
 export const CAP = 30_000;
 
-export type MessageKind = "user" | "talk" | "tool" | "echo" | "note";
+export type MessageKind = "user" | "work" | "talk" | "tool" | "echo" | "note";
 export type LogMessage = { kind: MessageKind; text: string; date: number };
 /** A view part: tree node `(l, i)`, covering messages `[i·2^l, (i+1)·2^l)`. */
 export type Part = { l: number; i: number };
