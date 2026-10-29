@@ -171,8 +171,8 @@ Only what is still out after the grace is cut off; each such call is
 logged and counted (above): a model call is not sent again on its own
 (below), a tool call is run again once. A tool cut off returns at once, so Pi's join is
 not held by work that ignores the abort; that work may still go on and is
-not undone (`spawn` stops at its next task and its git fetch stops on the
-abort, so no thread starts after it; a `tell` or `archive` under way
+not undone (`spawn` stops at its next task, so no thread is accepted after
+it; a `tell` or `archive` under way
 finishes in cubed). So every tool is read-only or keyed (`TOOL_REPLAY`):
 
 | tool | a second run |
@@ -564,7 +564,8 @@ either:
   thread started from the UI is not the chat's and is not shown; a thread
   the chat started needs no further step to appear.
 - **Where a note stands.** A thread's at its newest row among the rows
-  shown that started it (`[id] started in <project>…`) or told it and was
+  shown that started it (`[id] accepted in <project>…`, or `[id] started
+  in <project>…` in calls made before spawn answered on acceptance) or told it and was
   taken (`sent to [id]`, `queued for [id]` while it works, `[id] already
   has it` on a replay), once: each tell it took brings it back beside that
   tell. A tell refused (`not sent`), dropped, failed or still running moves
@@ -933,13 +934,20 @@ failure) nor recovery rounds send its request again; then archives it.
   asks for it. A protocol-3 runner (`cube-runner`, retired) takes none.
 - A spawned thread runs on the host's preferred model unless the task names
   one; `claude · max` models start Claude Code threads.
-- One `spawn` call fetches each project's latest commits once (at its
-  revision), and all of that call's threads in the project start there. A
-  new call fetches again. A failed fetch fails that project's tasks in the
-  call and no others. The answer does not wait for machines to start.
-  cubed's log has where the time went: `threads repository fetched` (lock
-  wait, `ls-remote`, fetch, resolve), `threads latest commits`, `threads
-  thread created` and `optchat spawn answered`.
+- `spawn` answers once each task's thread is accepted: checked against the
+  project, model and runner and stored with its place in the queue, all on
+  this host (`[id] accepted in <project>: <title>`). A task refused there is
+  `task <n> (<project>) not started: <why>`. Everything else happens as the
+  thread starts, in the background: once its turn in the queue comes, its
+  first step (`commits`) fetches the latest commits of the project revision
+  it was accepted at and resolves its skills. Threads of one project revision
+  starting together share one fetch; a later start fetches again. A fetch
+  that fails is a failed start, retried like a machine's, and reported to
+  the chat once it lasts (`[id] failed to start …`). cubed's log has where
+  the time went: `threads thread accepted` (`validateMs`, `createMs`) and
+  `optchat spawn answered` for the call; `threads repository fetched` (lock
+  wait, `ls-remote`, fetch, resolve), `threads latest commits` and
+  `threads commits resolved` (`ms`, `sinceAcceptedMs`) for the start.
 
 Routes: `GET /api/optchat/history`, `GET /api/optchat/stream` (the thread event
 model), `POST /api/optchat/prompt {text, requestId, images?}` (`images`: ids of

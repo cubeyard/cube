@@ -409,7 +409,7 @@ const received = async (verb: string, from: number, ms = 10_000) => {
 const fresh = (thread: Thread) => registry.getThread(thread.id)!;
 const idle = () => Promise.resolve(null);
 try {
-  const thread = registry.createThread("p", "t1", { provider: "faux", id: "faux" }, "hi", "pi", undefined, { runnerId: NODE });
+  const thread = registry.createThread("p", "t1", { provider: "faux", id: "faux" }, "hi", "pi", { runnerId: NODE });
   await vms.start(fresh(thread));
   registry.applyPhase(thread.id, { type: "ready", base: null });
   assert.ok(vms.running(fresh(thread)));
@@ -591,7 +591,7 @@ try {
   await vms.release(fresh(thread), false).catch(() => {});
   registry.applyPhase(thread.id, { type: "releaseBegan" });
   registry.applyPhase(thread.id, { type: "released" });
-  const second = registry.createThread("p", "t2", { provider: "faux", id: "faux" }, "hi", "pi", undefined, { runnerId: NODE });
+  const second = registry.createThread("p", "t2", { provider: "faux", id: "faux" }, "hi", "pi", { runnerId: NODE });
   machines.clear();
   await vms.start(fresh(second));
   registry.applyPhase(second.id, { type: "ready", base: null });
@@ -645,7 +645,7 @@ try {
   console.log("ok: B-207-2: after a cubed restart a running machine is not suspended before the guest's longest command and the grace");
 
   // B-207-3: one suspend per runner at a time.
-  const third = registry.createThread("p", "t3", { provider: "faux", id: "faux" }, "hi", "pi", undefined, { runnerId: NODE });
+  const third = registry.createThread("p", "t3", { provider: "faux", id: "faux" }, "hi", "pi", { runnerId: NODE });
   await vms.start(fresh(third));
   registry.applyPhase(third.id, { type: "ready", base: null });
   await delay(IDLE * 2);

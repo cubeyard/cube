@@ -51,16 +51,16 @@ try {
   // berth-vm answered once; the page's own check fails, so that report is stale.
   registry.recordRunnerProbe("berth-vm", { health: { ...health, softwareVersion: "0.1.0", maxActiveVms: 2 } });
   const model = { provider: "fixture", id: "m" };
-  for (const id of ["one", "two"]) registry.createThread("p", id, model, id, "pi", undefined, { runnerId: "pool-a" });
-  registry.createThread("p", "named", model, "named", "pi", undefined, { runnerId: "berth-vm" });
+  for (const id of ["one", "two"]) registry.createThread("p", id, model, id, "pi", { runnerId: "pool-a" });
+  registry.createThread("p", "named", model, "named", "pi", { runnerId: "berth-vm" });
   // A thread old-a took before protocol 3 was retired, still open: its row says protocol 4 while it is made.
   const sqlite = new DatabaseSync(path.join(host.state, "registry.sqlite"));
   sqlite.prepare("UPDATE runner SET data=json_set(data,'$.protocol',4,'$.kind','vm') WHERE id='old-a'").run();
-  registry.createThread("p", "legacy", model, "legacy", "pi", undefined, { runnerId: "old-a" });
+  registry.createThread("p", "legacy", model, "legacy", "pi", { runnerId: "old-a" });
   sqlite.prepare("UPDATE runner SET data=json_remove(data,'$.protocol','$.kind') WHERE id='old-a'").run();
   // An archived thread of old-b whose disk was kept: it stays on that host.
   sqlite.prepare("UPDATE runner SET data=json_set(data,'$.protocol',4,'$.kind','vm') WHERE id='old-b'").run();
-  const kept = registry.createThread("p", "kept", model, "kept", "pi", undefined, { runnerId: "old-b" });
+  const kept = registry.createThread("p", "kept", model, "kept", "pi", { runnerId: "old-b" });
   sqlite.prepare("UPDATE runner SET data=json_remove(data,'$.protocol','$.kind') WHERE id='old-b'").run();
   sqlite.close();
   registry.updateThreadVm(kept.id, { retain: true, retainReason: "dirty: work not pushed" });
@@ -71,7 +71,7 @@ try {
   // that cannot be read: its usage is unknown.
   const broken = { id: "broken", name: "broken", status: "ready" as const, error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] };
   registry.saveProject(broken);
-  const unread = registry.createThread("broken", "unread", { provider: "fixture", id: "m" }, "unread", "pi", undefined, { runnerId: "pool-a" });
+  const unread = registry.createThread("broken", "unread", { provider: "fixture", id: "m" }, "unread", "pi", { runnerId: "pool-a" });
   fs.mkdirSync(path.join(host.state, "threads", unread.id), { recursive: true });
   fs.writeFileSync(path.join(host.state, "threads", unread.id, "pi.sqlite"), "not a store");
   registry.applyPhase(unread.id, { type: "releaseBegan" });

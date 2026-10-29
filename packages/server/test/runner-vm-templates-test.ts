@@ -231,7 +231,7 @@ const vms = machinesFor();
 const route = registryCredentialRoute({ registry, threads, socket: () => null });
 const runnerAdmission = { nodeId: NODE, admission: { configPath: path.join(root, "vm1.json"), configHash: "vm1" } };
 let requests = 0;
-const newThread = (projectId: string, runnerId = NODE) => registry.createThread(projectId, `t${++requests}`, model, "hi", "pi", undefined, { runnerId });
+const newThread = (projectId: string, runnerId = NODE) => registry.createThread(projectId, `t${++requests}`, model, "hi", "pi", { runnerId });
 const steps = (thread: Thread) => registry.getThread(thread.id)!.vm!.steps!.map(step => `${step.name}:${step.state}`);
 const step = (thread: Thread, name: string) => registry.getThread(thread.id)!.vm!.steps!.findLast(item => item.name === name)!;
 const created = (thread: Thread) => of("machineCreate").filter(call => call.value.ref.id === registry.getThread(thread.id)!.vm!.vmId);

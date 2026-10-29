@@ -101,11 +101,7 @@ try {
   assert.equal(project.status, "ready");
   const threads = cubeThreads({ registry: app.registry, conversations: app.conversations,
     catalog: async () => [{ provider: faux.getModel().provider, id: faux.getModel().id }],
-    runners: () => observeRunners(app.registry, 60_000),
-    latestCommits: async () => {
-      const current = app.registry.getProject(project.id)!;
-      return { projectRevision: current.revision, repositories: current.repositories.map(r => ({ url: r.url, base: r.resolvedBase!, baseOid: r.baseOid! })) };
-    } });
+    runners: () => observeRunners(app.registry, 60_000) });
   const until = async (what: string, check: () => boolean, ms = 60000) => {
     const deadline = Date.now() + ms;
     while (!check()) {

@@ -34,7 +34,7 @@ function world(name: string, runners: Array<{ name: string; max: number }>, prot
   };
   runners.forEach(spec => enroll(spec));
   let requests = 0;
-  const create = (runnerId?: string) => registry.createThread("p", `r${++requests}`, model, "hello", "pi", undefined, runnerId ? { runnerId } : undefined);
+  const create = (runnerId?: string) => registry.createThread("p", `r${++requests}`, model, "hello", "pi", runnerId ? { runnerId } : undefined);
   const get = (id: string) => registry.getThread(id)!;
   return { registry, enroll, create, get };
 }
@@ -126,7 +126,7 @@ try {
     try {
       app.registry.enrollRunner({ nodeId: "node-a", threadId: "a", environmentId: 1, configPath: "/private/a.json", configHash: "a", protocol: 4, kind: "vm" });
       app.registry.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
-      const thread = app.registry.createThread("p", "view", { provider: faux.getModel().provider, id: faux.getModel().id }, "hello", "pi", undefined, { runnerId: "a" });
+      const thread = app.registry.createThread("p", "view", { provider: faux.getModel().provider, id: faux.getModel().id }, "hello", "pi", { runnerId: "a" });
       await app.conversations.activate(thread.id);
       assert.equal(app.conversations.error(thread.id), null, "a wait is not a failure");
       assert.match(app.conversations.waiting(thread.id)!, /node-a does not answer/);
@@ -136,7 +136,7 @@ try {
       const listed = (await (await fetch(`http://127.0.0.1:${port}/api/threads`)).json()).threads[0];
       assert.deepEqual([listed.state, listed.error], ["starting", null]);
       assert.match(listed.waiting, /waiting for a runner/);
-      const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [], runners: () => { throw new Error("unused"); }, latestCommits: () => { throw new Error("unused"); } });
+      const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [], runners: () => { throw new Error("unused"); } });
       assert.match(await adapter.describe([thread.id]), /starting its machine, waiting for a runner: node-a does not answer/);
       assert.equal((await adapter.observe!([thread.id])).get(thread.id)!.state, "waiting for a runner");
       assert.match(adapter.startFailure(thread.id)?.failure ?? "", /waiting for a runner/, "cubed tells OptChat a start not made yet");

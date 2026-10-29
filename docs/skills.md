@@ -98,8 +98,9 @@ sequenceDiagram
   H->>H: open the agent; its prompt lists name, description, SKILL.md path
 ```
 
-- Skills resolve beside the repositories' latest commits. A source that
-  cannot be read fails the start, like an unreachable repository; one the
+- Skills resolve beside the repositories' latest commits, in the thread's
+  first startup step (`commits`). A source that cannot be read fails that
+  start, like an unreachable repository, and cube tries again; one the
   machine cannot fetch fails its preparation step, which cube tries again. A
   later settings change never changes a started thread.
 - Every winning skill is installed as `/home/agent/.cube/skills/<name>/`, so

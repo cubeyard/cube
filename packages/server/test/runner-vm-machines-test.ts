@@ -224,7 +224,7 @@ const sizes = { vcpus: 2, memoryMiB: 2048, diskGiB: 32 };
 const machinesFor = (withPolicy: boolean) => new RunnerMachines({ registry, threads, session: () => session, sizes, ...(withPolicy ? { policy } : {}) });
 const of = (verb: string) => calls.filter(call => call.verb === verb);
 try {
-  const thread = registry.createThread("p", "r1", { provider: "faux", id: "faux" }, "hi", "pi", undefined, { runnerId: NODE });
+  const thread = registry.createThread("p", "r1", { provider: "faux", id: "faux" }, "hi", "pi", { runnerId: NODE });
   assert.equal(thread.pinned, true, "started on the runner by name");
   const placeholder = thread.vm!.placeholders.github!;
   assert.match(placeholder, /^cube_ph_github_/);
@@ -379,13 +379,13 @@ try {
 
   // A host runner keeps its hooks' logs on that host: no startup log.
   registry.enrollRunner({ nodeId: "node-host1", threadId: "node-host1", environmentId: 2, configPath: path.join(root, "host1.json"), configHash: "host1", maxActiveVms: 1, protocol: 4, kind: "host" });
-  const onHost = registry.createThread("p", "r3", { provider: "faux", id: "faux" }, "hi", "pi", undefined, { runnerId: "node-host1" });
+  const onHost = registry.createThread("p", "r3", { provider: "faux", id: "faux" }, "hi", "pi", { runnerId: "node-host1" });
   assert.equal(await vms.startupLog(onHost), null);
   console.log("ok: a host runner's thread has no startup log in cubed");
 
   // A guest that never gets ready: the boot step and the diagnosis say why, bounded.
   agentSays = { ready: false, reason: `the image has no sudo ${"!".repeat(2000)}`, version: `v${"9".repeat(200)}`, build: "not-a-sha", bootId: "b".repeat(100), hooks: {} };
-  const stuck = registry.createThread("p", "r2", { provider: "faux", id: "faux" }, "hi", "pi", undefined, { runnerId: NODE });
+  const stuck = registry.createThread("p", "r2", { provider: "faux", id: "faux" }, "hi", "pi", { runnerId: NODE });
   const waiting = new RunnerMachines({ registry, threads, session: () => session, sizes, policy, readyTimeoutMs: 1500 });
   await assert.rejects(waiting.start(stuck), (error: Error) => /did not get ready in 2 s: the image has no sudo !+$/.test(error.message));
   const boot = registry.getThread(stuck.id)!.vm!.steps!.find(step => step.name === "boot")!;
@@ -539,7 +539,7 @@ try {
     const quiet = { nodeId: "node-quiet", hello: async () => { throw new RunnerError("UNAVAILABLE", "", "no answer"); } } as unknown as RunnerSession;
     const machines = new RunnerMachines({ registry: waiting, threads: path.join(root, "waiting-threads"), session: () => quiet, sizes, policy });
     const pooled = waiting.createThread("p", "pooled", { provider: "faux", id: "faux" }, "hi");
-    const named = waiting.createThread("p", "named", { provider: "faux", id: "faux" }, "hi", "pi", undefined, { runnerId: "quiet" });
+    const named = waiting.createThread("p", "named", { provider: "faux", id: "faux" }, "hi", "pi", { runnerId: "quiet" });
     assert.deepEqual([pooled.runnerId, pooled.pinned, named.pinned], ["quiet", undefined, true]);
     await assert.rejects(machines.start(pooled), (error: Error) => error instanceof RunnerWait
       && error.message === "waiting for runner node-quiet: it does not answer; this thread was placed on it and stays there");

@@ -558,7 +558,7 @@ try {
   try {
     berth.down = true;
     // A host runner is never in the pool: a thread is started on it by name.
-    const a = registry.createThread(project.id, "create-host", model, "hello", "pi", undefined, { runnerId: RUNNER });
+    const a = registry.createThread(project.id, "create-host", model, "hello", "pi", { runnerId: RUNNER });
     await cubed.conversations.activate(a.id);
     for (let minutes = 0; minutes < 150; minutes += 10) { clock.now += 10 * 60_000; await cubed.conversations.boot(); }
     assert.deepEqual([fresh(a.id).retry, cubed.conversations.error(a.id)], [undefined, null], "a host runner's thread waits");

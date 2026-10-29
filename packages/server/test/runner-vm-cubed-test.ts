@@ -283,11 +283,7 @@ try {
   assert.equal(ready.status, "ready", ready.error ?? "");
   const threads = cubeThreads({ registry: app.registry, conversations: app.conversations,
     catalog: async () => [{ provider: faux.getModel().provider, id: faux.getModel().id }],
-    runners: () => observeRunners(app.registry, 60_000),
-    latestCommits: async () => {
-      const current = app.registry.getProject(project.id)!;
-      return { projectRevision: current.revision, repositories: current.repositories.map(r => ({ url: r.url, base: r.resolvedBase!, baseOid: r.baseOid! })) };
-    } });
+    runners: () => observeRunners(app.registry, 60_000) });
 
   // spawn naming berth vm: the template build, then boot, boot documents, policy, checkout and hooks
   // a deployment's gateway is up before any thread starts; the credential route refuses, not waits, while it starts (F-Ca-2)

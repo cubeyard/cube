@@ -94,7 +94,7 @@ OFFLINE_TESTS=(
   packages/server/test/optchat-cache-path-test.ts
   packages/server/test/optchat-close-test.ts
   packages/server/test/optchat-replay-test.ts
-  packages/server/test/optchat-spawn-batch-test.ts
+  packages/server/test/optchat-spawn-accept-test.ts
   packages/server/test/optchat-view-fault-test.ts
   packages/server/test/optchat-history-test.ts
   packages/server/test/thread-history-test.ts

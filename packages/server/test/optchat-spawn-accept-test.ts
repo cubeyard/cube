@@ -1,58 +1,53 @@
-/** OptChat's spawn with cubed's own pieces (real registry, latestCommitsOf,
- * cubeThreads and a real GitService over local upstreams) and a git whose
- * network commands take DELAY_MS, as GitHub's do: one call's tasks fetch a
- * project's latest commits once, not once per task, and a new call fetches
- * again. The first two take the runner's two slots and the rest queue in
- * the order asked; a replay fetches nothing; a failed fetch fails that
- * project's tasks only. The timing lines say where the time went. Only the
- * threads' machines are fakes (activate is recorded, never run). */
+/** OptChat's spawn answers once its threads are accepted, with cubed's own
+ * pieces (createCubed, its Conversations, latestCommitsOf over a real
+ * GitService, cubeThreads and OptChat's store) on local guests:
+ *
+ *   - five tasks in a project whose upstream holds its answer (real git
+ *     over an ssh stand-in that waits while a hold file exists) are
+ *     answered while it still holds: two take the runner's two slots and
+ *     share one fetch, three queue in the order asked and fetch nothing;
+ *   - a replay answers the same threads and starts nothing;
+ *   - one call mixing a working project on a named runner, a project whose
+ *     upstream is gone, an unknown project and an unknown model: the bad
+ *     tasks are refused one by one, the rest accepted; the working ones
+ *     start, the gone ones fail in their commits step;
+ *   - a start failure that lasts reaches the chat once, also after the
+ *     chat is opened again.
+ *
+ * The timing lines say where the time went. Disposable state. */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import type { Harness, TaskId, ToolExecutionApi, ToolRegistration } from "@earendil-works/pi-durable";
-import { defaultRunner, GitService, type ProcessRunner } from "@cube/git";
-import { Artifacts } from "../src/artifact-service.ts";
-import { ArtifactStore } from "../src/artifacts.ts";
-import type { GithubPulls } from "../src/github-pulls.ts";
-import { latestCommitsOf } from "../src/index.ts";
-import { OptChat, type OptThreads } from "../src/optchat.ts";
+import { createCubed } from "../src/index.ts";
+import { OptChat } from "../src/optchat.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
-import { Registry } from "../src/registry.ts";
+import { LocalMachines } from "./local-guest.ts";
 
-const DELAY_MS = 100;
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-spawn-batch-"));
-const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+const context = BACKGROUND_CONTEXT;
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-spawn-accept-"));
+const sh = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 function upstream(name: string) {
-  const dir = path.join(root, `${name}.git`);
-  sh(root, "init", "-q", "--bare", "-b", "main", dir);
-  const work = path.join(root, `${name}-work`);
-  sh(root, "clone", "-q", dir, work);
-  sh(work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "one");
-  sh(work, "push", "-q", "origin", "HEAD:main");
-  return { url: dir, work, head: () => sh(dir, "rev-parse", "main") };
+  const dir = path.join(root, name);
+  fs.mkdirSync(dir);
+  sh(dir, "init", "-q", "--initial-branch=main");
+  sh(dir, "commit", "-q", "--allow-empty", "-m", "one");
+  return { url: dir, head: () => sh(dir, "rev-parse", "main") };
 }
 const a = upstream("a"), b = upstream("b");
 
-// The network commands, each held DELAY_MS; how many run on one mirror at once.
-const network: string[] = [];
-let running = 0, most = 0;
-const runner: ProcessRunner = async (file, args, opts) => {
-  const command = args[4] === "--git-dir" ? args[6]! : args[4]!;
-  if (command === "ls-remote" || command === "remote" || command === "clone") {
-    network.push(command);
-    most = Math.max(most, ++running);
-    try {
-      await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-      return await defaultRunner(file, args, opts);
-    } finally { running--; }
-  }
-  return defaultRunner(file, args, opts);
-};
-const git = new GitService(path.join(root, "repos"), runner);
+const hold = path.join(root, "hold");
+const sshLog = path.join(root, "ssh.log");
+const ssh = path.join(root, "ssh");
+fs.writeFileSync(ssh, `#!/bin/sh\necho "$2" >> "${sshLog}"\nwhile [ -e "${hold}" ]; do sleep 0.02; done\nexec sh -c "$2"\n`, { mode: 0o755 });
+process.env.GIT_SSH_COMMAND = ssh;
+process.env.GIT_SSH_VARIANT = "simple";
+const connections = () => fs.existsSync(sshLog) ? fs.readFileSync(sshLog, "utf8").split("\n").filter(Boolean).length : 0;
 
 // cubed's log lines, read back for their timing fields.
 const lines: string[] = [];
@@ -61,101 +56,125 @@ process.stdout.write = ((chunk: string | Uint8Array, ...rest: never[]) => {
   lines.push(String(chunk));
   return write(chunk, ...rest);
 }) as typeof process.stdout.write;
-const field = (line: string, key: string) => Number(new RegExp(` ${key}=(\\d+)`).exec(line)?.[1] ?? NaN);
+const field = (line: string | undefined, key: string) => Number(new RegExp(` ${key}=(\\d+)`).exec(line ?? "")?.[1] ?? NaN);
 
-const registry = new Registry(path.join(root, "registry.sqlite"));
-registry.enrollRunner({ nodeId: "node-a", threadId: "a", environmentId: 1, configPath: "/private/a.json", configHash: "a", maxActiveVms: 2, protocol: 4, kind: "vm" });
-const project = (id: string, url: string) => registry.saveProject({ id, name: id, status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [
-  { id: `${id}-r`, projectId: id, position: 0, url, base: null, checkoutName: id, status: "ready", error: null, resolvedBase: "main", baseOid: "0".repeat(40), checkedAt: 1 }] });
-project("a", a.url);
-project("b", b.url);
-project("gone", path.join(root, "missing.git"));
-// The project check that made the projects ready cloned their mirrors.
-await git.prepareRepository(a.url);
-await git.prepareRepository(b.url);
-
-const activated: string[] = [];
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
-faux.setResponses(Array.from({ length: 10 }, () => fauxAssistantMessage("ok")));
+faux.setResponses(Array.from({ length: 100 }, () => fauxAssistantMessage("noted")));
 const models = createModels();
 models.setProvider(faux.provider);
-const threads = {
-  ...cubeThreads({ registry, conversations: { activate: async (id: string) => { activated.push(id); } } as never,
-    catalog: async () => [{ provider: "faux", id: "faux-1" }] as never, runners: () => ({ runners: [] }) as never,
-    latestCommits: latestCommitsOf({ registry, git, skills: () => ({ sources: [], disabled: [] }), skillSource: null }) }),
-  // The watcher OptChat sets on each thread reads nothing here.
-  events: async () => null, startFailure: () => null, onStartFailure: () => () => {}, onRunFeed: () => () => {},
-} as unknown as OptThreads;
-const store = new ArtifactStore(path.join(root, "artifacts.sqlite"));
-const artifacts = new Artifacts({ store, registry, github: {} as GithubPulls, optchat: async () => null, submit: async () => {} });
-const chat = await OptChat.open({ directory: path.join(root, "chat"), models, model: async () => ({ provider: faux.getModel().provider, id: faux.getModel().id }), threads, artifacts });
-try {
+const model = { provider: faux.getModel().provider, id: faux.getModel().id };
+const app = await createCubed({ state: path.join(root, "state"), models, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null });
+app.registry.enrollRunner({ nodeId: "node-pool", threadId: "pool", environmentId: 1, configPath: "/private/pool.json", configHash: "pool", maxActiveVms: 2, protocol: 4, kind: "vm" });
+app.registry.enrollRunner({ nodeId: "node-named", threadId: "named", environmentId: 2, configPath: "/private/named.json", configHash: "named", maxActiveVms: 10, protocol: 4, kind: "host" });
+const project = (id: string, url: string) => app.registry.saveProject({ id, name: id, status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [
+  { id: `${id}-r`, projectId: id, position: 0, url, base: null, checkoutName: id, status: "ready", error: null, resolvedBase: "main", baseOid: "0".repeat(40), checkedAt: 1 }] });
+project("a", `ssh://stand-in${a.url}`);
+project("b", b.url);
+project("gone", path.join(root, "missing"));
+
+const threads = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [model], runners: () => ({ runners: [] }) as never });
+const chatAt = () => OptChat.open({ directory: path.join(root, "chat"), models, model: async () => model, threads, limits: { node: 64, retryMs: 50, watchMs: 20, startGraceMs: 200 } });
+let chat = await chatAt();
+const thread = (short: string) => app.registry.listThreads().find(each => each.id.startsWith(short))!;
+const commitSteps = (short: string) => (thread(short).vm?.steps ?? []).filter(step => step.name === "commits").map(step => step.state);
+async function until(what: string, check: () => boolean | Promise<boolean>, ms = 30_000) {
+  for (const deadline = Date.now() + ms; !(await check()); await delay(25)) assert.ok(Date.now() < deadline, what);
+}
+/** The chat's messages under `requestId`: waiting or placed. */
+async function sent(requestId: string): Promise<number> {
+  const pending = (await chat.pending()).filter(item => item.requestId === requestId).length;
+  const placed = await chat.agent.conversation.commit(async tx => !!await tx.submissionByRequest(chat.agent.conversation.id, requestId), context);
+  return pending + (placed ? 1 : 0);
+}
+let calls = 0;
+const call = async (tasks: Array<{ project: string; task: string; model?: string; runner?: string }>, callId = `call-${++calls}`) => {
   const inner = chat as unknown as { harness: Harness; extension(): { tools: ToolRegistration[] } };
   const spawn = inner.extension().tools.find(tool => tool.name === "spawn")!;
-  const conversationId = chat.agent.conversation.id;
-  let task = 0;
-  const call = async (tasks: Array<{ project: string; task: string }>, callId = `call-${++task}`) => {
-    network.length = 0;
-    lines.length = 0;
-    const api = { taskId: task as TaskId, callId, conversationId,
-      commit: (change: (tx: never) => unknown, context: typeof BACKGROUND_CONTEXT) => inner.harness.commit(async tx => change(tx as never), context) } as unknown as ToolExecutionApi;
-    const started = performance.now();
-    const result = await spawn.execute({ tasks } as never, api, BACKGROUND_CONTEXT) as { output: Array<{ text: string }> };
-    return { text: result.output.map(part => part.text).join(""), ms: performance.now() - started };
-  };
-  const ids = (text: string) => [...text.matchAll(/^\[([0-9a-f]{8})\] started/gm)].map(match => match[1]!);
-  const thread = (short: string) => registry.listThreads().find(each => each.id.startsWith(short))!;
+  const api = { taskId: calls as TaskId, callId, conversationId: chat.agent.conversation.id,
+    commit: (change: (tx: never) => unknown, at: typeof context) => inner.harness.commit(async tx => change(tx as never), at) } as unknown as ToolExecutionApi;
+  lines.length = 0;
+  const started = performance.now();
+  const result = await spawn.execute({ tasks } as never, api, context) as { output: Array<{ text: string }> };
+  return { text: result.output.map(part => part.text).join(""), ms: performance.now() - started };
+};
+const ids = (text: string) => [...text.matchAll(/^\[([0-9a-f]{8})\] accepted in /gm)].map(match => match[1]!);
 
-  // Five tasks in one project, as on Oct 29: one ls-remote and one fetch.
+try {
+  // Five tasks while upstream holds its answer.
+  fs.writeFileSync(hold, "");
   const five = await call(Array.from({ length: 5 }, (_, k) => ({ project: "a", task: `task ${k + 1}` })), "five");
-  const started = ids(five.text);
-  assert.equal(started.length, 5, five.text);
-  assert.deepEqual(network, ["ls-remote", "remote"], "one call fetches a project once, not once per task");
-  assert.deepEqual(started.map(id => thread(id).allocation.repositories[0]!.baseOid), Array(5).fill(a.head()), "every thread starts at the commit fetched");
-  assert.deepEqual(activated.map(id => id.slice(0, 8)), started, "each thread's start is set off, in order, not awaited");
-  assert.deepEqual(started.map(id => !!thread(id).vm?.suspension), [false, false, true, true, true], "two take the runner's slots, three queue in the order asked");
-  const fetched = lines.filter(line => line.includes("threads repository fetched"));
-  assert.equal(fetched.length, 1);
-  for (const key of ["lockMs", "lsRemoteMs", "fetchMs", "resolveMs"]) assert.ok(Number.isFinite(field(fetched[0]!, key)), `repository fetched has ${key}`);
-  assert.ok(field(fetched[0]!, "lsRemoteMs") >= DELAY_MS - 5 && field(fetched[0]!, "fetchMs") >= DELAY_MS - 5, "the network stages carry the delay");
-  const created = lines.filter(line => line.includes("threads thread created"));
-  assert.deepEqual(created.map(line => / sharedCommits=(\w+)/.exec(line)?.[1]), ["false", "true", "true", "true", "true"]);
-  assert.match(lines.find(line => line.includes("optchat spawn answered"))!, / tasks=5 fetches=1 commitMs=\d+ ms=\d+/);
-  console.log(`spawn of 5 tasks, ${DELAY_MS} ms per network git command: ${Math.round(five.ms)} ms, network ${JSON.stringify(network)}`);
+  const accepted = ids(five.text);
+  assert.deepEqual(five.text.split("\n").map(line => line.replace(/^\[[0-9a-f]{8}\]/, "[id]")), [1, 2, 3, 4, 5].map(k => `[id] accepted in a: task ${k}`));
+  assert.ok(fs.existsSync(hold), "answered while upstream still holds");
+  assert.deepEqual(accepted.map(id => !!thread(id).vm?.suspension), [false, false, true, true, true], "two take the runner's slots, three queue in the order asked");
+  const since = accepted.slice(2).map(id => { const sleep = thread(id).vm!.suspension!; assert.equal(sleep.state, "queued"); return sleep.since; });
+  assert.deepEqual(since, [...since].sort((x, y) => x - y), "queued in the order asked");
+  for (const id of accepted) assert.equal(await chat.started(thread(id).id), true, "the chat records each thread");
+  const answered = lines.find(line => line.includes("optchat spawn answered"));
+  assert.match(answered ?? "", / tasks=5 commitMs=\d+ ms=\d+/);
+  const acceptedLines = lines.filter(line => line.includes("threads thread accepted"));
+  assert.equal(acceptedLines.length, 5);
+  for (const line of acceptedLines) for (const key of ["validateMs", "createMs"]) assert.ok(Number.isFinite(field(line, key)), `thread accepted has ${key}`);
+  await until("the two with slots wait in their commits step", () => accepted.slice(0, 2).every(id => commitSteps(id)[0] === "running"));
+  await delay(300);
+  assert.deepEqual(accepted.map(commitSteps), [["running"], ["running"], [], [], []], "the queued three have not fetched");
+  assert.equal(connections(), 1, "one connection under way, shared by both starts");
+  console.log(`spawn of 5 tasks while upstream held its answer: ${Math.round(five.ms)} ms (tool), spawn answered ms=${field(answered, "ms")}`);
 
-  // A replay of the call finds its threads and fetches nothing.
+  // A replay answers the same threads and starts nothing more.
   const replay = await call(Array.from({ length: 5 }, (_, k) => ({ project: "a", task: `task ${k + 1}` })), "five");
-  assert.deepEqual(ids(replay.text), started);
-  assert.deepEqual(network, [], "a replay fetches nothing");
+  assert.deepEqual(ids(replay.text), accepted);
+  assert.equal(app.registry.listThreads().length, 5);
 
-  // A new call fetches again: it starts at what was pushed since.
-  sh(a.work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "two");
-  sh(a.work, "push", "-q", "origin", "HEAD:main");
-  const again = await call([{ project: "a", task: "later 1" }, { project: "a", task: "later 2" }]);
-  assert.deepEqual(network, ["ls-remote", "remote"]);
-  assert.deepEqual(ids(again.text).map(id => thread(id).allocation.repositories[0]!.baseOid), [a.head(), a.head()], "a new call starts at the new commit");
+  fs.rmSync(hold);
+  await until("the two resolve their commits", () => accepted.slice(0, 2).every(id => commitSteps(id).at(-1) === "ok"));
+  assert.deepEqual(accepted.slice(0, 2).map(id => thread(id).allocation.repositories[0]!.baseOid), [a.head(), a.head()]);
+  assert.equal(connections(), 2, "ls-remote and fetch, once for both");
+  const resolvedLines = lines.filter(line => line.includes("threads commits resolved"));
+  assert.equal(resolvedLines.length, 2);
+  for (const line of resolvedLines) for (const key of ["ms", "sinceAcceptedMs"]) assert.ok(Number.isFinite(field(line, key)), `commits resolved has ${key}`);
+  for (const key of ["repositoriesMs", "skillsMs", "ms"]) assert.ok(Number.isFinite(field(lines.find(line => line.includes("threads latest commits")), key)), `latest commits has ${key}`);
+  console.log("ok: five tasks are accepted while upstream holds; two starts share one fetch; three queue and fetch nothing yet; a replay answers the same");
 
-  // Projects in one call: each fetched once; a failed fetch fails its own tasks, once.
-  const mixed = await call([{ project: "a", task: "m1" }, { project: "gone", task: "m2" }, { project: "b", task: "m3" }, { project: "gone", task: "m4" }, { project: "a", task: "m5" }]);
-  assert.deepEqual(network.filter(command => command === "ls-remote").length, 3, "a, gone and b: one discovery each");
-  assert.equal(ids(mixed.text).length, 3, mixed.text);
-  assert.equal(mixed.text.match(/not started: fetching the latest default branch of .*missing\.git failed, so no thread was started/g)?.length, 2, mixed.text);
+  // One call, mixed tasks.
+  const mixed = await call([
+    { project: "b", task: "m1", runner: "node-named" }, { project: "gone", task: "m2", runner: "node-named" }, { project: "nowhere", task: "m3" },
+    { project: "b", task: "m4", model: "faux/none" }, { project: "b", task: "m5", runner: "node-named" }]);
+  const mixedLines = mixed.text.split("\n");
+  assert.equal(mixedLines.length, 5, mixed.text);
+  assert.match(mixedLines[2]!, /^task 3 \(nowhere\) not started: no project nowhere$/);
+  assert.match(mixedLines[3]!, /^task 4 \(b\) not started: model faux\/none unavailable; selectable models: /);
+  const [m1, m2, m5] = ids(mixed.text);
+  assert.deepEqual([m1, m2, m5].map(id => thread(id!).runnerId), ["named", "named", "named"], "on the runner named");
+  assert.deepEqual([m1, m2, m5].map(id => thread(id!).pinned), [true, true, true]);
+  for (const id of [m1!, m5!]) await until(`${id} becomes ready`, () => thread(id).workspaceState === "available");
+  assert.deepEqual([m1, m5].map(id => thread(id!).allocation.repositories[0]!.baseOid), [b.head(), b.head()], "started at the latest commit");
+  await until("the gone project's start fails", () => thread(m2!).workspaceState === "failed");
+  assert.match(thread(m2!).workspaceError!, /^workspace allocation failed: fetching the latest default branch of .*missing failed: /);
+  assert.deepEqual(commitSteps(m2!), ["failed"]);
+  console.log("ok: a mixed call refuses its bad tasks one by one; its working threads start on the runner named, its gone project's fails in the commits step");
 
-  // A project check (or the UI's new thread) on the same mirror waits its
-  // turn behind a spawn's fetch: one network git at a time, and its lock wait is logged.
-  most = 0;
-  const spawning = call([{ project: "a", task: "c1" }, { project: "a", task: "c2" }]);
-  while (!(network as string[]).includes("ls-remote")) await new Promise(resolve => setTimeout(resolve, 1));
-  const checked = latestCommitsOf({ registry, git, skills: () => ({ sources: [], disabled: [] }), skillSource: null })("a");
-  await Promise.all([spawning, checked]);
-  assert.equal(most, 1, "one network git at a time on a mirror");
-  const waits = lines.filter(line => line.includes("threads repository fetched")).map(line => field(line, "lockMs"));
-  assert.equal(waits.length, 2);
-  assert.ok(waits[1]! >= DELAY_MS - 5, `the second waited for the first's fetch: ${waits.join(", ")} ms`);
-  console.log("spawn batch ok: one fetch per project per call, fresh per call, replay fetches nothing, failures per project, FIFO queue and lock kept");
-} finally {
-  process.stdout.write = write;
+  // The lasting failure reaches the chat once, and not again from a reopened chat.
+  const m2Id = thread(m2!).id;
+  await until("the failure is reported", async () => await sent(`report:${m2Id}:start`) === 1);
   await chat.close();
-  registry.close();
+  chat = await chatAt();
+  await delay(600);
+  assert.equal(await sent(`report:${m2Id}:start`), 1, "once, also after the chat opened again");
+  const report = (await chat.pending()).find(item => item.requestId === `report:${m2Id}:start`)?.text
+    ?? await chat.agent.conversation.commit(async tx => {
+      const submission = await tx.submissionByRequest(chat.agent.conversation.id, `report:${m2Id}:start`);
+      const entry = submission?.type === "input" && submission.entry !== undefined ? await tx.entry(submission.entry) : undefined;
+      const content = entry?.model?.[0]?.content;
+      return typeof content === "string" ? content : Array.isArray(content) ? content.map(part => part.type === "text" ? part.text : "").join("") : "";
+    }, context);
+  assert.match(report, new RegExp(`^\\[${m2}\\] failed to start for \\d+ s; cubed keeps retrying: workspace allocation failed: fetching the latest default branch of .*missing failed: `));
+  console.log("spawn accept ok: answered on acceptance while upstream holds, starts in the background, FIFO, runner named, refusals per task, failures reported once");
+} finally {
+  fs.rmSync(hold, { force: true });
+  process.stdout.write = write;
+  await until("no start is under way at the close", () => app.registry.listThreads().every(each => !app.conversations.starting(each.id))).catch(() => {});
+  await chat.close();
+  await app.close();
   fs.rmSync(root, { recursive: true, force: true });
 }

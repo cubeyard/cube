@@ -80,7 +80,7 @@ const models = createModels();
 models.setProvider(faux.provider);
 const machines = new LocalMachines(path.join(root, "machines"));
 const app = await createCubed({ state: path.join(root, "state"), models, machines, claude: null, gateway: null });
-app.registry.enrollRunner({ nodeId: "node-hooks", environmentId: 1, threadId: "runner-hooks", configPath: "/private/hooks.json", configHash: "hooks", maxActiveVms: 2, protocol: 4, kind: "vm" });
+app.registry.enrollRunner({ nodeId: "node-hooks", environmentId: 1, threadId: "runner-hooks", configPath: "/private/hooks.json", configHash: "hooks", maxActiveVms: 4, protocol: 4, kind: "vm" });
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
 const address = app.server.address();
 assert(address && typeof address === "object");
@@ -263,10 +263,12 @@ try {
   assert.ok(!fs.existsSync(path.join(otherGuest.root, "home", "order")), "demo's hooks never ran there");
 
   // A message of the user steered into a run a report started counts from
-  // the next step on: spawn holds its tool round on the slow repository.
+  // the next step on: a tell to the thread just spawned holds its tool
+  // round while the thread's start fetches the slow repository.
   fs.rmSync(go);
   let steeredIn = false;
   script = [call("spawn", { tasks: [{ project: "slow", task: "hold" }] }, "slow-spawn"),
+    () => call("tell", { id: /^\[([0-9a-f]{8})\] accepted in slow/.exec(results.get("slow-spawn") ?? "")?.[1] ?? "none", message: "hold on" }, "slow-tell")(),
     () => {
       // The same run: the spawn's result, then the user's message steered in after it.
       const spawned = lastMessages.findIndex(message => message.role === "toolResult" && message.toolCallId === "slow-spawn");
@@ -275,7 +277,7 @@ try {
     }, () => fauxAssistantMessage("saved")];
   assert.equal((await post("/api/optchat/prompt", { text: "[abcdef12] ended its turn", requestId: "report:abcdef12-0000-4000-8000-000000000001:run-3" })).status, 200);
   turns++;
-  await until(() => fs.existsSync(held), Boolean, "the spawn's tool round is under way");
+  await until(() => fs.existsSync(held) && script.length === 2, Boolean, "the tell's tool round waits on the spawned thread's start");
   assert.equal((await post("/api/optchat/prompt", { text: "set demo's pre-resume to echo steered", requestId: `chat-${++turns}` })).status, 200);
   // The steer lands within milliseconds; the round is held well past it.
   await delay(2000);
@@ -291,7 +293,7 @@ try {
   const checking = post(`/api/projects/${slow.id}/check`, {});
   await until(() => fs.existsSync(held), Boolean, "the check is under way");
   const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [],
-    runners: () => observeRunners(app.registry, 60_000), latestCommits: () => { throw new Error("unused"); } });
+    runners: () => observeRunners(app.registry, 60_000) });
   assert.match(await adapter.writeHooks!("slow", { preSetup: "echo during-check" }, "check-1"), /^saved preSetup/);
   fs.writeFileSync(go, "");
   const checked = await (await checking).json();

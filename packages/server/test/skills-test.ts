@@ -289,7 +289,7 @@ try {
   const machines = new LocalMachines(path.join(root, "machines"));
   const app = await createCubed({ state: path.join(root, "state"), models, machines, claude: null, gateway: null, skillSource: defaults });
   try {
-    for (const index of [0, 1]) {
+    for (const index of [0, 1, 2]) {
       app.registry.enrollRunner({ nodeId: `node-${index}`, threadId: `runner-${index}`, environmentId: index + 1, configPath: `/private/runner-${index}.json`, configHash: `hash-${index}`, protocol: 4, kind: "vm" });
     }
     await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
@@ -361,21 +361,25 @@ try {
     assert.match(String(step.detail), new RegExp(`installing the thread's skills failed \\(exit 3\\): .*fetching skills from ${defaults.url} at ${defaults.commit} failed`));
     console.log("ok: skills the machine cannot fetch fail its preparation with the source and commit");
 
-    // 7. Through cubed: an oversized source fails the start with 502 and
-    //    allocates no thread; a credential URL is not saved.
-    const before = app.registry.listThreads().length;
+    // 7. Through cubed: an oversized source fails the accepted thread's
+    //    start in its commits step, before any machine; a credential URL is
+    //    not saved.
     Object.assign(defaults, oversized);
     const refusedStart = await call("/api/threads", "POST", { projectId: project.id, requestId: "three", text: "hello", model });
-    assert.equal(refusedStart.status, 502);
-    assert.match(String(refusedStart.body.error), /resolving the skills failed, so no thread was started: .*over the machine's 8192/);
-    assert.equal(app.registry.listThreads().length, before, "no thread was allocated");
+    assert.equal(refusedStart.status, 200, "accepted: the skills are the start's");
+    const refusedId = String(refusedStart.body.id);
+    for (const deadline = Date.now() + 30_000; app.registry.getThread(refusedId)!.workspaceState !== "failed"; await delay(25)) assert.ok(Date.now() < deadline, "the start fails");
+    const commits = app.registry.getThread(refusedId)!.vm!.steps!.filter(entry => entry.name === "commits");
+    assert.deepEqual(commits.map(entry => entry.state), ["failed"]);
+    assert.match(String(commits[0]!.detail), /^resolving the skills failed: .*over the machine's 8192/);
+    assert.equal(app.registry.getThread(refusedId)!.vm!.steps!.some(entry => entry.name === "prepare"), false, "no machine was prepared");
     const settingsFile = path.join(root, "state", "settings.json");
     const savedBefore = fs.readFileSync(settingsFile, "utf8");
     const leaked = await call("/api/settings/skills", "PUT", { sources: [{ url: "https://me:ghp_secret@github.com/me/skills", commit: oversized.commit }] });
     assert.equal(leaked.status, 400);
     assert.doesNotMatch(JSON.stringify(leaked.body), /ghp_secret/);
     assert.equal(fs.readFileSync(settingsFile, "utf8"), savedBefore, "nothing is saved");
-    console.log("ok: through cubed, an oversized source allocates no thread and a credential URL is neither saved nor echoed");
+    console.log("ok: through cubed, an oversized source fails the thread's start before any machine and a credential URL is neither saved nor echoed");
   } finally {
     app.server.closeAllConnections();
     await app.close();
@@ -440,7 +444,10 @@ try {
     const start = async (requestId: string) => {
       const started = await cubed.call("/api/threads", "POST", { projectId: project.id, requestId, text: "hello", model: updateModel });
       assert.equal(started.status, 200, JSON.stringify(started.body));
-      return String(started.body.id);
+      const id = String(started.body.id);
+      // Its skills are resolved as it starts, with its commits.
+      for (const deadline = Date.now() + 30_000; cubed.app.registry.getThread(id)!.allocation.latest; await delay(25)) assert.ok(Date.now() < deadline, "the thread resolves its skills");
+      return id;
     };
     const pins = (id: string) => cubed.app.registry.getThread(id)!.allocation.skills!.skills.map(entry => [entry.name, entry.commit]);
     const before = await start("before");

@@ -118,10 +118,10 @@ export interface Runner extends NodeBinding {
 export interface WorkspaceRepository {
   url: string; base: string; baseOid: string; checkoutName: string;
 }
-/** Each of a project's repositories as resolved against its upstream for
- * one new thread (`git.prepareRepository`), in the project's order. */
+/** Each of a thread's repositories as resolved against its upstream at its
+ * first start (`git.prepareRepository`), in the project's order. */
 export interface ResolvedRepositories {
-  projectRevision: number; repositories: Array<{ url: string; base: string; baseOid: string }>;
+  repositories: Array<{ url: string; base: string; baseOid: string }>;
   /** The skills resolved for the same thread (skills.ts). */
   skills?: ThreadSkills;
 }
@@ -134,7 +134,15 @@ export interface WorkspaceAllocation {
   /** The skills resolved when the thread was created, installed in its
    * machine; absent for threads created before skills. */
   skills?: ThreadSkills;
+  /** Present from the thread's acceptance until its start resolves its
+   * repositories' latest commits and its skills (`resolveCommits`): each
+   * repository's configured branch (null: the remote's default branch), in
+   * order. Until then `repositories` holds the last check's commits, and
+   * nothing checks them out. */
+  latest?: { bases: Array<string | null> };
 }
+/** An accepted thread's allocation whose start has not resolved it yet. */
+export type UnresolvedAllocation = WorkspaceAllocation & Required<Pick<WorkspaceAllocation, "latest">>;
 export type RunnerAllocationState = "available" | "allocating" | "busy" | "releasing" | "failed" | "retiring" | "retired";
 export type RunnerContactStatus = "unknown" | "reachable" | "unreachable" | "stale" | "retired";
 export interface RunnerStatus {
@@ -225,7 +233,7 @@ export const STEP_LOG_BYTES = 4096;
  * build machine; `boot`: the thread's machine boots until its guest answers;
  * `prepare`: checkout, pre-setup and setup (one try per `attempt`);
  * `resume`: the resume hooks. */
-export type StartupStepName = "lookup" | "build-boot" | "build-prepare" | "build-seal" | "build-publish" | "boot" | "prepare" | "resume";
+export type StartupStepName = "commits" | "lookup" | "build-boot" | "build-prepare" | "build-seal" | "build-publish" | "boot" | "prepare" | "resume";
 export interface StartupStep {
   name: StartupStepName;
   /** The preparation try (its command's key is `cube:provision:<attempt>`). */
@@ -814,12 +822,12 @@ export class Registry {
     const row = this.db.prepare("SELECT thread_id FROM creation WHERE project_id=? AND request_id=?").get(projectId, requestId);
     return row ? this.getThread(String(row.thread_id)) : null;
   }
-  /** A replayed request returns the thread it made, with the commits it was
-   * pinned to then. A new thread is pinned to `resolved`, the commits just
-   * resolved against upstream for it; without it (fixtures only) to the
-   * commits of the project's last check. */
-  createThread(projectId: string, requestId: string, model: ModelSelection, text: string, agent: ThreadAgent = "pi", resolved?: ResolvedRepositories,
-    options: { runnerId?: string } = {}): Thread {
+  /** Accepts a thread: a replayed request returns the thread it made. With
+   * `latest` (every product caller) its start resolves its repositories'
+   * latest commits, of the project revision it was accepted at; without it
+   * (fixtures only) it is pinned to the commits of the project's last check. */
+  createThread(projectId: string, requestId: string, model: ModelSelection, text: string, agent: ThreadAgent = "pi",
+    options: { runnerId?: string; latest?: boolean } = {}): Thread {
     const payload = JSON.stringify({ model, text });
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -833,15 +841,7 @@ export class Registry {
       const project = this.getProject(projectId);
       if (!project) throw new Error("project not found");
       if (project.status !== "ready") throw new Error("check the project before starting a thread");
-      let repositories = allocationRepositories(project, true);
-      if (resolved) {
-        if (resolved.projectRevision !== project.revision || resolved.repositories.length !== repositories.length
-          || resolved.repositories.some((repository, index) => repository.url !== repositories[index].url)) {
-          throw new Error("the project changed while its latest commits were fetched; start the thread again");
-        }
-        repositories = repositories.map((repository, index) => ({ ...repository,
-          base: resolved.repositories[index].base, baseOid: resolved.repositories[index].baseOid }));
-      }
+      const repositories = allocationRepositories(project, true);
       // Counting open threads and inserting this one in one IMMEDIATE
       // transaction is the slot reservation: no two creations, in this or
       // another process, can take a runner's last slot. With no slot free
@@ -864,7 +864,7 @@ export class Registry {
         title: text.replace(/\s+/g, " ").slice(0, 80) || null, name: newThreadName(id, taken), model, agent, archived: false, createdAt: Date.now(),
         allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks },
           ...(project.machine && Object.keys(project.machine).length ? { machine: { ...project.machine } } : {}),
-          ...(resolved?.skills ? { skills: resolved.skills } : {}) },
+          ...(options.latest ? { latest: { bases: project.repositories.map(repository => repository.base) } } : {}) },
         workspaceState: "allocating", workspaceError: null, workspaceBase: null,
         vm: { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") }, placement: "provisional", ...queued ? { suspension: queued } : {} } };
       this.db.prepare("INSERT INTO thread VALUES (?,?,?,?)").run(thread.id, projectId, load.id, JSON.stringify(thread));
@@ -872,6 +872,28 @@ export class Registry {
       this.db.prepare("INSERT INTO creation VALUES (?,?,?,?)").run(projectId, requestId, thread.id, payload);
       this.db.exec("COMMIT");
       return thread;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  /** Pins a thread to the commits and skills its start resolved, once: a
+   * thread already resolved (another activation, or one before a restart)
+   * keeps what it has, and the thread as stored is returned. */
+  resolveCommits(threadId: string, resolved: ResolvedRepositories): Thread {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const thread = this.getThread(threadId);
+      if (!thread) throw new Error("thread not found");
+      if (!thread.allocation.latest) { this.db.exec("COMMIT"); return thread; }
+      const { latest: _, ...allocation } = thread.allocation;
+      if (resolved.repositories.length !== allocation.repositories.length
+        || resolved.repositories.some((repository, index) => repository.url !== allocation.repositories[index]!.url)) {
+        throw new Error("the resolved repositories are not the thread's");
+      }
+      const written: Thread = { ...thread, allocation: { ...allocation,
+        repositories: allocation.repositories.map((repository, index) => ({ ...repository, base: resolved.repositories[index]!.base, baseOid: resolved.repositories[index]!.baseOid })),
+        ...(resolved.skills ? { skills: resolved.skills } : {}) } };
+      this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify(written), threadId);
+      this.db.exec("COMMIT");
+      return written;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   close(): void { this.db.close(); }

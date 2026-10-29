@@ -105,6 +105,7 @@ try {
   await until(async () => (await row()).state, state => state === "ready", "the thread is ready");
   const shown = (await steps()).map(step => `${step.name}${step.attempt ? ` ${step.attempt}` : ""} ${step.state}: ${step.detail}`);
   assert.deepEqual(shown, [
+    `commits ok: main ${git(repository, ["rev-parse", "main"]).trim().slice(0, 12)}`,
     "prepare 1 failed: pre-setup was stopped: the machine ran out of memory (this command used up to 3.5 GB; the machine has 3.8 GB); cube tries again",
     "prepare 2 ok: pre-setup ok, setup absent",
     "resume ok: pre-resume absent, resume absent",
@@ -123,7 +124,8 @@ try {
   // The next activation marks them interrupted before it records its own;
   // its next try (4) runs and is not touched by another call meanwhile.
   await app.close();
-  // What that cubed left in its registry, written while no cubed runs.
+  // What that cubed left in its registry (after its commits, two prepare
+  // tries and a resume), written while no cubed runs.
   const stopped = (change: (registry: Registry) => void) => { const registry = new Registry(path.join(root, "state", "registry.sqlite")); change(registry); registry.close(); };
   stopped(registry => {
     for (const name of ["lookup", "build-prepare", "boot"] as const) registry.beginStartupStep(thread.id, { name });
@@ -143,9 +145,9 @@ try {
   };
   await restart();
   const again = await until(steps, list => list.some(step => step.name === "prepare" && step.attempt === 4 && step.state === "running"), "the next try runs");
-  const states = (list: StartupStep[]) => list.slice(3).map(step => `${step.name}${step.attempt ? ` ${step.attempt}` : ""} ${step.state}`);
+  const states = (list: StartupStep[]) => list.slice(4).map(step => `${step.name}${step.attempt ? ` ${step.attempt}` : ""} ${step.state}`);
   assert.deepEqual(states(again), ["lookup interrupted", "build-prepare interrupted", "boot interrupted", "prepare 3 interrupted", "prepare 4 running"]);
-  assert.ok(again.slice(3, 7).every(step => step.endedAt && step.endedAt >= step.startedAt), "an interrupted step has its end");
+  assert.ok(again.slice(4, 8).every(step => step.endedAt && step.endedAt >= step.startedAt), "an interrupted step has its end");
   void app.conversations.activate(thread.id);
   await delay(300);
   assert.equal((await steps()).at(-1)!.state, "running", "a call meanwhile shares the activation and leaves its step running");

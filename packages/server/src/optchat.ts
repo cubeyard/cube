@@ -18,7 +18,6 @@ import { createRegistry, defineDoc, defineExtension, defineTool, GenerationTask,
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openStorage } from "./durable-agent.ts";
 import { agents } from "./claude-agent.ts";
-import type { ResolvedRepositories } from "./registry.ts";
 import { createLogger } from "./log.ts";
 import { compactNode, Spent, spent, TRIES, type Round } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
@@ -237,23 +236,16 @@ export const THREAD_NOTE = "(This thread was started by OptChat, the user's chat
  * title or project, and a page of the matches. */
 export type ThreadListRequest = { archived?: boolean; query?: string | undefined; offset?: number | undefined; limit?: number | undefined };
 
-/** One spawn call's fetches of latest commits, by project id and revision:
- * each settles once, success or failure, for every task of the call. */
-export type SpawnBatch = Map<string, Promise<ResolvedRepositories>>;
-
 export interface OptThreads {
   /** Projects, models and capacity a new thread can use, as text. */
   projects(): Promise<string>;
   /** Each runner's last report (version, platform, machines) and what is unknown, as text. */
   runners(): Promise<string>;
-  /** Starts one thread; the same request id finds the same thread again. */
+  /** Accepts one thread, which starts in the background; the same request
+   * id finds the same thread again. */
   /** `runner`: a runner's node id or id; the thread starts there and stays
    * (a host runner takes no other threads). Absent: the pool chooses. */
-  /** `batch`: shared by one spawn call's tasks, so a project's latest
-   * commits are fetched once per call (per project revision), not once per
-   * task; a new call fetches again. */
-  spawn(task: { project: string; task: string; model?: string | undefined; runner?: string | undefined }, requestId: string, signal?: AbortSignal,
-    batch?: SpawnBatch): Promise<{ id: string; title: string }>;
+  spawn(task: { project: string; task: string; model?: string | undefined; runner?: string | undefined }, requestId: string): Promise<{ id: string; title: string }>;
   /** A message to a thread. One that works gets it steered into its running
    * turn; the answer says what the thread did with it (void: started). */
   tell(id: string, text: string, requestId: string): Promise<ThreadAcceptance | void>;
@@ -1716,7 +1708,7 @@ export class OptChat {
     });
     const spawn = defineTool({
       name: "spawn",
-      description: "Start one thread per task (one goal, one result; another pull request, question or review is a new task), in parallel, and answer their ids at once. Each thread is a coding agent with its own machine and a checkout of the project; it does not see this chat. Its report comes back later as a message starting \"[id] \".",
+      description: "Start one thread per task (one goal, one result; another pull request, question or review is a new task), in parallel, and answer their ids at once: each is accepted, then fetches the project's latest commits and starts in the background. Each thread is a coding agent with its own machine and a checkout of the project; it does not see this chat. Its report comes back later as a message starting \"[id] \", and so does a start that keeps failing.",
       parameters: Type.Object({ tasks: Type.Array(Type.Object({
         project: Type.String({ description: "Project name or id" }),
         task: Type.String({ description: "The whole task, self-contained" }),
@@ -1730,7 +1722,6 @@ export class OptChat {
       execute: async (args, api, callContext) => {
         const lines: string[] = [];
         const signal = callContext.abortSignal;
-        const batch: SpawnBatch = new Map();
         const started = performance.now();
         let commitMs = 0;
         for (const [index, task] of args.tasks.entries()) {
@@ -1738,19 +1729,19 @@ export class OptChat {
           // call ends aborted rather than reporting the rest "not started".
           signal?.throwIfAborted();
           try {
-            const thread = await this.options.threads.spawn(task, `optchat:${api.callId}:${index}`, signal, batch);
+            const thread = await this.options.threads.spawn(task, `optchat:${api.callId}:${index}`);
             const committing = performance.now();
             await api.commit(async tx => { (await tx.doc(SettingsDoc)).threads[thread.id] ??= { at: Date.now() }; }, callContext);
             commitMs += performance.now() - committing;
             this.mine.add(thread.id);
             this.attach(thread.id);
-            lines.push(`[${short(thread.id)}] started in ${task.project}: ${thread.title}`);
+            lines.push(`[${short(thread.id)}] accepted in ${task.project}: ${thread.title}`);
           } catch (error) {
             if (signal?.aborted) throw error;
             lines.push(`task ${index + 1} (${task.project}) not started: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
-        log.info("spawn answered", { call: api.callId, tasks: args.tasks.length, fetches: batch.size,
+        log.info("spawn answered", { call: api.callId, tasks: args.tasks.length,
           commitMs: Math.round(commitMs), ms: Math.round(performance.now() - started) });
         return text(lines.join("\n"));
       },

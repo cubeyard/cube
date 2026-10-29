@@ -31,8 +31,7 @@ models.setProvider(faux.provider);
 
 const registry = new Registry(path.join(root, "registry.sqlite"));
 registry.saveProject({ id: "demo", name: "demo", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
-const real = cubeThreads({ registry, conversations: {} as never, catalog: async () => [], runners: () => ({ runners: [] }) as never,
-  latestCommits: () => { throw new Error("unused"); } });
+const real = cubeThreads({ registry, conversations: {} as never, catalog: async () => [], runners: () => ({ runners: [] }) as never });
 const store = new ArtifactStore(path.join(root, "artifacts.sqlite"));
 const artifacts = new Artifacts({ store, registry, github: {} as GithubPulls, optchat: async () => null, submit: async () => {} });
 
@@ -187,13 +186,12 @@ try {
   assert.equal(ran, 0, "nor after Pi aborts it");
   inside.closing = false;
 
-  // cube's own spawn, with cubed's own latestCommits over a fake git, cut
-  // off in each fetch it makes: the repository's (prepareRepository), the
-  // installed skills' source and the repository's own skills (ensureMirror).
-  // The abort reaches the git of each, and no thread is made after it.
+  // cubed's own latestCommits over a fake git, cut off in each fetch it
+  // makes: the repository's (prepareRepository), the installed skills'
+  // source and the repository's own skills (ensureMirror). The abort (a
+  // closing cubed's, Conversations) reaches the git of each and is rethrown
+  // as it came, not as a failed fetch that names it.
   const REPO = "https://github.com/x/fetch.git", SKILLS = "https://github.com/x/skills.git";
-  registry.saveProject({ id: "fetch", name: "fetch", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [
-    { id: "r1", projectId: "fetch", position: 0, url: REPO, base: "main", checkoutName: "fetch", status: "ready", error: null, resolvedBase: "main", baseOid: "a".repeat(40), checkedAt: 1 }] });
   let stall: "prepare" | "skills" | "project" = "prepare";
   const reached = new Map<string, AbortSignal | undefined>();
   // A git that never ends: it stops only on its signal, and fails at once without one.
@@ -207,31 +205,33 @@ try {
     async ensureMirror(url: string, signal?: AbortSignal) { return hang(url === SKILLS ? "skills" : "project", signal); },
     async listFilesAtCommit() { return null; }, async readFileAtCommit() { return null; },
   };
+  const allocation = { projectId: "fetch", projectRevision: 1, repositories: [{ url: REPO, base: "main", baseOid: "0".repeat(40), checkoutName: "workspace" }], latest: { bases: ["main"] } };
   for (const step of ["prepare", "skills", "project"] as const) {
     stall = step;
-    const spawning = cubeThreads({ registry, conversations: {} as never, runners: () => ({ runners: [] }) as never,
-      catalog: async () => [{ provider: "faux", id: "faux-1" }] as never,
-      latestCommits: latestCommitsOf({ registry, git: fetchGit, skills: () => ({ sources: [], disabled: [] }),
-        skillSource: step === "skills" ? { url: SKILLS, commit: "b".repeat(40), path: "skills" } : null }) });
+    const latest = latestCommitsOf({ git: fetchGit, skills: () => ({ sources: [], disabled: [] }),
+      skillSource: step === "skills" ? { url: SKILLS, commit: "b".repeat(40), path: "skills" } : null });
     const cutting = new AbortController();
-    const started = spawning.spawn({ project: "fetch", task: "cut" }, `optchat:cut:${step}`, cutting.signal);
-    await until(() => reached.has(step), `spawn reached the ${step} fetch`);
-    cutting.abort(new Error("optchat is closing"));
-    // The abort's own reason, not a failed fetch that names it.
-    await assert.rejects(started, error => error === cutting.signal.reason, `${step}: spawn rethrows the abort`);
+    const resolving = latest(allocation, cutting.signal);
+    await until(() => reached.has(step), `the ${step} fetch is under way`);
+    cutting.abort(new Error("cubed is closing"));
+    await assert.rejects(resolving, error => error === cutting.signal.reason, `${step}: the abort is rethrown as it came`);
     assert.equal(reached.get(step), cutting.signal, `${step}: the abort reaches its git`);
-    assert.equal(registry.threadByRequest("fetch", `optchat:cut:${step}`), null, `${step}: no thread is made after the abort`);
   }
-  // Its git ends as the abort comes, with commits: the abort still decides.
-  const racing = cubeThreads({ registry, conversations: {} as never, runners: () => ({ runners: [] }) as never,
-    catalog: async () => [{ provider: "faux", id: "faux-1" }] as never,
-    latestCommits: (_project, signal) => new Promise(resolve => { signal?.addEventListener("abort", () => resolve({ projectRevision: 1, repositories: [] } as never), { once: true }); }) });
-  const cutting = new AbortController();
-  const started = racing.spawn({ project: "demo", task: "cut" }, "optchat:cut:0", cutting.signal);
-  await new Promise(resolve => setImmediate(resolve));
-  cutting.abort(new Error("optchat is closing"));
-  await assert.rejects(started, /optchat is closing/);
-  assert.equal(registry.threadByRequest("demo", "optchat:cut:0"), null, "and makes no thread after the abort");
+  // spawn itself fetches nothing: with every git hanging it accepts the thread.
+  stall = "prepare";
+  reached.clear();
+  registry.enrollRunner({ nodeId: "node-replay", threadId: "replay", environmentId: 1, configPath: "/private/replay.json", configHash: "replay", protocol: 4, kind: "vm" });
+  registry.saveProject({ id: "fetch", name: "fetch", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [
+    { id: "r1", projectId: "fetch", position: 0, url: REPO, base: "main", checkoutName: "fetch", status: "ready", error: null, resolvedBase: "main", baseOid: "a".repeat(40), checkedAt: 1 }] });
+  const activated: string[] = [];
+  const accepting = cubeThreads({ registry, conversations: { activate: async (id: string) => { activated.push(id); } } as never, runners: () => ({ runners: [] }) as never,
+    catalog: async () => [{ provider: "faux", id: "faux-1" }] as never });
+  const accepted = await accepting.spawn({ project: "fetch", task: "accept" }, "optchat:accept:0");
+  assert.deepEqual(registry.getThread(accepted.id)!.allocation.latest, { bases: ["main"] }, "accepted with its commits still to resolve");
+  assert.deepEqual(activated, [accepted.id], "and its start set off");
+  assert.equal(reached.size, 0, "no git was asked");
+  assert.deepEqual(await accepting.spawn({ project: "fetch", task: "accept" }, "optchat:accept:0"), accepted, "a replay finds the same thread");
+  assert.deepEqual(activated, [accepted.id], "and sets off no second start");
   assert.equal(tells.size, 1, "the tell was taken once");
   // And counted once against the thread's TELLS (8): seven other calls go, the next is refused.
   for (let k = 0; k < 7; k++) assert.match(await run("tell", { id: THREAD.slice(0, 8), message: `more ${k}` }, ++task, `call-${task}`), /sent to/);

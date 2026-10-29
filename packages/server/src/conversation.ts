@@ -17,7 +17,7 @@ import { serveThreadEvents } from "./thread-events-http.ts";
 import type { WindowQuery } from "./transcript-window.ts";
 import { readClaudeHistory, readPiHistory, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { isThreadImageRef, readThreadImage } from "./thread-images.ts";
-import { Registry, threadAgent, type HookOutcome, type Thread } from "./registry.ts";
+import { Registry, threadAgent, type HookOutcome, type ResolvedRepositories, type Thread, type UnresolvedAllocation } from "./registry.ts";
 import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWorkspace, RunnerWait, StepFailure, stepLog, type CommandTiming, type PreparationOutcome,
   type ThreadMachines } from "./vm.ts";
 import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
@@ -112,6 +112,10 @@ export interface ConversationsOptions {
   /** PATIENCE's waits, shorter in tests. */
   patience?: Partial<typeof PATIENCE>;
   portal?: (thread: Thread) => GuestPortal; hostTools?: (thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"];
+  /** Resolves an accepted thread's latest commits and skills at its first
+   * start (index.ts, latestCommitsOf); absent where no thread is accepted
+   * with `latest` (fixtures). */
+  latestCommits?: (allocation: UnresolvedAllocation, signal: AbortSignal) => Promise<ResolvedRepositories>;
 }
 export class Conversations {
   private readonly registry: Registry;
@@ -163,6 +167,9 @@ export class Conversations {
   /** Host tools a Pi thread's agent gets (artifacts). */
   private readonly hostTools: ((thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"]) | null;
   private closing = false;
+  /** Aborted by the close: stops the fetches of commits under way. */
+  private readonly stopping = new AbortController();
+  private readonly latestCommits: ConversationsOptions["latestCommits"] | null;
   private readonly now: () => number;
   private readonly patience: typeof PATIENCE;
   /** When this process's Conversations began (`PATIENCE.restartMs`). */
@@ -198,6 +205,7 @@ export class Conversations {
     this.now = options.now ?? Date.now;
     this.patience = { ...PATIENCE, ...options.patience };
     this.portal = options.portal ?? (() => ({ reason: "this cube installation has no portal" }));
+    this.latestCommits = options.latestCommits ?? null;
   }
   /** Whether claude-code threads can run on this host. */
   get claudeAvailable(): boolean { return this.claude !== null; }
@@ -527,6 +535,10 @@ export class Conversations {
       const sleep = this.registry.applySleep(id, { type: "wakeAsked", waiting: queued.waiting });
       if (sleep) throw new RunnerWait(slotWait(sleep)!);
     }
+    // Its commits once its turn came: a queued thread starts at what
+    // upstream has then, and a failed fetch is a start failure the chat
+    // hears of, not one hidden behind its wait in the queue.
+    if (thread.allocation.latest) thread = await this.resolveCommits(id, thread.allocation.latest);
     // An agent opened on this machine before it was ready holds the lease
     // that preparing it needs (agents now open only on ready machines).
     await this.closeAgents(id);
@@ -573,6 +585,31 @@ export class Conversations {
     } catch (error) {
       // Nothing failed: the machine waits for a runner, still allocating.
       if (error instanceof RunnerWait) throw error;
+      const failure = allocationFailed(error);
+      this.registry.applyPhase(id, { type: "failed", failure });
+      throw new FailedTry(failure, { cause: error });
+    }
+  }
+  /** The `commits` step: pins the thread to its repositories' latest
+   * commits and its skills. Concurrent or repeated starts converge (the
+   * first write wins); a start cut off before the write fetches again. A
+   * failure is a failed try like a machine's, retried by the recovery loop;
+   * one cut off by cubed's close is no failure, and the next cubed retries. */
+  private async resolveCommits(id: string, latest: UnresolvedAllocation["latest"]): Promise<Thread> {
+    const thread = this.thread(id);
+    const started = performance.now();
+    this.registry.beginStartupStep(id, { name: "commits", detail: `the latest ${latest.bases.map(base => base ?? "default branch").join(", ")} and the skills` });
+    try {
+      if (!this.latestCommits) throw new Error("this cubed resolves no commits");
+      const resolved = this.registry.resolveCommits(id, await this.latestCommits({ ...thread.allocation, latest }, this.stopping.signal));
+      const ms = Math.round(performance.now() - started);
+      this.registry.endStartupStep(id, { name: "commits", state: "ok",
+        detail: resolved.allocation.repositories.map(repository => `${repository.base} ${repository.baseOid.slice(0, 12)}`).join(", ") });
+      log.info("commits resolved", { thread: id, ms, sinceAcceptedMs: Date.now() - thread.createdAt });
+      return resolved;
+    } catch (error) {
+      if (this.closing) throw new RunnerWait("cubed is closing; the thread's commits are fetched when it starts again", { cause: error });
+      this.registry.endStartupStep(id, { name: "commits", state: "failed", detail: `${error instanceof Error ? error.message : String(error)}; cube tries again` });
       const failure = allocationFailed(error);
       this.registry.applyPhase(id, { type: "failed", failure });
       throw new FailedTry(failure, { cause: error });
@@ -1211,6 +1248,7 @@ export class Conversations {
    * or an archive is keyed. */
   async close(ms = THREADS_CLOSE_MS): Promise<void> {
     this.closing = true;
+    this.stopping.abort(new Error("cubed is closing"));
     const deadline = Date.now() + ms;
     const left = (cap = Infinity) => Math.min(cap, Math.max(0, deadline - Date.now()));
     // A machine still booting is left to boot; the next cubed attaches to it.

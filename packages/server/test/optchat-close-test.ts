@@ -77,18 +77,17 @@ const runs = { open: 0, closing: 0, reopened: 0 };
 let toolMs = 0;
 /** `spawn`'s tasks as the threads see them: each asked request id, and the
  * threads made, by request id (a request id makes one thread, as the
- * registry's creation table does). Each task takes spawnMs, as its git
- * fetch, and stops on the abort, as git does. */
+ * registry's creation table does). Each task takes spawnMs and, like the
+ * registry's acceptance, is not cut off midway. */
 let spawnMs = 0;
 const spawned = { asked: [] as string[], made: new Map<string, string>() };
 const threads: OptThreads = { startFailure: () => null, onStartFailure: () => () => {}, onRunFeed: () => () => {},
   async projects() { runs[phase]++; if (toolMs < 0) await new Promise(() => {}); if (toolMs) await delay(toolMs); return "projects: cube"; }, async runners() { return "no runners"; },
-  async spawn(task, requestId, signal) {
+  async spawn(task, requestId) {
     spawned.asked.push(requestId);
     const made = spawned.made.get(requestId);
     if (made) return { id: made, title: task.task };
-    if (spawnMs) await delay(spawnMs, null, { signal });
-    signal?.throwIfAborted();
+    if (spawnMs) await delay(spawnMs);
     const id = crypto.randomUUID();
     spawned.made.set(requestId, id);
     return { id, title: task.task };
@@ -258,9 +257,9 @@ for (const ms of [0, 200]) {
   } finally { await chat.close(); toolMs = 0; }
 }
 
-// 2e. spawn cut off at the close: its task under way stops on the abort (as
-// its git fetch does) and no later task is started; the reopened run asks
-// again under the same request ids, so every task makes one thread.
+// 2e. spawn cut off at the close: its task under way ends, and no later
+// task is started; the reopened run asks again under the same request ids,
+// so every task makes one thread.
 {
   reset();
   spawnMs = 400;
@@ -273,8 +272,7 @@ for (const ms of [0, 200]) {
     // The call returned at the cut; its work, if it went on, would by now.
     await delay(spawnMs + 300);
     assert.ok(spawned.asked.length <= 1, `no task started after the cut (${spawned.asked.length} asked)`);
-    const before = spawned.made.size;
-    assert.equal(before, 0, "the task under way made no thread after the abort");
+    assert.ok(spawned.made.size <= 1, "only the task under way made its thread");
     spawnMs = 0;
     chat = await chatAt(directory, 5_000);
     await quiet(chat);
