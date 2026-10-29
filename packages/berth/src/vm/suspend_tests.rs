@@ -3,7 +3,10 @@
 //! `quit`, reaped as `launch` reaps), and the agent's side of the channel
 //! answered by hand. What only a real QEMU and agent show (the memory file,
 //! the restore, the guest going on) is G-F's, natively.
-use super::template_tests::{Lab, USER, base, create, fence, plenty, pull, reason, reference};
+use super::template_tests::{
+    BUILD, Lab, USER, base, create, events, fence, free, plenty, pull, reason, reference, set_free,
+    settable,
+};
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::{
@@ -323,6 +326,25 @@ async fn suspend_saves_the_memory_records_it_then_quits_and_the_machine_holds_no
     assert!(fake.index("cont").is_none(), "{:?}", fake.commands());
     let dir = runner.machine_dir(USER);
     assert!(dir.join(record::MEMORY).is_file() && !dir.join(record::MEMORY_PART).exists());
+    // The evidence line: the memory file measured, allocated and apparent.
+    let (allocated, apparent) = disk::size(&dir.join(record::MEMORY)).unwrap();
+    assert_eq!(allocated, suspended.memory_bytes);
+    let log = events(&runner, USER);
+    let line = log
+        .lines()
+        .find(|line| line.contains("op=suspend"))
+        .unwrap();
+    assert!(line.contains(" disk: op=suspend outcome=ok "), "{line}");
+    assert!(
+        line.contains(&format!("need={} reserve={} ", 512u64 << 20, 20u64 << 30)),
+        "{line}"
+    );
+    assert!(
+        line.ends_with(&format!(
+            " memory_allocated={allocated} memory_apparent={apparent} concurrent_writers=included"
+        )),
+        "{line}"
+    );
     let journal = on_disk(&runner, USER);
     assert_eq!(journal.phase, Phase::Suspended);
     assert_eq!(
@@ -415,8 +437,8 @@ async fn refusals_leave_the_machine_running_and_untouched() {
     assert_eq!(phase(&runner, USER), Phase::Running);
 }
 
-fn twenty_gib(_: &Path) -> std::io::Result<u64> {
-    Ok(20 << 30)
+fn twenty_gib(_: &Path) -> std::io::Result<disk::Space> {
+    free(20 << 30)
 }
 
 #[tokio::test]
@@ -433,6 +455,46 @@ async fn too_little_disk_keeps_the_machine_running() {
     assert_eq!(reason(error), (Code::ResourceExhausted, "disk".into()));
     assert!(ops.lock().unwrap().is_empty() && fake.commands().is_empty());
     assert_eq!(phase(&runner, USER), Phase::Running);
+}
+
+/// What template builds may still write is not room for a memory file.
+#[tokio::test]
+async fn a_suspend_counts_what_template_builds_may_still_write() {
+    let lab = Lab::new();
+    let image = pull(lab.path(), 1, &[1]);
+    let runner = lab.runner_with(image, 16 << 30, settable, Some(1), 8).await;
+    set_free(Some(3 << 30));
+    create(&runner, BUILD, base(), true).await.unwrap();
+    create(&runner, USER, base(), false).await.unwrap();
+    let (fake, ops) = running(&runner, USER, Migrate::Completes, Agent::Prepares).await;
+    // 512 MiB and a margin of 1 GiB in 2 GiB free, but 1 GiB is the build's.
+    set_free(Some(2 << 30));
+    let error = call(&runner, suspend_call(USER, 2)).await.unwrap_err();
+    assert_eq!(
+        reason(error.clone()),
+        (Code::ResourceExhausted, "disk".into())
+    );
+    assert!(
+        error.message.ends_with(
+            "it has 2.0 GiB free, 1.0 GiB of it committed to template builds (an estimate), and an unknown number of free inodes (at least 10000); the machine keeps running"
+        ),
+        "{}",
+        error.message
+    );
+    assert!(ops.lock().unwrap().is_empty() && fake.commands().is_empty());
+    assert_eq!(phase(&runner, USER), Phase::Running);
+    assert!(
+        events(&runner, USER).contains(&format!(
+            "disk: op=suspend outcome=refused path={} free_before={} inodes_before=unknown committed_estimate={} need={} reserve={}",
+            runner.machine_dir(USER).display(),
+            2u64 << 30,
+            1u64 << 30,
+            512u64 << 20,
+            1u64 << 30
+        )),
+        "{}",
+        events(&runner, USER)
+    );
 }
 
 /// K-8: a save past SUSPEND_WAIT is undone: the migration cancelled, the

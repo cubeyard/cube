@@ -205,7 +205,8 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   `INVALID_ARGUMENT build`) is a build machine, and only it gets a template
   disk, vdd: `template.raw`, raw, blank and sparse, `size.disk_gib` large,
   made only if the directory's file system has the disk's size + 2 GiB
-  free (a 32 GiB disk: 34 GiB; else `RESOURCE_EXHAUSTED disk_space`). Other
+  free besides what other builds may still write (a 32 GiB disk: 34 GiB;
+  else `RESOURCE_EXHAUSTED disk_space`; see Disk room). Other
   machines have no vdd, and their agent refuses to publish.
   `template_publish {from, fence, key, meta}` (`key` 1 to 128 printable
   ASCII characters and `meta` at most 4 KiB, both cubed's and opaque) needs
@@ -289,6 +290,26 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   configured `--network`, which is not the path in use. The runner sends
   no watch event for an RTT alone: watch carries the value of the newest
   runner event. cubed does not log either yet (C phase).
+- Disk room (`src/disk.rs`): one rule before every allocation in the
+  directory, under `ops`: free bytes less what template builds may still
+  write into their sparse template disks (`committed`, an estimate: each
+  one's size less what it allocated) must cover the need and its reserve,
+  and at least 10 000 inodes must be free when the file system counts
+  them. A new machine needs only the reserve, 2 GiB (else `RESOURCE_EXHAUSTED
+  disk_space`, and nothing of it is made; a disk that cannot be measured
+  lets it through); a build machine its template disk + 2 GiB and a
+  suspend the machine's memory + the margin (`disk`), both refused when
+  the disk cannot be measured, as before. Running machines' writable disks
+  are overcommitted on purpose and not counted: the rule stops new
+  allocations, not a guest that fills its disk. Every create, build,
+  suspend and publish leaves one `disk:` line (`events.log`; a refused
+  create's and a kept template's in the runner's log, as their machine
+  directory is not there) with `op`, `outcome` (`ok`, `refused`,
+  `failed`), the space before and after (`unknown`, never 0;
+  `free_after − free_before` includes other writers), the estimate, the
+  need, the reserve, `ms`, and a memory file's or a template's allocated
+  and apparent bytes. `Capacity.disk_*` reports the same measurement to
+  cubed with every runner report.
 - Suspend and resume (masterplan S-7a, `vm/suspend.rs`; runner.proto's
   `machine_suspend`): **off unless `berth vm` starts with
   `--suspend-disk-margin-gib <GiB>`**, which has no default; without it

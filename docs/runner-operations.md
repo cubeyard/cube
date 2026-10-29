@@ -265,6 +265,20 @@ runner.
   trust until it starts again), but a tool with a store of its own (a JDK
   from a tarball, say) stops trusting the runner's HTTPS until the
   project's resume hook imports the new CA or the thread is new.
+- **Disk room**: `berth vm` refuses a new machine while its directory's
+  file system has less than 2 GiB free besides what template builds may
+  still write, or fewer than 10 000 free inodes (`RESOURCE_EXHAUSTED
+  disk_space`); nothing of the machine is made, and cubed shows the thread
+  as waiting for disk space on that runner, keeps its slot and place in the
+  queue, counts no failed start and tries again every recovery round (30 s)
+  until there is room. Free space is the operator's to make: berth deletes
+  nothing and stops no machine for it, and a running machine can still fill
+  the disk (its disk is sparse and overcommitted). The runners page and
+  OptChat show each VM runner's free space, what builds may still write,
+  and `low` below 4 × the reserve; each machine's `events.log` has a `disk:`
+  line per create, build, suspend and publish. Deploy cubed before a berth
+  with this check: an older cubed shows the refusal as waiting for a free
+  slot (it still waits; only the words are wrong).
 - **Suspend** (phase 7) is off unless `berth vm` starts with
   `--suspend-disk-margin-gib <GiB>`, which has no default in berth: it is
   the free disk a runner keeps besides a machine's memory file (at least 1

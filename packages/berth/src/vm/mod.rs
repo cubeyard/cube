@@ -117,6 +117,7 @@ use qemu::{Arch, Keel, Qmp};
 use record::{Boot, MachineImage, MachineRecord, Phase, Size, Stopped};
 
 use crate::{
+    disk,
     host::{getrandom, host_name, valid_id, valid_op, valid_owner},
     image,
     serve::{self, Service},
@@ -190,9 +191,9 @@ pub struct VmOptions {
     pub mkfs_version: String,
     /// The layer cache's limit (`--layer-cache-gib`).
     pub layer_cache_bytes: u64,
-    /// Free bytes on the file system of a path ([`image::free_bytes`]; tests
-    /// give another).
-    pub free_space: fn(&Path) -> std::io::Result<u64>,
+    /// The free space of a path's file system ([`disk::space`]; tests give
+    /// another).
+    pub free_space: fn(&Path) -> std::io::Result<disk::Space>,
     /// `--suspend-disk-margin-gib`: suspend is on only when the operator
     /// names it (S-7a). A machine is suspended only while the disk keeps its
     /// memory and this much besides; there is no default. Without it
@@ -738,6 +739,7 @@ impl VmRunner {
             .filter(|entry| entry.record.phase == Phase::Retained)
             .count() as u32;
         let host_cpus = std::thread::available_parallelism().map_or(0, |n| n.get() as u32);
+        let space = (self.options.free_space)(&self.options.directory).ok();
         proto::Runner {
             node_id: self.options.node_id.clone(),
             software_version: crate::SOFTWARE_VERSION.into(),
@@ -768,6 +770,11 @@ impl VmRunner {
                 retained,
                 suspended,
                 suspended_bytes,
+                disk_free_bytes: space.map(|space| space.bytes),
+                disk_free_inodes: space.and_then(|space| space.inodes),
+                disk_committed_bytes: Some(committed(state, &self.options.directory)),
+                disk_reserve_bytes: Some(disk::RESERVE),
+                disk_reserve_inodes: Some(disk::RESERVE_INODES),
                 ..Default::default()
             }),
             lifecycle: proto::runner::Lifecycle::Ready as i32,
@@ -1200,7 +1207,7 @@ impl VmRunner {
             ));
         }
         let size = Self::size(spec.size.as_ref())?;
-        let template = {
+        let (template, committed) = {
             let mut state = self.state.lock().unwrap();
             let taken = state
                 .deleted
@@ -1238,16 +1245,41 @@ impl VmRunner {
                     "the runner hosts as many machines as it may",
                 ));
             }
-            match &from {
+            let template = match &from {
                 Some(id) => Some(self.usable_template(&state, id)?),
                 None => None,
-            }
+            };
+            (template, committed(&state, &self.options.directory))
         };
-        if spec.build {
-            // B-8 D2 and C2: room for the template disk before it is
-            // made, as the agent may fill it.
-            let free = (self.options.free_space)(&self.options.directory).map_err(internal)?;
-            build_room(free, size.disk_gib)?;
+        // Room before anything is made. A build machine's template disk
+        // (B-8 D2 and C2): its size + 2 GiB, as the agent may fill it. Any
+        // other machine: the reserve, so its first writes find room.
+        let (op, need, reserve) = if spec.build {
+            (
+                disk::Op::Build,
+                u64::from(size.disk_gib) << 30,
+                BUILD_RESERVE,
+            )
+        } else {
+            (disk::Op::Create, 0, disk::RESERVE)
+        };
+        let directory = &self.options.directory;
+        let room = disk::Room::measure(
+            op,
+            directory,
+            (self.options.free_space)(directory),
+            committed,
+            need,
+            reserve,
+        );
+        if let Err(error) = room.verdict() {
+            // No directory of the machine exists to keep its evidence.
+            eprintln!(
+                "machine {}: disk: {}",
+                reference.id,
+                room.line("refused", (self.options.free_space)(directory), "")
+            );
+            return Err(error);
         }
         let epoch = request.fence.as_ref().map_or(0, |fence| fence.epoch);
         if epoch < 1 {
@@ -1258,27 +1290,11 @@ impl VmRunner {
             ));
         }
         let dir = self.machine_dir(&reference.id);
-        std::fs::create_dir_all(&dir).map_err(internal)?;
-        let disk = dir.join(qemu::RW_DISK);
-        if !disk.exists() {
-            let temporary = dir.join("rw.qcow2.tmp");
-            let _ = std::fs::remove_file(&temporary);
-            qemu::create_disk(&self.options.qemu_img, &temporary, size.disk_gib)
-                .await
-                .map_err(internal)?;
-            std::fs::rename(&temporary, &disk).map_err(internal)?;
-        }
-        let vdd = dir.join(template::DISK);
-        if spec.build && !vdd.exists() {
-            let temporary = dir.join("template.raw.tmp");
-            let _ = std::fs::remove_file(&temporary);
-            qemu::create_template_disk(&temporary, size.disk_gib).map_err(internal)?;
-            std::fs::rename(&temporary, &vdd).map_err(internal)?;
-        }
-        readiness::begin(&dir).map_err(internal)?;
-        let image = self
-            .write_layers(&reference.id, template.as_ref())
-            .map_err(internal)?;
+        let made = self
+            .make_disks(&dir, &reference.id, size, spec.build, template.as_ref())
+            .await;
+        let disk_line = |outcome| room.line(outcome, (self.options.free_space)(directory), "");
+        let image = made.inspect_err(|_| event(&dir, "disk", &disk_line("failed")))?;
         let machine_type = self
             .floor
             .newest_machine_type()
@@ -1320,6 +1336,7 @@ impl VmRunner {
                 }
             ),
         );
+        event(&dir, "disk", &disk_line("ok"));
         let mut state = self.state.lock().unwrap();
         state.machines.insert(
             reference.id.clone(),
@@ -1339,6 +1356,36 @@ impl VmRunner {
             },
         );
         self.commit(&mut state, &reference.id)
+    }
+
+    /// A new machine's directory, disks and layer disk; its image.
+    async fn make_disks(
+        &self,
+        dir: &Path,
+        id: &str,
+        size: Size,
+        build: bool,
+        template: Option<&template::TemplateRecord>,
+    ) -> Answer<MachineImage> {
+        std::fs::create_dir_all(dir).map_err(internal)?;
+        let disk = dir.join(qemu::RW_DISK);
+        if !disk.exists() {
+            let temporary = dir.join("rw.qcow2.tmp");
+            let _ = std::fs::remove_file(&temporary);
+            qemu::create_disk(&self.options.qemu_img, &temporary, size.disk_gib)
+                .await
+                .map_err(internal)?;
+            std::fs::rename(&temporary, &disk).map_err(internal)?;
+        }
+        let vdd = dir.join(template::DISK);
+        if build && !vdd.exists() {
+            let temporary = dir.join("template.raw.tmp");
+            let _ = std::fs::remove_file(&temporary);
+            qemu::create_template_disk(&temporary, size.disk_gib).map_err(internal)?;
+            std::fs::rename(&temporary, &vdd).map_err(internal)?;
+        }
+        readiness::begin(dir).map_err(internal)?;
+        self.write_layers(id, template).map_err(internal)
     }
 
     /// Template `id` for a new machine: ready, and on this runner's image
@@ -1605,6 +1652,14 @@ impl VmRunner {
             )
         })?;
         let _op = self.ops.lock().await;
+        let room = disk::Room::measure(
+            disk::Op::Publish,
+            &self.options.directory,
+            (self.options.free_space)(&self.options.directory),
+            0,
+            0,
+            0,
+        );
         // A shutdown that began meanwhile held `ops` until it stopped every
         // machine, this one too: nothing is kept.
         if *self.stopping.borrow() {
@@ -1634,6 +1689,22 @@ impl VmRunner {
             self.keep_template(&mut state, &id, &request.key, &request.meta)
         };
         drop(mark);
+        let sizes = disk::size(&template::layer(&self.options.directory, &id)).map_or(
+            String::new(),
+            |(allocated, apparent)| {
+                format!(" template_allocated={allocated} template_apparent={apparent}")
+            },
+        );
+        let line = room.line(
+            if kept.is_ok() { "ok" } else { "failed" },
+            (self.options.free_space)(&self.options.directory),
+            &sizes,
+        );
+        // A kept template's build machine and its events are gone.
+        match kept {
+            Ok(_) => eprintln!("template {id}: disk: {line}"),
+            Err(_) => event(&dir, "disk", &line),
+        }
         kept
     }
 
@@ -2645,22 +2716,23 @@ impl VmRunner {
 /// C2, approved: 1 × the disk + 2 GiB).
 const BUILD_RESERVE: u64 = 2 << 30;
 
-/// The room check before a build machine's template disk is made (B-8 D2,
-/// C2): the disk's size + 2 GiB, since the agent may fill it and the
-/// template is that same file, renamed, not a copy; the templates already
-/// kept are on the same disk.
-fn build_room(free: u64, disk_gib: u32) -> Answer<()> {
-    let needed = (u64::from(disk_gib) << 30).saturating_add(BUILD_RESERVE);
-    if free < needed {
-        return Err(refuse(
-            Code::ResourceExhausted,
-            "disk_space",
-            &format!(
-                "a build machine's {disk_gib} GiB template disk needs its size + 2 GiB = {needed} bytes free; the runner's directory has {free}"
-            ),
-        ));
-    }
-    Ok(())
+/// What template builds may still write (disk.rs): each build machine not
+/// retained, its template disk's size less what it allocated. The template
+/// is that same file, renamed, not a copy, so a published one is in the
+/// free space as it is. Running machines' writable disks are not counted:
+/// they are overcommitted on purpose.
+fn committed(state: &State, directory: &Path) -> u64 {
+    state
+        .machines
+        .values()
+        .filter(|entry| entry.record.build && entry.record.phase != Phase::Retained)
+        .map(|entry| {
+            disk::still_to_write(
+                &directory.join(&entry.record.id).join(template::DISK),
+                u64::from(entry.record.size.disk_gib) << 30,
+            )
+        })
+        .fold(0, u64::saturating_add)
 }
 
 /// `MachineSetup.layers` of a machine on `image` (partition N the Nth

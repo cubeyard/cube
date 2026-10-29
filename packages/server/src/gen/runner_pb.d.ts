@@ -719,6 +719,42 @@ export declare type Capacity = Message<"cube.runner.v4.Capacity"> & {
    * @generated from field: uint64 suspended_bytes = 11;
    */
   suspendedBytes: bigint;
+
+  /**
+   * VM runners: the file system of the runner's directory, measured when
+   * the report is made. Unset is unknown (a runner before these fields, or
+   * a measurement that failed or a file system that keeps no inode count),
+   * never zero. `disk_free_gib` above is never set.
+   *
+   * @generated from field: optional uint64 disk_free_bytes = 12;
+   */
+  diskFreeBytes?: bigint | undefined;
+
+  /**
+   * @generated from field: optional uint64 disk_free_inodes = 13;
+   */
+  diskFreeInodes?: bigint | undefined;
+
+  /**
+   * An estimate: what template builds may still write into their template
+   * disks (each one's size less what it holds now).
+   *
+   * @generated from field: optional uint64 disk_committed_bytes = 14;
+   */
+  diskCommittedBytes?: bigint | undefined;
+
+  /**
+   * A new machine is refused while free bytes less committed bytes are
+   * below this, or free inodes below `disk_reserve_inodes`.
+   *
+   * @generated from field: optional uint64 disk_reserve_bytes = 15;
+   */
+  diskReserveBytes?: bigint | undefined;
+
+  /**
+   * @generated from field: optional uint64 disk_reserve_inodes = 16;
+   */
+  diskReserveInodes?: bigint | undefined;
 };
 
 /**

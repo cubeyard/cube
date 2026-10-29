@@ -42,7 +42,7 @@ use cube_runner_protocol::{
 use serde_json::{Value, json};
 
 use super::{
-    Answer, Phase, Qmp, VmRunner, channel, event, internal, qemu,
+    Answer, Phase, Qmp, VmRunner, channel, committed, disk, event, qemu,
     record::{self, Dropped, MEMORY, MEMORY_PART, MachineRecord, Snapshot, SnapshotKey},
 };
 
@@ -304,7 +304,7 @@ impl VmRunner {
                 "suspend is off on this runner: berth vm suspends machines only when started with --suspend-disk-margin-gib",
             ));
         };
-        let (id, dir, guest) = {
+        let (id, dir, guest, room) = {
             let mut state = self.state.lock().unwrap();
             Self::not_publishing(&state, request.r#ref.as_ref())?;
             let entry = Self::fenced(&mut state, request.r#ref.as_ref(), request.fence.as_ref())?;
@@ -336,26 +336,34 @@ impl VmRunner {
                     ),
                 ));
             }
-            // The memory file is at most the guest's memory; one suspend at a
-            // time (`ops`), so no other save counts the same free space.
-            let needed = (u64::from(entry.record.size.memory_mib) << 20)
-                .saturating_add(margin_gib.saturating_mul(1 << 30));
-            let free = (self.options.free_space)(&dir).map_err(internal)?;
-            if free < needed {
-                return Err(refuse(
-                    Code::ResourceExhausted,
+            // The memory file is at most the guest's memory, and the margin
+            // is its reserve; one suspend at a time (`ops`), so no other save
+            // counts the same free space, but template builds may still
+            // write theirs.
+            let need = u64::from(entry.record.size.memory_mib) << 20;
+            let committed = committed(&state, &self.options.directory);
+            let room = disk::Room::measure(
+                disk::Op::Suspend,
+                &dir,
+                (self.options.free_space)(&dir),
+                committed,
+                need,
+                margin_gib.saturating_mul(1 << 30),
+            );
+            if let Err(mut error) = room.verdict() {
+                event(
+                    &dir,
                     "disk",
-                    &format!(
-                        "{} MiB free; a suspend needs the machine's memory ({} MiB) and --suspend-disk-margin-gib {margin_gib}; the machine keeps running",
-                        free >> 20,
-                        entry.record.size.memory_mib
-                    ),
-                ));
+                    &room.line("refused", (self.options.free_space)(&dir), ""),
+                );
+                error.message.push_str("; the machine keeps running");
+                return Err(error);
             }
+            let entry = state.machines.get_mut(&id).unwrap();
             entry.record.phase = Phase::Suspending;
             entry.record.dropped = None;
             self.commit(&mut state, &id)?;
-            (id, dir, guest)
+            (id, dir, guest, room)
         };
         event(&dir, "suspend", "the machine is saved");
         let mut progress = Progress::default();
@@ -387,6 +395,15 @@ impl VmRunner {
                     "suspended",
                     &format!("{} MiB of memory saved; QEMU is quit", memory_bytes >> 20),
                 );
+                let sizes =
+                    disk::size(&dir.join(MEMORY)).map_or(String::new(), |(allocated, apparent)| {
+                        format!(" memory_allocated={allocated} memory_apparent={apparent}")
+                    });
+                event(
+                    &dir,
+                    "disk",
+                    &room.line("ok", (self.options.free_space)(&dir), &sizes),
+                );
                 if tokio::time::timeout(TAIL_WAIT, self.quit(&id))
                     .await
                     .is_err()
@@ -406,6 +423,11 @@ impl VmRunner {
             }
             Err(error) => {
                 let message = format!("{error:#}");
+                event(
+                    &dir,
+                    "disk",
+                    &room.line("failed", (self.options.free_space)(&dir), ""),
+                );
                 if tokio::time::timeout(TAIL_WAIT, self.unsave(&id, &dir, &guest, &progress))
                     .await
                     .is_err()

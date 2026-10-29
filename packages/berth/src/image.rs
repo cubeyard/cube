@@ -468,31 +468,7 @@ impl Store {
 /// Bytes an unprivileged process may still write on the file system that
 /// holds `path`.
 pub fn free_bytes(path: &Path) -> std::io::Result<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
-    // statfs, not statvfs, on macOS: Darwin's statvfs has 32-bit block
-    // counts, which a large disk overflows.
-    #[cfg(target_os = "macos")]
-    {
-        // SAFETY: plain data, filled in by statfs.
-        let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
-        // SAFETY: a NUL-terminated path and a struct of the right type.
-        if unsafe { libc::statfs(name.as_ptr(), &mut stat) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(stat.f_bavail.saturating_mul(u64::from(stat.f_bsize)))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        // SAFETY: plain data, filled in by statvfs.
-        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-        // SAFETY: a NUL-terminated path and a struct of the right type.
-        if unsafe { libc::statvfs(name.as_ptr(), &mut stat) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        #[allow(clippy::unnecessary_cast)]
-        Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
-    }
+    crate::disk::space(path).map(|space| space.bytes)
 }
 
 /// What a blob of `blob_bytes` needs free before it is fetched.
