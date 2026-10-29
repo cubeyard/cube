@@ -409,8 +409,16 @@
   }
 
   async function submit(): Promise<void> {
+    const press = sendPress;
+    sendPress = null;
     const text = prompt.trim();
     if (!canSend || !model) return;
+    // A send made from the field (Enter in it, a press that left the focus in
+    // it, or the send key by a key or a mouse) gives the focus back to the
+    // field; a tap with the field left raises no keyboard.
+    const fromField = document.activeElement === composer || (!!press && press !== "touch" && press !== "pen");
+    // the key goes disabled at once: the focus goes with the draft, not to the page
+    if (fromField && document.activeElement !== composer) composer?.focus();
     sending = true;
     error = null;
     keep(base, { note: null });
@@ -468,12 +476,18 @@
       keep(base, { note: `not sent: ${error}`, pending: tried });
     } finally {
       sending = false;
-      composer?.focus();
+      // Only to the field the send came from, and only when the focus has
+      // gone nowhere the user chose since (to the page, or the send key).
+      const at = document.activeElement;
+      if (fromField && (!at || at === document.body || at === sendKey)) composer?.focus();
     }
   }
 
-  async function stop(): Promise<void> {
+  async function stop(event: MouseEvent): Promise<void> {
     if (stopping) return;
+    // Pressed by a key (or a screen reader), the stop key had the focus; it
+    // goes disabled and then away, so the focus goes on to the field beside it.
+    if (event.detail === 0 && document.activeElement === event.currentTarget) composer?.focus();
     stopping = true;
     try {
       await stopThread(base);
@@ -484,13 +498,23 @@
     }
   }
 
-  /** A press on the send or stop key leaves the focus in the field that has
-   * it: the key goes disabled or away at once, and the focus with it would
-   * fall to the page, where the next typed or pasted words (a dictation
-   * app's) land nowhere. The press is still a click. */
-  function keepComposerFocus(event: MouseEvent): void {
-    if (document.activeElement === composer) event.preventDefault();
+  /** A press on the composer's keys (send, stop, +) or the field's edge
+   * leaves the focus in the field that has it: send and stop go disabled or
+   * away at once, and the focus with them would fall to the page, where the
+   * next typed or pasted words (a dictation app's) land nowhere. The press is
+   * still a click. A disabled key sends no mousedown, only a pointerdown:
+   * that one is held there (it makes no click anyway). */
+  function keepComposerFocus(event: MouseEvent | PointerEvent): void {
+    if (event.type === "pointerdown") lastPointer = (event as PointerEvent).pointerType;
+    if (document.activeElement !== composer || event.target === composer) return;
+    if (event.type === "pointerdown" && !(event.target as Element).closest("button:disabled")) return;
+    event.preventDefault();
   }
+  /** The pointer of the last press in the composer's row. */
+  let lastPointer = "";
+  /** How the send key was last pressed: "key" (a key or a screen reader), or the pointer's type. */
+  let sendPress: string | null = null;
+  let sendKey: HTMLButtonElement | undefined;
 
   function onComposerKeydown(event: KeyboardEvent): void {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
@@ -642,7 +666,8 @@
       </div>
     {/if}
     <!-- the deck is full-bleed; the field sits in the transcript's measure -->
-    <div class="composer-row">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="composer-row" onmousedown={keepComposerFocus} onpointerdown={keepComposerFocus}>
       <!-- a press on the field's padding puts the caret in the text; the keys keep their own -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <div class="composer-field" onclick={(event) => { if (event.target === event.currentTarget) composer?.focus(); }}>
@@ -663,11 +688,12 @@
           title="enter to send · shift enter for a new line"
           rows="1"
         ></textarea>
-        <button class="send-key" type="submit" title="send · enter" aria-label="send message" disabled={!canSend} onmousedown={keepComposerFocus}>
+        <button class="send-key" type="submit" title="send · enter" aria-label="send message" disabled={!canSend} bind:this={sendKey}
+          onclick={(event) => { sendPress = event.detail === 0 ? "key" : lastPointer || "mouse"; }}>
           <Icon name="arrow" size={16} />
         </button>
       </div>
-      {#if working || waiting}<button class="key stop-key" type="button" disabled={stopping} onmousedown={keepComposerFocus} onclick={stop}>{stopping ? "stopping…" : "stop"}</button>{/if}
+      {#if working || waiting}<button class="key stop-key" type="button" disabled={stopping} onclick={stop}>{stopping ? "stopping…" : "stop"}</button>{/if}
     </div>
   </form>
   {#if viewing}
