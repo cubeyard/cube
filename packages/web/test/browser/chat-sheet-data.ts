@@ -43,9 +43,9 @@ export function chatEvents(options: { filler?: number } = {}): ThreadEvent[] {
       { project: "nope", task: "a project that does not exist" },
     ] }),
     result("2.2", "spawn-1", "spawn", [
-      `[${ID.composer.slice(0, 8)}] started in cube: composer room: measure the mobile composer and propose more space`,
-      `[${ID.flaky.slice(0, 8)}] started in cube: find why the artifact browser test is flaky`,
-      `[${ID.ca.slice(0, 8)}] started in keel-images: java trusts runner ca`,
+      `[${ID.composer.slice(0, 8)}] accepted in cube: composer room: measure the mobile composer and propose more space`,
+      `[${ID.flaky.slice(0, 8)}] accepted in cube: find why the artifact browser test is flaky`,
+      `[${ID.ca.slice(0, 8)}] accepted in keel-images: java trusts runner ca`,
       "task 4 (nope) not started: no project nope",
     ].join("\n")),
     agent("2.3", "Three are running. The fourth task named a project that does not exist, so it did not start."),

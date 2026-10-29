@@ -10,11 +10,13 @@ import { failing, moving, stateText } from "../src/lib/work-state.ts";
 import type { ArtifactListItem, OverviewThread, ThreadEvent, ThreadSummary } from "../src/lib/types.ts";
 import { artifacts, chatEvents, ID, overview, threads } from "./browser/chat-sheet-data.ts";
 
-// spawn lines: today's, an older record without a title, a newer cubed's name, a failure
+// spawn lines: today's (accepted), older ones (started; one without a
+// title), a newer cubed's name, a refusal
 assert.deepEqual(spawnLines([
-  "[aaaaaaa1] started in cube: composer room: more space",
+  "[aaaaaaa1] accepted in cube: composer room: more space",
   "[bbbbbbb2] started in keel-images",
   "[ccccccc3] started in cube as 🦦 calm otter: java trust",
+  "[ddddddd4] accepted in cube as 🦦 calm otter: java trust",
   "task 4 (nope) not started: no project nope",
   "something else entirely",
 ].join("\n")), {
@@ -22,6 +24,7 @@ assert.deepEqual(spawnLines([
     { short: "aaaaaaa1", project: "cube", title: "composer room: more space" },
     { short: "bbbbbbb2", project: "keel-images", title: null },
     { short: "ccccccc3", project: "cube", title: "java trust" },
+    { short: "ddddddd4", project: "cube", title: "java trust" },
   ],
   unstarted: [{ task: 4, project: "nope", reason: "no project nope" }],
 });
