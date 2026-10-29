@@ -53,7 +53,7 @@ try {
     ["2 R reviewed #10; review #11: spawn R2", [[master, "a review of anything else"], [master, "neither wrote the change nor reviewed something else"]]],
     ["3 A pushed fixes R reviewed: tell R the delta", [[master, "a delta review of a change it already reviewed (new commits on the same pull request)"], [tell, "a delta review of its own work"]]],
     ["4 review found bugs in A's PR: tell A", [[master, "review findings on its own pull request"], [tell, "fixes"]]],
-    ["5 A merged #10; a new margin fix: spawn, rules restated", [[master, "work in the same area after its result was delivered"], [master, "restated (the thread sees neither this chat nor your instructions)"]]],
+    ["5 A merged #10; a new margin fix: spawn, rules restated", [[master, "work in the same area after its result was delivered"], [master, "restated (a new thread sees this chat as context only, never as its instructions)"]]],
     ["6 D explored designs; build option 2: spawn an implementer", [[master, "Exploring or designing is not implementing: no code, branch or pull request unless the task says so"], [master, "spawn a new thread for the new part rather than stretch the old one"]]],
     ["7 only the desktop part: tell A (narrows)", [[master, "Tell a working thread only to correct or narrow its task"]]],
     ["8 and a settings page too: spawn or ask", [[master, "When the user widens a task (design becomes implementation, a second feature), ask if it is unclear, then spawn"], [master, "a follow-up the thread's task did not include"]]],

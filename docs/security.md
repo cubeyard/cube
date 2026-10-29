@@ -31,6 +31,15 @@
   your token through the gateway (github.com and api.github.com only) and send
   what it reads to any public HTTPS host. Give projects the repositories you
   mean it to touch.
+- **A new thread reads your chat with OptChat.** Every thread created since
+  OptChat's memory came to threads gets the chat's view in its prompt and can
+  read any message of the chat with `memory_zoom` (docs/optchat.md, "The chat
+  in threads"): briefs and reports of other threads and projects included.
+  Secret-looking values are redacted (tokens, `key=value`, URL passwords,
+  private keys); a secret in plain words is not. The thread's model provider
+  receives it, and a thread could send what it read to any public HTTPS host.
+  It is context only: it grants a thread no permission, and nothing a thread
+  does writes to the chat.
 - **cubed has no user authentication.** It binds `127.0.0.1:7777`. Anyone
   who reaches it is you. For access from other devices use an authenticated
   reverse proxy, or Tailscale: set `CUBED_HOST` to the Mac's Tailscale IP and

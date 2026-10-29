@@ -71,6 +71,18 @@ export function piTool(tool: CubeTool, key: (api: ToolExecutionApi) => string): 
   });
 }
 
+const refuse = (status: number, code: string, error: string) => ({ status, body: { error, code, completionUnknown: false } });
+
+/** The refusal, unless `token` is the lease cubed holds for the thread's
+ * Claude Code child: what authorizes its cube tools and its memory route. */
+export async function claudeCodeOnly(token: string | undefined, lease: (token: string) => Promise<WorkspaceLease | null>): Promise<{ status: number; body: unknown } | null> {
+  if (!token) return refuse(401, "LEASE_STALE", "workspace lease token required");
+  const held = await lease(token);
+  if (!held) return refuse(401, "LEASE_STALE", "workspace lease is not held by this token");
+  if (held.owner !== "claude-code") return refuse(403, "WRONG_NODE", "these tools are for claude code threads");
+  return null;
+}
+
 /** Claude Code's half, on cubed's workspace socket: `GET …/workspace/tools`
  * lists the tools (the mod registers them), `POST …/workspace/tools/<name>`
  * `{ call, input }` answers one call `{ text }`. The lease token cubed holds
@@ -78,12 +90,9 @@ export function piTool(tool: CubeTool, key: (api: ToolExecutionApi) => string): 
  * list for a held token, and `signal` aborts when the request is abandoned. */
 export async function toolsRoute(request: { method: string; name: string | undefined; token: string | undefined; body: Record<string, unknown>; signal: AbortSignal },
   lease: (token: string) => Promise<WorkspaceLease | null>, tools: (token: string) => readonly CubeTool[]): Promise<{ status: number; body: unknown }> {
-  const refuse = (status: number, code: string, error: string) => ({ status, body: { error, code, completionUnknown: false } });
-  if (!request.token) return refuse(401, "LEASE_STALE", "workspace lease token required");
-  const held = await lease(request.token);
-  if (!held) return refuse(401, "LEASE_STALE", "workspace lease is not held by this token");
-  if (held.owner !== "claude-code") return refuse(403, "WRONG_NODE", "these tools are for claude code threads");
-  const offered = tools(request.token);
+  const refused = await claudeCodeOnly(request.token, lease);
+  if (refused) return refused;
+  const offered = tools(request.token!);
   if (request.name === undefined && request.method === "GET") return { status: 200, body: { tools: manifest(offered) } };
   const tool = offered.find(candidate => candidate.name === request.name);
   if (!tool || request.method !== "POST") return refuse(404, "NOT_FOUND", `no cube tool ${request.name ?? ""}`);

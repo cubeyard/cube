@@ -114,7 +114,11 @@ export async function openAgent(options: {
   /** Host tools beside the workspace tools (artifacts), with a line for the
    * preamble. `readFile` reads a workspace file under the agent's lease;
    * `key` is a call's stable request id. */
-  hostTools?: (host: { readFile(file: string, limit: number): Promise<{ text: string; path: string; sha256: string }>; key(api: ToolExecutionApi): string }) => { tools: ToolRegistration[]; note: string };
+  hostTools?: (host: { readFile(file: string, limit: number): Promise<{ text: string; path: string; sha256: string }>; key(api: ToolExecutionApi): string }) => {
+    tools: ToolRegistration[]; note: string;
+    /** OptChat's memory for the thread (thread-memory.ts), a section after the preamble: the same bytes once captured. */
+    memory?: () => Promise<string | null>;
+  };
 }) {
   // The lease is the single writable owner of the thread: a competing holder,
   // in this process or another, is refused, and process death releases it.
@@ -196,6 +200,7 @@ export async function openAgent(options: {
       name: "cube",
       tools: [direct(read), direct(write), direct(edit), bashTool.registration, codemode, ...host?.tools ?? []],
       sections: [section("preamble", () => `You are a coding agent working in this thread's own Debian virtual machine. File tools address the workspace root as ${WORKSPACE_ROOT} and take relative paths there; an absolute path elsewhere (/home/agent, /tmp) is a file in the same machine, reached with the agent's own permissions (use sudo in bash for root-owned files; /proc, /sys and /dev only through bash). bash runs commands as the user agent (with passwordless sudo) with the workspace root as its working directory. codemode runs one JavaScript script that calls these tools, for batching, chaining or filtering their results. The machine reaches the internet over HTTP and HTTPS only, through cube's gateway, which decides every request; other connections are refused. git and gh are installed and authenticated for GitHub where the host allows it (GH_TOKEN holds a placeholder the gateway replaces; never print or copy it elsewhere). Never assume access to control-plane files or credentials. A server a command starts ends with that command: to keep a web server running and give the user a URL, run "cube service start NAME --port PORT -- COMMAND" (it must listen on 0.0.0.0; "cube service --help" lists status, logs and stop). ${PROJECT_HOOKS_NOTE}${host ? ` ${host.note}` : ""}`, { tag: false }),
+        ...host?.memory ? [section("memory", async () => await host.memory!() ?? undefined, { tag: false })] : [],
         // The repository's own instructions live in the VM, as they do
         // for Claude Code threads; rendered each generation, so edits apply.
         section("repository", async (_input, context) => {

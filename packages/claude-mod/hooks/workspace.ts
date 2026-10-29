@@ -103,6 +103,8 @@ export class WorkspaceClient {
   callTool(token: string, name: string, call: string, input: Record<string, unknown>): Promise<{ text: string }> {
     return this.call("POST", `/tools/${encodeURIComponent(name)}`, { token, body: { call, input } });
   }
+  /** The thread's OptChat memory text, the same once captured; null for a thread without memory. */
+  async memory(token: string): Promise<string | null> { return (await this.call<{ text: string | null }>("GET", "/memory", { token })).text; }
   stat(token: string, file: string): Promise<WorkspaceStat> {
     return this.call("GET", `/stat?${new URLSearchParams({ path: file })}`, { token });
   }

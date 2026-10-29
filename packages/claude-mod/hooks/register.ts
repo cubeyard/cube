@@ -4,7 +4,7 @@
  * by tool_use_id, and refuses what would act on the cubed host instead. Every
  * file path names a file in that machine: the workspace, or with an absolute
  * path anywhere else in it; none is opened on the host. It also registers
- * cube's own tools (artifacts) as cubed lists them and forwards their calls
+ * cube's own tools (artifacts, OptChat's memory) as cubed lists them and forwards their calls
  * to cubed, which defines and answers them (packages/server/src/cube-tools.ts).
  *
  * cubed passes the workspace through the environment: a Unix socket that
@@ -124,7 +124,10 @@ export const register: Register = on => {
     // The thread's skills, installed in its machine; cubed renders the list.
     const skills = await $.env.get('CUBE_SKILLS_PROMPT')
     if (skills) sections.push(skills)
-    return { ...context, blocks: [...context.blocks, { name: 'cubeWorkspace', text: sections.join('\n\n') }] }
+    // OptChat's memory, frozen per thread, before the parts read again from the machine.
+    const memory = await scope.client.memory(scope.token).catch(() => null)
+    const blocks = memory ? [{ name: 'cubeMemory', text: memory }] : []
+    return { ...context, blocks: [...context.blocks, ...blocks, { name: 'cubeWorkspace', text: sections.join('\n\n') }] }
   })
 
   // Last, once every hook above is in: cube's own tools are registered as

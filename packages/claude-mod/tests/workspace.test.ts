@@ -21,7 +21,7 @@ const TOOLS = [
 
 /** The routes cubed serves, in memory: files, keyed commands and writes,
  * cube's tools (each call answered with what reached it) and the ready. */
-function fakeWorkspace(on: On, files: Record<string, string> = {}, env: Record<string, string> = {}, tools: unknown = TOOLS) {
+function fakeWorkspace(on: On, files: Record<string, string> = {}, env: Record<string, string> = {}, tools: unknown = TOOLS, memory?: string | null) {
   const requests: Request[] = []
   const operations = new Map<string, { request: string; reply: Reply }>()
   const shas = new Map<string, number>()
@@ -64,6 +64,7 @@ function fakeWorkspace(on: On, files: Record<string, string> = {}, env: Record<s
       return reply(200, { text: `cubed ran ${name} for ${String(body?.call)} with ${JSON.stringify(body?.input)}` })
     }
     if (route === '/claude-ready' && request.method === 'POST') return reply(200, { ok: true })
+    if (route === '/memory' && request.method === 'GET') return memory === undefined ? fail(500, 'IO_ERROR') : reply(200, { text: memory })
     const file = url.searchParams.get('path') ?? String(body?.path)
     if (route === '/stat' && request.method === 'GET') {
       return file in files ? reply(200, { kind: 'file', size: files[file]!.length, mode: 0o644, modifiedMs: 0, sha256: sha(file) }) : fail(404, 'NOT_FOUND')
@@ -319,6 +320,26 @@ describe('workspace tools', () => {
     expect(context.blocks[1]!.text).toMatch(/run the tests/)
     expect(context.blocks[1]!.text).toMatch(/virtual machine/)
     expect(context.blocks[1]!.text).not.toMatch(/available_skills/)
+  })
+
+  test('OptChat\'s memory is its own block before the workspace\'s, and only for a thread that has it', async ($, on) => {
+    fakeWorkspace(on, { 'AGENTS.md': 'run the tests\n' }, {}, TOOLS, 'Chat memory: the view')
+    on('prompt.context', ($, e) => ({ blocks: e.blocks }))
+    const context = await $.prompt.context({ blocks: [{ name: 'currentDate', text: 'today' }] })
+    expect(context.blocks.map(block => block.name)).toEqual(['currentDate', 'cubeMemory', 'cubeWorkspace'])
+    expect(context.blocks[1]!.text).toBe('Chat memory: the view')
+  })
+
+  test('a thread without memory has no memory block', async ($, on) => {
+    fakeWorkspace(on, { 'AGENTS.md': 'run the tests\n' }, {}, TOOLS, null)
+    on('prompt.context', ($, e) => ({ blocks: e.blocks }))
+    expect((await $.prompt.context({ blocks: [] })).blocks.map(block => block.name)).toEqual(['cubeWorkspace'])
+  })
+
+  test('when cubed cannot answer for the memory, the workspace block stays', async ($, on) => {
+    fakeWorkspace(on, { 'AGENTS.md': 'run the tests\n' })
+    on('prompt.context', ($, e) => ({ blocks: e.blocks }))
+    expect((await $.prompt.context({ blocks: [] })).blocks.map(block => block.name)).toEqual(['cubeWorkspace'])
   })
 
   test('the thread\'s skills follow the workspace instructions', async ($, on) => {

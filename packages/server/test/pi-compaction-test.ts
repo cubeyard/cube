@@ -37,14 +37,18 @@ const big = (label: string) => `${label}: ${"x".repeat(100_000)}`;
 const SUMMARY = "the user sent a long first message and got reply one";
 const textOf = (message: Message) => typeof message.content === "string" ? message.content
   : message.content.map(part => part.type === "text" ? part.text : "").join("\n");
-/** Every model request: summarization or a turn, with its user texts. */
-const requests: Array<{ summary: boolean; users: string[] }> = [];
+/** Every model request: summarization or a turn, with its user texts and
+ * its memory section as the system entries replay to it. */
+const requests: Array<{ summary: boolean; users: string[]; memory?: string | null | undefined }> = [];
+/** A thread's frozen OptChat memory (thread-memory.ts): the same bytes before and after a compaction. */
+const MEMORY = "Chat memory: a stand-in view\n<chat>\n0+1|user: plan the release\n</chat>";
 function models() {
   const faux = fauxProvider({ models: [{ id: "tiny", contextWindow: CONTEXT_WINDOW }], tokensPerSecond: 100_000 });
   faux.setResponses(Array.from({ length: 20 }, () => request => {
     const summary = request.messages.some(message => message.role === "system" && /context summarization assistant/.test(JSON.stringify(message)));
     const users = request.messages.filter(message => message.role === "user").map(textOf);
-    requests.push({ summary, users });
+    const memory = request.messages.flatMap(message => message.role === "system" && message.sections && "memory" in message.sections ? [message.sections.memory] : []).at(-1);
+    requests.push({ summary, users, memory });
     if (summary) return fauxAssistantMessage(SUMMARY);
     const last = users.at(-1)!;
     return fauxAssistantMessage(`reply to ${last.slice(0, last.indexOf(":"))}`);
@@ -53,7 +57,7 @@ function models() {
   catalog.setProvider(faux.provider);
   return { models: catalog, model: { provider: faux.getModel().provider, id: faux.getModel().id } };
 }
-const open = () => openAgent({ directory, binding: guest.binding, workspace, ...models() });
+const open = () => openAgent({ directory, binding: guest.binding, workspace, ...models(), hostTools: () => ({ tools: [], note: "", memory: async () => MEMORY }) });
 const feed = (agent: Agent) => new PiThreadEvents({ agent, owner: () => leases.holder(), failure: () => null });
 async function turn(agent: Agent, content: string, requestId: string) {
   const submission = await agent.conversation.submit({ type: "input", content, requestId }, context);
@@ -97,6 +101,7 @@ try {
     assert.equal(answered.users.length, 2, "the model sees the summary and the kept message");
     assert.match(answered.users[0]!, new RegExp(SUMMARY));
     assert.match(answered.users[1]!, /^second: /);
+    assert.equal(answered.memory, MEMORY, "the baseline after the compaction restates the memory, byte for byte");
     const compacted = await view(agent);
     const marker = compacted.entries[0]!;
     assert.equal(marker.kind, "pi.compaction");
@@ -130,6 +135,7 @@ try {
     assert.deepEqual(await events.read(), afterCompaction);
     await turn(agent, "fourth: after reopen", "fourth");
     assert.equal(requests.at(-1)!.users[0]!.includes(SUMMARY), true, "the reopened model context starts at the summary");
+    assert.deepEqual([...new Set(requests.filter(request => !request.summary).map(request => request.memory))], [MEMORY], "every turn, before and after the compaction and the reopen, has the same memory");
     assert.deepEqual(lines(await events.read()).slice(-2), ["user fourth", "assistant reply to fourth"]);
     console.log("ok: a reopen from the same state reads the same compacted history and the thread continues");
   }

@@ -8,7 +8,8 @@
  * `edit <file> <old> <new>`, `read <file>`, `write-at <absolute path> <text>` and
  * `read-at <absolute path>`, `tool <name> <json input>` (a cube tool the mod
  * registered, mcp__cube__<name>; `$ID` in the input is the artifact id the
- * last result named), `say <text>`, `crash`, `fail`,
+ * last result named), `say <text>`, `memory` (says the thread's memory
+ * text, as the mod's prompt.context reads it), `crash`, `fail`,
  * `id <tool_use_id> run <command>`, `ignore-interrupt`, `ignore-term`,
  * `background <task_id> <ms> <description>` (a background Agent that
  * finishes after ms: Claude Code's task_started and task_notification
@@ -222,6 +223,8 @@ async function turn(text: string, prompted = true): Promise<void> {
       else if (verb === "read-at") await tool(id, "Read", { file_path: rest[0], ...rest[1] ? { offset: Number(rest[1]) } : {}, ...rest[2] ? { limit: Number(rest[2]) } : {} }, controller.signal);
       else if (verb === "edit-at") await tool(id, "Edit", { file_path: rest[0], old_string: rest[1]!.replace(/_/g, " "), new_string: rest[2]!.replace(/_/g, " ") }, controller.signal);
       else if (verb === "tool") await tool(id, `${CUBE_TOOL_PREFIX}${rest[0]}`, JSON.parse(rest.slice(1).join(" ").replaceAll("$ID", lastArtifact)) as Record<string, unknown>, controller.signal);
+      // What the mod's prompt.context puts in front of each prompt as cubeMemory.
+      else if (verb === "memory") await say(`memory: ${await client.memory(env.CUBE_WORKSPACE_TOKEN!)}`);
       else if (verb === "hang") await new Promise(() => {});
       else if (verb === "background" || verb === "background-quiet" || verb === "background-later") background(id, rest[0]!, Number(rest[1]), rest.slice(2).join(" "), verb !== "background-quiet", verb === "background-later");
       else if (verb === "monitor") emit({ type: "system", subtype: "task_started", task_id: rest[0], description: "watch a log", task_type: "monitor", is_backgrounded: true });

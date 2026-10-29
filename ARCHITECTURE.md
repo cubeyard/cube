@@ -35,7 +35,12 @@
   in-process pi-durable Harness on `CUBED_STATE/optchat/pi.sqlite`: its
   entries are the chat's log, a model-free conversation holds the summary tree,
   and each turn starts at a head entry. It has no machine and no code tools; it
-  starts, tells and archives ordinary threads. See [docs/optchat.md](docs/optchat.md).
+  starts, tells and archives ordinary threads. A thread created since
+  `thread_memory` exists (a registry row from `createThread`) reads the chat:
+  a redacted start view captured at its first request and kept word for word
+  (Pi's `memory` section, the Claude Code mod's `cubeMemory` block), and the
+  read-only cube tools `memory_zoom`/`memory_date` over the live chat
+  (`thread-memory.ts`). See [docs/optchat.md](docs/optchat.md).
 - **work artifacts:** documents OptChat and threads write for the user
   (`artifacts*.ts`, `CUBED_STATE/artifacts.sqlite`): revisions with
   provenance, the user's anchored comments, delivered to the author as an
