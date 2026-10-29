@@ -28,7 +28,7 @@
 
   const repository = (source: { url: string }) => source.url.replace(/^https:\/\//, "").replace(/\.git$/, "");
   const short = (commit: string) => commit.slice(0, 12);
-  const SURFACE = { thread: "threads", both: "threads and chat", optchat: "chat (not read yet)" } as const;
+  const SURFACE = { thread: "threads", both: "threads and chat", optchat: "chat" } as const;
 
   async function refresh() {
     try {

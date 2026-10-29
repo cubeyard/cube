@@ -16,8 +16,9 @@ saves a project's external hooks in cube's projects (`project_hooks`,
 `project_hooks_write`, the project named explicitly; see
 [project-hooks.md](project-hooks.md)), writes work
 artifacts and reads and revises its own and its threads' (`artifact_write`,
-`artifact_read`, `artifact_edit`; see [artifacts.md](artifacts.md)) and reads its own
-memory (`zoom`, `date`). It keeps no task list: the chat page shows its
+`artifact_read`, `artifact_edit`; see [artifacts.md](artifacts.md)), reads its own
+memory (`zoom`, `date`) and reads the skills listed for it (`skill`; see
+[skills.md](skills.md), "OptChat"). It keeps no task list: the chat page shows its
 threads, derived from its own spawns (see "Threads beside the chat"), and
 no model reads the chat in the background for wishes or todos. Threads do
 all the work, each in its own VM, exactly like a thread started from the UI.

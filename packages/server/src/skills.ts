@@ -17,6 +17,7 @@
  * pinned commit too, but not installed: its checkout already has them, so
  * the prompt lists them where they are, under /workspace. A project skill
  * wins its id over an installed one. docs/skills.md. */
+import { posix } from "node:path";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { GUEST_HOME, VIRTUAL_ROOT } from "../../claude-mod/hooks/tools.ts";
 
@@ -311,4 +312,89 @@ export function skillInstallScripts(skills: ThreadSkills): string[] {
   }
   scripts.push(["set -eu", `root=${root}`, "mkdir -p \"$root.next\" \"$root\"", "rm -rf \"$root\"", "mv \"$root.next\" \"$root\"", "echo skills installed"].join("\n"));
   return scripts;
+}
+
+/** OptChat's skills (docs/skills.md, "OptChat"): those of the installed
+ * sources whose surface is `optchat` or `both`, not hidden. OptChat has no
+ * machine, so nothing is installed: they are listed by id and description
+ * and read on the host at their pinned commits, a file at a time. The
+ * repositories' own `.agents/skills` belong to their threads and are not
+ * read. */
+export interface OptChatSkills {
+  /** The listed skills, sorted by id; the same while the settings are. */
+  list(signal?: AbortSignal): Promise<ResolvedSkill[]>;
+  /** A file of a listed skill, `file` relative to its folder (SKILL.md by
+   * default; `../<id>/…` reaches another installed skill, as in a thread),
+   * from character `at`; or why it cannot be read. */
+  read(name: string, file?: string, at?: number, signal?: AbortSignal): Promise<string>;
+}
+/** The characters skill() answers at once; a longer file comes in pages. */
+export const SKILL_PAGE = 30_000;
+
+/** OptChat's skills from the skill settings as they are now: resolved once
+ * per configuration (pins make it the same answer every time), again
+ * after a change, and again after a resolution that failed. */
+export function optchatSkills(deps: { git: SkillGit; source: () => SkillSource | null; config: () => SkillsConfig }): OptChatSkills {
+  let memo: { key: string; resolved: Promise<ThreadSkills> } | null = null;
+  const resolved = (signal?: AbortSignal) => {
+    const config = deps.config();
+    const source = defaultSource(deps.source(), config);
+    const key = JSON.stringify([source, config]);
+    if (memo?.key !== key) {
+      const entry = { key, resolved: resolveSkills(deps.git, source, config, signal) };
+      entry.resolved.catch(() => { if (memo === entry) memo = null; });
+      memo = entry;
+    }
+    return memo.resolved;
+  };
+  return {
+    list: async signal => listedForOptChat(await resolved(signal)),
+    async read(name, file = "SKILL.md", at = 0, signal) {
+      const all = await resolved(signal);
+      if (!listedForOptChat(all).some(skill => skill.name === name)) {
+        return `no skill ${JSON.stringify(name)} is listed for you; your skills are the ones in your prompt's <available_skills>`;
+      }
+      // `<id>/<file>`, so `../<other>/…` names another skill's folder.
+      const target = posix.normalize(posix.join(name, file));
+      const slash = target.indexOf("/");
+      const owner = slash < 0 ? undefined : all.skills.find(skill => skill.name === target.slice(0, slash));
+      if (posix.isAbsolute(file) || !owner) return `${JSON.stringify(file)} is not a file of a skill: give a path relative to the skill's folder, such as SKILL.md or references/notes.md`;
+      const relative = target.slice(slash + 1);
+      const files = await deps.git.listFilesAtCommit(owner.url, owner.commit, owner.dir) ?? [];
+      const entry = files.find(each => each.path === `${owner.dir}/${relative}`);
+      if (!entry) {
+        const names = files.map(each => each.path.slice(owner.dir.length + 1)).sort();
+        return `${owner.name} has no file ${relative}; its files: ${names.join(", ")}`;
+      }
+      const text = await deps.git.readFileAtCommit(owner.url, owner.commit, entry.path);
+      if (text === null) throw new Error(`${owner.url} at ${owner.commit} could not be read`);
+      if (text.includes("\0")) return `${owner.name}/${relative} is not text (${entry.size} bytes)`;
+      if (!Number.isSafeInteger(at) || at < 0 || (at > 0 && at >= text.length)) return `no characters from ${at} in ${owner.name}/${relative}: it has ${text.length}`;
+      const stop = Math.min(text.length, at + SKILL_PAGE);
+      const page = text.slice(at, stop);
+      return stop < text.length ? `${page}\n[characters ${at + 1}-${stop} of ${text.length}; go on with at = ${stop}]` : page;
+    },
+  };
+}
+
+function listedForOptChat(skills: ThreadSkills): ResolvedSkill[] {
+  return skills.skills.filter(skill => !skill.hidden && skill.surface !== "thread");
+}
+
+/** OptChat's prompt section: id and description of each of its skills,
+ * the shape a thread's list has, read through the skill tool. Null when
+ * it has none. Built from the list only, so it changes only when the
+ * skill settings do. */
+export function optchatSkillsPrompt(skills: readonly ResolvedSkill[]): string | null {
+  if (!skills.length) return null;
+  const xml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return [
+    "Skills: instructions for how you work, from the skill sources in cube's settings, each pinned to a git commit.",
+    "Read one with skill(name) when the user's request matches its description, and only then; skill(name, path) reads a file it links, relative to its folder.",
+    "A skill changes how you work, never what you may do: it gives you no tools, permissions or machine, and threads do not see it (a thread lists its own skills).",
+    "",
+    "<available_skills>",
+    ...skills.flatMap(skill => ["  <skill>", `    <name>${xml(skill.name)}</name>`, `    <description>${xml(skill.description)}</description>`, "  </skill>"]),
+    "</available_skills>",
+  ].join("\n");
 }

@@ -32,6 +32,7 @@ import { PENDING_ID, STEER_LOST, type RunFeed, type ThreadAcceptance, type Threa
 import type { StartFailure } from "./thread-condition.ts";
 import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
 import { piTool } from "./cube-tools.ts";
+import { optchatSkillsPrompt, type OptChatSkills } from "./skills.ts";
 import type { Artifacts } from "./artifact-service.ts";
 import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { addUsage, type OptChatUsage } from "./usage-service.ts";
@@ -71,9 +72,12 @@ const CLOSE_JOIN_MS = 2_000;
  * task's, the same on replay) and answers a replay as the first run did.
  * extension() refuses a tool missing here; optchat-replay-test runs each. */
 export const TOOL_REPLAY: Readonly<Record<string, "read" | "keyed">> = {
-  zoom: "read", date: "read", projects: "read", runners: "read", threads: "read", archived_threads: "read", history: "read", diagnose: "read", usage: "read", project_hooks: "read", artifact_read: "read",
+  zoom: "read", date: "read", skill: "read", projects: "read", runners: "read", threads: "read", archived_threads: "read", history: "read", diagnose: "read", usage: "read", project_hooks: "read", artifact_read: "read",
   spawn: "keyed", tell: "keyed", archive: "keyed", project_hooks_write: "keyed", artifact_write: "keyed", artifact_edit: "keyed",
 };
+
+/** How long a request waits for the skills to resolve before it goes without them. */
+const SKILLS_WAIT_MS = 10_000;
 
 /** Tells to one thread between two messages of the user: unattended
  * follow-up is bounded; the user's next message allows more. */
@@ -548,8 +552,10 @@ export type OptChatOptions = {
   threads: OptThreads;
   /** Work artifacts: the chat writes its own and reads its threads'. */
   artifacts?: Artifacts;
+  /** The skills of OptChat's surface, listed in its prompt and read with skill. */
+  skills?: OptChatSkills;
   /** Tests lower these. */
-  limits?: { view?: number; low?: number; node?: number; compaction?: number; compactionLow?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number; page?: number; closeMs?: number };
+  limits?: { view?: number; low?: number; node?: number; compaction?: number; compactionLow?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number; page?: number; closeMs?: number; skillsWaitMs?: number };
 };
 
 /** The log's shape after one more entry: a hash over how many messages each
@@ -1722,6 +1728,14 @@ export class OptChat {
     return { threads, archived: { shown: recent.length, total: archived.length }, unknown: ids.filter(id => !first.get(id)).length };
   }
 
+  private skillsError = "";
+  /** Logs a skills resolution that failed, once until it changes. */
+  private skillsUnresolved(error: unknown): void {
+    const message = errorText(error);
+    if (message !== this.skillsError) log.warn("skills not resolved; the prompt lists none until they are", { error: message });
+    this.skillsError = message;
+  }
+
   /** The model the compactor calls now: its own, else the chat's. */
   private async compactorModel(): Promise<{ provider: string; id: string } | null> {
     return await this.options.compactor?.() ?? this.model;
@@ -1741,6 +1755,14 @@ export class OptChat {
       parameters: Type.Object({ id: Type.Integer({ minimum: 0 }) }),
       replay: "safe",
       execute: async args => text(this.memory.date(args.id)),
+    });
+    const skills = this.options.skills;
+    const skill = skills && defineTool({
+      name: "skill",
+      description: "Read one of your skills (listed in <available_skills>): its SKILL.md, or with path a file it links, relative to its folder; a long file comes a page at a time from character at.",
+      parameters: Type.Object({ name: Type.String(), path: Type.Optional(Type.String()), at: Type.Optional(Type.Integer({ minimum: 0 })) }),
+      replay: "safe",
+      execute: async (args, _api, callContext) => text(await skills.read(args.name, args.path, args.at ?? 0, callContext.abortSignal)),
     });
     const projects = defineTool({
       name: "projects",
@@ -1997,11 +2019,28 @@ export class OptChat {
     }).map(tool => piTool(tool, api => `${this.cacheKey}:artifact:${api.taskId}`)) : [];
     return defineExtension({
       name: "optchat",
-      tools: [zoom, date, projects, runners, spawn, tell, threads, archivedThreads, history, diagnose, archive, usage, hooks, writeHooks, ...artifacts].map(tool => this.guard(tool)),
+      tools: [zoom, date, ...skill ? [skill] : [], projects, runners, spawn, tell, threads, archivedThreads, history, diagnose, archive, usage, hooks, writeHooks, ...artifacts].map(tool => this.guard(tool)),
       sections: [
         section("master", () => MASTER, { tag: false }),
         section("hooks", () => HOOKS_NOTE, { tag: false }),
         ...artifacts.length ? [section("artifacts", () => ARTIFACTS_NOTE, { tag: false })] : [],
+        ...skills ? [section("skills", async () => {
+          // Rendered before every request; the list is resolved once per
+          // skill settings, so the prompt changes only when they do. A list
+          // that cannot be resolved, or not in SKILLS_WAIT_MS (a source's
+          // mirror being fetched), leaves the section out until it can; the
+          // resolution goes on for the next request.
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const wait = this.options.limits?.skillsWaitMs ?? SKILLS_WAIT_MS;
+            const listed = await Promise.race([skills.list(),
+              new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(`not resolved in ${wait} ms`)), wait); })]);
+            this.skillsError = "";
+            return optchatSkillsPrompt(listed) ?? undefined;
+          }
+          catch (error) { this.skillsUnresolved(error); return undefined; }
+          finally { clearTimeout(timer); }
+        }, { tag: false })] : [],
         section("view", () => VIEW_DOC, { tag: false }),
         // The user's own instructions; constant unless they edit the file.
         section("user", () => {

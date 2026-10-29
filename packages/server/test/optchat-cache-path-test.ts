@@ -89,9 +89,11 @@ function use(body: { model: string; tools?: unknown; thinking?: unknown; output_
 const sse = (events: Array<{ type: string }>) => new TextEncoder().encode(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""));
 const textOf = (content: string | Block[]) => typeof content === "string" ? content : content.map(block => typeof block.text === "string" ? block.text : "").join("");
 let calls = 0;
+const withSkills = new Set<boolean>();
 globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
   const body = JSON.parse(String(init!.body));
   const compaction = JSON.stringify(body.system ?? "").includes("You write the memory of OptChat");
+  if (!compaction) withSkills.add(JSON.stringify(body.system ?? "").includes("<name>delegating</name>") && body.tools.some((tool: { name: string }) => tool.name === "skill"));
   const { begun, texts, ...measured } = use(body);
   // The turn's own input follows the view: "#steps=n" asks for n tool calls first.
   const input = textOf(body.messages.find((message: { role: string }) => message.role === "user").content).split("</chat>").at(-1)!;
@@ -136,7 +138,11 @@ const threads: OptThreads = { startFailure: () => null, onStartFailure: () => ()
 };
 const directory = path.join(root, "optchat");
 const MODEL = process.env.CUBE_TEST_OPTCHAT_MODEL ?? "claude-opus-5-5";
-const open = () => OptChat.open({ directory, models, model: async () => ({ provider: "anthropic", id: MODEL }), threads,
+// Skills as cubed gives them: a section and a tool in every request, the
+// same while the skill settings are.
+const skills = { async list() { return [{ name: "delegating", description: "Hand work to threads.", surface: "optchat" as const, url: "https://example.invalid/skills", commit: "a".repeat(40), dir: "skills/delegating" }]; },
+  async read() { return "# delegating\n"; } };
+const open = () => OptChat.open({ directory, models, model: async () => ({ provider: "anthropic", id: MODEL }), threads, skills,
   limits: { view: 24_000, low: 12_000, compaction: 8_000, compactionLow: 4_000, retryMs: 50, watchMs: 50 } });
 async function until(check: () => boolean, what: string) {
   for (let k = 0; k < 4000 && !check(); k++) await delay(5);
@@ -296,6 +302,7 @@ assert.equal(across, 0, "nor across a reopen: a close waits for the calls out");
 // request differs from every other one, byte for byte.
 const sentTwice = requests.length - new Set(requests.map(request => hash(JSON.stringify([request.kind, request.blocks])))).size;
 assert.equal(sentTwice, 0, "no request was sent twice");
+assert.deepEqual([...withSkills], [true], "every turn's request lists the skills and has the skill tool");
 
 const share = (kind: Request["kind"]) => {
   const list = requests.filter(request => request.kind === kind);

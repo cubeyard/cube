@@ -3,8 +3,9 @@
 A thread's agent (Pi or Claude Code) gets skills: folders in the
 [Agent Skills](https://agentskills.io) format, each a `SKILL.md` with `name`
 and `description` frontmatter plus the files it links. They come from git
-repositories, each pinned to one exact commit. OptChat does not read skills
-yet. Code: `packages/server/src/skills.ts`.
+repositories, each pinned to one exact commit. OptChat gets the skills of
+its surface from the same sources (see "OptChat"). Code:
+`packages/server/src/skills.ts`.
 
 ## Sources and precedence
 
@@ -78,8 +79,8 @@ the new release carries.
 | value | thread prompt | OptChat |
 | --- | --- | --- |
 | `thread` (default) | listed | not listed |
-| `optchat` | installed, not listed | deferred |
-| `both` | listed | deferred |
+| `optchat` | installed, not listed | listed |
+| `both` | listed | listed |
 
 A skill with `disable-model-invocation: true` is installed but not listed.
 
@@ -116,6 +117,42 @@ sequenceDiagram
   from the list in its context and reads them with Read, which the mod
   sends to the machine.
 - Threads created before skills have no `allocation.skills` and get none.
+
+## OptChat
+
+OptChat has no machine, so its skills are not installed. Its prompt lists
+the `optchat` and `both` skills of the sources above (after precedence and
+`skills.disabled`, without `disable-model-invocation` ones) by id and
+description, without a path. Its `skill(name, path?, at?)` tool reads one,
+read only, on the host at the skill's pinned commit:
+
+- `skill(name)` gives the listed skill's `SKILL.md`; `path` a file relative
+  to its folder. `../<id>/…` reaches another installed skill, as a link does
+  in a thread; any other path out of a skill's folder, an absolute one, a
+  skill not listed (a `thread` or hidden one) or a file not in the folder
+  is answered with why, and a missing file with the folder's files. A file
+  longer than 30,000 characters comes a page at a time, from `at`.
+- Progressive disclosure, as in a thread: no skill's body is in the prompt;
+  the model reads one when a request matches its description.
+- The list follows the settings, not a thread's start: resolved once per
+  configuration (the commits are pinned, so the same configuration lists the
+  same skills, across turns and restarts, byte for byte) and again after a
+  save. A save that changes the list changes OptChat's system prompt once,
+  as an edit of its `AGENTS.md` does, and the providers' prompt caches write
+  it again once. A resolution that fails (a source's mirror cannot be
+  fetched) leaves the section out, logs it once and is tried again before the
+  next request. A request waits at most 10 seconds for one (a new pin's
+  commit being fetched into the host mirror) and goes without the section
+  past that; the resolution goes on, and a later request lists the skills,
+  which changes the prompt once more.
+- A repository's own `.agents/skills` are its threads', not OptChat's:
+  OptChat spans projects and reads none of them.
+- A skill is instructions for how OptChat works. It adds no tool and no
+  permission: OptChat still only starts, tells and reads threads, and it
+  never passes a skill to a thread; a thread gets its own skills when it
+  starts.
+- OptChat runs on Pi only (any provider pi-ai offers); Claude Code is never
+  OptChat's agent, so there is no second path to keep in step.
 
 ## Checks and limits
 
