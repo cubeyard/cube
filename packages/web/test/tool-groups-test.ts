@@ -89,4 +89,15 @@ assert.deepEqual(shape(groupTools(pictured)), ["tool:a", "tool:b", "group[c,d]"]
 assert.deepEqual(shape(groupTools([...rowsOf([call("1", "a", "x"), call("2", "b", "y")]), { kind: "user", id: "echo", text: "hi", sending: true }])),
   ["group[a,b]", "echo"]);
 
+// a thread's run of commands: a failure and the call that moves are both on the line,
+// and a message steered in mid-run (the next turn's user message) splits it
+const bash = (index: number) => [call(`c${index}`, `k${index}`, "bash", { command: `pnpm test --filter ${index}` }),
+  result(`r${index}`, `k${index}`, "bash", index === 2 ? "exit 1" : "ok", index === 2)];
+const commands = [user("0", "run them"), ...Array.from({ length: 8 }, (_, index) => bash(index)).flat(), call("c8", "k8", "bash", { command: "pnpm lint" })];
+const nine = groupTools(rowsOf(commands, "working"))[1] as Extract<Shown, { kind: "tools" }>;
+assert.deepEqual({ ...groupLine(nine.tools), named: groupLine(nine.tools).named.summary },
+  { count: "9 tools called", failed: "1 failed", state: "waiting", named: "pnpm lint" }, "nine commands: the failure counted, the waiting one named");
+assert.deepEqual(shape(groupTools(rowsOf([...bash(0), ...bash(1), user("m7", "also lint"), ...bash(2), ...bash(3)]))),
+  ["group[k0,k1]", "m7", "group[k2,k3]"], "a steered message ends a run; nothing groups across it");
+
 console.log("tool groups: ok");

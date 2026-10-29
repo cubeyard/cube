@@ -2,9 +2,9 @@ import type { ToolState, TranscriptRow } from "./transcript.ts";
 
 type ToolRow = Extract<TranscriptRow, { kind: "tool" }>;
 
-/** What the chat draws: a row as it is, or a run of tool calls folded to
- * one line. Rows keep their order; a group only wraps rows that stand next
- * to each other. */
+/** What a conversation draws (the chat's and a thread's): a row as it is,
+ * or a run of tool calls folded to one line. Rows keep their order; a group
+ * only wraps rows that stand next to each other. */
 export type Shown =
   | { kind: "row"; row: TranscriptRow }
   /** `key`: the first call's id (`callId` outlives a renumbered row id);

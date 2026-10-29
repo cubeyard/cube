@@ -658,7 +658,10 @@ choice is kept by each of the run's calls, so it holds as the run grows a
 call at a time and when an earlier page reaches back into it. A spawn or a
 write folded into a run keeps its margin note by the run's line, its
 thread lines under it on a phone, and the note's way back opens the run.
-Threads keep their tool lines unfolded. The composer field takes the well radius and a soft
+A thread's transcript folds its runs the same way (the user's call,
+2026-10-29): its answers are what is read, and a run of commands is one
+line that says what failed and what still moves; a single call, waiting or
+running, stands open as before. The composer field takes the well radius and a soft
 1px-offset shadow, and nothing stands beside it: no key, count or state.
 What runs and what failed is said where it belongs, in the margin's notes
 and the index.
