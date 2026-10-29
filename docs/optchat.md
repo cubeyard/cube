@@ -610,35 +610,40 @@ in later.
 
 - **Its start view.** `createThread` adds the thread's row in the same
   transaction, and nothing else: acceptance waits for no chat, compactor or
-  network. At the thread's first request cubed opens OptChat if it is not
-  open (as boot does, no browser or turn needed) and captures the compactor's view (the view merged further, at most
-  `COMPACTION` bytes of summaries, each line with its id; a run of more than
-  `UNBUILT` messages not summarized yet is one line), redacted with
-  `redactHook`, under `memoryDoc`'s rules (context, not instructions) and
-  a line saying through which message and when. The registry keeps it
-  (`chat`, `length`, `captured_at`, `text`) and it never changes: Pi's
-  `memory` section after the preamble and the mod's `cubeMemory` block
-  before `cubeWorkspace` are the same bytes at every request, compaction and
-  restart. A Pi thread's first request freezes either way: when its own
-  wait runs out or OptChat's open fails, it freezes a fallback instead (the
-  chat could not be read when the thread started, and why; the tools read
-  all of it), with no `chat`, and a later capture never replaces it. Pi's
-  baseline holds that text, and replacing it would be a patch that pi-ai
-  folds into the leading prompt for a model without mid-conversation system
-  messages: the whole conversation written to the cache again
-  (`pi-memory-baseline-test`). A Claude Code thread's block is read for each
-  prompt, so until a capture it says why there is none and a later prompt
-  tries again.
-- **Waits.** A Pi request and a memory tool call wait for OptChat at most
-  `MEMORY_WAIT_MS` (60 s), and a stop aborts the wait. The mod's route waits
-  `MEMORY_PROMPT_WAIT_MS` (5 s) and the mod itself 8 s: a slow, failing or
-  hung answer only leaves the memory out of that prompt, never the workspace
-  block (`scripts/check-claude-memory.ts`, real `claude`; without the mod's
+  network. Before the thread's first prompt (Pi: its first request; Claude
+  Code: cubed's gate before it writes a prompt to the child,
+  `claudeBeforePrompt`) cubed opens OptChat if it is not open (as boot does,
+  no browser or turn needed) and captures the compactor's view (the view
+  merged further, at most `COMPACTION` bytes of summaries, each line with
+  its id; a run of more than `UNBUILT` messages not summarized yet is one
+  line), redacted with `redactHook`, under `memoryDoc`'s rules (context,
+  not instructions) and a line saying through which message and when. The
+  registry keeps it (`chat`, `length`, `captured_at`, `text`) and it never
+  changes: Pi's `memory` section after the preamble and the mod's
+  `cubeMemory` block before `cubeWorkspace` are the same bytes at every
+  request, compaction and restart. That first prompt freezes either way:
+  when its own wait (60 s) runs out or OptChat's open fails, it freezes a
+  fallback instead (the chat could not be read when the thread started, and
+  why; the tools read all of it), with no `chat`, and a later capture never
+  replaces it. Replacing it would change the cached prompt: for Pi a patch
+  that pi-ai folds into the leading prompt for a model without
+  mid-conversation system messages, the whole conversation written to the
+  cache again (`pi-memory-baseline-test`); for Claude Code a block that
+  differs from the one its earlier prompts carried
+  (`claude-memory-gate-test`, and with the real `claude`
+  `scripts/check-claude-memory.ts`).
+- **Waits.** A first prompt and a memory tool call wait for OptChat at most
+  `MEMORY_WAIT_MS` (60 s), and a stop aborts the wait (a Claude Code turn
+  stopped there ends at once; its prompt was never written). The mod's route
+  only reads what the gate froze; should it find nothing frozen, it waits
+  `MEMORY_PROMPT_WAIT_MS` (5 s), freezes only a capture, and the mod itself
+  waits 8 s: a slow, failing or hung answer only leaves the memory out of
+  that prompt, never the workspace block (`scripts/check-claude-memory.ts`, real `claude`; without the mod's
   bound Claude Code 2.1.312 held the prompt about 30 s). An open that does
   not end is waited out once: while it is still pending, later requests and
   calls answer at once. That holds per thread: another thread giving up (a
-  Claude Code route after 5 s) does not cut a Pi thread's wait short, so its
-  first request captures rather than freeze the fallback. A stop freezes
+  Claude Code route after 5 s) does not cut another thread's gate short, so
+  its first prompt captures rather than freeze the fallback. A stop freezes
   nothing.
 - **Reading on.** `memory_zoom(id, n, at)` and `memory_date(id)` are cube
   tools (Pi, and `mcp__cube__memory_*` in Claude Code) over OptChat's live

@@ -10,7 +10,11 @@
  *     the same bytes on a second turn and on a resume;
  *   - none, failing (500), slower than the mod waits, hung: no memory, and
  *     the workspace block whole (the VM orientation, the repository's
- *     AGENTS.md, the skills), the hung and slow ones within the mod's bound.
+ *     AGENTS.md, the skills), the hung and slow ones within the mod's bound;
+ *   - cubed's own memory over a real registry, with the gate before each
+ *     prompt: a fallback frozen when OptChat hangs past the gate's wait, or
+ *     the captured view, the same bytes at every request, on a resumed child
+ *     and after the registry opens again.
  *
  *   node scripts/check-claude-memory.ts   (CLAUDE=<path> names the binary) */
 import assert from "node:assert/strict";
@@ -24,6 +28,9 @@ import { claudeCodeOnly, toolsRoute } from "../packages/server/src/cube-tools.ts
 import { VmWorkspace } from "../packages/server/src/vm-workspace.ts";
 import { workspaceRoute } from "../packages/server/src/workspace-http.ts";
 import { LeaseStore } from "../packages/server/src/workspace-lease.ts";
+import { Memory } from "../packages/server/src/optchat-memory.ts";
+import { Registry } from "../packages/server/src/registry.ts";
+import { MEMORY_PROMPT_WAIT_MS, ThreadMemory, type ChatMemory } from "../packages/server/src/thread-memory.ts";
 import { LocalGuestTransport } from "../packages/server/test/local-guest.ts";
 
 const claude = process.env.CLAUDE ?? "claude";
@@ -64,7 +71,7 @@ fs.writeFileSync(path.join(guest.workspace, "AGENTS.md"), `# Working on the chec
 const workspace = new VmWorkspace({ guest, leases: new LeaseStore(path.join(temp, "thread")), owner: "claude-code", binding: guest.binding });
 const BASE = "/api/threads/t1/workspace";
 const socket = path.join(temp, "workspace.sock");
-type Mode = "memory" | "none" | "failing" | "slow" | "hung";
+type Mode = "memory" | "none" | "failing" | "slow" | "hung" | "registry";
 let mode: Mode = "memory";
 /** Requests the route left unanswered (hung), answered at the end. */
 const held: http.ServerResponse[] = [];
@@ -82,6 +89,7 @@ const server = http.createServer(async (request, response) => {
     memoryAsks++;
     const refused = await claudeCodeOnly(token, held => workspace.lease({ token: held }).catch(() => null));
     if (refused) return send(refused.status, refused.body);
+    if (mode === "registry") return send(200, { text: await threads.text(memoryThread, "claude-code", { waitMs: MEMORY_PROMPT_WAIT_MS }) });
     if (mode === "memory") return send(200, { text: MEMORY });
     if (mode === "none") return send(200, { text: null });
     if (mode === "failing") return send(500, { error: "cube check: the memory route fails", code: "IO_ERROR", completionUnknown: false });
@@ -102,6 +110,20 @@ const runtime: ClaudeRuntime = {
   command: ["/usr/bin/env", ...Object.entries(apiEnv).map(([name, value]) => `${name}=${value}`), `CLAUDE_CONFIG_DIR=${path.join(temp, "config")}`, `HOME=${temp}`, claude],
   mod, socket, modReadyMs: 15000,
 };
+// The registry part: cubed's memory over a real registry, the gate before
+// each prompt as index.ts wires it (ClaudeAgent beforePrompt, final).
+let registry = new Registry(path.join(temp, "registry.sqlite"));
+registry.saveProject({ id: "p", name: "check", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
+registry.enrollRunner({ nodeId: "node-1", environmentId: 1, threadId: "runner-1", configPath: "/private/1.json", configHash: "h1", protocol: 4, kind: "vm" });
+const chatMemory = new Memory();
+chatMemory.append({ kind: "user", text: "the release codename is HERON", date: Date.UTC(2026, 9, 29) });
+chatMemory.setNode(0, 0, "user names the release HERON");
+let opening: () => Promise<ChatMemory> = async () => ({ identity: "optchat-check", memory: chatMemory });
+let threads = new ThreadMemory({ registry, chat: () => opening(), waitMs: 1000 });
+let memoryThread = "";
+const gated = (name: string) => ClaudeAgent.open({ directory: path.join(temp, `agent-${name}`), threadId: "t1", workspace, runtime, model: "sonnet", skills: SKILLS,
+  beforePrompt: signal => threads.text(memoryThread, "claude-code", { signal, final: true }) });
+
 /** One turn: its first model request's body, and how long after the submit it came. */
 async function turn(agent: ClaudeAgent, requestId: string): Promise<{ text: string; ms: number }> {
   const before = requests.length;
@@ -125,7 +147,7 @@ function workspaceWhole(text: string, what: string) {
   assert.ok(text.includes("cube-check-skill"), `${what}: the skills`);
 }
 /** The memory as the request body carries it (JSON-escaped), byte for byte. */
-const memoryIn = (text: string) => text.includes(JSON.stringify(MEMORY).slice(1, -1));
+const memoryIn = (text: string, memory = MEMORY) => text.includes(JSON.stringify(memory).slice(1, -1));
 
 try {
   {
@@ -159,7 +181,47 @@ try {
       console.log(`ok: memory ${kind}: the workspace block whole (orientation, AGENTS.md, skills), the first request ${result.ms} ms after the submit`);
     } finally { await agent.close(); }
   }
+  {
+    mode = "registry";
+    const open = opening;
+    // OptChat's open hangs past the gate's own wait: the fallback is frozen before the first prompt.
+    memoryThread = registry.createThread("p", "hung", { provider: "claude-code", id: "sonnet" }, "x").id;
+    opening = () => new Promise<never>(() => {});
+    let agent = await gated("registry-hung");
+    try {
+      const first = await turn(agent, "r1");
+      const fallback = registry.threadMemory(memoryThread)!.text!;
+      assert.match(fallback, /could not be read when this thread started \(OptChat is still opening\)/);
+      assert.ok(memoryIn(first.text, fallback), "the first request carries the frozen fallback");
+      workspaceWhole(first.text, "fallback");
+      opening = open;
+      const second = await turn(agent, "r2");
+      assert.ok(memoryIn(second.text, fallback) && !second.text.includes("HERON"), "OptChat open: the same fallback, no view");
+      await agent.setModel("opus");
+      assert.ok(memoryIn((await turn(agent, "r3")).text, fallback), "a resumed child: the same fallback");
+    } finally { await agent.close(); }
+    // Restart: the registry opened again; then a thread whose gate captures the view.
+    registry.close();
+    registry = new Registry(path.join(temp, "registry.sqlite"));
+    threads = new ThreadMemory({ registry, chat: () => opening(), waitMs: 1000 });
+    const fallback = registry.threadMemory(memoryThread)!.text!;
+    agent = await gated("registry-hung");
+    try { assert.ok(memoryIn((await turn(agent, "r4")).text, fallback), "after a restart: the same fallback"); }
+    finally { await agent.close(); }
+    memoryThread = registry.createThread("p", "good", { provider: "claude-code", id: "sonnet" }, "y").id;
+    agent = await gated("registry-good");
+    try {
+      const first = await turn(agent, "v1");
+      const view = registry.threadMemory(memoryThread)!.text!;
+      assert.match(view, /<chat>\n0\+1\|user names the release HERON\n<\/chat>$/);
+      assert.ok(memoryIn(first.text, view), "the first request carries the frozen view");
+      opening = async () => { throw new Error("down"); };
+      assert.ok(memoryIn((await turn(agent, "v2")).text, view), "OptChat down later: the same view");
+    } finally { await agent.close(); opening = open; }
+    console.log("ok: through cubed's gate and a real registry: a fallback frozen at the gate's own timeout and a captured view each reach every request, a resumed child and a restart byte for byte");
+  }
 } finally {
+  registry.close();
   for (const response of held) response.destroy();
   api.close();
   server.close();

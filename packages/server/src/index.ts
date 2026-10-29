@@ -342,7 +342,8 @@ export async function createCubed(options: {
   const git = new GitService(path.join(options.state, "repositories"));
   const latestCommits = latestCommitsOf({ git, skills: () => settings.get().skills, skillSource: options.skillSource ?? null });
   let modelProblem: (model: ModelSelection) => Promise<string | null> = async () => null;
-  const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, latestCommits, modelProblem: model => modelProblem(model), ...options.machines ? { machines: options.machines } : {}, ...options.now ? { now: options.now } : {},
+  const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, latestCommits, modelProblem: model => modelProblem(model),
+    claudeBeforePrompt: (id, signal) => memory.text(id, "claude-code", { signal, final: true }), ...options.machines ? { machines: options.machines } : {}, ...options.now ? { now: options.now } : {},
     ...options.patience ? { patience: options.patience } : {}, runner: { policy, ...options.runner }, claude: claudeCommand ? {
     command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
   } : null, portal: thread => portal!.guest(thread),
@@ -957,8 +958,6 @@ export async function createCubed(options: {
         const result = await toolsRoute({ method: request.method!, name: parts[5], token: bearer(), body, signal: abandoned.signal },
           token => workspace.lease({ token }).catch(() => null),
           token => threadTools(thread.id, "claude-code", file => readMachineText(workspace, token, file, ARTIFACT_LIMITS.body)));
-        // The mod lists the tools at session.start: the memory's capture starts then, before the first prompt asks for it.
-        if (result.status === 200 && parts.length === 5 && request.method === "GET") void memory.text(thread.id, "claude-code").catch(() => {});
         return json(result.body, result.status);
       }
       // A Claude Code thread's memory text (thread-memory.ts), which its mod puts in each prompt's context.
@@ -966,7 +965,8 @@ export async function createCubed(options: {
         const workspace = conversations.workspace(thread.id);
         const refused = await claudeCodeOnly(bearer(), token => workspace.lease({ token }).catch(() => null));
         if (refused) return json(refused.body, refused.status);
-        // Bounded: the prompt goes on without the memory this time rather than wait.
+        // Frozen by cubed's gate before the prompt (claudeBeforePrompt), so
+        // this reads the same bytes; bounded in case no gate ran.
         const abandoned = new AbortController();
         response.once("close", () => { if (!response.writableFinished) abandoned.abort(); });
         return json({ text: await memory.text(thread.id, "claude-code", { waitMs: MEMORY_PROMPT_WAIT_MS, signal: abandoned.signal }) });

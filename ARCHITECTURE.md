@@ -37,7 +37,8 @@
   and each turn starts at a head entry. It has no machine and no code tools; it
   starts, tells and archives ordinary threads. A thread created since
   `thread_memory` exists (a registry row from `createThread`) reads the chat:
-  a redacted start view captured at its first request and kept word for word
+  a redacted start view frozen before its first prompt (or an honest
+  fallback when the chat cannot be read then) and kept word for word
   (Pi's `memory` section, the Claude Code mod's `cubeMemory` block), and the
   read-only cube tools `memory_zoom`/`memory_date` over the live chat
   (`thread-memory.ts`). See [docs/optchat.md](docs/optchat.md).

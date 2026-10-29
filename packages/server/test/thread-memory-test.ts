@@ -265,6 +265,47 @@ The view below is the chat through message 2 (2026-10-29T10:02:00.000Z), capture
   assert.equal(await threads.text(thread.id, "pi"), expected, "the start view stays");
   chat = { identity: "optchat-a", memory: chatMemory };
 
+  // ---- a Claude Code thread's gate before its first prompt (final): the same rules as Pi ----
+  // Its own wait runs out: the fallback is frozen, and the mod's route reads it at every prompt.
+  const ccHung = registry.createThread("p", "cc-hung", model, "a claude code thread, the chat hung");
+  opening = () => new Promise<never>(() => {});
+  threads = memory(registry, 100);
+  const ccFallback = (await threads.text(ccHung.id, "claude-code", { final: true }))!;
+  assert.equal(ccFallback, `${memoryDoc(name => `mcp__cube__${name}`)}\nThe chat could not be read when this thread started (OptChat is still opening), so there is no view of it here; mcp__cube__memory_zoom and mcp__cube__memory_date read all of it once OptChat is open.`);
+  opening = async () => chat;
+  threads = memory();
+  assert.equal(await threads.text(ccHung.id, "claude-code", { waitMs: 50 }), ccFallback, "the route, OptChat open: the same fallback");
+  assert.equal(await claude(ccHung.id)("memory_zoom", { id: 3, n: 1 }), "3+0|user: newer: ship it on friday", "its tools read the live chat");
+  // The open fails, then recovers: the fallback stays.
+  const ccFailed = registry.createThread("p", "cc-failed", model, "a claude code thread, the chat down");
+  opening = async () => { throw new Error("the store failed"); };
+  const ccDown = (await threads.text(ccFailed.id, "claude-code", { final: true }))!;
+  assert.match(ccDown, /could not be read when this thread started \(the store failed\)/);
+  opening = async () => chat;
+  assert.equal(await threads.text(ccFailed.id, "claude-code", { final: true }), ccDown);
+  // The route gives up first (not final: nothing frozen) while the gate still waits on the same open; the gate captures.
+  const ccRace = registry.createThread("p", "cc-race", model, "the route and the gate at once");
+  shared = new Promise<ChatMemory>(resolve => { release = resolve; });
+  opening = () => shared;
+  threads = memory(registry, 5_000);
+  const gate = threads.text(ccRace.id, "claude-code", { final: true });
+  assert.match((await threads.text(ccRace.id, "claude-code", { waitMs: 50 }))!, /cannot be read right now/);
+  assert.equal(registry.threadMemory(ccRace.id)!.text, null, "the route's give-up froze nothing");
+  release(chat);
+  const ccView = (await gate)!;
+  assert.match(ccView, /mcp__cube__memory_zoom[^]*through message 3 \(/);
+  assert.equal(await threads.text(ccRace.id, "claude-code", { waitMs: 50 }), ccView, "the route reads the gate's capture");
+  // The gate's fallback first: a capture from the route after it changes nothing.
+  const ccRaceToo = registry.createThread("p", "cc-race-too", model, "the gate gives up first");
+  shared = new Promise<ChatMemory>(resolve => { release = resolve; });
+  const routeLater = memory(registry, 5_000).text(ccRaceToo.id, "claude-code", { waitMs: 5_000 });
+  const gateFallback = (await memory(registry, 50).text(ccRaceToo.id, "claude-code", { final: true }))!;
+  release(chat);
+  assert.match(gateFallback, /could not be read when this thread started/);
+  assert.equal(await routeLater, gateFallback, "the same bytes for both");
+  opening = async () => chat;
+  threads = memory();
+
   // ---- archive and restart: nothing is deleted, the same bytes come back without OptChat ----
   registry.applyPhase(thread.id, { type: "released" });
   assert.equal(registry.getThread(thread.id)!.archived, true);
@@ -277,7 +318,9 @@ The view below is the chat through message 2 (2026-10-29T10:02:00.000Z), capture
   assert.equal(registry.threadMemory(before.id), null, "the old thread still has none after a restart");
   assert.equal(await threads.text(failed.id, "pi"), fallback, "a frozen fallback stays after a restart, with OptChat open");
   assert.equal(await threads.text(hung.id, "pi"), timedOut);
-  assert.equal(opens, 0, "neither asks OptChat");
+  assert.equal(await threads.text(ccHung.id, "claude-code", { waitMs: 50 }), ccFallback, "a claude code thread's fallback too");
+  assert.equal(await threads.text(ccRace.id, "claude-code", { final: true }), ccView, "and its view");
+  assert.equal(opens, 0, "none asks OptChat");
   assert.equal(await pi(failed.id)("memory_zoom", { id: 0, n: 1 }), "0+0|user: plan the release of cube 0.4", "its tools read the chat");
   assert.equal(threads.has(registry.createThread("p", "after-restart", model, "next").id), true);
   console.log("thread memory: new threads only, frozen redacted view, live read-only tools, both adapters");

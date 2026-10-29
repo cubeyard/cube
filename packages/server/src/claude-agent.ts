@@ -57,6 +57,7 @@ import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { ALLOWED_TOOLS } from "../../claude-mod/hooks/tools.ts";
 import { expectReady } from "./claude-ready.ts";
+import { createLogger } from "./log.ts";
 import type { ModelSelection } from "./models.ts";
 import type { ThreadAcceptance } from "./thread-events.ts";
 import type { Workspace, WorkspaceLease } from "./workspace.ts";
@@ -194,11 +195,18 @@ export class ClaudeAgent {
   private idle: NodeJS.Timeout | undefined;
   private readonly listeners = new Set<() => void>();
   private closing = false;
+  /** Awaited before a prompt is written to the child (index.ts: the thread's
+   * OptChat memory frozen, so the mod's block is the same at every prompt). */
+  private readonly beforePrompt: ((signal: AbortSignal) => Promise<unknown>) | null;
+  /** That wait, while a prompt waits on it: a stop or close aborts it. */
+  private preparing: AbortController | null = null;
   private closedResolve!: () => void;
   /** Settles when the agent closes. */
   readonly closed = new Promise<void>(resolve => { this.closedResolve = resolve; });
 
-  private constructor(options: { threadId: string; db: DatabaseSync; workspace: Workspace; lease: WorkspaceLease; runtime: ClaudeRuntime; cwd: string; skills: string | null }) {
+  private constructor(options: { threadId: string; db: DatabaseSync; workspace: Workspace; lease: WorkspaceLease; runtime: ClaudeRuntime; cwd: string; skills: string | null;
+    beforePrompt: ((signal: AbortSignal) => Promise<unknown>) | null }) {
+    this.beforePrompt = options.beforePrompt;
     this.threadId = options.threadId; this.db = options.db; this.workspace = options.workspace;
     this.lease = options.lease; this.runtime = options.runtime; this.cwd = options.cwd; this.skills = options.skills;
     ({ submissions: this.submissions, messages: this.messages } = record(this.db));
@@ -219,7 +227,8 @@ export class ClaudeAgent {
 
   /** Takes the thread's `claude-code` lease for the agent's lifetime: the
    * one writable owner. The token goes to the child's mod and nowhere else. */
-  static async open(options: { directory: string; threadId: string; workspace: Workspace; runtime: ClaudeRuntime; model: string; skills?: string | null }): Promise<ClaudeAgent> {
+  static async open(options: { directory: string; threadId: string; workspace: Workspace; runtime: ClaudeRuntime; model: string; skills?: string | null;
+    beforePrompt?: (signal: AbortSignal) => Promise<unknown> }): Promise<ClaudeAgent> {
     const lease = await options.workspace.lease({ owner: "claude-code" });
     let db: DatabaseSync | undefined;
     try {
@@ -246,7 +255,7 @@ export class ClaudeAgent {
       // before cubed stopped is not known.
       db.prepare("UPDATE steer SET state='dropped', detail=? WHERE state='queued'").run(RESTARTED);
       for (const seq of interrupted) db.prepare("UPDATE submission SET state='failed', error=? WHERE seq=?").run(withDropped(INTERRUPTED, dropped(db, seq)), seq);
-      const agent = new ClaudeAgent({ threadId: options.threadId, db, workspace: options.workspace, lease, runtime: options.runtime, cwd, skills: options.skills ?? null });
+      const agent = new ClaudeAgent({ threadId: options.threadId, db, workspace: options.workspace, lease, runtime: options.runtime, cwd, skills: options.skills ?? null, beforePrompt: options.beforePrompt ?? null });
       for (const message of agent.messages) if (interrupted.has(message.submission)) agent.track(message.data);
       // Background agents ran in a child that ended with the cubed before.
       agent.lose(CLOSED);
@@ -314,10 +323,19 @@ export class ClaudeAgent {
     this.submissions.push(submission);
     clearTimeout(this.idle);
     this.changed();
-    void child.ready.then(ready => {
+    void child.ready.then(async ready => {
       // A child that ended first has said why (its exit is the turn's failure);
       // a turn stopped or closed meanwhile is not sent.
-      if (submission.state !== "running" || this.child !== child || ready === "exited" || this.interrupt || this.closing || child.stopped) return;
+      const gone = () => submission.state !== "running" || this.child !== child || this.interrupt || this.closing || child.stopped;
+      if (gone() || ready === "exited") return;
+      if (ready === "ready" && this.beforePrompt) {
+        const preparing = new AbortController();
+        this.preparing = preparing;
+        try { await this.beforePrompt(preparing.signal); }
+        catch (error) { if (!preparing.signal.aborted) createLogger("claude").warn("the wait before a prompt failed; the prompt goes on", { thread: this.threadId, error: error instanceof Error ? error.message : String(error) }); }
+        finally { if (this.preparing === preparing) this.preparing = null; }
+        if (gone()) return;
+      }
       if (ready === "ready") {
         this.write(child.process, { type: "user", session_id: "", parent_tool_use_id: null, message: { role: "user", content: [{ type: "text", text }] } });
         this.delivered.add(seq);
@@ -410,8 +428,11 @@ export class ClaudeAgent {
       return;
     }
     if (!this.running || !child || this.interrupt) return;
-    // No prompt has reached a child the mod has not said it is in: it is ended at once.
-    if (!child.attached) {
+    // No prompt has reached a child the mod has not said it is in, nor one
+    // whose prompt waits before it is written: it is ended at once.
+    const waiting = this.preparing;
+    waiting?.abort(new Error("stopped in cube"));
+    if (!child.attached || waiting) {
       this.ending = { state: "stopped", reason: "stopped in cube" };
       child.stopped = true;
       child.process.kill("SIGKILL");
@@ -451,6 +472,7 @@ export class ClaudeAgent {
   async close(): Promise<void> {
     if (this.closing) return this.closed;
     this.closing = true;
+    this.preparing?.abort(new Error(CLOSED));
     clearTimeout(this.idle); clearTimeout(this.deadline); clearTimeout(this.grace);
     // Claude Code does not continue a turn cut off here: its guest
     // commands are cancelled before the lease goes.

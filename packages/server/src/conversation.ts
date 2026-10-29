@@ -119,6 +119,9 @@ export interface ConversationsOptions {
   /** Why an accepted thread cannot start with its model (index.ts), or
    * null; asked before its commits. Absent: not checked (fixtures). */
   modelProblem?: (model: ModelSelection) => Promise<string | null>;
+  /** Awaited before each prompt of a Claude Code thread is written to its
+   * child (index.ts: its OptChat memory frozen); a stop aborts it. */
+  claudeBeforePrompt?: (thread: string, signal: AbortSignal) => Promise<unknown>;
 }
 export class Conversations {
   private readonly registry: Registry;
@@ -169,6 +172,7 @@ export class Conversations {
   private readonly portal: (thread: Thread) => GuestPortal;
   /** Host tools a Pi thread's agent gets (artifacts). */
   private readonly hostTools: ((thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"]) | null;
+  private readonly claudeBeforePrompt: ((thread: string, signal: AbortSignal) => Promise<unknown>) | null;
   private closing = false;
   /** Aborted by the close: stops the fetches of commits under way. */
   private readonly stopping = new AbortController();
@@ -205,6 +209,7 @@ export class Conversations {
   constructor(options: ConversationsOptions) {
     this.registry = options.registry; this.directory = options.directory; this.models = options.models;
     this.hostTools = options.hostTools ?? null;
+    this.claudeBeforePrompt = options.claudeBeforePrompt ?? null;
     this.machines = options.machines; this.claude = options.claude ?? null;
     this.now = options.now ?? Date.now;
     this.patience = { ...PATIENCE, ...options.patience };
@@ -816,8 +821,9 @@ export class Conversations {
     this.ready(thread);
     const runtime = this.claude;
     const loading = (async () => {
+      const before = this.claudeBeforePrompt;
       const agent = await ClaudeAgent.open({ directory: path.join(this.directory, id), threadId: id, workspace: this.workspace(id), runtime, model: thread.model.id,
-        skills: skillsPrompt(thread.allocation.skills) });
+        skills: skillsPrompt(thread.allocation.skills), ...before ? { beforePrompt: (signal: AbortSignal) => before(id, signal) } : {} });
       try {
         // The first message is accepted once under this request id.
         const initial = this.registry.initialPrompt(id);
