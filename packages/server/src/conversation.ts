@@ -429,6 +429,14 @@ export class Conversations {
         this.gaveUp.delete(id);
         if (this.registry.getThread(id)?.retry) this.registry.applyPhase(id, { type: "trySucceeded" });
       } catch (error) {
+        // A start cubed's close cut off is no failure, whatever it threw (a
+        // machine or a store closed under it): the next cubed tries again.
+        // Nothing is read or recorded, as the registry may already be
+        // closed; a POST or a spawn left this activation unawaited.
+        if (this.closing) {
+          log.info("the close cut a start off; the next cubed starts it again", { thread: id, error: error instanceof Error ? error.message : String(error) });
+          return;
+        }
         // An archive that ended is not this thread's failure.
         if (error instanceof ThreadArchiving || this.registry.getThread(id)?.archived !== false) return;
         const message = error instanceof Error ? error.message : String(error);
@@ -600,8 +608,9 @@ export class Conversations {
         ? { remote: primary.url, ref: primary.base.startsWith("refs/heads/") ? primary.base : `refs/heads/${primary.base}`, oid: primary.baseOid }
         : null });
     } catch (error) {
-      // Nothing failed: the machine waits for a runner, still allocating.
-      if (error instanceof RunnerWait) throw error;
+      // Nothing failed: the machine waits for a runner, still allocating, or
+      // cubed's close cut the start off (`activate`).
+      if (error instanceof RunnerWait || this.closing) throw error;
       const failure = allocationFailed(error);
       this.registry.applyPhase(id, { type: "failed", failure });
       throw new FailedTry(failure, { cause: error });
@@ -669,6 +678,9 @@ export class Conversations {
       const read = thread ? await this.machines.startupLog(thread).catch(() => null) : null;
       if (read?.hook && read.text) log = stepLog(read.text);
     }
+    // A step cubed's close cut off did not fail: it stays running, and the
+    // next cubed ends it as interrupted or as the machine says it ended.
+    if (this.closing) return;
     this.registry.endStartupStep(id, { name, ...(attempt !== undefined ? { attempt } : {}), state: "failed",
       detail: `${error instanceof Error ? error.message : String(error)}${suffix}`,
       ...(error instanceof StepFailure && error.memory ? { memory: error.memory } : {}), ...(log ? { log } : {}) });
@@ -1291,7 +1303,9 @@ export class Conversations {
     const deadline = Date.now() + ms;
     const left = (cap = Infinity) => Math.min(cap, Math.max(0, deadline - Date.now()));
     // A machine still booting is left to boot; the next cubed attaches to it.
-    // Its own cap, so the drain after it always gets its share.
+    // Its own cap, so the drain after it always gets its share. The start
+    // under way (a POST's or a spawn's, unawaited) goes on and records no
+    // failure once closing (`activate`).
     await within("thread machines", this.machines.close(), left(MACHINES_CLOSE_MS));
     // A recovery round started before the close (cubed's boot) starts
     // nothing more, and ends before the registry closes under it; past its
