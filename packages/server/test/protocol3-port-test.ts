@@ -72,7 +72,7 @@ function retiredThread(): { registry: Registry; thread: Thread } {
   registry.saveProject(project);
   registry.enrollRunner({ nodeId: "node-old", threadId: "old", environmentId: 1, configPath: path.join(root, "old.json"), configHash: "old", maxActiveVms: 4,
     protocol: 4, kind: "vm" });
-  const created = registry.createThread(project.id, "p3", model, "hello", "pi", undefined, { runnerId: "old" });
+  const created = registry.createThread(project.id, "p3", model, "hello", "pi", { runnerId: "old" });
   registry.markPlacement(created.id, "old", ["provisional"], "allocated");
   registry.applySleep(created.id, { type: "wakeAsked", waiting: "unused" }, 1);
   registry.close();

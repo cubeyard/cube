@@ -42,7 +42,7 @@ await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
 const address = app.server.address();
 assert(address && typeof address === "object");
 const base = `http://127.0.0.1:${address.port}`;
-const adapter = cubeThreads({ registry: app.registry, conversations, catalog: async () => [], runners: () => { throw new Error("unused"); }, latestCommits: () => { throw new Error("unused"); } });
+const adapter = cubeThreads({ registry: app.registry, conversations, catalog: () => [], runners: () => { throw new Error("unused"); } });
 /** The start failures cubed told OptChat's listener, in order, per thread. */
 const told = new Map<string, unknown[]>();
 adapter.onStartFailure((thread, failure) => { told.set(thread, [...told.get(thread) ?? [], failure]); });

@@ -68,8 +68,7 @@ app.registry.saveProject({ id: "p", name: "p", status: "ready", error: null, rev
 const asked = new Map<string, number>();
 /** Tasks spawned without a start: their agent opens only when the test says. */
 const later = new Set<string>();
-const base = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [piModel], runners: () => ({ runners: [] }) as never,
-  latestCommits: async () => ({}) as never });
+const base = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: () => [piModel], runners: () => ({ runners: [] }) as never });
 const threads: OptThreads = {
   ...base,
   async events(id) { asked.set(id, (asked.get(id) ?? 0) + 1); return base.events(id); },
@@ -78,7 +77,7 @@ const threads: OptThreads = {
     const claude = task.task.startsWith("CLAUDE_");
     const text = claude ? (task.task.endsWith("HELD") ? `run while [ ! -e ${path.join(gates, task.task)} ]; do sleep 0.05; done\nsay ${task.task.toLowerCase()} done` : `say ${task.task.toLowerCase()} done`) : task.task;
     const thread = app.registry.threadByRequest("p", requestId)
-      ?? app.registry.createThread("p", requestId, claude ? claudeModel : piModel, text, claude ? "claude-code" : "pi", undefined, { runnerId: "r" });
+      ?? app.registry.createThread("p", requestId, claude ? claudeModel : piModel, text, claude ? "claude-code" : "pi", { runnerId: "r" });
     app.registry.renameThread(thread.id, task.task);
     if (!later.has(task.task)) void app.conversations.activate(thread.id);
     return { id: thread.id, title: task.task };

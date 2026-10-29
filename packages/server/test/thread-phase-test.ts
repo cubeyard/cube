@@ -39,10 +39,11 @@ const table: Array<[string, ThreadPhase, PhaseEvent, ThreadPhase]> = [
   ["releasing, failed (a release that failed)", { ...allocating, workspaceState: "releasing" }, { type: "failed", failure: releaseFailed("gone") },
     { ...allocating, workspaceState: "failed", workspaceError: "workspace release failed: gone" }],
   ["releasing, released", { ...allocating, workspaceState: "releasing", workspaceBase: base }, { type: "released" }, { ...allocating, workspaceState: "releasing", workspaceBase: base, archived: true }],
+  ["failed, retaken (the retry stays until trySucceeded)", retried, { type: "retaken" }, { ...retried, workspaceState: "allocating", workspaceError: null }],
 ];
 for (const [name, from, event, to] of table) assert.deepEqual(nextPhase(from, event), to, name);
 const every: PhaseEvent[] = [{ type: "ready", base: null }, { type: "failed", failure: allocationFailed("x") }, { type: "tryFailed", failure: allocationFailed("x"), at: 1 },
-  { type: "trySucceeded" }, { type: "releaseBegan" }, { type: "released" }];
+  { type: "trySucceeded" }, { type: "releaseBegan" }, { type: "released" }, { type: "retaken" }];
 for (const event of every) assert.deepEqual(nextPhase(archived, event), archived, `archived is terminal: ${event.type}`);
 console.log(`ok: T1 ${table.length} transitions and every event on an archived thread match the table`);
 

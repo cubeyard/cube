@@ -4,6 +4,8 @@
 import type { StartupStep, ThreadSummary } from "./types.ts";
 
 const LABELS: Record<StartupStep["name"], string> = {
+  model: "model",
+  commits: "latest commits",
   lookup: "template",
   "build-boot": "template build · boot",
   "build-prepare": "template build · pre-setup and setup",

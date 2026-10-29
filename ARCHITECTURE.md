@@ -394,7 +394,8 @@ the waiting messages; a `beforeRequest` hook puts the rendered view in front of 
 compactor runs beside it in cubed, with cheap model calls that carry no tools
 and no ids, and appends each node as an entry. A spawned thread is created
 through the registry with a request ID derived from the tool call, so a replayed
-`spawn` finds the same thread. Its settled runs come back as `[id] ` messages:
+`spawn` finds the same thread. `spawn` answers once the registry accepted
+it; the thread checks its model and fetches its latest commits as it starts. Its settled runs come back as `[id] ` messages:
 every accepted message waits in a Pi document until Pi has placed it, under its
 own request ID. Its `archive` tool calls the same `Conversations.archive` as
 the UI, for its own threads only, and refuses a working one. Images the user
@@ -828,14 +829,18 @@ image, the disk size). The startup phases (`allocate`,
 are logged ("machine ready for the agent") and kept in `thread.vm.startup`.
 
 **Startup steps.** What the thread shows while its machine starts is
-`thread.vm.steps` (registry, at most 40, oldest first): `lookup` (the
+`thread.vm.steps` (registry, at most 40, oldest first): `model` (the
+thread's model in the live catalog, checked as it starts), `commits` (the
+repositories' latest commits and the skills, resolved once at the thread's
+first start, once its turn in the queue came; until then
+`allocation.latest` names the configured branches), `lookup` (the
 template found, or why none, and whether a build starts), `build-boot`,
 `build-prepare`, `build-publish`, `boot`, `prepare` (one per
 try, `attempt` = the `cube:provision:<n>` key) and `resume`, each with its
 state (`running`, `ok`, `failed`, `interrupted` when cubed began it again),
 times, a detail, the command's memory and, for a failed hook, the end of its
 log (4 KiB, escaped and redacted). RunnerMachines writes the lookup, build
-and boot steps; Conversations the preparation and resume. Each activation
+and boot steps; Conversations the model, commits, preparation and resume. Each activation
 first marks every step still running as interrupted (one thread has one
 activation at a time, so such a step is one an earlier activation or a
 stopped cubed never ended); a preparation try marked so that ended in the

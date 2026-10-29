@@ -45,7 +45,7 @@ try {
   const first = await createCubed({ state, models, claude: null, gateway: null, machines: new LocalMachines(path.join(root, "machines")) });
   first.registry.enrollRunner({ nodeId: "node-r", threadId: "r", environmentId: 1, configPath: "/private/r.json", configHash: "r", protocol: 4, kind: "vm" });
   first.registry.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
-  first.registry.createThread("p", "t", model, "hello", "pi", undefined, { runnerId: "r" });
+  first.registry.createThread("p", "t", model, "hello", "pi", { runnerId: "r" });
   await first.close();
 
   const machines = new HeldMachines(path.join(root, "machines"));

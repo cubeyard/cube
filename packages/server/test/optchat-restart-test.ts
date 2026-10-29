@@ -106,14 +106,13 @@ async function open(machines: CountedMachines) {
   const app = await createCubed({ state, models, machines, claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")],
     claudeOptions: { stopGraceMs: 2000 }, gateway: null });
   const threads = {
-    ...cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [piModel], runners: () => ({ runners: [] }) as never,
-      latestCommits: async () => ({}) as never }),
+    ...cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: () => [piModel], runners: () => ({ runners: [] }) as never }),
     // A spawn as cubeThreads makes one, on a runner of its own (one slot each).
     async spawn(task: { task: string }, requestId: string) {
       const claude = task.task === "CLAUDE_HELD";
       const text = claude ? `run while [ ! -e ${claudeGate} ]; do sleep 0.05; done\nsay claude held done` : task.task;
       const thread = app.registry.threadByRequest("p", requestId)
-        ?? app.registry.createThread("p", requestId, claude ? claudeModel : piModel, text, claude ? "claude-code" : "pi", undefined, { runnerId: runnerOf[task.task]! });
+        ?? app.registry.createThread("p", requestId, claude ? claudeModel : piModel, text, claude ? "claude-code" : "pi", { runnerId: runnerOf[task.task]! });
       app.registry.renameThread(thread.id, task.task);
       void app.conversations.activate(thread.id);
       return { id: thread.id, title: task.task };
@@ -160,8 +159,7 @@ assert.deepEqual([Q, H, C].map(id => reportsOf(id).length), [1, 0, 0], "before t
 const after = new CountedMachines(machinesRoot);
 ({ app, chat } = await open(after));
 after.onResume = id => { app.registry.applySleep(id, { type: "running" }); };
-const threads = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [piModel], runners: () => ({ runners: [] }) as never,
-  latestCommits: async () => ({}) as never });
+const threads = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: () => [piModel], runners: () => ({ runners: [] }) as never });
 try {
   await until(() => reportsOf(H).length === 1 && reportsOf(C).length === 1, "H's and C's stored runs report after the restart");
   await delay(1500);

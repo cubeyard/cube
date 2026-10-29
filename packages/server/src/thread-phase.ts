@@ -17,14 +17,17 @@ export type ThreadPhase = Pick<Thread, "workspaceState" | "workspaceError" | "wo
  * - `trySucceeded`: a try succeeded; the failed ones before no longer count;
  * - `releaseBegan`: an archive decided the disk and releases the machine
  *   (its own tries count from here);
- * - `released`: the release finished: archived, its slot free. */
+ * - `released`: the release finished: archived, its slot free;
+ * - `retaken`: a thread whose commits failed before it had a machine (it
+ *   held no slot since, Registry) took a slot again for its next try. */
 export type PhaseEvent =
   | { type: "ready"; base: Thread["workspaceBase"] }
   | { type: "failed"; failure: Failure }
   | { type: "tryFailed"; failure: Failure; at: number }
   | { type: "trySucceeded" }
   | { type: "releaseBegan" }
-  | { type: "released" };
+  | { type: "released" }
+  | { type: "retaken" };
 
 /** The phase after `event`. `archived` is terminal: nothing changes it. */
 export function nextPhase(phase: ThreadPhase, event: PhaseEvent): ThreadPhase {
@@ -38,6 +41,7 @@ export function nextPhase(phase: ThreadPhase, event: PhaseEvent): ThreadPhase {
       return { ...phase, retry: { failures: (phase.retry?.failures ?? 0) + 1, at: event.at, since, error: event.failure.text.slice(0, 1024) } };
     }
     case "trySucceeded": return withoutRetry(phase);
+    case "retaken": return { ...phase, workspaceState: "allocating", workspaceError: null };
     case "releaseBegan": return { ...withoutRetry(phase), workspaceState: "releasing", workspaceError: null };
     case "released": return { ...phase, archived: true };
   }

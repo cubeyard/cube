@@ -58,8 +58,8 @@ try {
     registry.recordRunnerProbe("wide", { health: { ...legacy, softwareVersion: "0.8.0", maxActiveVms: 2, activeVms: 2, runningVms: 2,
       platform: "linux-x86_64", capabilities: ["node.hello", "node.status", "template.publish"], limits,
       disk: { freeBytes: 10 * GiB, freeInodes: 500_000, committedBytes: 3 * GiB, reserveBytes: 2 * GiB, reserveInodes: 10_000 } } }, at);
-    registry.createThread("p", "one", { provider: "fixture", id: "m" }, "one", "pi", undefined, { runnerId: "wide" });
-    registry.createThread("p", "two", { provider: "fixture", id: "m" }, "two", "pi", undefined, { runnerId: "wide" });
+    registry.createThread("p", "one", { provider: "fixture", id: "m" }, "one", "pi", { runnerId: "wide" });
+    registry.createThread("p", "two", { provider: "fixture", id: "m" }, "two", "pi", { runnerId: "wide" });
     view = observeRunners(registry, 60_000, at + 30_000);
     const wide = view.runners.find(row => row.id === "wide")!;
     assert.equal(wide.report?.fresh, true);
@@ -181,14 +181,14 @@ try {
     // Two open threads on the protocol-3 runner from when it took threads, and one archived.
     const before = new DatabaseSync(path.join(root, "capacity.sqlite"));
     before.prepare("UPDATE runner SET data=json_set(data,'$.protocol',4,'$.kind','vm') WHERE id='old3'").run();
-    for (const id of ["a", "d"]) registry.createThread("p", id, model, id, "pi", undefined, { runnerId: "old3" });
+    for (const id of ["a", "d"]) registry.createThread("p", id, model, id, "pi", { runnerId: "old3" });
     registry.applyPhase(registry.threadByRequest("p", "d")!.id, { type: "released" });
-    registry.createThread("p", "b", model, "b", "pi", undefined, { runnerId: "old3" });
+    registry.createThread("p", "b", model, "b", "pi", { runnerId: "old3" });
     before.prepare("UPDATE runner SET data=json_remove(data,'$.protocol','$.kind') WHERE id='old3'").run();
     before.close();
     // One pooled thread on a berth vm; one thread on the host runner by name.
     registry.createThread("p", "e", model, "e");
-    registry.createThread("p", "f", model, "f", "pi", undefined, { runnerId: "host4" });
+    registry.createThread("p", "f", model, "f", "pi", { runnerId: "host4" });
     const view = observeRunners(registry, 60_000, at + 1000);
     const byId = (id: string) => view.runners.find(row => row.id === id)!;
     assert.deepEqual(["fresh", "stale", "mute", "retired", "old3", "host4"].map(id => [byId(id).protocol, byId(id).kind]),

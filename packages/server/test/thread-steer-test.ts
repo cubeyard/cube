@@ -62,8 +62,7 @@ fs.mkdirSync(state);
 async function open(machines: LocalMachines) {
   const app = await createCubed({ state, models, machines, claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")],
     claudeOptions: { stopGraceMs: 2000 }, gateway: null });
-  const threads = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [piModel], runners: () => ({ runners: [] }) as never,
-    latestCommits: async () => ({}) as never });
+  const threads = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: () => [piModel], runners: () => ({ runners: [] }) as never });
   return { app, threads };
 }
 async function until<T>(read: () => T | Promise<T>, check: (value: T) => boolean, what: string, ms = 20_000): Promise<T> {
@@ -88,7 +87,7 @@ async function statuses(id: string): Promise<{ seen: ThreadStatus[]; stop(): Pro
 }
 let runners = 0;
 const create = (title: string, text: string, model = piModel) => {
-  const thread = app.registry.createThread("p", title, model, text, model === piModel ? "pi" : "claude-code", undefined, { runnerId: `r${++runners}` });
+  const thread = app.registry.createThread("p", title, model, text, model === piModel ? "pi" : "claude-code", { runnerId: `r${++runners}` });
   void app.conversations.activate(thread.id);
   return thread.id;
 };

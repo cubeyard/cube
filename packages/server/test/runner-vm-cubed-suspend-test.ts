@@ -481,12 +481,8 @@ try {
   });
   assert.equal(ready.status, "ready", ready.error ?? "");
   const threads = cubeThreads({ registry: app.registry, conversations: app.conversations,
-    catalog: async () => [{ provider: faux.getModel().provider, id: faux.getModel().id }],
-    runners: () => observeRunners(app.registry, 60_000),
-    latestCommits: async () => {
-      const current = app.registry.getProject(project.id)!;
-      return { projectRevision: current.revision, repositories: current.repositories.map(r => ({ url: r.url, base: r.resolvedBase!, baseOid: r.baseOid! })) };
-    } });
+    catalog: () => [{ provider: faux.getModel().provider, id: faux.getModel().id }],
+    runners: () => observeRunners(app.registry, 60_000) });
   assert.ok(app.gateway, "cubed started its gateway");
   await app.gateway.ready();
   const waitReady = (id: string, what: string) => until(what, 900000, () => {

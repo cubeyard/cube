@@ -28,9 +28,10 @@ export type Mention = {
  * streamed message is renumbered. */
 export const rowKey = (row: TranscriptRow): string => row.kind === "tool" ? `call:${row.callId}` : row.id;
 
-/** `[aaaaaaa1] started in cube: title`; older records print no title, a
- * newer cubed may print the thread's name (` as 🦦 calm otter`) before it. */
-const STARTED = /^\[([0-9a-f]{8})\] started in (.+?)(?: as [^:]+)?(?:: (.*))?$/;
+/** `[aaaaaaa1] accepted in cube: title`, `started in` in older records,
+ * which may print no title; a newer cubed may print the thread's name
+ * (` as 🦦 calm otter`) before it. */
+const STARTED = /^\[([0-9a-f]{8})\] (?:accepted|started) in (.+?)(?: as [^:]+)?(?:: (.*))?$/;
 const UNSTARTED = /^task (\d+) \((.+?)\) not started: (.*)$/;
 const WRITTEN = /^artifact ([0-9a-f-]{36}) "/;
 const LINKED = /#\/a\/([0-9a-f][0-9a-f-]{7,35})(?![0-9a-f-])/g;

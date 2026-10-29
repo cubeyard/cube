@@ -9,7 +9,7 @@ import { parseArgs } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Models } from "@earendil-works/pi-ai";
 import { GitService, normalizeRepoUrl, type PrepareTiming } from "@cube/git";
-import { NO_HOOKS, projectHooks, projectMachine, Registry, threadAgent, type Project, type ResolvedRepositories, type Runner, type Thread } from "./registry.ts";
+import { NO_HOOKS, projectHooks, projectMachine, Registry, threadAgent, type Project, type ResolvedRepositories, type Runner, type Thread, type UnresolvedAllocation } from "./registry.ts";
 import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { PATIENCE, THREADS_CLOSE_MS } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
@@ -204,27 +204,28 @@ const runnersLog = createLogger("runners");
 /** Whole milliseconds for a log line; undefined (a stage not reached) is left out. */
 const ms = (value: number | undefined) => value === undefined ? undefined : Math.round(value);
 
-/** A new thread starts at the latest commits, not at the project's last
- * check: each repository's configured branch (or the default branch the
- * remote advertises now) is fetched and resolved again. A failure starts
- * no thread rather than one at older commits. An abort stops the git and
- * skills fetches and is rethrown as it came. */
-export function latestCommitsOf(deps: { registry: Registry; git: SkillGit & Pick<GitService, "prepareRepository">; skills: () => SkillsConfig; skillSource: SkillSource | null }) {
-  return async (projectId: string, signal?: AbortSignal): Promise<ResolvedRepositories> => {
-    const project = deps.registry.getProject(projectId);
-    if (!project) throw new Error("project not found");
-    if (project.status !== "ready") throw new Error("check the project before starting a thread");
+/** A thread starts at the latest commits, not at the project's last check:
+ * at its first start each repository's configured branch (or the default
+ * branch the remote advertises now) is fetched and resolved again, of the
+ * project revision the thread was accepted at. Threads of one project
+ * revision starting at once share the fetch under way (not a finished one:
+ * a later start fetches again). An abort stops the git and skills fetches
+ * and is rethrown as it came. */
+export function latestCommitsOf(deps: { git: SkillGit & Pick<GitService, "prepareRepository">; skills: () => SkillsConfig; skillSource: SkillSource | null }) {
+  const flights = new Map<string, Promise<ResolvedRepositories>>();
+  const resolve = async (allocation: UnresolvedAllocation, signal?: AbortSignal): Promise<ResolvedRepositories> => {
     const started = performance.now();
-    const repositories = await Promise.all(project.repositories.map(async repository => {
+    const repositories = await Promise.all(allocation.repositories.map(async ({ url }, index) => {
+      const configured = allocation.latest.bases[index] ?? undefined;
       const timing: PrepareTiming = {};
       try {
-        const result = await deps.git.prepareRepository(repository.url, repository.base, signal, timing);
-        spawnLog.info("repository fetched", { project: projectId, url: repository.url, lockMs: ms(timing.lock), lsRemoteMs: ms(timing.discover),
+        const result = await deps.git.prepareRepository(url, configured, signal, timing);
+        spawnLog.info("repository fetched", { project: allocation.projectId, url, lockMs: ms(timing.lock), lsRemoteMs: ms(timing.discover),
           fetchMs: ms(timing.fetch), resolveMs: ms(timing.resolve) });
-        return { url: repository.url, base: result.base, baseOid: result.baseOid };
+        return { url, base: result.base, baseOid: result.baseOid };
       } catch (error) {
         signal?.throwIfAborted();
-        throw Object.assign(new Error(`fetching the latest ${repository.base ?? "default branch"} of ${repository.url} failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
+        throw new Error(`fetching the latest ${configured ?? "default branch"} of ${url} failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
     }));
     const fetched = performance.now();
@@ -238,10 +239,19 @@ export function latestCommitsOf(deps: { registry: Registry; git: SkillGit & Pick
       return { ...installed, skipped: [...installed.skipped, ...own.skipped], project: own.project };
     })().catch(error => {
       signal?.throwIfAborted();
-      throw Object.assign(new Error(`resolving the skills failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
+      throw new Error(`resolving the skills failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     });
-    spawnLog.info("latest commits", { project: projectId, repositoriesMs: ms(fetched - started), skillsMs: ms(performance.now() - fetched), ms: ms(performance.now() - started) });
-    return { projectRevision: project.revision, repositories, skills };
+    spawnLog.info("latest commits", { project: allocation.projectId, revision: allocation.projectRevision, repositoriesMs: ms(fetched - started),
+      skillsMs: ms(performance.now() - fetched), ms: ms(performance.now() - started) });
+    return { repositories, skills };
+  };
+  return (allocation: UnresolvedAllocation, signal?: AbortSignal): Promise<ResolvedRepositories> => {
+    const key = `${allocation.projectId}@${allocation.projectRevision}`;
+    const shared = flights.get(key);
+    if (shared) return shared;
+    const flight = resolve(allocation, signal).finally(() => flights.delete(key));
+    flights.set(key, flight);
+    return flight;
   };
 }
 
@@ -323,7 +333,11 @@ export async function createCubed(options: {
    * in its machine. */
   const threadTools = (thread: string, agent: "pi" | "claude-code", readFile: (file: string) => Promise<{ text: string; path: string; sha256: string }>) =>
     artifactTools({ artifacts: artifacts!, author: { kind: "thread", thread }, agent, readable: async () => [{ kind: "thread", thread }], readFile });
-  const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, ...options.machines ? { machines: options.machines } : {}, ...options.now ? { now: options.now } : {},
+  const settings = new SettingsStore(path.join(options.state, "settings.json"));
+  const git = new GitService(path.join(options.state, "repositories"));
+  const latestCommits = latestCommitsOf({ git, skills: () => settings.get().skills, skillSource: options.skillSource ?? null });
+  let modelProblem: (model: ModelSelection) => Promise<string | null> = async () => null;
+  const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, latestCommits, modelProblem: model => modelProblem(model), ...options.machines ? { machines: options.machines } : {}, ...options.now ? { now: options.now } : {},
     ...options.patience ? { patience: options.patience } : {}, runner: { policy, ...options.runner }, claude: claudeCommand ? {
     command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
   } : null, portal: thread => portal!.guest(thread),
@@ -333,8 +347,6 @@ export async function createCubed(options: {
   }) });
   portal = new Portal({ settings: options.portal === undefined ? portalSettings() : options.portal, directory: path.join(options.state, "portal"),
     registry, machines, wake: thread => conversations.wake(thread.id), archiving: id => conversations.archivingNow(id) });
-  const git = new GitService(path.join(options.state, "repositories"));
-  const latestCommits = latestCommitsOf({ registry, git, skills: () => settings.get().skills, skillSource: options.skillSource ?? null });
   const updates = options.updates ?? new UpdateService();
   const onboarding = path.join(options.state, "onboarding.json");
   const configuredHosts = options.allowedHosts ?? process.env.CUBED_ALLOWED_HOSTS?.split(",") ?? [];
@@ -361,8 +373,32 @@ export async function createCubed(options: {
     return runnerView(id)!;
   };
   const catalog = async () => (await models.getAvailable()).map(({ provider, id }) => ({ provider, id }));
+  /** What a new thread may start with as cubed last read it (`threadCatalog`):
+   * a thread is accepted against it without reading the catalog, which may
+   * run a provider's key command (`!command` in Pi's auth.json). */
+  let knownCatalog: readonly ModelSelection[] = [];
   /** What a new thread may start with: Pi's models, then claude · max. */
-  const threadCatalog = async () => [...await catalog(), ...(conversations.claudeAvailable ? CLAUDE_MODELS : [])];
+  const threadCatalog = async () => {
+    knownCatalog = [...await catalog(), ...(conversations.claudeAvailable ? CLAUDE_MODELS : [])];
+    return [...knownCatalog];
+  };
+  /** Why a thread cannot start with its model, checked as it starts (the
+   * live catalog: a key command not run yet runs here), or null. */
+  modelProblem = async (model: ModelSelection) => {
+    const available = await threadCatalog();
+    if (available.some(each => each.provider === model.provider && each.id === model.id)) return null;
+    const selectable = `selectable models: ${available.map(each => `${each.provider}/${each.id}`).join(", ") || "none, connect a model provider"}`;
+    if (model.provider === CLAUDE_PROVIDER) {
+      return CLAUDE_MODELS.some(each => each.id === model.id) ? `model ${model.provider}/${model.id} needs Claude Code, which this host does not run; ${selectable}`
+        : `model ${model.provider}/${model.id} is not one cube knows; ${selectable}`;
+    }
+    return models.getModel(model.provider, model.id)
+      ? `model ${model.provider}/${model.id} is known, but its provider has no working credential (its key or key command in Pi's auth.json, or its environment); ${selectable}`
+      : `model ${model.provider}/${model.id} is not in the model catalog; ${selectable}`;
+  };
+  // The catalog as cubed starts: Pi ran the key commands present when it
+  // made its model runtime, so this read runs none of them again.
+  await threadCatalog().catch(() => {});
   let optchat: Promise<{ chat: OptChat; events: OptChatEvents }> | null = null;
   // Read-only usage accounting over the agents' own records.
   const usage = new UsageService({
@@ -396,7 +432,7 @@ export async function createCubed(options: {
   const diagnostics = (id: string) => threadDiagnostics({ registry, conversations, version: `${versionInfo().version} (${versionInfo().commit})`,
     machine: thread => machines.diagnose(thread),
     runner: runnerId => observeRunners(registry, probeIntervalMs).runners.find(runner => runner.id === runnerId) ?? null }, id);
-  const optchatThreads = { ...cubeThreads({ registry, conversations, catalog: threadCatalog, runners: () => observeRunners(registry, probeIntervalMs), latestCommits }), usage: usageQuery,
+  const optchatThreads = { ...cubeThreads({ registry, conversations, catalog: () => knownCatalog, runners: () => observeRunners(registry, probeIntervalMs) }), usage: usageQuery,
     diagnose: async (id: string) => { const bundle = await diagnostics(id); return bundle && formatDiagnostics(bundle); } };
   artifacts = new Artifacts({ store: new ArtifactStore(path.join(options.state, "artifacts.sqlite")), registry,
     github: options.githubPulls ?? githubPulls({ token: () => github.token() }),
@@ -409,7 +445,6 @@ export async function createCubed(options: {
   // chat's own. A saved model no provider offers now is passed over for the
   // chat's, and the settings page says so. CUBED_OPTCHAT_COMPACTOR chose it
   // once; it is no longer read, and an install that still sets it is told.
-  const settings = new SettingsStore(path.join(options.state, "settings.json"));
   const settingsLog = createLogger("optchat");
   const ignoredCompactor = process.env.CUBED_OPTCHAT_COMPACTOR?.trim() || null;
   if (ignoredCompactor) settingsLog.warn("CUBED_OPTCHAT_COMPACTOR is no longer read; choose the compactor's model under settings", { value: ignoredCompactor });
@@ -561,6 +596,19 @@ export async function createCubed(options: {
         const selected = candidate ? available.find(model => model.provider === candidate.provider && model.id === candidate.id) : preferredModel(available);
         if (!selected) throw new Error("connect a model provider first");
         return selected;
+      };
+      /** A new thread's model without reading the catalog: the one asked
+       * for (checked as the thread starts), or the preferred one of the
+       * catalog as cubed last read it. */
+      const requested = (input: unknown): ModelSelection => {
+        if (input === undefined || input === null) {
+          const preferred = preferredModel([...knownCatalog]);
+          if (!preferred) throw new Error("connect a model provider first");
+          return preferred;
+        }
+        const candidate = input as Partial<ModelSelection>;
+        if (typeof candidate.provider !== "string" || !candidate.provider || typeof candidate.id !== "string" || !candidate.id) throw new Error("model must be { provider, id }");
+        return { provider: candidate.provider, id: candidate.id };
       };
       if (url.pathname === "/api/health" && method === "GET") {
         return json({ lifecycle: "ready", ...versionInfo(), gateway: gateway ? (gateway.unavailable ? "unavailable" : "ready") : "none", portal: portal.state });
@@ -805,16 +853,16 @@ export async function createCubed(options: {
           return response.end(request.headers["if-none-match"] === etag ? undefined : list);
         }
         if (!id && method === "POST") {
-          const model = await selection(body.model);
+          const model = requested(body.model);
           const projectId = text("projectId");
           const requestId = text("requestId");
           const prompt = text("text");
           // A runner by name (node id or id): the only way onto a host runner.
           const runnerId = typeof body.runner === "string" && body.runner.trim() ? registry.namedRunnerId(body.runner) : undefined;
-          // A replayed request gets its thread back at the commits it started at.
-          const resolved = registry.threadByRequest(projectId, requestId) ? undefined : await latestCommits(projectId);
-          const thread = registry.createThread(projectId, requestId, model, prompt, model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi", resolved,
-            runnerId === undefined ? {} : { runnerId });
+          // Accepted here; its latest commits are fetched as it starts. A
+          // replayed request gets its thread back.
+          const thread = registry.createThread(projectId, requestId, model, prompt, model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi",
+            { latest: true, ...runnerId === undefined ? {} : { runnerId } });
           // The machine boots in the background (minutes the first time);
           // the thread shows "starting" until it is up.
           void conversations.activate(thread.id);

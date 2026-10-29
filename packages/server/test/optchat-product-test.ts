@@ -127,29 +127,18 @@ try {
   assert.equal((await post("/api/optchat/wishes/w1/dismiss", {})).status, 404);
 
   // A replayed spawn finds its thread, even with another model or none left.
-  const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [],
-    runners: () => observeRunners(app.registry, 60_000), latestCommits: () => { throw new Error("a replay resolves nothing"); } });
+  const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: () => [],
+    runners: () => observeRunners(app.registry, 60_000) });
   assert.match(await adapter.runners(), /^capacity: p4 \(protocol 4, berth\) VM runners \(the pool[^\n]*0 of 1 slots free on 1 runner[^\n]*\nrunners as cubed last heard from them[^]*unknown for every runner/, "OptChat's runners tool reads cubed's registry");
   assert.deepEqual(await adapter.spawn({ project: "demo", task: "count the files in the repository with bash" }, "optchat:call-spawn:0"), { id: thread.id, title: thread.title });
   // The chat's own reads call the thread by its name beside its title.
   assert.match(await adapter.describe([thread.id]), new RegExp(`^\\[${thread.id.slice(0, 8)}\\] demo · ${called} · ${thread.title} · `));
-  // A new spawn whose latest commits cannot be fetched starts no thread.
-  const threadCount = app.registry.listThreads().length;
-  const unfetched = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [{ provider: faux.getModel().provider, id: faux.getModel().id }],
-    runners: () => observeRunners(app.registry, 60_000), latestCommits: async () => { throw new Error("fetching the latest main failed"); } });
-  await assert.rejects(unfetched.spawn({ project: "demo", task: "another" }, "optchat:call-spawn:1"), /fetching the latest main failed/);
-  // An exact model id passes selection; one not in the catalog names the exact
-  // ids that are, starts no thread and is never mapped onto one of them.
-  const fauxId = `${faux.getModel().provider}/${faux.getModel().id}`;
-  await assert.rejects(unfetched.spawn({ project: "demo", task: "another", model: fauxId }, "optchat:call-spawn:2"), /fetching the latest main failed/);
-  const listed = cubeThreads({ registry: app.registry, conversations: app.conversations,
-    catalog: async () => [{ provider: faux.getModel().provider, id: faux.getModel().id }, { provider: "claude-code", id: "opus" }],
-    runners: () => observeRunners(app.registry, 60_000), latestCommits: () => { throw new Error("an unknown model resolves nothing"); } });
-  await assert.rejects(listed.spawn({ project: "demo", task: "another", model: "claude/opus" }, "optchat:call-spawn:3"),
-    { message: `model claude/opus unavailable; selectable models: ${fauxId}, claude-code/opus` });
-  await assert.rejects(adapter.spawn({ project: "demo", task: "another", model: "claude/opus" }, "optchat:call-spawn:4"),
-    { message: "model claude/opus unavailable; no model provider is connected" });
-  assert.equal(app.registry.listThreads().length, threadCount);
+  // A model asked for is taken as written: not mapped onto a catalog id,
+  // and checked as the thread starts, not refused by the call.
+  const asked = await adapter.spawn({ project: "demo", task: "another", model: "claude/opus" }, "optchat:call-spawn:3");
+  assert.deepEqual(app.registry.getThread(asked.id)!.model, { provider: "claude", id: "opus" });
+  await app.conversations.archive(asked.id);
+  await assert.rejects(adapter.spawn({ project: "demo", task: "another", model: "opus" }, "optchat:call-spawn:4"), { message: "model opus is not provider/id" });
 
   // History reads the thread's stored transcript beside cubed's record,
   // without its agent or lease: while the agent is open, with a failure

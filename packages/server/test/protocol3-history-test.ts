@@ -59,7 +59,7 @@ try {
     for (let k = 0; (await app.conversations.history(id)).status.state !== "completed"; k++) { assert.ok(k < 400, `thread ${id} completes`); await delay(25); }
   };
   const create = async (request: string, runnerId: string) => {
-    const thread = app.registry.createThread("p", request, model, `${request} task`, "pi", undefined, { runnerId });
+    const thread = app.registry.createThread("p", request, model, `${request} task`, "pi", { runnerId });
     await app.conversations.activate(thread.id);
     await done(thread.id);
     return thread;

@@ -7,7 +7,7 @@ import { createLogger } from "./log.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
 import { ARCHIVED_MAX, ARCHIVED_PAGE, THREAD_NOTE, type ObservedThread, type OptThreads } from "./optchat.ts";
 import { describeProjectHooks, findProject, writeProjectHooks } from "./project-hooks.ts";
-import { threadAgent, type Project, type Registry, type ResolvedRepositories, type Thread } from "./registry.ts";
+import { threadAgent, type Project, type Registry, type Thread } from "./registry.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
 import type { MachineSleep } from "./machine-sleep.ts";
 import { failureOf, type ThreadCondition } from "./thread-condition.ts";
@@ -27,17 +27,16 @@ function hookSummary(hooks: Project["hooks"]): string {
   return set.length ? set.join(", ") : "none";
 }
 
-/** `latestCommits` resolves a project's repositories against upstream for a
- * new thread (index.ts); a thread is never started at the last check's. */
-export function cubeThreads(options: { registry: Registry; conversations: Conversations; catalog: () => Promise<ModelSelection[]>; runners: () => RunnersObservation;
-  latestCommits: (projectId: string, signal?: AbortSignal) => Promise<ResolvedRepositories> }): OptThreads {
+/** `catalog`: the models as cubed last read them (index.ts): spawn and
+ * projects read no catalog, so no provider's key command runs for them. */
+export function cubeThreads(options: { registry: Registry; conversations: Conversations; catalog: () => readonly ModelSelection[]; runners: () => RunnersObservation }): OptThreads {
   const { registry, conversations } = options;
   const free = () => { const slots = registry.runnerSlots(); return `${slots.free} of ${slots.total}`; };
   return {
     ...readThreads({ registry, conversations }),
     async projects() {
       const projects = registry.listProjects();
-      const models = await options.catalog();
+      const models = options.catalog();
       const slots = registry.runnerSlots();
       const lines = projects.map(project => `${project.name} (id ${project.id}; ${project.status}${project.error ? `: ${project.error}` : ""}): `
         + project.repositories.map(repository => `${repository.url}@${repository.base ?? "default"}`).join(", ")
@@ -46,7 +45,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         lines.length ? `projects:\n${lines.join("\n")}` : "no projects: the user creates them under projects",
         `free thread machines: ${slots.free} of ${slots.total} in the pool (its berth vm runners, for threads that name no runner; a running thread holds one; a new thread with none free is queued and starts in its turn; `
           + "a host runner takes threads only by name; runners has each runner's version, state and slots)",
-        `models: ${models.map(model => `${model.provider}/${model.id}`).join(", ") || "none connected"}`,
+        `models (as cubed last read them): ${models.map(model => `${model.provider}/${model.id}`).join(", ") || "none connected"}`,
       ].join("\n");
     },
     async hooks(project) {
@@ -58,44 +57,34 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
     async runners() {
       return describeRunners(options.runners());
     },
-    async spawn(task, requestId, signal, batch = new Map()) {
+    async spawn(task, requestId) {
+      const validating = performance.now();
       const project = registry.listProjects().find(candidate => candidate.id === task.project)
         ?? registry.listProjects().find(candidate => candidate.name.toLowerCase() === task.project.toLowerCase());
       if (!project) throw new Error(`no project ${task.project}`);
       // A replayed call finds its thread even if the default model changed since.
       const prior = registry.threadByRequest(project.id, requestId);
       if (prior) return { id: prior.id, title: prior.title ?? "untitled" };
-      const models = await options.catalog();
-      const model = task.model
-        ? models.find(candidate => `${candidate.provider}/${candidate.id}` === task.model)
-        : preferredModel(models);
-      // An id not in the catalog is named with the exact ids that are: no
-      // alias or fallback is guessed for it.
-      if (!model) {
-        if (!task.model) throw new Error("connect a model provider first");
-        const ids = models.map(candidate => `${candidate.provider}/${candidate.id}`);
-        throw new Error(`model ${task.model} unavailable; ${ids.length ? `selectable models: ${ids.join(", ")}` : "no model provider is connected"}`);
-      }
+      // The model asked for is taken as written (no alias or fallback is
+      // guessed) and checked as the thread starts, with the live catalog;
+      // none asked for: the preferred one as cubed last read the catalog.
+      const slash = task.model?.indexOf("/") ?? -1;
+      if (task.model && (slash <= 0 || slash === task.model.length - 1)) throw new Error(`model ${task.model} is not provider/id`);
+      const model = task.model ? { provider: task.model.slice(0, slash), id: task.model.slice(slash + 1) } : preferredModel([...options.catalog()]);
+      if (!model) throw new Error("connect a model provider first");
       const text = `${task.task}\n\n${THREAD_NOTE}`;
       const runnerId = task.runner ? registry.namedRunnerId(task.runner) : undefined;
-      // A project changed during the call is fetched again at its new revision.
-      const waiting = performance.now();
-      const key = `${project.id}@${project.revision}`;
-      const shared = batch.has(key);
-      if (!shared) batch.set(key, options.latestCommits(project.id, signal));
-      const commits = await batch.get(key)!;
-      const fetched = performance.now();
-      // Aborted (OptChat closing or stopped): no thread and no machine start.
-      signal?.throwIfAborted();
+      const creating = performance.now();
+      // Accepted: its latest commits are fetched as it starts, in the background.
       let thread = registry.createThread(project.id, requestId, model, text, model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi",
-        commits, runnerId === undefined ? {} : { runnerId });
+        { latest: true, ...runnerId === undefined ? {} : { runnerId } });
       // The title comes from the task alone, unless the user renamed it since.
       const title = task.task.replace(/\s+/g, " ").slice(0, 80) || null;
       const spawned = text.replace(/\s+/g, " ").slice(0, 80);
       if (title !== spawned && registry.renameThread(thread.id, title, spawned)) thread = { ...thread, title };
       void conversations.activate(thread.id);
-      log.info("thread created", { thread: thread.id, project: project.id, request: requestId, sharedCommits: shared,
-        commitsMs: Math.round(fetched - waiting), registryMs: Math.round(performance.now() - fetched) });
+      log.info("thread accepted", { thread: thread.id, project: project.id, request: requestId,
+        validateMs: Math.round(creating - validating), createMs: Math.round(performance.now() - creating) });
       return { id: thread.id, title: thread.title ?? "untitled" };
     },
     async tell(id, text, requestId) {

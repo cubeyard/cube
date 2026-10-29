@@ -60,7 +60,7 @@ const registryOf = (threads: Thread[]) => ({
   getProject: () => ({ id: "p", name: "cube" }), interruptStartupSteps: () => {}, beginStartupStep: () => {}, endStartupStep: () => {}, initialPrompt: () => null,
   runner: () => ({ nodeId: "node", environmentId: 1, configHash: "config" }), runnerSlots: () => ({ free: 0, total: 2 }), slotQueue: () => new Map(),
 }) as unknown as Registry;
-const noThreads = { catalog: async () => [], runners: () => ({ runners: [] }) as never, latestCommits: async () => ({}) as never };
+const noThreads = { catalog: () => [], runners: () => ({ runners: [] }) as never };
 
 // ------------------------------------------------ 1. the real Conversations
 

@@ -151,7 +151,7 @@ try {
   const registry = new Registry(path.join(root, "registry.sqlite"));
   registry.saveProject({ id: "p", name: "cube", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
   registry.enrollRunner({ nodeId: "node-mac", threadId: "mac", environmentId: 1, configPath: "/private/mac.json", configHash: "mac", maxActiveVms: 2, protocol: 4, kind: "vm" });
-  const created = registry.createThread("p", "r1", { provider: "faux", id: "faux" }, "hello", "pi", undefined, { runnerId: "mac" });
+  const created = registry.createThread("p", "r1", { provider: "faux", id: "faux" }, "hello", "pi", { runnerId: "mac" });
   registry.markPlacement(created.id, created.runnerId, ["provisional"], "allocated");
   const evidence: MachineEvidence = {
     cubed: { startInProgress: false, attached: false, lastGuestProbe: null },

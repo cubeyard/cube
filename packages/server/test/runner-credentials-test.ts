@@ -38,9 +38,9 @@ const r1 = { nodeId: "node-r1", environmentId: 1, threadId: "node-r1", configPat
 const r2 = { ...r1, nodeId: "node-r2", environmentId: 2, threadId: "node-r2", configPath: "/private/r2.json", configHash: "r2" };
 registry.enrollRunner(r1);
 registry.enrollRunner(r2);
-const mine = registry.createThread("project", "mine", model, "x", "pi", undefined, { runnerId: "node-r1" });
-const other = registry.createThread("project", "other", model, "x", "pi", undefined, { runnerId: "node-r2" });
-const gone = registry.createThread("project", "gone", model, "x", "pi", undefined, { runnerId: "node-r1" });
+const mine = registry.createThread("project", "mine", model, "x", "pi", { runnerId: "node-r1" });
+const other = registry.createThread("project", "other", model, "x", "pi", { runnerId: "node-r2" });
+const gone = registry.createThread("project", "gone", model, "x", "pi", { runnerId: "node-r1" });
 registry.applyPhase(gone.id, { type: "releaseBegan" });
 registry.applyPhase(gone.id, { type: "released" });
 const epoch = nextMachineEpoch(path.join(threads, mine.id, "vm"));

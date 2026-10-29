@@ -66,6 +66,8 @@ OFFLINE_TESTS=(
   packages/server/test/vm-diagnostics-test.ts
   packages/server/test/startup-steps-test.ts
   packages/server/test/thread-start-commits-test.ts
+  packages/server/test/thread-commits-capacity-test.ts
+  packages/server/test/thread-model-check-test.ts
   packages/server/test/durable-agent-test.ts
   packages/server/test/codemode-test.ts
   packages/server/test/pi-read-test.ts
@@ -95,7 +97,7 @@ OFFLINE_TESTS=(
   packages/server/test/optchat-cache-path-test.ts
   packages/server/test/optchat-close-test.ts
   packages/server/test/optchat-replay-test.ts
-  packages/server/test/optchat-spawn-batch-test.ts
+  packages/server/test/optchat-spawn-accept-test.ts
   packages/server/test/optchat-view-fault-test.ts
   packages/server/test/optchat-history-test.ts
   packages/server/test/thread-history-test.ts
