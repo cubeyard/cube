@@ -106,9 +106,14 @@ export class ThreadMemory {
   has(thread: string): boolean { return this.options.registry.threadMemory(thread) !== null; }
 
   /** The thread's memory text for its prompt, or null without memory. The
-   * first one captured stays for the thread's life, across restarts, so its
-   * prompt keeps its cache; until then it says why it cannot be read, and
-   * the next request tries again. An abort rejects. */
+   * first text frozen stays for the thread's life, across restarts, so its
+   * prompt keeps its cache. A Pi thread's first request freezes one either
+   * way: the captured view, or, when its own wait runs out or OptChat's open
+   * fails, a fallback saying the start view could not be read (Pi's
+   * baseline holds it; replacing it later would be a patch that rewrites the
+   * cached prompt). A Claude Code prompt's block is read again for each
+   * prompt, so it freezes only a capture, and until then says why there is
+   * none. An abort rejects and freezes nothing. */
   async text(thread: string, agent: "pi" | "claude-code", wait: { waitMs?: number; signal?: AbortSignal } = {}): Promise<string | null> {
     const row = this.options.registry.threadMemory(thread);
     if (!row) return null;
@@ -118,7 +123,12 @@ export class ThreadMemory {
     try { chat = await this.open(thread, wait.waitMs ?? this.options.waitMs ?? MEMORY_WAIT_MS, wait.signal); }
     catch (error) {
       if (wait.signal?.aborted) throw error;
-      return `${memoryDoc(tool)}\nThe chat cannot be read right now (${reason(error)}); the next request tries again, and ${tool("memory_zoom")} reads it once OptChat is open.`;
+      if (agent === "claude-code") {
+        return `${memoryDoc(tool)}\nThe chat cannot be read right now (${reason(error)}); a later prompt tries again, and ${tool("memory_zoom")} reads it once OptChat is open.`;
+      }
+      const fallback = `${memoryDoc(tool)}\nThe chat could not be read when this thread started (${reason(error)}), so there is no view of it here; ${tool("memory_zoom")} and ${tool("memory_date")} read all of it once OptChat is open.`;
+      this.options.registry.captureMemory(thread, { chat: null, length: null, capturedAt: (this.options.now ?? Date.now)(), text: fallback });
+      return this.options.registry.threadMemory(thread)!.text!;
     }
     const at = (this.options.now ?? Date.now)();
     this.options.registry.captureMemory(thread, { chat: chat.identity, length: chat.memory.length, capturedAt: at, text: captured(chat.memory, at, tool) });

@@ -699,8 +699,9 @@ export class Registry {
       { chat: string | null; length: number | null; captured_at: number | null; text: string | null } | undefined;
     return row ? { chat: row.chat, length: row.length, capturedAt: row.captured_at, text: row.text } : null;
   }
-  /** Freezes a thread's memory once; the first capture stays, later ones change nothing. */
-  captureMemory(id: string, memory: { chat: string; length: number; capturedAt: number; text: string }): void {
+  /** Freezes a thread's memory once; the first text stays, later ones change
+   * nothing. `chat` null: a fallback frozen without a view of any chat. */
+  captureMemory(id: string, memory: { chat: string | null; length: number | null; capturedAt: number; text: string }): void {
     this.db.prepare("UPDATE thread_memory SET chat=?, length=?, captured_at=?, text=? WHERE thread_id=? AND text IS NULL")
       .run(memory.chat, memory.length, memory.capturedAt, memory.text, id);
   }

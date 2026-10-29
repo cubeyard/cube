@@ -1,15 +1,12 @@
-/** What a Pi thread's request carries when its memory (thread-memory.ts)
- * could not be read at its first request and is captured later: Pi rendered
- * the "cannot be read" text into its baseline, and the capture is then one
- * patch of the memory section alone, written once; later requests add none.
- * The patch is a later system entry: a model that takes later system
- * messages natively gets it in place, after the cached prefix; for any other
- * model pi-ai folds every system message into the leading prompt
- * (getCurrentSystemMessage), so the patch changes the prefix and the whole
- * conversation is written to the cache again, once. thread-memory.ts keeps
- * this to a Pi thread whose own wait (60 s) ran out or whose OptChat open
- * failed: another thread giving up does not cut it short. Offline: faux
- * model, local guest. */
+/** A Pi thread's memory section (thread-memory.ts) as Pi's requests carry
+ * it, over a real registry: when its first request cannot read OptChat (its
+ * own wait runs out on a hung open), the fallback it freezes is written once,
+ * in the baseline, and never patched: not when OptChat opens, not after the
+ * agent and the registry are opened again. A thread whose first request
+ * captures writes its view once the same way. A patch would be a later
+ * system entry, which pi-ai folds into the leading prompt for a model without
+ * mid-conversation system messages (getCurrentSystemMessage): the whole
+ * conversation written to the cache again. Offline: faux model, local guest. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -17,53 +14,85 @@ import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, type Message } from "@earendil-works/pi-ai";
 import { openAgent, type Agent } from "../src/durable-agent.ts";
+import { Memory } from "../src/optchat-memory.ts";
+import { Registry } from "../src/registry.ts";
+import { ThreadMemory, type ChatMemory } from "../src/thread-memory.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
 import { LocalGuestTransport } from "./local-guest.ts";
 
 const context = BACKGROUND_CONTEXT;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-pi-memory-"));
-const files = path.join(root, "workspace");
-const directory = path.join(root, "thread");
-fs.mkdirSync(files, { recursive: true });
-const guest = new LocalGuestTransport(path.dirname(files));
-const leases = new LeaseStore(directory);
-const workspace = new VmWorkspace({ guest, leases, owner: "pi", binding: guest.binding });
-const TRANSIENT = "Chat memory: …\nThe chat cannot be read right now (OptChat is still opening); the next request tries again, and memory_zoom reads it once OptChat is open.";
-const CAPTURED = "Chat memory: …\nThe view below is the chat through message 0 (…), captured … when this thread started.\n<chat>\n0+1|user: plan the release\n</chat>";
-let memory = TRANSIENT;
+const file = path.join(root, "registry.sqlite");
+let registry = new Registry(file);
+registry.saveProject({ id: "p", name: "demo", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
+for (const n of [1, 2]) registry.enrollRunner({ nodeId: `node-${n}`, environmentId: n, threadId: `runner-${n}`, configPath: `/private/${n}.json`, configHash: `h${n}`, protocol: 4, kind: "vm" });
+const chatMemory = new Memory();
+chatMemory.append({ kind: "user", text: "plan the release", date: Date.UTC(2026, 9, 29) });
+chatMemory.setNode(0, 0, "user asks for a release plan");
+const chat: ChatMemory = { identity: "optchat-a", memory: chatMemory };
+let opening: () => Promise<ChatMemory> = () => new Promise<never>(() => {});
+let threads = new ThreadMemory({ registry, chat: () => opening(), waitMs: 200 });
 
-/** Each request's system entries: the sections each one sets, in order. */
-const requests: Array<Array<Record<string, string | null>>> = [];
+/** Each request's system entries' memory writes, by thread directory. */
+const writes = new Map<string, Array<Array<string | null | undefined>>>();
+let current = "";
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
-faux.setResponses(Array.from({ length: 10 }, () => request => {
-  requests.push(request.messages.filter((message: Message) => message.role === "system").map(message => (message as { sections?: Record<string, string | null> }).sections ?? {}));
+faux.setResponses(Array.from({ length: 20 }, () => request => {
+  const entries = request.messages.filter((message: Message) => message.role === "system").map(message => (message as { sections?: Record<string, string | null> }).sections ?? {});
+  writes.get(current)!.push(entries.filter(sections => "memory" in sections).map(sections => sections.memory));
   return fauxAssistantMessage("ok");
 }));
 const models = createModels();
 models.setProvider(faux.provider);
-const agent: Agent = await openAgent({ directory, binding: guest.binding, workspace, models, model: { provider: faux.getModel().provider, id: faux.getModel().id },
-  hostTools: () => ({ tools: [], note: "", memory: async () => memory }) });
-const turn = async (content: string) => {
+const guest = new LocalGuestTransport(path.join(root, "guest"));
+const open = (name: string, thread: string): Promise<Agent> => {
+  const directory = path.join(root, name);
+  const workspace = new VmWorkspace({ guest, leases: new LeaseStore(directory), owner: "pi", binding: guest.binding });
+  return openAgent({ directory, binding: guest.binding, workspace, models, model: { provider: faux.getModel().provider, id: faux.getModel().id },
+    hostTools: () => ({ tools: [], note: "", memory: signal => threads.text(thread, "pi", signal ? { signal } : {}) }) });
+};
+const turn = async (agent: Agent, name: string, content: string) => {
+  current = name;
+  if (!writes.has(name)) writes.set(name, []);
   const submission = await agent.conversation.submit({ type: "input", content, requestId: content }, context);
   assert.equal((await submission.wait(context)).status, "done");
 };
-const memoryWrites = (entries: Array<Record<string, string | null>>) => entries.filter(sections => "memory" in sections).map(sections => sections.memory);
 
+const model = { provider: "fixture", id: "m" };
+const timedOut = registry.createThread("p", "timed-out", model, "x").id;
+const captured = registry.createThread("p", "captured", model, "y").id;
+let agent = await open("timed-out", timedOut);
 try {
-  await turn("first");
-  assert.deepEqual(memoryWrites(requests[0]!), [TRANSIENT], "the first request's baseline holds the transient text");
-  memory = CAPTURED;
-  await turn("second");
-  assert.deepEqual(memoryWrites(requests[1]!), [TRANSIENT, CAPTURED], "the capture is one patch after the baseline");
-  assert.deepEqual(requests[1]!.at(-1), { memory: CAPTURED }, "the patch sets the memory section alone");
-  assert.equal(requests[1]![0]!.preamble, requests[0]![0]!.preamble, "the baseline before it is unchanged");
-  await turn("third");
-  assert.deepEqual(memoryWrites(requests[2]!), [TRANSIENT, CAPTURED], "and later requests add no patch");
-  console.log("ok: memory captured after a transient first request: the baseline keeps the transient text, one patch of the memory section alone follows, once");
+  // Its own wait runs out on a hung open: the fallback is the baseline.
+  await turn(agent, "timed-out", "first");
+  const fallback = String(writes.get("timed-out")![0]![0]);
+  assert.match(fallback, /could not be read when this thread started \(OptChat is still opening\)/, "the first request's baseline holds the fallback");
+  // OptChat opens: no patch.
+  opening = async () => chat;
+  await turn(agent, "timed-out", "second");
+  // The agent and the registry open again, as after a restart: no patch.
+  await agent.close();
+  registry.close();
+  registry = new Registry(file);
+  threads = new ThreadMemory({ registry, chat: () => opening(), waitMs: 200 });
+  agent = await open("timed-out", timedOut);
+  await turn(agent, "timed-out", "third");
+  assert.deepEqual(writes.get("timed-out")!, [[fallback], [fallback], [fallback]], "written once, in the baseline; never patched");
+  assert.equal(registry.threadMemory(timedOut)!.text, fallback, "frozen");
+  await agent.close();
+
+  // A first request that captures: its view the same way.
+  agent = await open("captured", captured);
+  await turn(agent, "captured", "first");
+  await turn(agent, "captured", "second");
+  const view = registry.threadMemory(captured)!.text!;
+  assert.match(view, /<chat>\n0\+1\|user asks for a release plan\n<\/chat>$/);
+  assert.deepEqual(writes.get("captured")!, [[view], [view]], "the view written once, in the baseline");
+  console.log("ok: a pi thread's memory section is written once in its baseline and never patched: a fallback frozen at its own timeout stays through OptChat opening and a restart, a captured view stays");
 } finally {
   await agent.close();
+  registry.close();
   guest.stop();
-  leases.close();
   fs.rmSync(root, { recursive: true, force: true });
 }

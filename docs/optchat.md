@@ -619,8 +619,16 @@ in later.
   (`chat`, `length`, `captured_at`, `text`) and it never changes: Pi's
   `memory` section after the preamble and the mod's `cubeMemory` block
   before `cubeWorkspace` are the same bytes at every request, compaction and
-  restart. While OptChat cannot open, the text says why and nothing is
-  frozen; the next request tries again.
+  restart. A Pi thread's first request freezes either way: when its own
+  wait runs out or OptChat's open fails, it freezes a fallback instead (the
+  chat could not be read when the thread started, and why; the tools read
+  all of it), with no `chat`, and a later capture never replaces it. Pi's
+  baseline holds that text, and replacing it would be a patch that pi-ai
+  folds into the leading prompt for a model without mid-conversation system
+  messages: the whole conversation written to the cache again
+  (`pi-memory-baseline-test`). A Claude Code thread's block is read for each
+  prompt, so until a capture it says why there is none and a later prompt
+  tries again.
 - **Waits.** A Pi request and a memory tool call wait for OptChat at most
   `MEMORY_WAIT_MS` (60 s), and a stop aborts the wait. The mod's route waits
   `MEMORY_PROMPT_WAIT_MS` (5 s) and the mod itself 8 s: a slow, failing or
@@ -630,12 +638,8 @@ in later.
   not end is waited out once: while it is still pending, later requests and
   calls answer at once. That holds per thread: another thread giving up (a
   Claude Code route after 5 s) does not cut a Pi thread's wait short, so its
-  first request captures rather than put the "cannot be read" text in its
-  baseline. When its own wait runs out or the open fails, Pi does put that
-  text there, and the later capture is one patch of the `memory` section
-  alone (`pi-memory-baseline-test`): kept in place after the cached prefix on
-  a model that takes later system messages, folded into the leading prompt
-  (one full cache write) on any other.
+  first request captures rather than freeze the fallback. A stop freezes
+  nothing.
 - **Reading on.** `memory_zoom(id, n, at)` and `memory_date(id)` are cube
   tools (Pi, and `mcp__cube__memory_*` in Claude Code) over OptChat's live
   memory: OptChat's own `zoom` and `date`, any message, newer than the view

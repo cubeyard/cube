@@ -144,57 +144,74 @@ The view below is the chat through message 2 (2026-10-29T10:02:00.000Z), capture
   assert.match(one!, /mcp__cube__memory_zoom\(id, n\)/, "a Claude Code thread is told the tool's name as it calls it");
   assert.match(one!, /through message 3 \(/);
 
-  // ---- OptChat cannot open: said, not frozen; the next request captures ----
-  const later = registry.createThread("p", "later", model, "while the chat is down");
+  // ---- OptChat cannot open: a Pi thread freezes a fallback at once, and keeps it ----
+  // Its baseline holds whatever its first request froze; a later capture
+  // would be a patch that rewrites the cached prompt.
+  const failed = registry.createThread("p", "failed", model, "while the chat is down");
   opening = async () => { throw new Error("connect a model provider first"); };
-  const down = await threads.text(later.id, "pi");
-  assert.equal(down, `${memoryDoc(name => name)}\nThe chat cannot be read right now (connect a model provider first); the next request tries again, and memory_zoom reads it once OptChat is open.`);
-  assert.equal(registry.threadMemory(later.id)!.text, null, "nothing frozen");
-  assert.equal(await pi(later.id)("memory_zoom", { id: 0, n: 1 }), "chat memory unavailable now: connect a model provider first");
-  // Still opening, or hung: the wait is bounded and runs out once per open;
-  // later requests and calls answer at once instead of waiting it out again.
+  const fallback = `${memoryDoc(name => name)}\nThe chat could not be read when this thread started (connect a model provider first), so there is no view of it here; memory_zoom and memory_date read all of it once OptChat is open.`;
+  assert.equal(await threads.text(failed.id, "pi"), fallback);
+  assert.deepEqual(registry.threadMemory(failed.id), { chat: null, length: null, capturedAt: CAPTURED, text: fallback }, "frozen, without a chat");
+  assert.equal(await pi(failed.id)("memory_zoom", { id: 0, n: 1 }), "chat memory unavailable now: connect a model provider first");
+  opening = async () => chat;
+  assert.equal(await threads.text(failed.id, "pi"), fallback, "OptChat open again: the fallback stays");
+  assert.equal(await pi(failed.id)("memory_zoom", { id: 3, n: 1 }), "3+0|user: newer: ship it on friday", "and the tools read the live chat");
+  assert.equal(await pi(failed.id)("memory_date", { id: 3 }), new Date(T0 + 600_000).toString());
+
+  // ---- a Claude Code thread's block is read for each prompt: said, not frozen, captured later ----
+  const routedDown = registry.createThread("p", "claude-down", model, "a claude code thread while the chat is down");
+  opening = async () => { throw new Error("connect a model provider first"); };
+  assert.equal(await threads.text(routedDown.id, "claude-code"), `${memoryDoc(name => `mcp__cube__${name}`)}\nThe chat cannot be read right now (connect a model provider first); a later prompt tries again, and mcp__cube__memory_zoom reads it once OptChat is open.`);
+  assert.equal(registry.threadMemory(routedDown.id)!.text, null, "nothing frozen");
+  opening = async () => chat;
+  assert.match((await threads.text(routedDown.id, "claude-code"))!, /through message 3 \(/, "captured once OptChat opens");
+
+  // ---- a hung open: a Pi thread's own wait runs out, it freezes the fallback ----
+  const hung = registry.createThread("p", "hung", model, "while the chat hangs");
   threads = memory(registry, 300);
   opening = () => new Promise<never>(() => {});
   opens = 0;
   let at = performance.now();
-  assert.match((await threads.text(later.id, "pi"))!, /cannot be read right now \(OptChat is still opening\)/);
+  const timedOut = (await threads.text(hung.id, "pi"))!;
   const first = performance.now() - at;
+  assert.match(timedOut, /could not be read when this thread started \(OptChat is still opening\), so there is no view of it here/);
+  assert.equal(registry.threadMemory(hung.id)!.text, timedOut);
   at = performance.now();
-  assert.match((await threads.text(later.id, "pi"))!, /OptChat is still opening/);
-  assert.equal(await pi(later.id)("memory_date", { id: 0 }), "chat memory unavailable now: OptChat is still opening");
-  assert.equal(await claude(later.id)("memory_zoom", { id: 0, n: 1 }), "chat memory unavailable now: OptChat is still opening");
+  assert.equal(await threads.text(hung.id, "pi"), timedOut, "the next request: the same bytes, at once");
+  assert.equal(await pi(hung.id)("memory_date", { id: 0 }), "chat memory unavailable now: OptChat is still opening");
+  assert.equal(await claude(hung.id)("memory_zoom", { id: 0, n: 1 }), "chat memory unavailable now: OptChat is still opening");
   const again = performance.now() - at;
   assert.ok(first >= 290 && first < 2_000, `the first wait runs its bound: ${first} ms`);
   assert.ok(again < 150, `later ones do not wait it out again: ${again} ms`);
   assert.equal(opens, 1, "one open, shared");
   console.log(`hung open: first wait ${first.toFixed(0)} ms, the next request and two calls ${again.toFixed(0)} ms`);
   // A stop aborts the wait at once (a fresh process, so a fresh open): the request rejects, nothing is frozen.
+  const stopped = registry.createThread("p", "stopped", model, "stopped while waiting");
   threads = memory();
   const stop = new AbortController();
   at = performance.now();
-  const waiting = threads.text(later.id, "pi", { signal: stop.signal });
+  const waiting = threads.text(stopped.id, "pi", { signal: stop.signal });
   setTimeout(() => stop.abort(new Error("stopped by the user")), 50);
   await assert.rejects(waiting, /stopped by the user/);
   assert.ok(performance.now() - at < 1_000, "the stop did not wait for OptChat");
-  assert.equal(registry.threadMemory(later.id)!.text, null);
-  // The Claude Code route's own, shorter wait.
-  threads = memory();
+  assert.equal(registry.threadMemory(stopped.id)!.text, null, "a stop freezes nothing");
+  // The Claude Code route's own, shorter wait freezes nothing either.
   at = performance.now();
-  assert.match((await threads.text(later.id, "claude-code", { waitMs: 50 }))!, /cannot be read right now \(OptChat is still opening\); the next request tries again, and mcp__cube__memory_zoom/);
+  assert.match((await threads.text(stopped.id, "claude-code", { waitMs: 50 }))!, /cannot be read right now \(OptChat is still opening\); a later prompt tries again, and mcp__cube__memory_zoom/);
   assert.ok(performance.now() - at < 1_000, "the route's wait is its own");
-  // A Claude Code thread's route gives up at its own short wait while a Pi
-  // thread shares the open: the Pi thread waits its own bound and its first
-  // request captures, so its baseline never holds the "cannot be read" text
-  // (which a later capture would replace with a patch). The Claude Code
-  // thread captures at its next prompt, from the same open.
+  assert.equal(registry.threadMemory(stopped.id)!.text, null);
+
+  // ---- a Claude Code thread's route gives up while a Pi thread shares the open ----
+  // The Pi thread waits its own bound and its first request captures: its
+  // baseline holds the view, not a fallback. The Claude Code thread captures
+  // at its next prompt, from the same open.
   const routed = registry.createThread("p", "shared-claude", model, "a claude code thread");
   const waiting2 = registry.createThread("p", "shared-pi", model, "a pi thread");
   let release!: (value: ChatMemory) => void;
   // As openOptchat: one open, memoized.
-  const shared = new Promise<ChatMemory>(resolve => { release = resolve; });
+  let shared = new Promise<ChatMemory>(resolve => { release = resolve; });
   opening = () => shared;
   threads = memory(registry, 5_000);
-  opens = 0;
   assert.match((await threads.text(routed.id, "claude-code", { waitMs: 50 }))!, /cannot be read right now \(OptChat is still opening\)/);
   at = performance.now();
   const piFirst = threads.text(waiting2.id, "pi");
@@ -202,15 +219,33 @@ The view below is the chat through message 2 (2026-10-29T10:02:00.000Z), capture
   release(chat);
   const piText = (await piFirst)!;
   assert.ok(performance.now() - at >= 140, "the pi request waited past the route's give-up");
-  assert.doesNotMatch(piText, /cannot be read/, "the pi thread's first request has the memory, not the transient text");
+  assert.doesNotMatch(piText, /could not be read|cannot be read/, "the pi thread's first request has the view, not a fallback");
   assert.match(piText, /^Chat memory:[^]*through message 3 \(/);
   assert.equal(registry.threadMemory(waiting2.id)!.text, piText, "and it is what was frozen");
   const routedNext = (await threads.text(routed.id, "claude-code", { waitMs: 50 }))!;
   assert.match(routedNext, /mcp__cube__memory_zoom[^]*through message 3 \(/, "the claude code thread captures at its next prompt");
   assert.equal(registry.threadMemory(routed.id)!.text, routedNext);
-  threads = memory();
+
+  // ---- a capture and a fallback race for one thread: the first frozen wins, both callers get it ----
+  // The fallback first (a request whose wait ran out), then a capture from the same open.
+  const raced = registry.createThread("p", "raced", model, "two requests at once");
+  shared = new Promise<ChatMemory>(resolve => { release = resolve; });
+  threads = memory(registry, 5_000);
+  const capturing = threads.text(raced.id, "pi");
+  const short = await memory(registry, 50).text(raced.id, "pi");
+  release(chat);
+  assert.match(short!, /could not be read when this thread started/);
+  assert.equal(await capturing, short, "the capture after it changes nothing: the same bytes");
+  assert.equal(registry.threadMemory(raced.id)!.text, short);
+  // The capture first: a failed open after it changes nothing.
   opening = async () => chat;
-  assert.match((await threads.text(later.id, "pi"))!, /through message 3 \(/, "captured once OptChat opens");
+  const racedToo = registry.createThread("p", "raced-too", model, "two requests at once, the other way");
+  const capturedFirst = (await memory().text(racedToo.id, "pi"))!;
+  assert.match(capturedFirst, /through message 3 \(/);
+  opening = async () => { throw new Error("the store failed"); };
+  assert.equal(await memory().text(racedToo.id, "pi"), capturedFirst, "a failed open after a capture keeps the capture");
+  opening = async () => chat;
+  threads = memory();
 
   // ---- an empty chat, and a long run the compactor has not summarized ----
   const empty = registry.createThread("p", "empty", model, "first ever");
@@ -240,6 +275,10 @@ The view below is the chat through message 2 (2026-10-29T10:02:00.000Z), capture
   assert.equal(await threads.text(thread.id, "pi"), expected);
   assert.equal(opens, 0, "a captured view is read from the registry");
   assert.equal(registry.threadMemory(before.id), null, "the old thread still has none after a restart");
+  assert.equal(await threads.text(failed.id, "pi"), fallback, "a frozen fallback stays after a restart, with OptChat open");
+  assert.equal(await threads.text(hung.id, "pi"), timedOut);
+  assert.equal(opens, 0, "neither asks OptChat");
+  assert.equal(await pi(failed.id)("memory_zoom", { id: 0, n: 1 }), "0+0|user: plan the release of cube 0.4", "its tools read the chat");
   assert.equal(threads.has(registry.createThread("p", "after-restart", model, "next").id), true);
   console.log("thread memory: new threads only, frozen redacted view, live read-only tools, both adapters");
 } finally {
