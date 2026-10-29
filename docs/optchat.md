@@ -936,7 +936,7 @@ failure) nor recovery rounds send its request again; then archives it.
 - One `spawn` call fetches each project's latest commits once (at its
   revision), and all of that call's threads in the project start there. A
   new call fetches again. A failed fetch fails that project's tasks in the
-  call and no others. Machines start after the answer, not before it.
+  call and no others. The answer does not wait for machines to start.
   cubed's log has where the time went: `threads repository fetched` (lock
   wait, `ls-remote`, fetch, resolve), `threads latest commits`, `threads
   thread created` and `optchat spawn answered`.
