@@ -51,6 +51,16 @@ const FITNESS_ORDER: Record<RunnerFitness, number> = { ready: 0, unverified: 1, 
  * want of disk (it answers, and may get room), then one that is down. A
  * disk the runner does not report is no refusal. */
 const placementTier = (load: { fitness: RunnerFitness; diskRefusing: boolean }) => load.fitness === "down" ? 2 : load.diskRefusing ? 1 : 0;
+/** The runners a thread that names none may get, in runnerLoads' order:
+ * while any runner can take a machine (placementTier 0), not one that
+ * reports refusing new machines for disk, even when it has the only free
+ * slot: the thread then queues on the first that can (FIFO), where a freed
+ * slot starts it, rather than waiting for disk on a runner it never leaves.
+ * The cost: a runner that refuses only for a moment (template builds still
+ * writing, a thread being archived) loses that thread to the queue. With
+ * no such runner every runner stays, refusing ones before down ones. */
+const automatic = <Load extends { fitness: RunnerFitness; diskRefusing: boolean }>(loads: Load[]): Load[] =>
+  loads.some(load => placementTier(load) === 0) ? loads.filter(load => !load.diskRefusing) : loads;
 
 export interface ProjectRepository {
   id: string; projectId: string; position: number; url: string; base: string | null;
@@ -855,7 +865,7 @@ export class Registry {
       // another process, can take a runner's last slot. With no slot free
       // (the threads waiting for one count as holding theirs), the thread is
       // queued on the least loaded runner and starts once its turn comes.
-      const loads = options.runnerId !== undefined ? [this.namedRunner(options.runnerId)] : this.runnerLoads();
+      const loads = options.runnerId !== undefined ? [this.namedRunner(options.runnerId)] : automatic(this.runnerLoads());
       const load = loads.find(candidate => candidate.active + candidate.waiting < candidate.slots) ?? loads[0];
       if (!load) throw new Error("no berth vm runner in the global runner pool: start the thread on a berth host by name, or enroll a berth vm");
       const queued = load.active + load.waiting >= load.slots

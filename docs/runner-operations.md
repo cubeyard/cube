@@ -271,22 +271,29 @@ runner.
   disk_space`); nothing of the machine is made, and cubed shows the thread
   as waiting for disk space on that runner, keeps its slot and place in the
   queue, counts no failed start and tries again every recovery round (30 s)
-  until there is room. Free space is the operator's to make: berth deletes
-  nothing and stops no machine for it, and a running machine can still fill
+  until there is room. berth deletes nothing and stops no machine to make
+  room (see below for what frees it), and a running machine can still fill
   the disk (its disk is sparse and overcommitted). The runners page and
   OptChat show each VM runner's free space, what builds may still write,
   and `low` below 4 × the reserve; each machine's `events.log` has a `disk:`
   line per create, build, suspend and publish. A new thread that names no
-  runner goes to a runner whose last report does not say it refuses new
-  machines for disk, before one that does (a runner that does not answer
-  still comes after both; a free slot still comes before ranking, so a
-  refusing runner with the only free slot takes the thread; a disk the
-  runner does not report is no refusal). A thread started on a runner by
-  name stays there, and a placed thread never moves. Limits: a disk wait has
-  no time limit (only the operator makes room); the waiting thread holds its
-  slot, so threads that wait for disk can keep suspended threads on that
-  runner from waking; and a build machine left stopped keeps its template
-  disk's size committed until it is deleted. Deploy cubed before a berth
+  runner never goes to a runner whose last report says it refuses new
+  machines for disk while another runner can take a machine (ready, or not
+  heard from lately): not even to its free slot. When those others are
+  full, the thread queues on them, first come first served, and starts once
+  a slot frees. Only when no other runner can take one (all refuse, or the
+  others are down) does it go to a refusing runner and wait for disk there.
+  The cost: a runner that refuses only for a moment, while template builds
+  still write their disks, loses that thread to another runner's queue. A
+  disk the runner does not report is no refusal. A thread started on a
+  runner by name stays there, and a placed thread never moves. Limits: a
+  disk wait has no time limit; room comes back when the operator frees
+  space, when a template build ends (published or deleted, so it no longer
+  counts as committed), or when threads on the runner are archived and
+  their machines deleted. The waiting thread holds its slot, so threads that
+  wait for disk can keep suspended threads on that runner from waking; and a
+  build machine left stopped keeps its template disk's size committed until
+  it is deleted. Deploy cubed before a berth
   with this check: an older cubed shows the refusal as waiting for a free
   slot (it still waits; only the words are wrong).
 - **Suspend** (phase 7) is off unless `berth vm` starts with

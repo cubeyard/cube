@@ -85,13 +85,23 @@ try {
     // By name the thread stays on the runner it names, disk or not.
     const pinned = w.create("full");
     assert.deepEqual([pinned.runnerId, pinned.pinned], ["full", true]);
-    // roomy full (4 of 4): a free slot on full beats a queue on roomy, as before (slots first).
+    // roomy full (4 of 4) and full with the only free slots: the thread queues on roomy, first come first served.
     assert.equal(w.create().runnerId, "roomy");
-    const spill = w.create();
-    assert.deepEqual([spill.runnerId, spill.vm?.suspension], ["full", undefined], "the refusing runner still takes a thread when no other has a slot");
-    // Its next report says there is room: ranked by load again, as before.
+    const queued = w.create();
+    assert.deepEqual([queued.runnerId, queued.vm?.suspension?.state], ["roomy", "queued"], "a refusing runner's free slot is not taken while another can take a machine");
+    const next = w.create();
+    assert.deepEqual([next.runnerId, next.vm?.suspension?.state], ["roomy", "queued"]);
+    assert.deepEqual(w.registry.slotQueue().get("roomy")?.waiting, [queued.id, next.id], "in the order they came");
+    assert.equal(w.get(pinned.id).runnerId, "full", "a thread already placed stays");
+    // Its next report says there is room: its free slots take threads again.
     w.registry.recordRunnerProbe("full", { health: { ...ready(4), disk: disk(100 * GiB) } });
-    assert.equal(w.create().runnerId, "full");
+    const spill = w.create();
+    assert.deepEqual([spill.runnerId, spill.vm?.suspension], ["full", undefined]);
+    // Only refusing runners: a thread still gets one (it waits for disk there), not refused.
+    const only = world("disk-only", [{ name: "a", max: 2 }, { name: "b", max: 2 }]);
+    only.registry.recordRunnerProbe("a", { health: full });
+    only.registry.recordRunnerProbe("b", { health: full });
+    assert.deepEqual([only.create().runnerId, only.create().runnerId], ["a", "b"]);
 
     // Behind a runner never heard from (unverified), ahead of one that is down.
     const v = world("disk-fitness", [{ name: "full", max: 4 }, { name: "unheard", max: 4 }, { name: "gone", max: 4 }]);
@@ -110,7 +120,7 @@ try {
     assert.equal(u.create("unmeasured").runnerId, "unmeasured");
     // Loads old 0, unmeasured 1, ok 2: old, then old again (a tie goes to enrollment order), then unmeasured before ok.
     assert.deepEqual([u.create().runnerId, u.create().runnerId, u.create().runnerId], ["old", "old", "unmeasured"], "unknown disk keeps the load order");
-    console.log("ok: placement ranks a runner that reports refusing new machines for disk after runners that can take one, before runners that are down; by name, slots first and unknown disk as before");
+    console.log("ok: placement ranks a runner that reports refusing new machines for disk after runners that can take one, before runners that are down; never its free slot while another can take a machine (that thread queues); by name and unknown disk as before");
   }
 
   // --- the pool is the berth vm runners; a host runner only by name; a protocol-3 runner never ---
