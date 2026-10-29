@@ -33,7 +33,8 @@ const health: TrustedRunnerHealth = { lifecycle: "ready", draining: false, error
 const asked: string[] = [];
 const host = await startChatHost({ runnerHealth: async runner => {
   asked.push(runner.nodeId);
-  if (runner.nodeId === "pool-a") return { ...health };
+  // Its disk is short of berth's reserve: it refuses new machines.
+  if (runner.nodeId === "pool-a") return { ...health, disk: { freeBytes: 1.5 * 2 ** 30, freeInodes: 900_000, committedBytes: 0, reserveBytes: 2 * 2 ** 30, reserveInodes: 10_000 } };
   throw new Error("NODE_UNAVAILABLE");
 } });
 const browser = await chromium.launch();
@@ -98,6 +99,11 @@ try {
     assert.equal(await oldB.locator("button", { hasText: "check" }).count(), 0, "a p3 runner has no check");
     assert.equal(await oldB.locator("button", { hasText: "retire" }).isEnabled(), true, "a p3 runner with no open thread can be retired without a check");
     assert.match(await panel.locator(".runner-row", { hasText: "old-a" }).locator(".runner-blocked").textContent() ?? "", /retirement waits until its threads are archived/);
+    // pool-a's disk, in error ink while it refuses new machines; berth-vm (an older berth) says nothing of its disk.
+    const disk = panel.locator(".runner-row", { hasText: "pool-a" }).locator(".runner-evidence span", { hasText: "disk:" });
+    assert.equal(await disk.textContent(), "disk: 1.5 GiB free · 0.0 GiB committed to template builds · refusing new machines");
+    assert.equal(await inkOf(disk), await badInk(page), "a runner refusing new machines for want of disk is in error ink");
+    assert.equal(await panel.locator(".runner-row", { hasText: "berth-vm" }).locator(".runner-evidence span", { hasText: "disk:" }).count(), 0);
     const keptRow = page.locator(".runner-row", { hasText: "dirty: work not pushed" });
     await keptRow.waitFor();
     assert.match(await keptRow.textContent() ?? "", /on a protocol-3 runner: cube no longer reaches it, so the disk stays on that runner's host/);

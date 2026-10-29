@@ -443,6 +443,11 @@ export class RunnerMachines implements ThreadMachines {
     const node = this.options.registry.getRunner(thread.runnerId)?.nodeId ?? thread.runnerId;
     // A new machine on a full runner (its slot was reserved, but the runner
     // counts otherwise: another cubed, a lowered bound) waits; it is no failure.
+    // Too little disk on the runner: the same wait, saying what berth measured
+    // (rounded there to 0.1 GiB, so the text changes only with the space).
+    if (error instanceof RunnerError && error.code === "RESOURCE_EXHAUSTED" && error.reason === "disk_space") {
+      return new RunnerWait(`waiting for disk space on runner ${node}: ${safeText(error.message.slice(`${error.code}/${error.reason}: `.length), 512)}; this thread stays on it and starts once there is room`, { cause: error });
+    }
     if (error instanceof RunnerError && error.code === "RESOURCE_EXHAUSTED") {
       return new RunnerWait(`waiting for a free slot on runner ${node}: it hosts as many machines as it may; this thread stays on it`, { cause: error });
     }

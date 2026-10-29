@@ -4,6 +4,7 @@
 //! for developing and debugging runners. Key files hold secrets; stdout and
 //! stderr show only public identities and addresses.
 mod debian;
+mod disk;
 mod host;
 mod image;
 mod serve;
@@ -700,7 +701,7 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
                 .layer_cache_gib
                 .unwrap_or(DEFAULT_LAYER_CACHE_GIB)
                 .saturating_mul(1 << 30),
-            free_space: image::free_bytes,
+            free_space: disk::space,
             suspend_disk_margin_gib,
         },
         floor,

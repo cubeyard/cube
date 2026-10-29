@@ -31,7 +31,12 @@
     "retained": 9,
     "retainedBytes": "1009",
     "suspended": 11,
-    "suspendedBytes": "1011"
+    "suspendedBytes": "1011",
+    "diskFreeBytes": "1012",
+    "diskFreeInodes": "1013",
+    "diskCommittedBytes": "1014",
+    "diskReserveBytes": "1015",
+    "diskReserveInodes": "1016"
   },
   "lifecycle": "RECOVERY_REQUIRED",
   "network": {
