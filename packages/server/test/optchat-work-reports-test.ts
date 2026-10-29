@@ -1,16 +1,20 @@
 /** A report to OptChat is work, not the user's words: offline and disposable,
- * over the real chat and Pi store with a faux model.
+ * over the real chat and Pi SQLite store with a faux model.
  *
  *   1. Every way a report enters the log (a turn's input, steered into a
- *      tool round, written into a batch, written unanswered at a stop) is
- *      an `optchat.work` entry whose model message keeps the user role; the
- *      user's own messages stay `pi.user`. The provider only ever gets
- *      user, assistant and tool result messages.
- *   2. The log, zoom, the view and the compactor's input read reports as
- *      `work:` and the user's messages as `user:`; a reopen keeps them so.
+ *      tool round, written into a batch, written unanswered at a stop)
+ *      stores a `pi.user` entry, as before: the store gains no entry kind,
+ *      and the report's Pi submission keeps its `report:` request id. The
+ *      provider only ever gets user, assistant and tool result messages.
+ *   2. Read from those request ids, the log, zoom, the view and the
+ *      compactor's input tag reports `work:` and the user's messages
+ *      `user:`. A long report after the stored view (its node held at the
+ *      close) is work after a reopen too.
  *   3. The transcript still shows a report as the thread's message.
- *   4. A report logged before (a `pi.user` entry) stays user and gives as
- *      many messages, so no id moves. */
+ *   4. A reader that does not know work (cubed before it) reads the same
+ *      store as as many messages with the same text, the reports as user:
+ *      no report is lost and no id moves, so neither refuses the other.
+ *   5. `entryMessages`: work changes only the kind, pages included. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -18,9 +22,11 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
-import type { Cursor, EntryRecord, Page } from "@earendil-works/pi-durable";
+import type { ConversationId, Cursor, EntryRecord, Page } from "@earendil-works/pi-durable";
+import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
+import { readStorage } from "../src/durable-agent.ts";
 import { entryMessages, OptChat, OptChatEvents, type OptThreads } from "../src/optchat.ts";
-import { WORK_ENTRY } from "../src/optchat-memory.ts";
+import { CAP } from "../src/optchat-memory.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -37,11 +43,12 @@ let compactorGate: Promise<void> = Promise.resolve();
 let projectsGate: Promise<void> = Promise.resolve();
 let inProjects = false;
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
-faux.setResponses(Array.from({ length: 200 }, () => async (request: { messages: Message[] }) => {
+faux.setResponses(Array.from({ length: 200 }, () => async (request: { messages: Message[] }, options?: { signal?: AbortSignal }) => {
   for (const message of request.messages) roles.add(message.role);
   const system = request.messages.find(message => message.role === "system");
   if (system && blocks(system).join("").includes("You write the memory of OptChat")) {
-    await compactorGate;
+    // A close's cut aborts a held answer, as a provider's request ends.
+    await Promise.race([compactorGate, new Promise((_, reject) => options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }))]);
     compactorInputs.push(request.messages.filter(message => message.role === "user").flatMap(blocks).join("\n"));
     return fauxAssistantMessage("summary");
   }
@@ -61,7 +68,7 @@ const threads: OptThreads = { startFailure: () => null, onStartFailure: () => ()
   async events() { return null; },
 };
 const directory = path.join(root, "optchat");
-const open = () => OptChat.open({ directory, models, model: async () => model, threads, limits: { node: 64, retryMs: 50, watchMs: 50 } });
+const open = () => OptChat.open({ directory, models, model: async () => model, threads, limits: { node: 64, retryMs: 50, watchMs: 50, closeMs: 200 } });
 async function until(check: () => boolean, what: string) {
   for (let k = 0; k < 400 && !check(); k++) await delay(10);
   assert.ok(check(), what);
@@ -70,23 +77,30 @@ const idle = async (chat: OptChat) => {
   await until(() => script.length === 0, "the scripted replies were used");
   await chat.agent.conversation.waitForIdle(context);
 };
-async function entries(chat: OptChat): Promise<EntryRecord[]> {
-  const out: EntryRecord[] = [];
+/** Every record a scan gives. */
+async function all<T>(scan: (cursor: Cursor | undefined) => Promise<Page<T, Cursor>>): Promise<T[]> {
+  const out: T[] = [];
   let cursor: Cursor | undefined;
-  do {
-    const page: Page<EntryRecord, Cursor> = await chat.agent.storage.scanEntries({ conversationId: chat.agent.conversation.id }, 256, cursor, context);
-    out.push(...page.items);
-    cursor = page.next;
-  } while (cursor);
+  do { const page = await scan(cursor); out.push(...page.items); cursor = page.next; } while (cursor);
   return out;
 }
+/** A conversation's entries, oldest first, as OptChat's log reads them. */
+const entries = async (storage: SqliteStorage, conversationId: ConversationId) => (await all(cursor => storage.scanEntries({ conversationId }, 256, cursor, context))).sort((a, b) => a.id - b.id);
+const submissions = (storage: SqliteStorage, conversationId: ConversationId) => all(cursor => storage.scanSubmissions({ conversationId }, 256, cursor, context));
 const lastUser = (messages: Message[]) => blocks(messages.findLast(message => message.role === "user")!).at(-1);
 const report = (run: string) => `report:${THREAD}:${run}`;
 const LONG = `[abcdef12] done: PR #9 merged, tests pass ${"and more detail ".repeat(8)}`;
+const LATE = `[abcdef12] late: PR #10 failed CI ${"with its log ".repeat(8)}`;
 const REPORTS = ["[abcdef12] done: PR #7", "[abcdef12] steered in", LONG, "[abcdef12] waited, then stopped"];
 const USERS = ["start a thread", "list projects", "prepare", "after the report", "prompt"];
+const EXPECTED = [
+  ["user", USERS[0]], ["work", REPORTS[0]], ["user", USERS[1]], ["work", REPORTS[1]], ["user", USERS[2]], ["work", LONG], ["user", USERS[3]],
+  ["user", USERS[4]], ["work", REPORTS[3]], ["work", LATE],
+];
+const kinds = (chat: OptChat) => chat.memory.messages.filter(message => message.kind === "user" || message.kind === "work").map(message => [message.kind, message.text]);
 
 let chat = await open();
+const conversationId = chat.agent.conversation.id;
 let view: string;
 try {
   // A user message spawns the thread, so the transcript knows it as this chat's.
@@ -160,22 +174,23 @@ try {
   await delay(200);
   assert.deepEqual(await chat.pending(), [], "nothing waits after the stop");
 
-  // 1. The entries: reports are work entries with a user message.
-  const users = (await entries(chat)).filter(entry => entry.model?.[0]?.role === "user");
-  const kindOf = (text: string) => users.filter(entry => blocks(entry.model![0]!).join("") === text).map(entry => entry.kind);
-  for (const text of REPORTS) assert.deepEqual(kindOf(text), [WORK_ENTRY], `${text.slice(0, 30)}: one ${WORK_ENTRY} entry`);
-  for (const text of USERS) assert.deepEqual(kindOf(text), ["pi.user"], `${text}: one pi.user entry`);
+  // 1. Every message is a pi.user entry; a report's submission says report:.
+  const stored = await entries(chat.agent.storage, conversationId);
+  const users = stored.filter(entry => entry.model?.[0]?.role === "user");
+  const entryOf = (text: string) => users.filter(entry => blocks(entry.model![0]!).join("") === text);
+  for (const text of [...REPORTS, ...USERS]) assert.deepEqual(entryOf(text).map(entry => entry.kind), ["pi.user"], `${text.slice(0, 30)}: one pi.user entry`);
+  assert.deepEqual([...new Set(stored.map(entry => entry.kind))].sort(), ["optchat.turn", "pi.assistant", "pi.system", "pi.tool-result", "pi.user"], "the store gains no entry kind");
+  const placedBy = new Map((await submissions(chat.agent.storage, conversationId)).flatMap(record => record.entry !== undefined ? [[record.entry as number, record.requestId]] : []));
+  const requestOf = (text: string) => placedBy.get(entryOf(text)[0]!.id);
+  assert.deepEqual(REPORTS.map(requestOf), [report("run-1"), report("run-2"), report("run-3"), `${report("run-4")}:unanswered`], "each report's submission keeps its request id");
+  assert.ok(USERS.every(text => !requestOf(text)?.startsWith("report:")), "no user message's does");
   assert.deepEqual([...roles].sort(), ["assistant", "system", "toolResult", "user"], "the provider got only valid roles");
 
   // 2. The log, zoom, the view and the compactor read reports as work.
   await until(() => chat.memory.settled() && chat.memory.ready(new Set(), 8).length === 0, "the tree is complete");
-  const logged = chat.memory.messages.flatMap((message, id) => message.kind === "user" || message.kind === "work" ? [{ id, ...message }] : []);
-  assert.deepEqual(logged.map(message => [message.kind, message.text]), [
-    ["user", USERS[0]], ["work", REPORTS[0]], ["user", USERS[1]], ["work", REPORTS[1]], ["user", USERS[2]], ["work", LONG], ["user", USERS[3]],
-    ["user", USERS[4]], ["work", REPORTS[3]],
-  ], "each message has its kind, in order");
-  const first = logged.find(message => message.text === REPORTS[0])!;
-  assert.equal(chat.memory.zoom(first.id, 1), `${first.id}+0|work: ${REPORTS[0]}`, "zoom shows the report as work");
+  assert.deepEqual(kinds(chat), EXPECTED.slice(0, -1), "each message has its kind, in order");
+  const first = chat.memory.messages.findIndex(message => message.text === REPORTS[0]);
+  assert.equal(chat.memory.zoom(first, 1), `${first}+0|work: ${REPORTS[0]}`, "zoom shows the report as work");
   assert.ok(compactorInputs.some(input => input.includes(`work: ${LONG}`)), "the compactor reads the long report as work");
   assert.ok(compactorInputs.every(input => !input.includes("user: [abcdef12]")), "never as the user's");
   view = chat.memory.render();
@@ -187,28 +202,51 @@ try {
     assert.deepEqual(shown.filter(event => event.type === "user-message" && event.text === text).map(event => event.type === "user-message" && event.from), ["abcdef12"], `${text.slice(0, 30)}: shown once, from the thread`);
   }
   assert.ok(shown.some(event => event.type === "user-message" && event.text === USERS[0] && !event.from), "the user's message stays the user's");
-} finally { await chat.close(); }
 
-// A reopen reads the same kinds from the store and restores the same view.
+  // A long report after the stored view, its node held at the close.
+  compactorGate = new Promise(() => {});
+  script = [() => fauxAssistantMessage("noted late")];
+  await chat.send(LATE, report("run-5"));
+  await idle(chat);
+  assert.deepEqual(kinds(chat).at(-1), ["work", LATE], "the late report is work");
+} finally { await chat.close(); }
+compactorGate = Promise.resolve();
+
+// A reopen reads the kinds from the store again; the late report's node
+// was cut at the close and is held, so it stays after the stored view.
 chat = await open();
 try {
-  assert.equal(chat.memory.render(), view, "a reopen restores the view");
-  assert.deepEqual(chat.memory.messages.filter(message => message.kind === "user" || message.kind === "work").map(message => [message.kind, message.text]), [
-    ["user", USERS[0]], ["work", REPORTS[0]], ["user", USERS[1]], ["work", REPORTS[1]], ["user", USERS[2]], ["work", LONG], ["user", USERS[3]],
-    ["user", USERS[4]], ["work", REPORTS[3]],
-  ], "and reads each message's kind from the store");
-} finally { await chat.close(); fs.rmSync(root, { recursive: true, force: true }); }
-console.log("ok: a report to the chat, however it enters (input, steered, batch write, unanswered at a stop), is an optchat.work entry with a user-role message: the provider gets only valid roles, the log, zoom, the view and the compactor read it as work, the transcript shows it as the thread's, and a reopen keeps it");
+  assert.deepEqual(kinds(chat), EXPECTED, "a reopen reads each message's kind from the store, the late report too");
+  const late = chat.memory.messages.findIndex(message => message.text === LATE);
+  assert.match(chat.memory.render(), new RegExp(`\\n${late}\\+1\\|\\(not summarized yet`), "the late report is after the stored view");
+  assert.equal(chat.memory.zoom(late, 1), `${late}+0|work: ${LATE}`);
+  view = chat.memory.render();
+} finally { await chat.close(); }
+console.log("ok: a report to the chat, however it enters (input, steered, batch write, unanswered at a stop), stays a pi.user entry whose submission keeps its report: id; the provider gets only valid roles; the log, zoom, the view and the compactor read it as work; the transcript shows it as the thread's; a reopen keeps it, for a report after the stored view too");
 
-// 4. A report logged before stays user, with as many messages.
+// 4. A reader that does not know work reads the same store.
 {
-  const at = (kind: string, text: string) => ({ id: 1, conversationId: 1, kind, model: [{ role: "user", content: text, timestamp: 1 }] }) as unknown as EntryRecord;
+  const old = await readStorage(path.join(directory, "pi.sqlite"), async storage => (await entries(storage, conversationId)).flatMap(entry => entryMessages(entry, CAP)));
+  chat = await open();
+  try {
+    const now = chat.memory.messages;
+    assert.equal(old!.length, now.length, "as many messages: every id the same");
+    assert.deepEqual(old!.map(message => message.text), now.map(message => message.text), "with the same text: no report lost");
+    assert.deepEqual(old!.flatMap((message, id) => message.kind !== now[id]!.kind ? [[message.kind, now[id]!.kind]] : []), Array.from({ length: 5 }, () => ["user", "work"]), "only the five reports differ, user to work");
+    assert.equal(chat.memory.render(), view, "a reopen restores the view");
+  } finally { await chat.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  console.log("ok: a reader that does not know work reads the same store as as many messages with the same text, the reports as user: no report lost, no id moved, and the chat reopens with its view");
+}
+
+// 5. Work changes only the kind.
+{
+  const at = (text: string) => ({ id: 1, conversationId: 1, kind: "pi.user", model: [{ role: "user", content: text, timestamp: 1 }] }) as unknown as EntryRecord;
   const long = `[abcdef12] ${"x".repeat(50)}\n${"y".repeat(50)}`;
-  assert.deepEqual(entryMessages(at("pi.user", REPORTS[0]!)).map(message => message.kind), ["user"], "an old report entry is still logged as user");
-  assert.deepEqual(entryMessages(at(WORK_ENTRY, REPORTS[0]!)).map(message => message.kind), ["work"]);
-  const pages = (kind: string) => entryMessages(at(kind, long), 40).map(message => message.text);
-  assert.deepEqual(pages(WORK_ENTRY), pages("pi.user"), "a work entry pages like a user one: no id moves");
-  assert.ok(pages(WORK_ENTRY).length > 1);
-  console.log("ok: a report logged before is a pi.user entry and stays user; a work entry gives the same messages and pages, so the log's ids and shape do not change");
+  assert.deepEqual(entryMessages(at(REPORTS[0]!)).map(message => message.kind), ["user"], "a user entry is user unless a report placed it");
+  assert.deepEqual(entryMessages(at(REPORTS[0]!), 0, true).map(message => message.kind), ["work"]);
+  const pages = (work: boolean) => entryMessages(at(long), 40, work).map(message => message.text);
+  assert.deepEqual(pages(true), pages(false), "a report pages like a user message");
+  assert.ok(pages(true).length > 1);
+  console.log("ok: entryMessages: work changes only the kind, pages included");
 }
 process.exit(0);

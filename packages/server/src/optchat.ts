@@ -14,14 +14,14 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Context, JsonRepresentation } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { cleanupSessionResources, Type, type AssistantMessage, type Message, type Models, type Usage } from "@earendil-works/pi-ai";
-import { createRegistry, defineDoc, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, ROOT_CONVERSATION_ID, section, ToolTask, type LiveState, type Conversation, type ConversationId, type Cursor, type Page, type EntryId, type EntryRecord, type TaskId, type ToolRegistration, type HookApi, type SessionEnd } from "@earendil-works/pi-durable";
+import { createRegistry, defineDoc, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, ROOT_CONVERSATION_ID, section, ToolTask, type LiveState, type Conversation, type ConversationId, type Cursor, type Page, type EntryId, type EntryRecord, type TaskId, type SubmissionId, type SubmissionRecord, type ToolRegistration, type HookApi, type SessionEnd } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openStorage } from "./durable-agent.ts";
 import { agents } from "./claude-agent.ts";
 import { createLogger } from "./log.ts";
 import { compactNode, Spent, spent, TRIES, type Round } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
-import { CAP, capText, Memory, pages, WORK_ENTRY, type LogMessage, type Part } from "./optchat-memory.ts";
+import { CAP, capText, Memory, pages, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import { imageNote } from "./thread-images.ts";
 import { countCut, markSent, RESTART_LIMIT, SendsDoc, settleSends } from "./pi-sends.ts";
@@ -410,8 +410,10 @@ const PendingDoc = defineDoc<Pending>({ kind: "cube.optchat.pending", version: 1
 const ViewDoc = defineDoc<{ total: number; parts: number[]; batch?: boolean; compaction?: number[]; compactionBatch?: boolean; entry?: number; shape?: string; shapeTotal?: number }>({ kind: "cube.optchat.view", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({ total: 0, parts: [] }) });
 /** How the log is read from Pi's entries: entries from `pagedFrom` on log a
  * long message in pages (spec §1); older ones as they were logged before
- * pages, so their messages keep their ids. Set at the first open that knows it. */
-const LogDoc = defineDoc<{ pagedFrom?: number }>({ kind: "cube.optchat.log", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({}) });
+ * pages, so their messages keep their ids. Set at the first open that knows it.
+ * Reports from `workFrom` on are logged as work; older ones as they were
+ * logged, as user. Set the same way. */
+const LogDoc = defineDoc<{ pagedFrom?: number; workFrom?: number }>({ kind: "cube.optchat.log", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({}) });
 /** The compactor's model calls run beside Pi, so Pi's `pi.usage` does not
  * see them: their usage by `provider/model`, one commit per reply, failed
  * replies included. `since` is when this store began counting; `earlier`
@@ -455,14 +457,10 @@ export const ZOOM_ECHO = "(the zoomed lines: a copy of earlier messages of this 
  * the media store, which the request hook fills in for the model. */
 const userContent = (item: Pick<PendingItem, "text" | "images">) => !item.images?.length ? item.text
   : [...item.text ? [{ type: "text" as const, text: item.text }] : [], ...item.images.map(image => ({ type: "image" as const, mimeType: image.mimeType, data: mediaData(image.id) }))];
-/** A report's entry is WORK_ENTRY; its model message is still the user's
- * role, the only one a provider takes for it. */
-const inputEntry = (item: Pick<PendingItem, "requestId">) => isReport(item.requestId) ? { entry: { kind: WORK_ENTRY } } : {};
-const userEntry = (item: Pick<PendingItem, "text" | "images" | "requestId">) => ({ kind: isReport(item.requestId) ? WORK_ENTRY : "pi.user", model: [{ role: "user" as const, content: userContent(item), timestamp: Date.now() }] });
-const USER_ENTRIES = new Set(["pi.user", WORK_ENTRY]);
+const userEntry = (item: Pick<PendingItem, "text" | "images">) => ({ kind: "pi.user", model: [{ role: "user" as const, content: userContent(item), timestamp: Date.now() }] });
 /** The store ids an entry's user messages refer to. */
 export function entryImages(entry: EntryRecord): string[] {
-  if (!USER_ENTRIES.has(entry.kind)) return [];
+  if (entry.kind !== "pi.user") return [];
   return (entry.model ?? []).flatMap(message => message.role !== "user" || typeof message.content === "string" ? []
     : message.content.flatMap(part => part.type === "image" ? [mediaId(part.data)].filter(id => id !== null) : []));
 }
@@ -479,14 +477,15 @@ const textOf = (content: Message["content"]) => typeof content === "string" ? co
  * `page`, a long message or reply is logged in pages of that many
  * characters, never cut; tool results and calls are capped instead. How
  * many messages an entry gives decides every later id: a change to it is
- * caught at the next open (`shape`) and refused. */
-export function entryMessages(entry: EntryRecord, page = 0): LogMessage[] {
+ * caught at the next open (`shape`) and refused. `work`: the entry is a
+ * report's (its Pi submission's request id says so): logged as work, the
+ * same messages as user, so a reader that does not know it numbers alike. */
+export function entryMessages(entry: EntryRecord, page = 0, work = false): LogMessage[] {
   const out: LogMessage[] = [];
   const paged = (kind: "user" | "work" | "talk", text: string, date: number) => { for (const part of page ? pages(text, page) : [text]) out.push({ kind, text: part, date }); };
   for (const message of entry.model ?? []) {
     const date = message.timestamp;
-    if (entry.kind === "pi.user" && message.role === "user") paged("user", textOf(message.content), date);
-    else if (entry.kind === WORK_ENTRY && message.role === "user") paged("work", textOf(message.content), date);
+    if (entry.kind === "pi.user" && message.role === "user") paged(work ? "work" : "user", textOf(message.content), date);
     else if (entry.kind === "pi.assistant" && message.role === "assistant") {
       // A failed attempt is retried and never reaches the model again; an
       // aborted one ran none of its tool calls.
@@ -579,6 +578,13 @@ export class OptChat {
   /** The log's shape through `lastEntry`, and the first entry logged in pages. */
   private shape = "";
   private pagedFrom = 0;
+  private workFrom = 0;
+  /** The entries reports placed, from `workFrom` on, as read from Pi's
+   * submissions (never deleted; each keeps its request id): the newest
+   * submission read, and report submissions still queued. */
+  private readonly reports = new Set<number>();
+  private submissionsRead = 0;
+  private readonly unplaced = new Set<number>();
   private readonly busy = new Set<string>();
   private readonly failed = new Set<string>();
   /** Each unbuilt node's answers left, as SpendDoc stores them. */
@@ -800,6 +806,13 @@ export class OptChat {
       this.pagedFrom = existing ? (entries.at(-1)?.id ?? 0) + 1 : 0;
       await this.harness.commit(async tx => { (await tx.doc(LogDoc)).pagedFrom = this.pagedFrom; }, context);
     }
+    // Reports logged before work keep their user lines, the same way.
+    if (read?.workFrom !== undefined) this.workFrom = read.workFrom;
+    else {
+      this.workFrom = existing ? (entries.at(-1)?.id ?? 0) + 1 : 0;
+      await this.harness.commit(async tx => { (await tx.doc(LogDoc)).workFrom = this.workFrom; }, context);
+    }
+    await this.readReports(entries);
     const stored = await this.harness.snapshot(ViewDoc, context);
     const messages: LogMessage[] = [];
     let checked = { total: 0, shape: "" };
@@ -961,13 +974,45 @@ export class OptChat {
     return items.filter(entry => entry.id > after).sort((a, b) => a.id - b.id);
   }
 
+  /** Reads which of `entries` (just scanned) reports placed. Pi records a
+   * submission's entry in the commit that appends it, so each one scanned
+   * has its submission's entry set. A user entry no report placed is the
+   * user's. */
+  private async readReports(entries: readonly EntryRecord[]): Promise<void> {
+    if (!entries.some(entry => entry.kind === "pi.user" && entry.id >= this.workFrom)) return;
+    const place = (record: SubmissionRecord) => {
+      this.unplaced.delete(record.id);
+      if (record.entry !== undefined) { if (record.entry >= this.workFrom) this.reports.add(record.entry); }
+      else if (record.status === "queued") this.unplaced.add(record.id);
+    };
+    for (const id of [...this.unplaced]) {
+      const record = await this.storage.submission(id as SubmissionId, context);
+      if (record) place(record);
+    }
+    // The submissions since the last read, newest first.
+    const fresh: SubmissionRecord[] = [];
+    let cursor: Cursor | undefined;
+    read: do {
+      const page: Page<SubmissionRecord, Cursor> = await this.storage.scanSubmissions({ conversationId: this.conversation.id, order: "descending" }, 256, cursor, context);
+      for (const record of page.items) {
+        if (record.id <= this.submissionsRead) break read;
+        fresh.push(record);
+      }
+      cursor = page.next;
+    } while (cursor);
+    if (fresh.length) this.submissionsRead = fresh[0]!.id;
+    for (const record of fresh) if (record.requestId !== undefined && isReport(record.requestId)) place(record);
+  }
+
   /** Appends the root conversation's new entries to the log. */
   private sync(): Promise<void> {
     if (this.syncing) { this.dirty = true; return this.syncing; }
     this.syncing = (async () => {
       do {
         this.dirty = false;
-        for (const entry of await this.scan(this.conversation.id, this.lastEntry)) {
+        const entries = await this.scan(this.conversation.id, this.lastEntry);
+        await this.readReports(entries);
+        for (const entry of entries) {
           const logged = this.messagesOf(entry);
           for (const message of logged) this.memory.append(message);
           this.shape = nextShape(this.shape, entry.id, logged.length);
@@ -982,7 +1027,7 @@ export class OptChat {
 
   /** One entry's log messages, in pages if it is logged since pages. */
   private messagesOf(entry: EntryRecord): LogMessage[] {
-    return entryMessages(entry, entry.id >= this.pagedFrom ? this.options.limits?.page ?? CAP : 0);
+    return entryMessages(entry, entry.id >= this.pagedFrom ? this.options.limits?.page ?? CAP : 0, this.reports.has(entry.id));
   }
 
   /** Starts every node that may be built now, up to JOBS at once. */
@@ -1385,7 +1430,7 @@ export class OptChat {
           doc.images = { ...doc.images, [item.requestId]: ids };
         }, context);
       }
-      await this.conversation.submit({ type: "input", content: userContent(item), ...inputEntry(item), requestId: item.requestId, whenBusy: "steer" }, context);
+      await this.conversation.submit({ type: "input", content: userContent(item), requestId: item.requestId, whenBusy: "steer" }, context);
       if (!isReport(item.requestId)) await this.markUser(item.requestId);
       await this.harness.commit(async tx => {
         const doc = await tx.doc(PendingDoc);
@@ -1430,7 +1475,7 @@ export class OptChat {
       for (const item of batch.slice(0, -1)) {
         if (!await this.known(item.requestId)) await conversation.submit({ type: "write", requestId: item.requestId, entry: userEntry(item) }, context);
       }
-      await conversation.submit({ type: "input", content: userContent(last), ...inputEntry(last), requestId: last.requestId, whenBusy: "steer" }, context);
+      await conversation.submit({ type: "input", content: userContent(last), requestId: last.requestId, whenBusy: "steer" }, context);
     }
     // The turn is the user's when the user wrote in it: its last message, or
     // one written into it here (not one an earlier run already took).

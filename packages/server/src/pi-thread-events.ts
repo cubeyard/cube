@@ -5,14 +5,12 @@ import type { AssistantMessage, ImageContent, Message, TextContent } from "@eare
 import { ROOT_CONVERSATION_ID, type ConversationView, type EntryRecord, type Storage, type SubmissionRecord, type ToolSlot } from "@earendil-works/pi-durable";
 import type { Agent } from "./durable-agent.ts";
 import { mediaId } from "./optchat-media.ts";
-import { WORK_ENTRY } from "./optchat-memory.ts";
 import { droppedReason } from "./pi-sends.ts";
 import { imageNote, shownImage, THREAD_IMAGE_LIMITS } from "./thread-images.ts";
 import type { MessageImage, ThreadAgent, ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
 
 const context = BACKGROUND_CONTEXT;
-/** OptChat's reports (WORK_ENTRY) show as user messages; OptChatEvents marks them as the thread's. */
-const SHOWN = new Set(["pi.user", WORK_ENTRY, "pi.assistant", "pi.tool-result"]);
+const SHOWN = new Set(["pi.user", "pi.assistant", "pi.tool-result"]);
 type Live = { run?: { taskId: number; inputs: number[] }; generation?: { message?: AssistantMessage }; tools?: ToolSlot[] };
 
 export class PiThreadEvents implements ThreadEvents {
