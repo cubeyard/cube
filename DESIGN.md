@@ -545,7 +545,12 @@ on the draft's last line: where images can be sent, a `+` icon key at the
 start opens the file picker (paste and drop attach too; never a worded
 "image" key), and the round signal send key at the end. Stop, while a run is
 on, is a worded key beside the field at the field's height. Enter sends; Shift+Enter inserts a new
-line. The keyboard hint lives in the field's tooltip and accessible description,
+line. A press on send or stop (or on either while disabled) leaves the focus
+in the field that has it, so the next words typed or pasted (a dictation
+app's) land in the draft. Send or stop by a key gives the focus to the field
+as the key goes; a send's end takes it back to the field only from the page
+or the send key, never from where the user went meanwhile, and a tap on send
+with the field left raises no keyboard. The keyboard hint lives in the field's tooltip and accessible description,
 not a permanent extra row. A thread's model selection belongs in its conversation pane's top rail
 (the chat's is in its index):
 the actual model id as a quiet text control, with providers grouped in the
