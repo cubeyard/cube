@@ -135,7 +135,10 @@ async function drive(instance: Instance, names: string[]) {
         const text = error instanceof Error ? error.stack ?? error.message : String(error);
         for (const [index, page] of pages.entries()) {
           await page.screenshot({ path: path.join(out, `failure-${index}.png`) }).catch(() => {});
-          await page.locator("body").ariaSnapshot().then(aria => fs.writeFileSync(path.join(out, `failure-${index}.aria.yml`), `${aria}\n`), () => {});
+          await page.locator("body").ariaSnapshot().then(aria => {
+            fs.writeFileSync(path.join(out, `failure-${index}.aria.yml`), `${aria}\n`);
+            console.error(`--- ${name} failure-${index}.aria.yml (${page.url()})\n${aria}`);
+          }, () => {});
         }
         context.step(`FAIL: ${text}`);
         failures.push(name);
@@ -165,6 +168,7 @@ const saveJson = (context: Context, name: string, value: unknown) => {
 async function sendInChat(page: Page, text: string, answer: string | RegExp) {
   const composer = page.locator(`${ACTIVE} .composer textarea`);
   await composer.fill(text);
+  await page.locator(`${ACTIVE} .composer button.send-key:enabled`).waitFor({ timeout: 30_000 });
   await composer.press("Enter");
   await page.locator(`${ACTIVE} .conversation-message.user:not(.sending)`, { hasText: text.slice(0, 60) }).waitFor();
   await page.locator(`${ACTIVE} .conversation`, { hasText: answer }).waitFor({ timeout: 30_000 });
