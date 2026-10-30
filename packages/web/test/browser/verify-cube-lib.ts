@@ -37,9 +37,15 @@ export const system: System = {
   command: pid => readCommand(pid),
 };
 
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Whether a command line is the helper given exactly this `--run` (not one
+ * that merely starts with it: `/tmp/r` is not `/tmp/r2`). */
+export const ranWith = (command: string, runArg: string) =>
+  command.includes("verify-cube.ts") && new RegExp(`(^|\\s)--run\\s+${escape(runArg)}(\\s|$)`).test(command);
+
 /** The command a served instance runs under: the helper's `serve` with its own `--run`. */
-export const isServeOf = (command: string, runArg: string) =>
-  command.includes("verify-cube.ts") && /(^|\s)serve(\s|$)/.test(command) && command.includes(runArg);
+export const isServeOf = (command: string, runArg: string) => ranWith(command, runArg) && /(^|\s)serve(\s|$)/.test(command);
 
 /** The owner token in `scratch`, or null when it is not verify-cube's. */
 export function ownerOf(scratch: string): string | null {

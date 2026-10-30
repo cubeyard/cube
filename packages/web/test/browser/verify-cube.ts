@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import { startVerifyHost, VERIFY_RUNNER, VERIFY_SEED_COMMIT } from "../../../server/test/verify-host.ts";
-import { freshDirectory, ownerOf, parsePort, planCleanup, system } from "./verify-cube-lib.ts";
+import { freshDirectory, ownerOf, parsePort, planCleanup, ranWith, system } from "./verify-cube-lib.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "../../../..");
 const SELF = path.relative(ROOT, import.meta.filename);
@@ -33,8 +33,8 @@ function usage(): never {
   run [journey...]          launch, doctor, drive (default: chat thread), clean up; one command
   serve --port N [--host H] [--allowed-host NAME]
                             keep an instance in the foreground (cube service, or a second shell)
-  doctor                    is the instance in DIR ours, up and usable?
-  drive journey...          drive a served instance
+  doctor [--wait S]         is the instance in DIR ours, up and usable? (waits up to S s, default 30, for it to launch)
+  drive journey... [--wait S] drive a served instance
   cleanup                   stop the instance DIR names (only that pid) and remove its scratch
 journeys: ${Object.keys(JOURNEYS).join(", ")}
 run's DIR defaults to $TMPDIR/verify-cube/<time>; the others need --run. Evidence stays in DIR/evidence;
@@ -56,6 +56,19 @@ const host = flag("--host") ?? "127.0.0.1";
 const allowedHost = flag("--allowed-host");
 const instanceFile = path.join(run, "instance.json");
 const readInstance = (): Instance => JSON.parse(fs.readFileSync(instanceFile, "utf8")) as Instance;
+const rawWait = flag("--wait") ?? "30";
+if (!/^\d{1,4}$/.test(rawWait)) usage();
+const waitSeconds = Number(rawWait);
+/** The instance a `serve` of this run wrote, waiting up to --wait seconds (default 30) while it launches. */
+async function awaitInstance(): Promise<Instance> {
+  for (const deadline = Date.now() + waitSeconds * 1000; !fs.existsSync(instanceFile); await new Promise(resolve => setTimeout(resolve, 200))) {
+    if (Date.now() >= deadline) {
+      console.log(`FAIL: no ${instanceFile} after ${waitSeconds} s: no instance of this run is launched (serve it, or check its log)`);
+      process.exit(1);
+    }
+  }
+  return readInstance();
+}
 
 const api = async (instance: Instance, route: string, init?: RequestInit) => {
   const response = await fetch(`${instance.url}${route}`, init);
@@ -100,8 +113,12 @@ async function doctor(instance: Instance) {
   const check = (ok: boolean, text: string) => { lines.push(`${ok ? "ok" : "FAIL"}: ${text}`); return ok; };
   const alive = system.alive(instance.pid);
   check(alive, `pid ${instance.pid} is alive`);
-  const cmdline = alive ? system.command(instance.pid) : null;
-  check(cmdline !== null && cmdline.includes("verify-cube.ts") && cmdline.includes(instance.runArg), `pid ${instance.pid} is verify-cube on ${instance.runArg} (${cmdline ?? "command unreadable"})`);
+  if (instance.pid === process.pid) {
+    check(path.resolve(instance.run) === run, `pid ${instance.pid} is this verify-cube run on ${run}`);
+  } else {
+    const cmdline = alive ? system.command(instance.pid) : null;
+    check(cmdline !== null && ranWith(cmdline, instance.runArg), `pid ${instance.pid} is verify-cube with --run ${instance.runArg} (${cmdline ?? "command unreadable"})`);
+  }
   check(ownerOf(instance.scratch) === instance.owner, "scratch holds this launch's owner file");
   check(instance.state.startsWith(`${instance.run}${path.sep}`) && !instance.state.startsWith(path.join(os.homedir(), ".cube")), `state ${instance.state} is this run's`);
   try {
@@ -380,10 +397,10 @@ if (command === "run") {
   const cubed = await launch();
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => { void cubed.close().then(() => process.exit(0)); });
 } else if (command === "doctor") {
-  process.exit(await doctor(readInstance()) ? 0 : 1);
+  process.exit(await doctor(await awaitInstance()) ? 0 : 1);
 } else if (command === "drive") {
   if (!argv.length) usage();
-  process.exit(await drive(readInstance(), argv) ? 0 : 1);
+  process.exit(await drive(await awaitInstance(), argv) ? 0 : 1);
 } else if (command === "cleanup") {
   process.exit(await cleanup() ? 0 : 1);
 } else {

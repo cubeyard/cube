@@ -78,7 +78,7 @@ Outside a cube thread run `serve` in a second shell with the default host.
 
 ## Doctor
 
-`doctor --run RUN` reads `RUN/instance.json` and prints one `ok:` or `FAIL:` line per check: the pid is alive and its command is `verify-cube.ts` on this `--run`; scratch holds this launch's owner file; the state is under this run (never `~/.cube*`); `/api/health` says `ready`; `/api/state` has onboarding done and a model; `/api/models` lists `faux/faux-1`; `/api/runners` lists `node-verify`; `/` serves the UI. A process's command comes from `/proc` (Linux) or `ps` (macOS); when neither answers, doctor fails. Run it before the first drive and after any failed drive. A `FAIL` means relaunch, not drive harder. `run` does this itself.
+`doctor --run RUN` reads `RUN/instance.json`, waiting up to `--wait` seconds (default 30) while a `serve` launches and then failing with `FAIL: no RUN/instance.json …`, and prints one `ok:` or `FAIL:` line per check: the pid is alive and is this run (inside `run`, the process itself; for a `serve`, its command is `verify-cube.ts` with exactly this `--run`); scratch holds this launch's owner file; the state is under this run (never `~/.cube*`); `/api/health` says `ready`; `/api/state` has onboarding done and a model; `/api/models` lists `faux/faux-1`; `/api/runners` lists `node-verify`; `/` serves the UI. A process's command comes from `/proc` (Linux) or `ps` (macOS); when neither answers, doctor fails. Run it before the first drive and after any failed drive. A `FAIL` means relaunch, not drive harder. `run` does this itself.
 
 ## Drive
 

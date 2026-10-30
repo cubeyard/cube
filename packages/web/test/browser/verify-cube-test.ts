@@ -22,6 +22,10 @@ assert.match(readCommand(process.pid) ?? "", /verify-cube-test\.ts/, "this host 
 assert.ok(isServeOf("/usr/bin/node /w/verify-cube.ts serve --run /tmp/r --port 7790", "/tmp/r"));
 assert.ok(!isServeOf("/usr/bin/node /w/verify-cube.ts run --run /tmp/r", "/tmp/r"), "a run is not a served instance");
 assert.ok(!isServeOf("/usr/bin/node /w/verify-cube.ts serve --run /tmp/other", "/tmp/r"), "another run's serve is not this one");
+assert.ok(!isServeOf("/usr/bin/node /w/verify-cube.ts serve --run /tmp/r2 --port 7790", "/tmp/r"), "/tmp/r2 is not /tmp/r");
+assert.ok(!isServeOf("/usr/bin/node /w/verify-cube.ts serve --run /tmp/r/sub", "/tmp/r"), "/tmp/r/sub is not /tmp/r");
+assert.ok(isServeOf("/usr/bin/node /w/verify-cube.ts serve --port 7790 --run /tmp/r", "/tmp/r"), "--run last");
+assert.ok(isServeOf("node verify-cube.ts serve --run /tmp/a+b(1) --port 1", "/tmp/a+b(1)"), "a path with regex characters");
 console.log("ok: process identity reads /proc, else ps, else nothing");
 
 const sys = (alive: boolean, command: string | null): System => ({ alive: () => alive, command: () => command });
@@ -138,6 +142,27 @@ try {
   assert.match(result.stdout, /belongs to another verify-cube launch: left alone/);
   assert.ok(fs.existsSync(path.join(reused, "scratch", OWNER_FILE)), "the other launch's scratch stays");
   console.log("ok: cleanup never stops a reused pid and leaves another launch's scratch");
+
+  // The documented default: run without --run, in $TMPDIR/verify-cube/<time>.
+  const tmp = path.join(root, "tmpdir");
+  fs.mkdirSync(tmp);
+  result = helper(["run", "cli"], { TMPDIR: tmp });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /ok: pid \d+ is this verify-cube run on /);
+  const [made] = fs.readdirSync(path.join(tmp, "verify-cube"));
+  assert.match(fs.readFileSync(path.join(tmp, "verify-cube", made!, "evidence", "cli", "steps.log"), "utf8"), /PASS/);
+  assert.deepEqual(left(path.join(tmp, "verify-cube", made!)), [], "nothing left but evidence");
+  console.log("ok: run without --run passes doctor and keeps its evidence under $TMPDIR/verify-cube");
+
+  // Doctor and drive before an instance exists: a bounded wait, then a clear failure.
+  for (const command of [["doctor"], ["drive", "cli"]]) {
+    const started = Date.now();
+    result = helper([...command, "--run", path.join(root, "none"), "--wait", "1"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /FAIL: no .*instance\.json after 1 s: no instance of this run is launched/);
+    assert.ok(Date.now() - started < 30_000, `${command[0]} gave up within its wait`);
+  }
+  console.log("ok: doctor and drive wait boundedly for an instance, then fail clearly");
 
   // Two drives in one run directory keep both evidence sets.
   const twice = path.join(root, "twice");
