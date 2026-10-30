@@ -69,6 +69,7 @@ try {
   says(master, "The ordinary steps of one task stay in its thread", "continuity");
   says(master, "Keep no thread as a standing worker for unrelated follow-ups", "standing workers");
   says(master, "A review brief names what to review and the criteria, not the author's reasoning", "review brief");
+  says(master, "When your reply names a thread, link it as [its name or title](#/t/<id>)", "thread links");
   // The user's instructions still come last and still lead.
   says(master, "Follow the user's instructions at the end of this prompt", "user priority");
 } finally {

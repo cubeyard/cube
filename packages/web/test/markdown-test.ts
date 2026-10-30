@@ -49,4 +49,13 @@ assert.match(renderMarkdown(`${open}\n\`\`\`\n\nmore`, undefined, { streaming: t
 assert.match(renderMarkdown("````mermaid\nflowchart LR\n  A --> B\n```", undefined, { streaming: true }), /diagram-growing/, "a shorter marker does not close a longer fence");
 assert.match(renderMarkdown(open), /data-diagram="0"/, "a finished message draws an unclosed fence");
 assert.match(renderMarkdown("```mermaid\n" + "A-->B\n".repeat(4000) + "```"), /diagram too large to draw \(23999 characters; at most 20000\)/);
-console.log("ok: agent markdown renders without raw html, script links or remote images, and shows only the images the thread read; mermaid fences are figures, an open one while streaming its growing source");
+
+// A cube page link goes where the caller's `page` says; null prints its words. External links and the default are untouched.
+const page = (href: string) => href === "#/t/aaaaaaa1" ? "#/t/aaaaaaa1-1111-4111-8111-111111111111" : href.startsWith("#/t/") ? null : href;
+const mentioned = renderMarkdown("[calm otter](#/t/aaaaaaa1), [gone](#/t/ddddddd4), [review](#/a/x1) and [docs](https://example.com)", undefined, { page });
+assert.match(mentioned, /<a href="#\/t\/aaaaaaa1-1111-4111-8111-111111111111">calm otter<\/a>/, "a thread link opens in place, by its whole id");
+assert.match(mentioned, /, gone, /, "a link page refuses is its words");
+assert.match(mentioned, /<a href="#\/a\/x1">review<\/a>/);
+assert.match(mentioned, /<a href="https:\/\/example.com" target="_blank" rel="noopener noreferrer">docs<\/a>/);
+assert.match(renderMarkdown("[calm otter](#/t/aaaaaaa1)"), /<a href="#\/t\/aaaaaaa1">/, "without page, as written");
+console.log("ok: agent markdown renders without raw html, script links or remote images, and shows only the images the thread read; mermaid fences are figures, an open one while streaming its growing source; a cube page link goes where the caller says");

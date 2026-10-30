@@ -602,6 +602,17 @@ either:
 
 OptChat's own `threads` tool lists the same open threads with their state.
 
+**Thread links.** The prompt (`MASTER`) tells OptChat to link a thread
+it names as `[name or title](#/t/<id>)`, with the 8-character id its
+tools and reports print (a whole id works too). The chat's page resolves
+such a link against the thread list (`threadPage`, provenance.ts): it
+opens the one thread not archived whose id that is, at `#/t/<whole id>`,
+the same page the margin's notes open. A key that names no open thread
+(archived, unknown, ambiguous, or the list not read yet) prints the
+link's words without a link, as a report's name does for an archived
+thread. Nothing in prose is linked without the link form, and stored
+messages are not rewritten.
+
 ## The chat in threads
 
 Every thread created since memory reached threads, from the UI or by

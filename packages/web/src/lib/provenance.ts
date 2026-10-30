@@ -160,6 +160,20 @@ export function resolveArtifact(key: string, artifacts: readonly ArtifactListIte
   return matches.length === 1 ? matches[0]! : null;
 }
 
+/** `#/t/<key>`: a thread's whole id, or the 8 characters OptChat's tools and reports print. */
+const THREAD_LINK = /^#\/t\/([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)$/;
+
+/** Where a cube page link in the chat goes: a thread link opens the one
+ * thread among `open` (the ids of threads not archived, as a thread page
+ * shows them; null while unread) its key names, by its whole id; anything
+ * else in `#/t/` is null, printed as its label. Other pages as written. */
+export function threadPage(href: string, open: readonly string[] | null): string | null {
+  if (!href.startsWith("#/t/")) return href;
+  const key = THREAD_LINK.exec(href)?.[1];
+  const matches = key && open ? open.filter(id => key.length === 36 ? id === key : id.startsWith(key)) : [];
+  return matches.length === 1 ? `#/t/${matches[0]}` : null;
+}
+
 /** The newest report of each thread among the rows, by short id. */
 export function latestReports(rows: readonly TranscriptRow[]): Map<string, { row: string; text: string }> {
   const out = new Map<string, { row: string; text: string }>();
