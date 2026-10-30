@@ -48,3 +48,7 @@ node packages/web/test/browser/settings-browser-test.ts
 node packages/web/test/browser/runners-browser-test.ts
 node packages/web/test/browser/skills-browser-test.ts
 node packages/web/test/browser/startup-browser-test.ts
+# The verify-cube skill's recipe, every journey (.agents/skills/verify-cube).
+verify=$(mktemp -d)
+.agents/skills/verify-cube/verify-cube run --run "$verify/run" chat project thread spawn cli
+rm -rf "$verify"
