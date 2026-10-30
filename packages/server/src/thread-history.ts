@@ -1,5 +1,5 @@
 /** A page of a thread's stored conversation, read without its agent, for
- * OptChat's history tool. Messages are numbered from the first, so a page
+ * OptChat's history tool and a thread's thread_history, and its text. Messages are numbered from the first, so a page
  * needs to know how many messages each stored row shows: an index of that
  * is kept per store and extended by the rows written since it was last read
  * (stored rows are only ever appended), with Claude Code's tool names by
@@ -15,10 +15,13 @@ import fs from "node:fs";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import type { EntryRecord, SubmissionRecord } from "@earendil-works/pi-durable";
 import { messageEvents, status as claudeStatus, submissionEvent, virtualize } from "./claude-thread-events.ts";
-import { storedBackground, type ClaudeSubmission } from "./claude-agent.ts";
+import { agents, storedBackground, type ClaudeSubmission } from "./claude-agent.ts";
+import { capText } from "./optchat-memory.ts";
 import { entryEvents, runStatus, withDropped } from "./pi-thread-events.ts";
 import { DROPPED_ENTRY } from "./pi-sends.ts";
 import type { ThreadAgent, ThreadEvent, ThreadStatus, ThreadTranscript } from "./thread-events.ts";
+import { imageNote } from "./thread-images.ts";
+import { threadNameText, type ThreadName } from "./thread-names.ts";
 
 export const HISTORY_PAGE = 12;
 export const HISTORY_MAX = 40;
@@ -302,4 +305,90 @@ export async function readClaudeHistory(file: string, root: string, owner: Threa
         : messageEvents(key, JSON.parse((message.get(key) as { data: string }).data) as Record<string, unknown>, namesBefore(read, read.at[row]!), shown)).filter(historyShows);
     });
   }));
+}
+
+/** What cubed has of a thread, read only: its own record beside a page of
+ * the agent's stored transcript, which may disagree. */
+export type ThreadRecord = {
+  project: string;
+  title: string | null;
+  /** Its name ("🦦 calm otter"); absent or null on threads older than names. */
+  name?: ThreadName | null;
+  archived: boolean;
+  /** The machine as cubed sees it ("ready", "starting its machine",
+   * "error: …"); null once archived. */
+  machine: string | null;
+  /** Other facts of cubed's record: workspace, retained disk, agent, writer. */
+  facts: string[];
+  /** Whether the agent is open in cubed: a stored run goes on only then. */
+  agentOpen: boolean;
+  /** The machine or workspace failure cubed records, if any. */
+  failure: string | null;
+  /** A page of the agent's stored transcript; null when it stored none or `unreadable`. */
+  transcript: HistoryPage | null;
+  unreadable: string | null;
+};
+
+
+const short = (id: string) => id.slice(0, 8);
+/** A page's messages share this many characters; one gets at most HISTORY_TEXT. */
+const HISTORY_BUDGET = 24_000;
+const HISTORY_TEXT = 2000;
+const HISTORY_TOOL = 400;
+const HISTORY_ANSWER = 4000;
+
+function historyLine(event: ThreadEvent, cap: number): string {
+  if (event.type === "user-message") return `user: ${capText(event.text, cap)}`;
+  if (event.type === "assistant-text") return `thread: ${capText(event.text, cap)}`;
+  const tool = Math.min(cap, HISTORY_TOOL);
+  if (event.type === "tool-call") return `tool ${event.name} ${capText(JSON.stringify(event.input ?? {}), tool)}`;
+  // The images a result shows are named, never sent: the chat sees that there were some.
+  const images = imageNote(event.images?.length ?? 0);
+  return `result ${event.name}${event.isError ? " (error)" : ""}: ${[images, capText(event.output, tool)].filter(Boolean).join(" ")}`;
+}
+
+export type ReportState = "delivered" | "accepted" | "none";
+const reportText = (report: ReportState) => report === "delivered" ? "delivered" : report === "accepted" ? "accepted, not in the chat yet" : "not sent yet";
+
+/** A history tool's answer: cubed's record of the thread, the run and the
+ * latest answer from its stored transcript, whether this chat got the run's
+ * report (or, without a transcript, the failure to start; OptChat's
+ * `history` only, null leaves it out), what disagrees, then the record's
+ * page of messages, numbered from the first. `tool` is the tool as its
+ * caller names it, for the "earlier:" line. */
+export function formatHistory(id: string, record: ThreadRecord, report: ReportState | null, tool = "history"): string {
+  const lines = [`[${short(id)}] ${record.project} · ${record.name ? `${threadNameText(record.name)} · ` : ""}${record.title ?? "untitled"}`,
+    `cubed: ${[record.archived ? "archived" : `machine ${record.machine}`, ...record.facts].join("; ")}`];
+  const transcript = record.transcript;
+  if (!transcript) {
+    lines.push(record.unreadable ? `history: unreadable: ${record.unreadable}`
+      : `history: none stored; the agent never opened${record.machine === "starting its machine" ? " (its machine is still starting)" : ""}`);
+    if (record.failure && report) lines.push(`failure to start, reported to this chat: ${reportText(report)}`);
+    return lines.join("\n");
+  }
+  const { state, run, error } = transcript.status;
+  const waiting = transcript.status.waiting ?? [];
+  lines.push(`run: ${state}${run ? ` (${run})` : ""}${error ? `: ${error}` : ""}${waiting.length ? `; still running: ${agents(waiting)}` : ""}`);
+  const { answer, asked } = transcript;
+  lines.push(!answer ? "latest answer: none" : `latest answer #${answer.index}${asked > answer.index ? ` (before the newest message #${asked}, which has none yet)` : ""}: ${capText(answer.text.trim(), HISTORY_ANSWER)}`);
+  if (report && state !== "idle" && state !== "working" && run) lines.push(`report of this run to this chat: ${reportText(report)}`);
+  // Disagreements are shown as cubed has them; this view does not settle them.
+  const notes: string[] = [];
+  if (record.failure && state !== "idle") notes.push(`cubed records a failure (${record.failure}) while the stored history shows the agent ${state === "working" ? "working" : `ran (run ${state})`}; the history does not say whether the failure came before, during or after that run`);
+  if (state === "working" && record.archived) notes.push("the store shows a run unfinished at archive; it does not go on");
+  else if (state === "working" && !record.agentOpen) notes.push(transcript.agent === "claude-code"
+    ? "the store shows a turn unfinished, but its agent is not open in cubed: Claude Code does not continue it; it shows as failed once the agent opens again"
+    : "the store shows a run unfinished, but its agent is not open in cubed: it goes on only when the agent opens again");
+  if (waiting.length && (record.archived || !record.agentOpen)) notes.push(`the store shows ${agents(waiting)} running, but its agent is not open in cubed: ${waiting.length === 1 ? "it ended with it and shows" : "they ended with it and show"} as lost once the agent opens again`);
+  for (const note of notes) lines.push(`note: ${note}`);
+  const { total, start, events } = transcript;
+  const end = start + events.length;
+  const cap = Math.min(HISTORY_TEXT, Math.floor(HISTORY_BUDGET / Math.max(1, events.length)));
+  if (!total) lines.push("messages: none");
+  else if (start === end) lines.push(`messages: none before #${end} (${total} in all)`);
+  else {
+    lines.push(`messages #${start}–#${end - 1} of ${total}, oldest first${start > 0 ? `; earlier: ${tool}("${short(id)}", before: ${start})` : ""}`);
+    events.forEach((event, k) => lines.push(`#${start + k} ${historyLine(event, cap)}`));
+  }
+  return lines.join("\n");
 }

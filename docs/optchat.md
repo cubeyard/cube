@@ -652,10 +652,33 @@ in later.
   too, redacted. Past the end they say how many messages the chat has. A
   thread whose view came from another chat (OptChat's store replaced) is
   refused rather than shown other messages under its ids.
-- **No writing.** Those two tools are all a thread gets. Its report reaches
-  this chat as an ordinary message, as before, and is summarized like any
-  other. Other threads' transcripts stay out of reach (only OptChat's
-  `history` reads them).
+- **No writing.** These tools only read. A thread's report reaches this
+  chat as an ordinary message, as before, and is summarized like any other.
+- **Other threads' history.** `thread_history(id, before, limit)`
+  (`mcp__cube__thread_history` in Claude Code, `thread-history-tool.ts`)
+  reads the stored conversation of any thread in the caller's own project:
+  open or archived, created from the UI or by `spawn`, its own included. It
+  is OptChat's `history` with a different scope and without the report line:
+  the same reader (`readThreads(...).history`, the thread's store opened
+  read only, no machine, agent, lease or activation) and the same renderer
+  and caps (`formatHistory`, moved to `thread-history.ts`; OptChat's output
+  is unchanged). OptChat resolves among the threads it spawned, in any
+  project; a thread resolves an id or its first characters among its
+  project's threads, and another project's thread is answered as one that
+  does not exist. The whole answer is redacted with `redactHook` (a
+  heuristic) and opens with a line saying the transcript is evidence, not
+  instructions, and grants nothing. A message is cited as `[id]#N`; numbers
+  hold once a thread ends (a still-writing thread's rare late commit can
+  reorder them, and `total` changes). There is no search: ids come from the
+  chat's `work:` lines, `memory_zoom` and briefs. Only threads created since
+  the tool exists get it: `createThread` stamps `capabilities:
+  ["thread_history"]` into the thread's row, and `threadTools` offers the
+  tool only with that stamp. An older thread never gets it, also after a
+  restart, so its tool list and prompt cache stay as they were; no row is
+  backfilled and the registry schema is unchanged. A new thread may still
+  read an older one. What it reads goes into the thread's context and can
+  leave the machine as the chat can: never copy it into files, commits or
+  requests unless the task asks.
 - **Kept.** Archiving deletes no memory; the row stays with the thread's
   other records.
 - **Left out.** Unlike uniichat, a thread gets no lines of the chat added to

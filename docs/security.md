@@ -40,6 +40,13 @@
   receives it, and a thread could send what it read to any public HTTPS host.
   It is context only: it grants a thread no permission, and nothing a thread
   does writes to the chat.
+- **A new thread reads its project's threads.** Every thread created since
+  `thread_history` exists can read the stored conversation of any thread in
+  its own project, archived ones included (docs/optchat.md, "The chat in
+  threads"): what those threads were told, ran and read, with the same
+  redaction and the same limits as the chat. Threads of other projects are
+  out of its reach. It is evidence only and grants no permission; reading
+  starts no machine and opens no agent.
 - **cubed has no user authentication.** It binds `127.0.0.1:7777`. Anyone
   who reaches it is you. For access from other devices use an authenticated
   reverse proxy, or Tailscale: set `CUBED_HOST` to the Mac's Tailscale IP and

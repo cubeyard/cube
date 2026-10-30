@@ -33,7 +33,7 @@ import { versionInfo } from "./version.ts";
 import { OptChat, OptChatEvents } from "./optchat.ts";
 import { isMediaId, MEDIA_LIMITS, MediaError } from "./optchat-media.ts";
 import { createLogger } from "./log.ts";
-import { cubeThreads } from "./optchat-threads.ts";
+import { cubeThreads, readThreads } from "./optchat-threads.ts";
 import { localDisk, observeRunners } from "./runner-observe.ts";
 import { diskState } from "./runner-types.ts";
 import { formatDiagnostics, threadDiagnostics } from "./vm-diagnostics.ts";
@@ -46,6 +46,7 @@ import { Artifacts } from "./artifact-service.ts";
 import { ARTIFACT_GUIDE, artifactTools } from "./artifact-tools.ts";
 import { claudeCodeOnly, piTool, toolsRoute } from "./cube-tools.ts";
 import { MEMORY_PROMPT_WAIT_MS, ThreadMemory } from "./thread-memory.ts";
+import { threadHistoryTool } from "./thread-history-tool.ts";
 import { readMachineText } from "./workspace-env.ts";
 import { githubPulls, type GithubPulls } from "./github-pulls.ts";
 import { Portal, portalSettings, type PortalSettings } from "./portal.ts";
@@ -332,11 +333,13 @@ export async function createCubed(options: {
   let portal: Portal | null = null;
   let artifacts: Artifacts | null = null;
   /** A thread's cube tools, the same list for its Pi and its Claude Code
-   * agent: its own artifacts and its project's; a body may come from a file
-   * in its machine. */
+   * agent: its own artifacts and its project's (a body may come from a file
+   * in its machine), OptChat's memory, and the tools its creation gave it. */
   const threadTools = (thread: string, agent: "pi" | "claude-code", readFile: (file: string) => Promise<{ text: string; path: string; sha256: string }>) => [
     ...artifactTools({ artifacts: artifacts!, author: { kind: "thread", thread }, agent, readable: async () => [{ kind: "thread", thread }], readFile }),
-    ...memory.tools(thread)];
+    ...memory.tools(thread),
+    ...registry.getThread(thread)?.capabilities?.includes("thread_history")
+      ? [threadHistoryTool({ thread, agent, registry, read: (id, request) => readThreads({ registry, conversations }).history(id, request) })] : []];
   // OptChat's memory for every thread created since it exists: OptChat is
   // opened for it (as at boot), never a browser or a turn.
   const memory = new ThreadMemory({ registry, chat: async () => (await openOptchat()).chat, ...options.memoryWaitMs ? { waitMs: options.memoryWaitMs } : {} });
