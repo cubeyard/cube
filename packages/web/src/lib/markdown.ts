@@ -20,7 +20,8 @@ const marked = new Marked({
     },
     link({ href, title, tokens }: Tokens.Link): string {
       const label = this.parser.parseInline(tokens);
-      const url = safeUrl(href, { pages: true });
+      const safe = safeUrl(href, { pages: true });
+      const url = safe?.startsWith("#/") && page ? page(safe) : safe;
       if (!url) return label;
       const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
       // cube's own pages (an artifact an agent links) open in place.
@@ -52,6 +53,8 @@ const SHOWN_IMAGE = "message-image markdown-image";
 
 /** The image source a markdown image's target resolves to, during one render. */
 let picture: ((href: string) => string | null) | undefined;
+/** The cube page a `#/` link opens, during one render; null prints its label. */
+let page: ((href: string) => string | null) | undefined;
 /** Whether the text being rendered may still grow, and its diagrams so far. */
 let growing = false;
 let diagrams = 0;
@@ -63,13 +66,15 @@ function closed(raw: string): boolean {
   return !!fence && lines.length > 1 && new RegExp(`^ {0,3}${fence[0]}{${fence.length},}\\s*$`).test(lines.at(-1)!);
 }
 
-/** `streaming`: the text is a message still being written. */
-export function renderMarkdown(text: string, pictures?: (href: string) => string | null, options: { streaming?: boolean } = {}): string {
+/** `streaming`: the text is a message still being written. `page`: where a
+ * link to one of cube's pages goes (`threadPage` in the chat); absent, as written. */
+export function renderMarkdown(text: string, pictures?: (href: string) => string | null, options: { streaming?: boolean; page?: (href: string) => string | null } = {}): string {
   picture = pictures;
+  page = options.page;
   growing = !!options.streaming;
   diagrams = 0;
   try { return marked.parse(text) as string; }
-  finally { picture = undefined; growing = false; }
+  finally { picture = undefined; page = undefined; growing = false; }
 }
 
 /** `pages`: also cube's own hash routes (`#/a/<id>`, `#/t/<id>`, …). */

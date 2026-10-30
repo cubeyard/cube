@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { place } from "../src/lib/margin-layout.ts";
 import { nameText, threadText } from "../src/lib/thread-name.ts";
-import { chatToolLine, excerpt, latestReports, mentionsOf, indexThreads, resolveArtifact, resolveThread, spawnLines } from "../src/lib/provenance.ts";
+import { chatToolLine, excerpt, latestReports, mentionsOf, indexThreads, resolveArtifact, resolveThread, spawnLines, threadPage } from "../src/lib/provenance.ts";
 import { transcriptRows } from "../src/lib/transcript.ts";
 import { failing, moving, stateText } from "../src/lib/work-state.ts";
 import type { ArtifactListItem, OverviewThread, ThreadEvent, ThreadSummary } from "../src/lib/types.ts";
@@ -137,6 +137,18 @@ assert.equal(resolveArtifact("12345678", artifacts), null);
 assert.equal(resolveArtifact(ID.review, null), null);
 const twins = [artifacts[0]!, { ...artifacts[0]!, id: `${ID.review.slice(0, 8)}-0000-4000-8000-000000000000` }] as ArtifactListItem[];
 assert.equal(resolveArtifact(ID.review.slice(0, 8), twins), null, "an ambiguous prefix names nothing");
+
+// a thread link opens the one open thread its key names, by its whole id; anything else prints its words
+const open = threads.map(thread => thread.id);
+assert.equal(threadPage(`#/t/${ID.composer.slice(0, 8)}`, open), `#/t/${ID.composer}`, "a short id opens the whole id's page");
+assert.equal(threadPage(`#/t/${ID.flaky}`, open), `#/t/${ID.flaky}`);
+assert.equal(threadPage(`#/t/${ID.gone.slice(0, 8)}`, open), null, "a thread cube does not list (or lists archived) is no link");
+assert.equal(threadPage(`#/t/${ID.composer.slice(0, 8)}`, null), null, "no link before the list is read");
+assert.equal(threadPage(`#/t/${ID.composer.slice(0, 4)}`, open), null, "fewer than 8 characters name nothing");
+assert.equal(threadPage("#/t/calm-otter", open), null, "a name is not an id");
+assert.equal(threadPage(`#/t/${ID.composer.slice(0, 8)}/x`, open), null);
+assert.equal(threadPage(`#/t/${ID.composer.slice(0, 8)}`, [...open, `${ID.composer.slice(0, 8)}-0000-4000-8000-000000000000`]), null, "an ambiguous id names nothing");
+assert.equal(threadPage(`#/a/${ID.review}`, open), `#/a/${ID.review}`, "other pages as written");
 
 assert.deepEqual([...latestReports(rows).keys()], [ID.flaky.slice(0, 8), ID.composer.slice(0, 8)]);
 assert.equal(excerpt("# title\n\nWith the **keyboard** up, see [this](#/x).\n\n- fold the strip\n- keep send-key"), "With the keyboard up, see this. fold the strip keep send-key");

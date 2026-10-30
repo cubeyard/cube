@@ -19,7 +19,7 @@
   import ThinkingCube from "./ThinkingCube.svelte";
 
   let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread", images = null,
-    sheet = false, foldTools = false, onRows, toolLine, reportLabel, reportTitle, reportNamed, after, margin }: {
+    sheet = false, foldTools = false, onRows, toolLine, reportLabel, reportTitle, reportNamed, page, after, margin }: {
     threadId?: string;
     /** Messages may be sent while the agent works; they reach it between tool calls. */
     steer?: boolean;
@@ -53,6 +53,8 @@
     /** Whether that name is the thread's short given name ("🦦 calm otter"),
      * which the line's first words give way to before it is cut. */
     reportNamed?: (from: string) => boolean;
+    /** Where a link to one of cube's pages in a message goes; null prints its label. */
+    page?: (href: string) => string | null;
     /** Drawn after a row, in the conversation's flow. */
     after?: Snippet<[TranscriptRow]>;
     /** Drawn beside the conversation's column, scrolling with it; rows carry `data-anchor` (`rowKey`). */
@@ -741,7 +743,7 @@
       <div class="report-body">
         <span class="message-label">{#if reportLabel}{@render reportLabel(row.from)}{:else}thread {row.from}{/if}</span>
         <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text and allows only http(s)/mailto links -->
-        <div class="message-copy markdown">{@html renderMarkdown(row.text)}</div>
+        <div class="message-copy markdown">{@html renderMarkdown(row.text, undefined, { page })}</div>
       </div>
     </details>
   {:else if row.kind === "user"}
@@ -757,7 +759,7 @@
       <!-- a press on an image the thread read opens it; the keys are in the rendered markup -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text, allows only http(s)/mailto links and shows only images the thread read -->
-      <div class="message-copy markdown" class:reasoning={row.reasoning} onclick={onProseClick}>{@html renderMarkdown(row.text, pictureOf(row), { streaming: row.id === streamingId })}</div>
+      <div class="message-copy markdown" class:reasoning={row.reasoning} onclick={onProseClick}>{@html renderMarkdown(row.text, pictureOf(row), { streaming: row.id === streamingId, page })}</div>
     </article>
   {/if}
 {/snippet}

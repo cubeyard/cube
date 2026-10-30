@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { CHAT_BASE, errorText, fetchChatModels, fetchChatView, setChatModel } from "../lib/api.ts";
   import { providerLabel } from "../lib/agent.ts";
-  import { chatToolLine, indexThreads, latestReports, mentionsOf, resolveArtifact, resolveThread, rowKey, type NoteGroup } from "../lib/provenance.ts";
+  import { chatToolLine, indexThreads, latestReports, mentionsOf, resolveArtifact, resolveThread, rowKey, threadPage, type NoteGroup } from "../lib/provenance.ts";
   import { nameText } from "../lib/thread-name.ts";
   import type { TranscriptRow } from "../lib/transcript.ts";
   import type { ArtifactListItem, ThreadModels, ThreadSummary } from "../lib/types.ts";
@@ -72,6 +72,10 @@
   const calledOf = (short: string) => { const thread = resolveThread({ short, project: null, title: null }, known); return nameText(thread.name) || thread.title; };
   const toolLine = (row: Extract<TranscriptRow, { kind: "tool" }>) => chatToolLine(row, calledOf);
   const reportTitle = (from: string) => calledOf(from) ?? `[${from}]`;
+  // The threads a link may open, as one string: a poll that changes only
+  // states draws no message again.
+  const openIds = $derived(threadsLoaded ? threads.filter((thread) => !thread.archived).map((thread) => thread.id).join(" ") : null);
+  const page = $derived.by(() => { const open = openIds?.split(" ").filter(Boolean) ?? null; return (href: string) => threadPage(href, open); });
   const reportNamed = (from: string) => !!resolveThread({ short: from, project: null, title: null }, known).name;
 
   /** What a message's note in the margin holds, for its skip key. */
@@ -226,7 +230,7 @@
   {#if modelState}
     <Conversation base={CHAT_BASE} steer sheet foldTools model={selectedModel} {changingModel} bind:busy onRows={(shown) => (rows = shown)}
       images={modelState.images ?? { supported: false, reason: "this host does not take images in the chat" }}
-      placeholder="message optchat" {toolLine} {reportLabel} {reportTitle} {reportNamed} {after} margin={wide ? margin : undefined}
+      placeholder="message optchat" {toolLine} {reportLabel} {reportTitle} {reportNamed} {page} {after} margin={wide ? margin : undefined}
       empty={{ title: "one chat, every thread", hint: "Say what you want done: the chat starts threads in your projects, follows their reports and remembers everything you said. A thread needs a project; add one under projects." }} />
   {:else}
     <div class="conversation-empty"><p class="conversation-wait" role="status">{modelError ? "connect a model provider to start the chat" : "loading…"}</p></div>
