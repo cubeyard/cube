@@ -4,18 +4,19 @@
  * run it through `.agents/skills/verify-cube/verify-cube`. Needs a built UI
  * (pnpm build) and Playwright's Chromium. */
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
-import { startVerifyHost, VERIFY_RUNNER } from "../../../server/test/verify-host.ts";
+import { startVerifyHost, VERIFY_RUNNER, VERIFY_SEED_COMMIT } from "../../../server/test/verify-host.ts";
+import { freshDirectory, ownerOf, parsePort, planCleanup, system } from "./verify-cube-lib.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "../../../..");
 const SELF = path.relative(ROOT, import.meta.filename);
 const ACTIVE = ":is(dialog.page-panel[open], #app:not(:has(> dialog.page-panel[open])))";
 
-type Instance = { pid: number; url: string; port: number; run: string; scratch: string; state: string; repository: string;
+type Instance = { pid: number; runArg: string; owner: string; url: string; port: number; run: string; scratch: string; state: string; repository: string;
   model: { provider: string; id: string }; projectId: string; started: string };
 type Context = { instance: Instance; browser: Browser; out: string; step(text: string): void; page(width?: number, height?: number): Promise<Page> };
 
@@ -36,7 +37,8 @@ function usage(): never {
   drive journey...          drive a served instance
   cleanup                   stop the instance DIR names (only that pid) and remove its scratch
 journeys: ${Object.keys(JOURNEYS).join(", ")}
-run's DIR defaults to $TMPDIR/verify-cube/<time>; the others need --run. Evidence stays in DIR/evidence.`);
+run's DIR defaults to $TMPDIR/verify-cube/<time>; the others need --run. Evidence stays in DIR/evidence;
+DIR/scratch must not exist before a launch.`);
   process.exit(2);
 }
 
@@ -45,8 +47,11 @@ const command = argv.shift() ?? usage();
 const flag = (name: string) => { const at = argv.indexOf(name); if (at < 0) return undefined; const [, value] = argv.splice(at, 2); return value ?? usage(); };
 const given = flag("--run");
 if (!given && command !== "run") usage();
-const run = path.resolve(given ?? path.join(os.tmpdir(), "verify-cube", new Date().toISOString().replace(/[:.]/g, "-")));
-const port = Number(flag("--port") ?? 0);
+const runArg = given ?? path.join(os.tmpdir(), "verify-cube", new Date().toISOString().replace(/[:.]/g, "-"));
+const run = path.resolve(runArg);
+const rawPort = flag("--port");
+if (command === "serve" && rawPort === undefined) usage();
+const port = parsePort(rawPort ?? "0", command === "serve" ? 1 : 0);
 const host = flag("--host") ?? "127.0.0.1";
 const allowedHost = flag("--allowed-host");
 const instanceFile = path.join(run, "instance.json");
@@ -61,30 +66,43 @@ const api = async (instance: Instance, route: string, init?: RequestInit) => {
 const post = (instance: Instance, route: string, body: unknown) =>
   api(instance, route, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
+/** Starts the instance and seeds `demo`. A launch that fails part way
+ * leaves nothing behind; CUBE_VERIFY_FAIL=project|instance makes it fail
+ * there, for verify-cube-test.ts. */
 async function launch() {
-  assert.ok(!fs.existsSync(instanceFile), `${instanceFile} exists: clean up that run or choose another --run`);
   assert.ok(fs.existsSync(path.join(ROOT, "packages/web/dist/index.html")), "no built UI: pnpm build");
-  const scratch = path.join(run, "scratch");
-  const cubed = await startVerifyHost({ scratch, host, port, ...allowedHost ? { allowedHosts: [allowedHost] } : {} });
-  const instance: Instance = { pid: process.pid, url: cubed.url, port: cubed.port, run, scratch, state: cubed.state, repository: cubed.repository,
-    model: cubed.model, projectId: "", started: new Date().toISOString() };
-  const project = await post(instance, "/api/projects", { name: "demo", repositories: [{ url: cubed.repository, base: "main" }] });
-  assert.equal(project.project.status, "ready", `seeded project: ${JSON.stringify(project)}`);
-  instance.projectId = project.project.id;
-  fs.mkdirSync(path.join(run, "evidence"), { recursive: true });
-  fs.writeFileSync(instanceFile, `${JSON.stringify(instance, null, 2)}\n`);
-  console.log(`ready ${cubed.url} run=${run}`);
-  return { instance, async close() { fs.rmSync(instanceFile, { force: true }); await cubed.close(); } };
+  assert.ok(!fs.existsSync(instanceFile), `${instanceFile} exists: clean up that run or choose another --run`);
+  const inject = process.env.CUBE_VERIFY_FAIL;
+  const cubed = await startVerifyHost({ scratch: path.join(run, "scratch"), host, port, ...allowedHost ? { allowedHosts: [allowedHost] } : {} });
+  let wrote = false;
+  try {
+    if (inject === "project") throw new Error("injected failure before seeding the project");
+    const instance: Instance = { pid: process.pid, runArg, owner: cubed.owner, url: cubed.url, port: cubed.port, run, scratch: path.join(run, "scratch"),
+      state: cubed.state, repository: cubed.repository, model: cubed.model, projectId: "", started: new Date().toISOString() };
+    const project = await post(instance, "/api/projects", { name: "demo", repositories: [{ url: cubed.repository, base: "main" }] });
+    assert.equal(project.project.status, "ready", `seeded project: ${JSON.stringify(project)}`);
+    instance.projectId = project.project.id;
+    fs.mkdirSync(path.join(run, "evidence"), { recursive: true });
+    fs.writeFileSync(instanceFile, `${JSON.stringify(instance, null, 2)}\n`, { flag: "wx" });
+    wrote = true;
+    if (inject === "instance") throw new Error("injected failure after writing instance.json");
+    console.log(`ready ${cubed.url} run=${run}`);
+    return { instance, async close() { fs.rmSync(instanceFile, { force: true }); await cubed.close(); } };
+  } catch (error) {
+    if (wrote) fs.rmSync(instanceFile, { force: true });
+    await cubed.close();
+    throw error;
+  }
 }
 
 async function doctor(instance: Instance) {
   const lines: string[] = [];
   const check = (ok: boolean, text: string) => { lines.push(`${ok ? "ok" : "FAIL"}: ${text}`); return ok; };
-  let alive = false;
-  try { process.kill(instance.pid, 0); alive = true; } catch { /* gone */ }
+  const alive = system.alive(instance.pid);
   check(alive, `pid ${instance.pid} is alive`);
-  const cmdline = alive ? fs.readFileSync(`/proc/${instance.pid}/cmdline`, "utf8").split("\0").join(" ") : "";
-  check(cmdline.includes("verify-cube.ts"), `pid ${instance.pid} is verify-cube (${cmdline.trim() || "unreadable"})`);
+  const cmdline = alive ? system.command(instance.pid) : null;
+  check(cmdline !== null && cmdline.includes("verify-cube.ts") && cmdline.includes(instance.runArg), `pid ${instance.pid} is verify-cube on ${instance.runArg} (${cmdline ?? "command unreadable"})`);
+  check(ownerOf(instance.scratch) === instance.owner, "scratch holds this launch's owner file");
   check(instance.state.startsWith(`${instance.run}${path.sep}`) && !instance.state.startsWith(path.join(os.homedir(), ".cube")), `state ${instance.state} is this run's`);
   try {
     const health = await api(instance, "/api/health");
@@ -111,10 +129,10 @@ async function drive(instance: Instance, names: string[]) {
     for (const name of names) {
       const journey = JOURNEYS[name];
       assert.ok(journey, `unknown journey ${name}: ${Object.keys(JOURNEYS).join(", ")}`);
-      const out = path.join(instance.run, "evidence", name);
-      fs.mkdirSync(out, { recursive: true });
+      const out = freshDirectory(path.join(instance.run, "evidence"), name);
       const log = path.join(out, "steps.log");
       fs.writeFileSync(log, `journey ${name} (features/${journey.feature}) on ${instance.url} at ${new Date().toISOString()}\n`);
+      console.log(`  ${name}: evidence in ${out}`);
       const errors: string[] = [];
       const pages: Page[] = [];
       const context: Context = {
@@ -241,7 +259,8 @@ async function threadJourney(context: Context) {
   await page.locator(`${ACTIVE} .conversation`, { hasText: "result: # demo" }).waitFor({ timeout: 60_000 });
   await page.locator(`${ACTIVE} .composer[aria-busy=false]`).waitFor({ timeout: 30_000 });
   await page.locator(`${ACTIVE} .conversation`, { hasText: "seeded by verify-cube" }).waitFor();
-  context.step("the machine started, bash ran in its /workspace (the seeded checkout) and the reply quotes README.md and the seed commit");
+  await page.locator(`${ACTIVE} .conversation`, { hasText: VERIFY_SEED_COMMIT }).waitFor();
+  context.step(`the machine started, bash ran in its /workspace (the seeded checkout) and the reply quotes README.md and the commit '${VERIFY_SEED_COMMIT}'`);
   await capture(context, page, "02-first-turn");
   await sendInChat(page, bash("cat proof.txt"), "result: verify-cube");
   context.step("asked the thread to read proof.txt: 'result: verify-cube' (the first turn's file persists)");
@@ -272,24 +291,39 @@ async function spawnJourney(context: Context) {
   const token = `spawned-${Date.now().toString(36)}`;
   const task = bash(`echo ${token}`);
   const ask = `tool ${JSON.stringify({ name: "spawn", args: { tasks: [{ project: "demo", task }] } })}`;
-  await sendInChat(page, ask, /accepted in demo/);
-  context.step("asked OptChat to spawn a thread in demo: it answers '[id] accepted in demo'");
+  await sendInChat(page, ask, new RegExp(`\\[[0-9a-f]{8}\\] accepted in demo: .*${token}`));
+  const accepted = await page.locator(`${ACTIVE} .conversation`).getByText(new RegExp(`\\[[0-9a-f]{8}\\] accepted in demo: .*${token}`)).last().innerText();
+  const short = accepted.match(/\[([0-9a-f]{8})\] accepted in demo/)![1]!;
+  context.step(`asked OptChat to spawn a thread in demo: it answers '[${short}] accepted in demo'`);
   await capture(context, page, "01-accepted");
+  const margin = page.getByRole("complementary", { name: "threads and artifacts from this chat" });
+  await margin.getByRole("button", { name: new RegExp(`${token}.* · demo$`) }).waitFor({ timeout: 30_000 });
+  context.step(`the chat's margin lists the thread, titled with its task (${token}), in demo`);
   await page.locator(`${ACTIVE} details.report > summary[aria-label*="turn ended: result: ${token}"]`).waitFor({ timeout: 60_000 });
   context.step(`the thread ran its task and its report 'turn ended: result: ${token}' came back to the chat`);
   await capture(context, page, "02-report");
   const threads = await api(instance, "/api/threads");
   saveJson(context, "threads.json", threads);
-  assert.ok(JSON.stringify(threads).includes(instance.projectId), "/api/threads lists the spawned thread in demo");
-  saveJson(context, "optchat-history.json", await api(instance, "/api/optchat/history"));
+  const spawned = (threads.threads as { id: string; projectId: string; title: string }[]).filter(thread => thread.id.startsWith(short));
+  assert.equal(spawned.length, 1, `/api/threads has exactly one thread ${short}`);
+  assert.equal(spawned[0]!.projectId, instance.projectId, "the thread is in demo");
+  assert.ok(spawned[0]!.title.includes(token), "its title is its task");
+  context.step(`/api/threads has thread ${spawned[0]!.id} in demo, titled with the task`);
+  const history = await api(instance, "/api/optchat/history");
+  saveJson(context, "optchat-history.json", history);
+  assert.ok(JSON.stringify(history).includes(`[${short}] ended its turn; nothing of it runs now: result: ${token}`), "OptChat's history holds this thread's report");
+  context.step(`OptChat's history holds '[${short}] ended its turn; … result: ${token}'`);
 }
 
 async function cliJourney(context: Context) {
+  const empty = fs.mkdtempSync(path.join(context.instance.scratch, "cli-state-"));
   const cubed = (args: string[]) => {
-    const result = spawnSync(process.execPath, [path.join(ROOT, "packages/server/src/index.ts"), ...args], { encoding: "utf8", env: { ...process.env, CUBED_STATE: context.instance.state } });
+    const result = spawnSync(process.execPath, [path.join(ROOT, "packages/server/src/index.ts"), ...args],
+      { encoding: "utf8", timeout: 30_000, killSignal: "SIGKILL", env: { ...process.env, CUBED_STATE: empty } });
     const name = args.join("-").replace(/[^a-z0-9-]+/gi, "") || "none";
-    fs.writeFileSync(path.join(context.out, `cubed-${name}.txt`), `$ cubed ${args.join(" ")}\nexit ${result.status}\n--- stdout\n${result.stdout}--- stderr\n${result.stderr}`);
+    fs.writeFileSync(path.join(context.out, `cubed-${name}.txt`), `$ cubed ${args.join(" ")}\nexit ${result.status}${result.error ? ` (${result.error.message})` : ""}\n--- stdout\n${result.stdout}--- stderr\n${result.stderr}`);
     context.step(`cubed ${args.join(" ")}: exit ${result.status} (cubed-${name}.txt)`);
+    assert.equal(result.error, undefined, `cubed ${args.join(" ")} ended within 30 s`);
     return result;
   };
   const version = cubed(["--version"]);
@@ -301,27 +335,33 @@ async function cliJourney(context: Context) {
   const status = cubed(["runners", "status", "--state", context.instance.state]);
   assert.equal(status.status, 1, "the stand-in runner row has no config to reach");
   assert.match(status.stdout, new RegExp(`^${VERIFY_RUNNER}: unreachable; .*/private/verify\\.json`, "m"));
-  const bad = cubed(["--port", "nope"]);
-  assert.notEqual(bad.status, 0, "a bad option fails");
+  // An empty state of its own and a port it refuses: no second server on this run's state.
+  const bad = cubed(["--port", "70000", "--state", empty]);
+  assert.equal(bad.status, 1, "a bad option fails");
+  assert.match(bad.stderr, /--port must be an integer from 0 through 65535/);
 }
 
-function cleanup() {
-  if (fs.existsSync(instanceFile)) {
-    const instance = readInstance();
-    let cmdline = "";
-    try { cmdline = fs.readFileSync(`/proc/${instance.pid}/cmdline`, "utf8"); } catch { /* gone */ }
-    if (cmdline.includes("verify-cube.ts") && cmdline.includes("\0serve\0")) {
-      process.kill(instance.pid, "SIGTERM");
-      for (const deadline = Date.now() + 20_000; fs.existsSync(`/proc/${instance.pid}`) && Date.now() < deadline;) execFileSync("sleep", ["0.2"]);
-      console.log(`stopped pid ${instance.pid}`);
-    } else if (cmdline) {
-      console.log(`pid ${instance.pid} is not this run's verify-cube (${cmdline.split("\0").join(" ")}): left alone`);
+/** Stops a served instance of this run and removes its scratch, as far as
+ * planCleanup allows; false when something of the run stays in place. */
+async function cleanup(): Promise<boolean> {
+  const instance = fs.existsSync(instanceFile) ? readInstance() : null;
+  const scratch = path.join(run, "scratch");
+  const plan = planCleanup({ instance, scratchOwner: ownerOf(scratch), scratchExists: fs.existsSync(scratch) }, system);
+  for (const note of plan.notes) console.log(note);
+  if (instance && plan.stop) {
+    process.kill(instance.pid, "SIGTERM");
+    for (const deadline = Date.now() + 20_000; system.alive(instance.pid) && Date.now() < deadline;) await new Promise(resolve => setTimeout(resolve, 200));
+    if (system.alive(instance.pid)) {
+      console.log(`pid ${instance.pid} did not stop within 20 s: nothing deleted`);
+      return false;
     }
-    fs.rmSync(instanceFile, { force: true });
+    console.log(`stopped pid ${instance.pid}`);
   }
-  fs.rmSync(path.join(run, "scratch"), { recursive: true, force: true });
+  if (plan.removeScratch && fs.existsSync(scratch) && ownerOf(scratch) === (instance?.owner ?? ownerOf(scratch))) fs.rmSync(scratch, { recursive: true, force: true });
+  if (plan.removeInstance) fs.rmSync(instanceFile, { force: true });
   const evidence = path.join(run, "evidence");
   console.log(fs.existsSync(evidence) ? `kept ${evidence}` : `no evidence in ${run}`);
+  return plan.ok;
 }
 
 if (command === "run") {
@@ -332,7 +372,8 @@ if (command === "run") {
     ok = await doctor(cubed.instance) && await drive(cubed.instance, names);
   } finally {
     await cubed.close();
-    cleanup();
+    const evidence = path.join(run, "evidence");
+    console.log(fs.existsSync(path.join(run, "scratch")) ? `scratch left in ${run}` : `kept ${evidence}`);
   }
   process.exit(ok ? 0 : 1);
 } else if (command === "serve") {
@@ -344,7 +385,7 @@ if (command === "run") {
   if (!argv.length) usage();
   process.exit(await drive(readInstance(), argv) ? 0 : 1);
 } else if (command === "cleanup") {
-  cleanup();
+  process.exit(await cleanup() ? 0 : 1);
 } else {
   usage();
 }

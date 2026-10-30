@@ -6,7 +6,7 @@ This directory is the maintained source for verifying cube's user-facing behavio
 
 - A fresh `pnpm build` and Playwright's Chromium.
 - An instance launched by `verify-cube run` or `verify-cube serve` on a run directory of its own; `doctor` prints only `ok:` lines.
-- The seeded project `demo` is ready: one repository at `RUN/scratch/demo.git`, branch `main`, one commit `seed` with `README.md` containing `seeded by verify-cube`.
+- The seeded project `demo` is ready: one repository at `RUN/scratch/demo.git`, branch `main`, one commit `verify-cube seed commit` with `README.md` containing `seeded by verify-cube`.
 - The model is `faux/faux-1`, scripted by the message (SKILL.md, Drive). The runner `node-verify` is a registry row; tools run in local guests, not VMs.
 - Never drive an instance this run did not start.
 
@@ -19,7 +19,7 @@ This directory is the maintained source for verifying cube's user-facing behavio
 
 ## Proof and skip reporting
 
-- Each journey writes `RUN/evidence/<journey>/steps.log` with every action and observation, screenshots with ARIA snapshots, and API or CLI captures.
+- Each drive of a journey writes its own `RUN/evidence/<journey>` (then `<journey>-2`, …) with `steps.log` with every action and observation, screenshots with ARIA snapshots, and API or CLI captures.
 - A mutation is proven by a second view: a later turn, the guest's file, the API.
 - Report a journey not run as not run, with the reason. A journey that cannot reach its state fails; never weaken it to pass.
 - Name the faux model and local guests in every claim that rests on them.

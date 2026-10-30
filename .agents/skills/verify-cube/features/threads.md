@@ -22,7 +22,7 @@ Preconditions:
 - `doctor` is all `ok:`; the seeded project `demo` is ready.
 
 - **Open the dialog.** On `#/projects/<demo>` choose `new thread`. `dialog.new-thread-dialog` opens. Fill `first message` with `tool {"name":"bash","args":{"command":"cat README.md && git log --format=%s -1 && printf verify-cube > proof.txt"}}`. Captured as `01-new-thread`.
-- **Start.** Choose `start thread`. The URL becomes `#/t/<id>`; the transcript shows the bash call and `result: # demo`, `seeded by verify-cube`, `seed`. Captured as `02-first-turn`.
+- **Start.** Choose `start thread`. The URL becomes `#/t/<id>`; the transcript shows the bash call and `result: # demo`, `seeded by verify-cube` and the commit `verify-cube seed commit`. Captured as `02-first-turn`.
 - **Continue.** Send `tool {"name":"bash","args":{"command":"cat proof.txt"}}`. The reply is `result: verify-cube`. Captured as `03-second-turn`.
 - **Side effect.** `RUN/scratch/machines/<id>/workspace/proof.txt` holds `verify-cube`; `history.json` is `/api/threads/<id>/history`.
 - **Archive.** Choose `details` (`.strip-details-key`), `archive thread`, then `confirm: archive this thread`. The page leaves `#/t/<id>`. Captured as `04-archived`.

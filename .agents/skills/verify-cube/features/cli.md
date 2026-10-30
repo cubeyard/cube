@@ -17,13 +17,13 @@
 
 Preconditions:
 
-- An instance from `run` or `serve`, for its state directory.
+- An instance from `run` or `serve`, for its state directory. Every command runs with `CUBED_STATE` set to an empty directory under scratch; only `runners status` names the run's state.
 
 - **Version.** `cubed --version`: exit 0, an `x.y.z` version.
 - **Help.** `cubed --help`: exit 0, stdout starts `usage: cubed`.
 - **Runner status.** `cubed runners status --state RUN/scratch/state`: exit 1, `node-verify: unreachable; ENOENT … /private/verify.json`.
-- **Bad option.** `cubed --port nope`: non-zero exit.
-- **Proof.** One `cubed-*.txt` per command with exit code, stdout and stderr.
+- **Bad option.** `cubed --port 70000 --state <empty dir>`: exit 1, `--port must be an integer from 0 through 65535`. Its state is an empty directory of its own, so even a wrong parse would not start a second server on the run's state.
+- **Proof.** One `cubed-*.txt` per command with exit code, stdout and stderr. Each command is killed after 30 s and then fails the journey.
 
 Run: `.agents/skills/verify-cube/verify-cube run cli`.
 
