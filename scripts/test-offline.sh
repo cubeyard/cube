@@ -103,6 +103,7 @@ OFFLINE_TESTS=(
   packages/server/test/optchat-view-fault-test.ts
   packages/server/test/optchat-history-test.ts
   packages/server/test/thread-history-test.ts
+  packages/server/test/thread-history-tool-test.ts
   packages/server/test/thread-images-test.ts
   packages/server/test/optchat-archive-test.ts
   packages/server/test/optchat-passive-test.ts
@@ -129,6 +130,7 @@ OFFLINE_TESTS=(
   packages/server/test/cube-tools-test.ts
   packages/server/test/thread-memory-test.ts
   packages/server/test/thread-memory-cubed-test.ts
+  packages/server/test/thread-history-cubed-test.ts
   packages/server/test/pi-memory-baseline-test.ts
   packages/server/test/claude-memory-gate-test.ts
   packages/server/test/thread-memory-claude-gate-cubed-test.ts

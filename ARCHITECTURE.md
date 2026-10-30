@@ -41,7 +41,10 @@
   fallback when the chat cannot be read then) and kept word for word
   (Pi's `memory` section, the Claude Code mod's `cubeMemory` block), and the
   read-only cube tools `memory_zoom`/`memory_date` over the live chat
-  (`thread-memory.ts`). See [docs/optchat.md](docs/optchat.md).
+  (`thread-memory.ts`). A thread created since `thread_history` exists (a
+  `capabilities` stamp in its row) also reads the stored conversation of
+  any thread in its project with it, read only, through OptChat's history
+  reader (`thread-history-tool.ts`). See [docs/optchat.md](docs/optchat.md).
 - **work artifacts:** documents OptChat and threads write for the user
   (`artifacts*.ts`, `CUBED_STATE/artifacts.sqlite`): revisions with
   provenance, the user's anchored comments, delivered to the author as an

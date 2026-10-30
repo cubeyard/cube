@@ -195,7 +195,13 @@ export interface Thread {
    * START_TRIES; a release it tries for as long as it fails
    * (thread-recovery.ts). A wait for a runner is no failed try. */
   retry?: { failures: number; at: number; since?: number; error: string };
+  /** cube tools given at creation and never after: a thread created before
+   * one existed never gets it, so its tool list (and prompt cache) stays. */
+  capabilities?: readonly ThreadCapability[];
 }
+export type ThreadCapability = "thread_history";
+/** What a thread created now is given; a new-threads-only tool adds its name here. */
+const CAPABILITIES: readonly ThreadCapability[] = ["thread_history"];
 /** Where the thread's own machine stands on `thread.runnerId`:
  * `provisional`: no `vm.allocate` for it ever reached that runner, so the
  * thread may move; `requested`: one may have (written before it is sent), so
@@ -926,7 +932,7 @@ export class Registry {
         .flatMap(row => row.words ? [row.words] : []));
       const thread: Thread = { id, projectId, runnerId: load.id, ...(options.runnerId !== undefined ? { pinned: true as const } : {}),
         title: text.replace(/\s+/g, " ").slice(0, 80) || null, name: newThreadName(id, taken), model, agent, archived: false, createdAt: Date.now(),
-        allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks },
+        capabilities: CAPABILITIES, allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks },
           ...(project.machine && Object.keys(project.machine).length ? { machine: { ...project.machine } } : {}),
           ...(options.latest ? { latest: { bases: project.repositories.map(repository => repository.base) } } : {}) },
         workspaceState: "allocating", workspaceError: null, workspaceBase: null,

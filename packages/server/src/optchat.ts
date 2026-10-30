@@ -23,7 +23,6 @@ import { compactNode, Spent, spent, TRIES, type Round } from "./optchat-compacto
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { CAP, capText, Memory, pages, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
-import { imageNote } from "./thread-images.ts";
 import { countCut, markSent, RESTART_LIMIT, SendsDoc, settleSends } from "./pi-sends.ts";
 import { boundedOutput, CHAT_OUTPUT_TOKENS } from "./optchat-output.ts";
 import { piReports, reportText as errorText } from "./pi-report.ts";
@@ -34,9 +33,8 @@ import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
 import { piTool } from "./cube-tools.ts";
 import { optchatSkillsPrompt, settledWithin, SKILLS_WAIT_MS, type OptChatSkills } from "./skills.ts";
 import type { Artifacts } from "./artifact-service.ts";
-import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
+import { formatHistory, HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest, type ReportState, type ThreadRecord } from "./thread-history.ts";
 import { addUsage, type OptChatUsage } from "./usage-service.ts";
-import { threadNameText, type ThreadName } from "./thread-names.ts";
 
 const context = BACKGROUND_CONTEXT;
 const log = createLogger("optchat");
@@ -307,88 +305,9 @@ export interface OptThreads {
   writeHooks?(project: string, hooks: { preSetup?: string | undefined; preResume?: string | undefined }, requestId: string): Promise<string>;
 }
 
-export type ThreadRecord = {
-  project: string;
-  title: string | null;
-  /** Its name ("🦦 calm otter"); absent or null on threads older than names. */
-  name?: ThreadName | null;
-  archived: boolean;
-  /** The machine as cubed sees it ("ready", "starting its machine",
-   * "error: …"); null once archived. */
-  machine: string | null;
-  /** Other facts of cubed's record: workspace, retained disk, agent, writer. */
-  facts: string[];
-  /** Whether the agent is open in cubed: a stored run goes on only then. */
-  agentOpen: boolean;
-  /** The machine or workspace failure cubed records, if any. */
-  failure: string | null;
-  /** A page of the agent's stored transcript; null when it stored none or `unreadable`. */
-  transcript: HistoryPage | null;
-  unreadable: string | null;
-};
-
-export { HISTORY_MAX, HISTORY_PAGE };
+export { formatHistory, HISTORY_MAX, HISTORY_PAGE };
+export type { ReportState, ThreadRecord };
 export type { ObservedThread, OverviewThread, ThreadOverview };
-/** A page's messages share this many characters; one gets at most HISTORY_TEXT. */
-const HISTORY_BUDGET = 24_000;
-const HISTORY_TEXT = 2000;
-const HISTORY_TOOL = 400;
-const HISTORY_ANSWER = 4000;
-
-function historyLine(event: ThreadEvent, cap: number): string {
-  if (event.type === "user-message") return `user: ${capText(event.text, cap)}`;
-  if (event.type === "assistant-text") return `thread: ${capText(event.text, cap)}`;
-  const tool = Math.min(cap, HISTORY_TOOL);
-  if (event.type === "tool-call") return `tool ${event.name} ${capText(JSON.stringify(event.input ?? {}), tool)}`;
-  // The images a result shows are named, never sent: the chat sees that there were some.
-  const images = imageNote(event.images?.length ?? 0);
-  return `result ${event.name}${event.isError ? " (error)" : ""}: ${[images, capText(event.output, tool)].filter(Boolean).join(" ")}`;
-}
-
-export type ReportState = "delivered" | "accepted" | "none";
-const reportText = (report: ReportState) => report === "delivered" ? "delivered" : report === "accepted" ? "accepted, not in the chat yet" : "not sent yet";
-
-/** The history tool's answer: cubed's record of the thread, the run and the
- * latest answer from its stored transcript, whether this chat got the run's
- * report (or, without a transcript, the failure to start), what disagrees,
- * then the record's page of messages, numbered from the first. */
-export function formatHistory(id: string, record: ThreadRecord, report: ReportState): string {
-  const lines = [`[${short(id)}] ${record.project} · ${record.name ? `${threadNameText(record.name)} · ` : ""}${record.title ?? "untitled"}`,
-    `cubed: ${[record.archived ? "archived" : `machine ${record.machine}`, ...record.facts].join("; ")}`];
-  const transcript = record.transcript;
-  if (!transcript) {
-    lines.push(record.unreadable ? `history: unreadable: ${record.unreadable}`
-      : `history: none stored; the agent never opened${record.machine === "starting its machine" ? " (its machine is still starting)" : ""}`);
-    if (record.failure) lines.push(`failure to start, reported to this chat: ${reportText(report)}`);
-    return lines.join("\n");
-  }
-  const { state, run, error } = transcript.status;
-  const waiting = transcript.status.waiting ?? [];
-  lines.push(`run: ${state}${run ? ` (${run})` : ""}${error ? `: ${error}` : ""}${waiting.length ? `; still running: ${agents(waiting)}` : ""}`);
-  const { answer, asked } = transcript;
-  lines.push(!answer ? "latest answer: none" : `latest answer #${answer.index}${asked > answer.index ? ` (before the newest message #${asked}, which has none yet)` : ""}: ${capText(answer.text.trim(), HISTORY_ANSWER)}`);
-  if (state !== "idle" && state !== "working" && run) lines.push(`report of this run to this chat: ${reportText(report)}`);
-  // Disagreements are shown as cubed has them; this view does not settle them.
-  const notes: string[] = [];
-  if (record.failure && state !== "idle") notes.push(`cubed records a failure (${record.failure}) while the stored history shows the agent ${state === "working" ? "working" : `ran (run ${state})`}; the history does not say whether the failure came before, during or after that run`);
-  if (state === "working" && record.archived) notes.push("the store shows a run unfinished at archive; it does not go on");
-  else if (state === "working" && !record.agentOpen) notes.push(transcript.agent === "claude-code"
-    ? "the store shows a turn unfinished, but its agent is not open in cubed: Claude Code does not continue it; it shows as failed once the agent opens again"
-    : "the store shows a run unfinished, but its agent is not open in cubed: it goes on only when the agent opens again");
-  if (waiting.length && (record.archived || !record.agentOpen)) notes.push(`the store shows ${agents(waiting)} running, but its agent is not open in cubed: ${waiting.length === 1 ? "it ended with it and shows" : "they ended with it and show"} as lost once the agent opens again`);
-  for (const note of notes) lines.push(`note: ${note}`);
-  const { total, start, events } = transcript;
-  const end = start + events.length;
-  const cap = Math.min(HISTORY_TEXT, Math.floor(HISTORY_BUDGET / Math.max(1, events.length)));
-  if (!total) lines.push("messages: none");
-  else if (start === end) lines.push(`messages: none before #${end} (${total} in all)`);
-  else {
-    lines.push(`messages #${start}–#${end - 1} of ${total}, oldest first${start > 0 ? `; earlier: history("${short(id)}", before: ${start})` : ""}`);
-    events.forEach((event, k) => lines.push(`#${start + k} ${historyLine(event, cap)}`));
-  }
-  return lines.join("\n");
-}
-
 /** `cache` names the chat for the providers' prompt caches; it never changes. */
 /** `tells`: the tell calls to a thread since the user's last message. */
 /** `archives`: by archive call (its task id), each thread it named and the
