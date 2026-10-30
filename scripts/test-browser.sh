@@ -49,3 +49,14 @@ node packages/web/test/browser/settings-browser-test.ts
 node packages/web/test/browser/runners-browser-test.ts
 node packages/web/test/browser/skills-browser-test.ts
 node packages/web/test/browser/startup-browser-test.ts
+# The verify-cube skill's safety and its recipe, every journey
+# (.agents/skills/verify-cube). With CUBE_SCREENSHOTS (CI uploads it) the
+# evidence stays there; otherwise in a temporary directory removed on success.
+node packages/web/test/browser/verify-cube-test.ts
+if [ -n "${CUBE_SCREENSHOTS:-}" ]; then
+  verify="$CUBE_SCREENSHOTS/verify-cube"
+else
+  verify=$(mktemp -d)
+fi
+.agents/skills/verify-cube/verify-cube run --run "$verify/run" chat project thread spawn cli
+if [ -z "${CUBE_SCREENSHOTS:-}" ]; then rm -rf "$verify"; fi

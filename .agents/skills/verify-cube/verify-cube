@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# verify-cube's helper: SKILL.md next to this file is the recipe.
+set -euo pipefail
+cd "$(dirname "$0")/../../.."
+export CUBED_LOG_LEVEL="${CUBED_LOG_LEVEL:-warn}"
+exec node packages/web/test/browser/verify-cube.ts "$@"
