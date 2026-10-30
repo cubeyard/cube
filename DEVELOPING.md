@@ -302,6 +302,9 @@ For UI changes use the existing browser workflow: build, run cubed on disposable
 state, check desktop and phone (390×844), exercise affected interactions and
 inspect screenshots. In an Amp orb use supervised orb services and portal URLs,
 not an unmanaged background shell. Never expose unauthenticated cubed publicly.
+`.agents/skills/verify-cube` scripts that loop (an isolated cubed with a faux
+model and local guests, journeys in Chromium, kept evidence) and says which
+journeys a change needs; `scripts/test-browser.sh` runs all of them.
 
 ## cubed release acceptance
 
