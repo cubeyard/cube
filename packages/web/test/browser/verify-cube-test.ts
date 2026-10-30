@@ -10,7 +10,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { freshDirectory, isServeOf, OWNER_FILE, parsePort, planCleanup, readCommand, type System } from "./verify-cube-lib.ts";
+import { freshDirectory, isServeOf, OWNER_FILE, parsePort, planCleanup, PS_ARGS, readCommand, type System } from "./verify-cube-lib.ts";
 
 const HELPER = path.join(import.meta.dirname, "verify-cube.ts");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-cube-test-"));
@@ -26,7 +26,11 @@ assert.ok(!isServeOf("/usr/bin/node /w/verify-cube.ts serve --run /tmp/r2 --port
 assert.ok(!isServeOf("/usr/bin/node /w/verify-cube.ts serve --run /tmp/r/sub", "/tmp/r"), "/tmp/r/sub is not /tmp/r");
 assert.ok(isServeOf("/usr/bin/node /w/verify-cube.ts serve --port 7790 --run /tmp/r", "/tmp/r"), "--run last");
 assert.ok(isServeOf("node verify-cube.ts serve --run /tmp/a+b(1) --port 1", "/tmp/a+b(1)"), "a path with regex characters");
-console.log("ok: process identity reads /proc, else ps, else nothing");
+assert.deepEqual([...PS_ARGS], ["-ww", "-o", "command=", "-p"], "ps prints the whole command line (macOS cuts it to the terminal width otherwise)");
+const longRun = `/tmp/verify-cube/${"a-long-run-directory-name/".repeat(8)}run`;
+const longServe = `/opt/homebrew/bin/node /Users/someone/src/cube/packages/web/test/browser/verify-cube.ts serve --run ${longRun} --port 7790 --host 0.0.0.0`;
+assert.ok(longServe.length > 300 && isServeOf(longServe, longRun), "a long serve command is recognized whole");
+console.log("ok: process identity reads /proc, else ps -ww, else nothing; long command lines match");
 
 const sys = (alive: boolean, command: string | null): System => ({ alive: () => alive, command: () => command });
 const instance = { pid: 42, runArg: "/tmp/r", owner: "t1" };
@@ -37,6 +41,13 @@ plan = planCleanup({ instance, scratchOwner: "t1", scratchExists: true }, sys(tr
 assert.deepEqual([plan.stop, plan.removeScratch, plan.removeInstance, plan.ok], [true, true, true, true], "our live serve: stopped and removed");
 plan = planCleanup({ instance, scratchOwner: "t1", scratchExists: true }, sys(true, "vim notes.txt"));
 assert.deepEqual([plan.stop, plan.removeScratch, plan.ok], [false, true, true], "a reused pid is never stopped; our scratch still goes");
+const truncated = { pid: 42, runArg: longRun, owner: "t1" };
+plan = planCleanup({ instance: truncated, scratchOwner: "t1", scratchExists: true }, sys(true, longServe.slice(0, 120)));
+assert.deepEqual([plan.stop, plan.removeScratch, plan.removeInstance, plan.ok], [false, false, false, false], "a truncated verify-cube command: nothing stopped or deleted");
+plan = planCleanup({ instance: truncated, scratchOwner: "t1", scratchExists: true }, sys(true, longServe));
+assert.deepEqual([plan.stop, plan.removeScratch, plan.removeInstance, plan.ok], [true, true, true, true], "the whole long command: stopped and removed");
+plan = planCleanup({ instance, scratchOwner: "t1", scratchExists: true }, sys(true, "node /w/verify-cube.ts serve --run /tmp/r2 --port 7791"));
+assert.deepEqual([plan.stop, plan.removeScratch, plan.ok], [false, false, false], "another run's verify-cube on the pid: fail closed");
 plan = planCleanup({ instance, scratchOwner: "t2", scratchExists: true }, sys(false, null));
 assert.deepEqual([plan.stop, plan.removeScratch, plan.ok], [false, false, false], "another launch's scratch stays");
 plan = planCleanup({ instance: null, scratchOwner: null, scratchExists: true }, sys(false, null));

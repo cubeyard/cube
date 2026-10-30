@@ -17,8 +17,10 @@ export type System = {
 const procCommand = (pid: number): string | null => {
   try { return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ").trim() || null; } catch { return null; }
 };
+/** `-ww`: the whole command line; without it macOS's ps cuts it to the terminal width. */
+export const PS_ARGS = ["-ww", "-o", "command=", "-p"] as const;
 const psCommand = (pid: number): string | null => {
-  try { return execFileSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim() || null; } catch { return null; }
+  try { return execFileSync("ps", [...PS_ARGS, String(pid)], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim() || null; } catch { return null; }
 };
 
 /** /proc where it exists (Linux), else `ps` (macOS); null when neither answers. */
@@ -58,7 +60,8 @@ export type CleanupPlan = { stop: boolean; removeScratch: boolean; removeInstanc
 /** What a cleanup may do. It stops only a live `serve` of this run, deletes
  * scratch only when its owner file names this run's token (or, with no
  * instance file, when it has an owner file at all), and deletes nothing
- * while a process it cannot identify may still use it. */
+ * while a process it cannot identify may still use it, including a
+ * verify-cube process whose command does not show this run's serve. */
 export function planCleanup(input: { instance: { pid: number; runArg: string; owner: string } | null; scratchOwner: string | null; scratchExists: boolean },
   sys: System): CleanupPlan {
   const notes: string[] = [];
@@ -72,6 +75,9 @@ export function planCleanup(input: { instance: { pid: number; runArg: string; ow
       notes.push(`pid ${instance.pid} is alive and its command cannot be read: not stopped, nothing deleted; stop it yourself, then clean up again`);
     } else if (isServeOf(command, instance.runArg)) {
       stop = true;
+    } else if (command.includes("verify-cube.ts")) {
+      blocked = true;
+      notes.push(`pid ${instance.pid} is a verify-cube process that cannot be told to be this run's serve (${command}): not stopped, nothing deleted; stop it yourself, then clean up again`);
     } else {
       notes.push(`pid ${instance.pid} is now another process (${command}): left alone`);
     }

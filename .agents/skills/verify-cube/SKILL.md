@@ -78,7 +78,7 @@ Outside a cube thread run `serve` in a second shell with the default host.
 
 ## Doctor
 
-`doctor --run RUN` reads `RUN/instance.json`, waiting up to `--wait` seconds (default 30) while a `serve` launches and then failing with `FAIL: no RUN/instance.json …`, and prints one `ok:` or `FAIL:` line per check: the pid is alive and is this run (inside `run`, the process itself; for a `serve`, its command is `verify-cube.ts` with exactly this `--run`); scratch holds this launch's owner file; the state is under this run (never `~/.cube*`); `/api/health` says `ready`; `/api/state` has onboarding done and a model; `/api/models` lists `faux/faux-1`; `/api/runners` lists `node-verify`; `/` serves the UI. A process's command comes from `/proc` (Linux) or `ps` (macOS); when neither answers, doctor fails. Run it before the first drive and after any failed drive. A `FAIL` means relaunch, not drive harder. `run` does this itself.
+`doctor --run RUN` reads `RUN/instance.json`, waiting up to `--wait` seconds (default 30) while a `serve` launches and then failing with `FAIL: no RUN/instance.json …`, and prints one `ok:` or `FAIL:` line per check: the pid is alive and is this run (inside `run`, the process itself; for a `serve`, its command is `verify-cube.ts` with exactly this `--run`); scratch holds this launch's owner file; the state is under this run (never `~/.cube*`); `/api/health` says `ready`; `/api/state` has onboarding done and a model; `/api/models` lists `faux/faux-1`; `/api/runners` lists `node-verify`; `/` serves the UI. A process's command comes from `/proc` (Linux) or `ps -ww` (macOS, whole line); when neither answers, doctor fails. Run it before the first drive and after any failed drive. A `FAIL` means relaunch, not drive harder. `run` does this itself.
 
 ## Drive
 
@@ -110,8 +110,8 @@ Proof is the user action plus its resulting state plus a side effect seen anothe
 
 `run` cleans up by itself, also after a failure. For a served instance, `cleanup --run RUN`:
 
-- stops the pid in `RUN/instance.json` only when it is alive and its command is this run's `verify-cube.ts serve`, and waits up to 20 s for it to exit; a pid that is now another process is left alone;
-- deletes nothing while that pid is alive and its command cannot be read, or while it has not exited;
+- stops the pid in `RUN/instance.json` only when it is alive and its command is this run's `verify-cube.ts serve`, and waits up to 20 s for it to exit; a pid that is now some other program is left alone;
+- deletes nothing while that pid is alive and its command cannot be read, is a verify-cube process it cannot match to this run's `serve` (cut short, another run), or has not exited;
 - removes `RUN/scratch` only when its owner file holds this launch's token (or, with no `instance.json`, when it has an owner file at all), then `instance.json`;
 - prints `kept RUN/evidence`, and exits 1 when it left any of the run in place, saying what and why.
 
