@@ -163,6 +163,8 @@ try {
   const piAnswer = lastResult(history);
   assert.ok(piAnswer.startsWith(`${HISTORY_FRAME}\n[${short}] demo · `), piAnswer);
   assert.match(piAnswer, /\ncubed: archived; .*agent pi not open in cubed; workspace writer: none\n/);
+  assert.match(piAnswer.split("\n")[1]!, / · say GITHUB_TOKEN=\[redacted\] and \[…\]$/, "the title, cut at creation inside a URL password, ends without it");
+  assert.ok(!piAnswer.includes(KEY.slice(0, 6)), "no part of the key");
   assert.match(piAnswer, new RegExp(`\\nmessages #1–#1 of 2, oldest first; earlier: thread_history\\("${short}", before: 1\\)\\n#1 thread: ok$`));
   assert.deepEqual(started.slice(before.started), [reader], "only the reader's machine starts: the read starts, wakes or reboots none");
   assert.equal(app.conversations.agentOpen(target), false, "the read opens no agent");

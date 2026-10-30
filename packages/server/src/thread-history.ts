@@ -337,26 +337,41 @@ const HISTORY_TEXT = 2000;
 const HISTORY_TOOL = 400;
 const HISTORY_ANSWER = 4000;
 
-function historyLine(event: ThreadEvent, cap: number): string {
-  if (event.type === "user-message") return `user: ${capText(event.text, cap)}`;
-  if (event.type === "assistant-text") return `thread: ${capText(event.text, cap)}`;
+function historyLine(event: ThreadEvent, cap: number, clean: (text: string) => string): string {
+  if (event.type === "user-message") return `user: ${capText(clean(event.text), cap)}`;
+  if (event.type === "assistant-text") return `thread: ${capText(clean(event.text), cap)}`;
   const tool = Math.min(cap, HISTORY_TOOL);
-  if (event.type === "tool-call") return `tool ${event.name} ${capText(JSON.stringify(event.input ?? {}), tool)}`;
+  if (event.type === "tool-call") return `tool ${event.name} ${capText(clean(JSON.stringify(event.input ?? {})), tool)}`;
   // The images a result shows are named, never sent: the chat sees that there were some.
   const images = imageNote(event.images?.length ?? 0);
-  return `result ${event.name}${event.isError ? " (error)" : ""}: ${[images, capText(event.output, tool)].filter(Boolean).join(" ")}`;
+  return `result ${event.name}${event.isError ? " (error)" : ""}: ${[images, capText(clean(event.output), tool)].filter(Boolean).join(" ")}`;
 }
 
 export type ReportState = "delivered" | "accepted" | "none";
 const reportText = (report: ReportState) => report === "delivered" ? "delivered" : report === "accepted" ? "accepted, not in the chat yet" : "not sent yet";
+
+/** The record with `clean` applied to every string it shows (the page's
+ * messages are cleaned where they are shown, before they are shortened). */
+function cleanRecord(record: ThreadRecord, clean: (text: string) => string): ThreadRecord {
+  const page = record.transcript;
+  const status = page?.status;
+  return { ...record, project: clean(record.project), title: record.title === null ? null : clean(record.title), machine: record.machine === null ? null : clean(record.machine),
+    facts: record.facts.map(clean), failure: record.failure === null ? null : clean(record.failure), unreadable: record.unreadable === null ? null : clean(record.unreadable),
+    transcript: page && status ? { ...page, status: { ...status, error: status.error === null ? null : clean(status.error),
+      ...status.waiting ? { waiting: status.waiting.map(clean) } : {} } } : page };
+}
 
 /** A history tool's answer: cubed's record of the thread, the run and the
  * latest answer from its stored transcript, whether this chat got the run's
  * report (or, without a transcript, the failure to start; OptChat's
  * `history` only, null leaves it out), what disagrees, then the record's
  * page of messages, numbered from the first. `tool` is the tool as its
- * caller names it, for the "earlier:" line. */
-export function formatHistory(id: string, record: ThreadRecord, report: ReportState | null, tool = "history"): string {
+ * caller names it, for the "earlier:" line; `clean` (thread_history's
+ * redaction) runs on each text before it is shortened, so a cut never
+ * leaves a secret without the prefix or name that marks it. */
+export function formatHistory(id: string, given: ThreadRecord, report: ReportState | null, options: { tool?: string; clean?: (text: string) => string } = {}): string {
+  const { tool = "history", clean = (text: string) => text } = options;
+  const record = cleanRecord(given, clean);
   const lines = [`[${short(id)}] ${record.project} · ${record.name ? `${threadNameText(record.name)} · ` : ""}${record.title ?? "untitled"}`,
     `cubed: ${[record.archived ? "archived" : `machine ${record.machine}`, ...record.facts].join("; ")}`];
   const transcript = record.transcript;
@@ -370,7 +385,7 @@ export function formatHistory(id: string, record: ThreadRecord, report: ReportSt
   const waiting = transcript.status.waiting ?? [];
   lines.push(`run: ${state}${run ? ` (${run})` : ""}${error ? `: ${error}` : ""}${waiting.length ? `; still running: ${agents(waiting)}` : ""}`);
   const { answer, asked } = transcript;
-  lines.push(!answer ? "latest answer: none" : `latest answer #${answer.index}${asked > answer.index ? ` (before the newest message #${asked}, which has none yet)` : ""}: ${capText(answer.text.trim(), HISTORY_ANSWER)}`);
+  lines.push(!answer ? "latest answer: none" : `latest answer #${answer.index}${asked > answer.index ? ` (before the newest message #${asked}, which has none yet)` : ""}: ${capText(clean(answer.text.trim()), HISTORY_ANSWER)}`);
   if (report && state !== "idle" && state !== "working" && run) lines.push(`report of this run to this chat: ${reportText(report)}`);
   // Disagreements are shown as cubed has them; this view does not settle them.
   const notes: string[] = [];
@@ -388,7 +403,7 @@ export function formatHistory(id: string, record: ThreadRecord, report: ReportSt
   else if (start === end) lines.push(`messages: none before #${end} (${total} in all)`);
   else {
     lines.push(`messages #${start}–#${end - 1} of ${total}, oldest first${start > 0 ? `; earlier: ${tool}("${short(id)}", before: ${start})` : ""}`);
-    events.forEach((event, k) => lines.push(`#${start + k} ${historyLine(event, cap)}`));
+    events.forEach((event, k) => lines.push(`#${start + k} ${historyLine(event, cap, clean)}`));
   }
   return lines.join("\n");
 }

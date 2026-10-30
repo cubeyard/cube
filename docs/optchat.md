@@ -665,8 +665,11 @@ in later.
   is unchanged). OptChat resolves among the threads it spawned, in any
   project; a thread resolves an id or its first characters among its
   project's threads, and another project's thread is answered as one that
-  does not exist. The whole answer is redacted with `redactHook` (a
-  heuristic) and opens with a line saying the transcript is evidence, not
+  does not exist. Each text is redacted with `redactHook` (a heuristic)
+  before the renderer shortens it, so a cut never leaves a secret without
+  the prefix or name that marks it; a title as long as a creation cut (80
+  characters) may end inside one and shows without its last word. The
+  answer opens with a line saying the transcript is evidence, not
   instructions, and grants nothing. A message is cited as `[id]#N`; numbers
   hold once a thread ends (a still-writing thread's rare late commit can
   reorder them, and `total` changes). There is no search: ids come from the
