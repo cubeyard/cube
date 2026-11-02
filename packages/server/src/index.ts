@@ -1242,7 +1242,10 @@ async function main(argv: string[]): Promise<void> {
  * the process after that, so it exits by itself. The lifeline is read as a
  * socket: a file read of a pipe the supervisor keeps open (as it does while
  * it waits for this process to exit) would hold a threadpool request that
- * nothing can cancel, and the supervisor's SIGKILL would end every stop. */
+ * nothing can cancel, and the supervisor's SIGKILL would end every stop.
+ * The signal listeners stay until the process exits (they do not hold it):
+ * a signal sent during the close can be dispatched after it, and with
+ * `stop` gone signal-exit (proper-lockfile's) would re-raise it. */
 export async function serveUntilStopped(app: { server: http.Server; close(): Promise<void> }, say: (line: string) => void = line => console.log(line)): Promise<void> {
   let shutdown: Promise<void> | undefined;
   const stop = (signal: NodeJS.Signals | "supervisor-exit") => {
@@ -1265,7 +1268,6 @@ export async function serveUntilStopped(app: { server: http.Server; close(): Pro
   await new Promise<void>(resolve => app.server.once("close", resolve));
   await shutdown;
   lifeline?.destroy();
-  for (const signal of ["SIGTERM", "SIGINT"] as const) process.off(signal, stop);
 }
 
 if (import.meta.main) {
