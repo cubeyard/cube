@@ -4,7 +4,7 @@
  * bounded wait for progress still fails a frozen workload. */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { awaitProgress, ZOMBIE_SCAN, zombieScan } from "./keel-boot-check-lib.ts";
@@ -94,36 +94,23 @@ if (existsSync("/proc/self/stat")) {
 
   // A running process whose name holds ") Z " is not reported: its stat
   // line reads "<pid> (x) Z y) S ...", and the state follows the last paren.
-  const odd = mkdtempSync(join(tmpdir(), "kbc-comm-"));
+  // The shell names itself and blocks in its builtin read: a copied sleep
+  // would not do, since uutils' multicall binary refuses an unknown name.
+  const named = spawn("/bin/sh", ["-c", 'printf "x) Z y" > /proc/$$/comm && read -r _'], { stdio: ["pipe", "ignore", "ignore"] });
   try {
-    const exe = join(odd, "x) Z y");
-    copyFileSync("/bin/sleep", exe);
-    chmodSync(exe, 0o755);
-    const named = spawn(exe, ["30"], { stdio: "ignore", argv0: "sleep" });
-    const started = await new Promise<string | undefined>((r) => {
-      named.once("spawn", () => r(undefined));
-      named.once("error", (e) => r(e.message));
+    const stat = `/proc/${named.pid}/stat`;
+    let line = "";
+    await until("the named process sleeps under its name", () => {
+      line = shell(`cat ${stat}`).output;
+      return line.startsWith(`${named.pid} (x) Z y) S `);
     });
-    if (started) console.log(`SKIP: a process named "x) Z y" did not start: ${started}`);
-    else {
-      try {
-        const stat = `/proc/${named.pid}/stat`;
-        let line = "";
-        await until("the named process sleeps under its name", () => {
-          line = shell(`cat ${stat}`).output;
-          return line.startsWith(`${named.pid} (x) Z y) S `);
-        });
-        assert.equal(zombie(line.trim()), undefined);
-        const scan = shell(zombieScan(stat));
-        assert.equal(scan.status, 0);
-        assert.equal(scan.output, "", `a running process with ") Z " in its name was reported: ${scan.output}`);
-      } finally {
-        named.kill("SIGKILL");
-        await until("the named process is gone", () => named.exitCode !== null || named.signalCode !== null);
-      }
-    }
+    assert.equal(zombie(line.trim()), undefined);
+    const scan = shell(zombieScan(stat));
+    assert.equal(scan.status, 0);
+    assert.equal(scan.output, "", `a running process with ") Z " in its name was reported: ${scan.output}`);
   } finally {
-    rmSync(odd, { recursive: true, force: true });
+    named.kill("SIGKILL");
+    await until("the named process is gone", () => named.exitCode !== null || named.signalCode !== null);
   }
 }
 
