@@ -262,7 +262,7 @@
         {#key threadId}
           <!-- The id as a plain value: the view is made again for another id, and
                its signals read from it otherwise outlived it (2 800 nodes a visit). -->
-          <ThreadView threadId={untrack(() => threadId!)} threads={activeThreads} {command} onConsume={consume} {onNewThread} />
+          <ThreadView threadId={untrack(() => threadId!)} threads={activeThreads} {command} onConsume={consume} {onNewThread} onRefresh={refresh} />
         {/key}
       {:else if threadId}
         <p class="loading" role="status">loading…</p>
