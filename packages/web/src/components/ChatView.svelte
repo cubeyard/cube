@@ -21,11 +21,13 @@
   // the message that says so, on a wide screen, or as quiet lines under it
   // on a narrow one. Everything else (every thread, artifacts, projects,
   // settings, the chat's model and memory) is in the index, a step away.
-  let { threads = [], threadsLoaded = false }: {
+  let { threads = [], threadsLoaded = false, covered = false }: {
     /** Every thread cubed has, archived ones too (App's poll). */
     threads?: ThreadSummary[];
     /** Whether that list has been read at least once. */
     threadsLoaded?: boolean;
+    /** A page (a thread, an artifact) covers the chat edge to edge. */
+    covered?: boolean;
   } = $props();
 
   let modelState = $state<ThreadModels | null>(null);
@@ -228,7 +230,7 @@
     </section>
   {/if}
   {#if modelState}
-    <Conversation base={CHAT_BASE} steer sheet foldTools model={selectedModel} {changingModel} bind:busy onRows={(shown) => (rows = shown)}
+    <Conversation base={CHAT_BASE} steer sheet foldTools {covered} model={selectedModel} {changingModel} bind:busy onRows={(shown) => (rows = shown)}
       images={modelState.images ?? { supported: false, reason: "this host does not take images in the chat" }}
       placeholder="message optchat" {toolLine} {reportLabel} {reportTitle} {reportNamed} {page} {after} margin={wide ? margin : undefined}
       empty={{ title: "one chat, every thread", hint: "Say what you want done: the chat starts threads in your projects, follows their reports and remembers everything you said. A thread needs a project; add one under projects." }} />

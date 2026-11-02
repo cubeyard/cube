@@ -39,6 +39,8 @@
   const threadId = $derived(hash.match(/^#\/t\/([^/?]+)/)?.[1] ?? null);
   const projectId = $derived(hash.match(/^#\/projects\/([^/?]+)/)?.[1] ?? null);
   const artifactId = $derived(hash.match(/^#\/a\/([^/?]+)/)?.[1] ?? null);
+  /** A thread and an artifact take the whole sheet, over the chat. */
+  const whole = $derived(!!threadId || !!artifactId);
   const artifactRevision = $derived(Number(hash.match(/^#\/a\/[^/?]+\?rev=(\d+)$/)?.[1] ?? "") || null);
   const artifactsRoute = $derived(/^#\/artifacts(?:[/?]|$)/.test(hash));
   // The chat is home: an empty hash lands there.
@@ -245,9 +247,9 @@
   {/if}
   <!-- The chat is home and never leaves: every other place opens over it in
        one panel, so the chat, its scroll and its draft are there when it closes. -->
-  <ChatView {threads} {threadsLoaded} />
+  <ChatView {threads} {threadsLoaded} covered={whole} />
   {#if !chatRoute}
-    <PagePanel label={panelLabel} whole={!!threadId || !!artifactId}>
+    <PagePanel label={panelLabel} {whole}>
       {#if settingsPage}
         <SettingsLayout page={settingsPage}>
           {@render settings(settingsPage)}
