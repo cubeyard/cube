@@ -49,6 +49,7 @@ node packages/web/test/browser/settings-browser-test.ts
 node packages/web/test/browser/runners-browser-test.ts
 node packages/web/test/browser/skills-browser-test.ts
 node packages/web/test/browser/startup-browser-test.ts
+node packages/web/test/browser/thread-starting-browser-test.ts
 # The verify-cube skill's safety and its recipe, every journey
 # (.agents/skills/verify-cube). With CUBE_SCREENSHOTS (CI uploads it) the
 # evidence stays there; otherwise in a temporary directory removed on success.
