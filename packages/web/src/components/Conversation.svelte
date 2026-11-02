@@ -646,7 +646,7 @@
         {:else if waiting}
           <div class="working-line" role="status"><ThinkingCube state="waiting" /><span>waiting on {status.waiting!.length === 1 ? "a background agent" : `${status.waiting!.length} background agents`}: {status.waiting!.map(description => description.length > 80 ? `${description.slice(0, 79)}…` : description).join(", ")}</span></div>
         {:else if status.state === "stopped"}
-          <div class="working-line" role="status">stopped</div>
+          <div class="working-line" role="status">stopped{status.error ? `: ${status.error}` : ""}</div>
         {/if}
       {/if}
     </div>
