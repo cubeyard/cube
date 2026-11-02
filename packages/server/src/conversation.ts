@@ -284,8 +284,7 @@ export class Conversations {
   /** Why the thread's last try failed, also one before a restart until
    * this process tries again; once the recovery loop stopped trying
    * (START_TRIES), that too. */
-  failure(id: string): Failure | null {
-    const thread = this.registry.getThread(id);
+  failure(id: string, thread = this.registry.getThread(id)): Failure | null {
     const failure = this.failures.get(id) ?? (this.tried.has(id) || !thread?.retry ? null : readFailure(thread.retry.error));
     if (!thread?.retry || !retriesExhausted(thread)) return failure;
     const last = failure ?? readFailure(thread.retry.error);
@@ -306,7 +305,7 @@ export class Conversations {
   condition(thread: Thread): ThreadCondition {
     const id = thread.id;
     return threadCondition(thread, { archiving: this.archivingNow(id), starting: this.starting(id), agentOpen: this.agentOpen(id),
-      failure: this.failure(id), down: this.down(id), waiting: this.waiting(id) });
+      failure: this.failure(id, thread), down: this.down(id), waiting: this.waiting(id) });
   }
   /** The thread's start failure now (thread-condition.ts), which OptChat
    * reports once it lasts; null: none, or no such thread. */
