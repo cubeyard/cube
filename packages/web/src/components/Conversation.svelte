@@ -18,7 +18,7 @@
   import Icon from "./Icon.svelte";
   import ThinkingCube from "./ThinkingCube.svelte";
 
-  let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread", images = null,
+  let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, recheck, notice = null, empty = null, placeholder = "message this thread", images = null,
     sheet = false, foldTools = false, onRows, toolLine, reportLabel, reportTitle, reportNamed, page, after, margin }: {
     threadId?: string;
     /** Messages may be sent while the agent works; they reach it between tool calls. */
@@ -32,6 +32,9 @@
     changingModel?: boolean;
     busy?: boolean;
     waitingText?: string | null;
+    /** Reads again what `waitingText` comes from (a polled list, seconds
+     * old): a send it holds asks once, and goes if it no longer holds. */
+    recheck?: () => Promise<void>;
     /** A standing note about the thread, shown above its transcript. */
     notice?: string | null;
     /** Messages may carry images (pasted, dropped or picked) when the model
@@ -410,9 +413,17 @@
     viewer?.showModal();
   }
 
+  /** A send waits on `recheck`: further presses meanwhile are the same send. */
+  let rechecking = false;
   async function submit(): Promise<void> {
     const press = sendPress;
     sendPress = null;
+    if (waitingText && recheck && prompt.trim()) {
+      if (rechecking) return;
+      rechecking = true;
+      try { await recheck(); await tick(); } finally { rechecking = false; }
+      if (disposed) return;
+    }
     const text = prompt.trim();
     if (!canSend || !model) return;
     // A send made from the field (Enter in it, a press that left the focus in

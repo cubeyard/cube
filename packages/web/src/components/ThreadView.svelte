@@ -28,9 +28,11 @@
   import StartupPanel from "./StartupPanel.svelte";
   import { pagePanel } from "./PagePanel.svelte";
 
-  let { threadId, threads, command = null, onConsume = () => {}, onNewThread }: {
+  let { threadId, threads, command = null, onConsume = () => {}, onNewThread, onRefresh }: {
     threadId: string;
     threads: ThreadSummary[];
+    /** Reads the thread list again now (App's poll). */
+    onRefresh?: () => Promise<void>;
     onNewThread: (projectId?: string) => void;
     /** App's `n` shortcut: start a new thread in this thread's project. */
     command?: Command | null;
@@ -338,7 +340,7 @@
       <div class="conversation-gone"><p>this thread is no longer active.</p><a class="key" href="#/threads">back to threads</a></div>
     {:else}
       <Conversation sheet foldTools {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy}
-        waitingText={composerWaiting(summary)}
+        waitingText={composerWaiting(summary)} recheck={onRefresh}
         notice={summary?.agent === "claude-code" || isClaude(modelState?.selected) ? `claude · max — ${CLAUDE_DURABILITY}` : null} />
     {/if}
   </section>
