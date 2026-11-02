@@ -437,7 +437,8 @@
             <blockquote class="work-quote">{pending.anchor.quote}</blockquote>
             <textarea bind:this={composer} bind:value={draftText} aria-label="comment" placeholder="what about it?" maxlength={4000} rows="3"
               onkeydown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void saveComment(); } if (event.key === "Escape") cancelComment(); }}></textarea>
-            <div class="comment-keys">
+            <!-- a press leaves the focus in the field: the keyboard, and the room it gave, stay until the press is a click -->
+            <div class="comment-keys" onmousedown={(event) => event.preventDefault()} role="presentation">
               <button type="button" class="key" onclick={cancelComment}>cancel</button>
               <button type="submit" class="key primary" disabled={!draftText.trim() || saving}>{saving ? "saving…" : "add comment"}</button>
             </div>

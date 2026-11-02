@@ -1980,4 +1980,10 @@ p.action-problems { padding-left: 0.75rem; }
   /* the provenance line in the document names the author */
   .artifact-strip .bar-sub { display: none; }
   .artifact-workspace > .work-panel { max-height: 36vh; }
+  /* a comment being written takes the room above the keyboard (Android
+     shrinks vh with it), the document keeps its bar */
+  :root[data-keyboard] .artifact-workspace:has(.comment-composer) > .work-panel { max-height: calc(var(--app-height, 100dvh) - 3rem); }
 }
+/* on its side the bank stands beside the document, and its head gives the
+   composer the little room the keyboard leaves */
+:root[data-keyboard="tight"] .artifact-comments:has(.comment-composer) .work-head { display: none; }
