@@ -216,6 +216,16 @@ await scenario("a failed run shows its error with the message in place", async (
   assertSend(await watch.since("please fail"), "please fail");
 });
 
+await scenario("a run the host stopped says why; one the user stopped says stopped", async (page, host) => {
+  const base = host.transcript.events;
+  const why = "cubed stopped while this run's model request was out, so it was not sent again (what it cost is unknown): send a message to go on";
+  host.set([...base, user("3.0", "words 400"), agent("4.0.0", "w1 w2 w")], { state: "stopped", error: why });
+  await page.locator(".working-line", { hasText: why }).waitFor();
+  assert.equal((await page.locator(".working-line").innerText()).trim(), `stopped: ${why}`);
+  host.set([...base, user("3.0", "words 400"), agent("4.0.0", "w1 w2 w")], { state: "stopped", error: null });
+  await page.locator(".working-line", { hasText: /^stopped$/ }).waitFor();
+});
+
 await scenario("a lost stream mid-run reconnects; the message and the run stay, and a reload reads them back", async (page, host, watch) => {
   const base = host.transcript.events;
   host.onPrompt = ({ text, requestId }) => { host.set([...base, user(`pending.${requestId}`, text)], { state: "working", run: "pending" }); };
