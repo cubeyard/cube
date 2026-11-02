@@ -120,6 +120,32 @@ const keyGap = (page: Page) => page.evaluate(() => {
   return Math.max(Math.abs(key.top - Math.min(Math.max(rect.bottom + 8, field.top + 8), field.bottom - 52)),
     Math.abs(key.left + key.width / 2 - Math.min(Math.max(rect.left + rect.width / 2, 60), innerWidth - 60)));
 });
+/** A comment started on a phone, then the keyboard up as Android raises it
+ * (the page shrinks to `room`): the field and its keys stay in view. */
+async function commentAboveKeyboard(page: Page, text: string, room: number, shot: string): Promise<void> {
+  const whole = page.viewportSize()!;
+  await select(page, text);
+  await page.locator(".artifact-select-key").tap();
+  await page.locator(".comment-composer textarea").waitFor();
+  await page.setViewportSize({ width: whole.width, height: room });
+  await until(() => page.evaluate(() => document.documentElement.dataset.keyboard ?? null), state => state !== null, "the keyboard reads as up");
+  const hidden = await page.evaluate(() => {
+    const field = document.querySelector(".artifact-comments .work-body")!.getBoundingClientRect();
+    return [".comment-composer textarea", ".comment-composer button[type=submit]"].filter(selector => {
+      const box = document.querySelector(selector)!.getBoundingClientRect();
+      return box.top < Math.max(field.top, 0) || box.bottom > Math.min(field.bottom, innerHeight);
+    });
+  });
+  await shoot(page, shot);
+  assert.deepEqual(hidden, [], `the comment being written shows above the keyboard at ${whole.width}x${room}`);
+  await page.locator(".comment-composer textarea").fill("typed above the keyboard");
+  await page.locator(".comment-composer button[type=submit]").tap();
+  const draft = page.locator(".comment-item.draft", { hasText: "typed above the keyboard" });
+  await draft.waitFor({ timeout: 5_000 });
+  await page.setViewportSize(whole);
+  await draft.locator(".work-dismiss").tap();
+  await draft.waitFor({ state: "detached" });
+}
 async function comment(page: Page, text: string, body: string, to?: string): Promise<void> {
   await select(page, text, to);
   await page.locator(".artifact-select-key").click();
@@ -322,6 +348,12 @@ try {
   await shoot(phone, "12-review-phone");
   await until(async () => phone.locator(".diagram-picture[aria-busy]").count(), count => count === 0, "every diagram drawn on the phone");
   await steadyKey(phone, "the store keeps every revision", "12a-comment-key-phone", true);
+  await commentAboveKeyboard(phone, "the store keeps every revision", 508, "12b-comment-keyboard-phone");
+  await phone.setViewportSize({ width: 360, height: 640 });
+  await commentAboveKeyboard(phone, "the store keeps every revision", 350, "12c-comment-keyboard-small-phone");
+  await phone.setViewportSize({ width: 844, height: 390 });
+  await commentAboveKeyboard(phone, "the store keeps every revision", 190, "12d-comment-keyboard-phone-side");
+  await phone.setViewportSize({ width: 390, height: 844 });
   await phone.goto(`${url}/#/artifacts`);
   await phone.locator(".artifact-list li").first().waitFor();
   await shoot(phone, "13-list-phone");
