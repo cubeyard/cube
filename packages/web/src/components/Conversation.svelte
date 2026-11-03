@@ -219,7 +219,7 @@
   async function onFrame(next: ThreadTranscript): Promise<void> {
     frames++;
     if (!disposed) reconnecting = false;
-    const same = letGo !== null && !loading && JSON.stringify(next) === letGo;
+    const same = letGo !== null && !loading && !historyError && JSON.stringify(next) === letGo;
     letGo = null;
     if (same) return;
     await show(next);

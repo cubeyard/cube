@@ -1,3 +1,9 @@
+/** Many windows of one browser. Over HTTP/1.1 a browser opens six
+ * connections per host for all its windows, and each live stream holds one
+ * until it ends: three thread windows, six hidden windows, or (in WebKit)
+ * threads opened and closed must not leave the next window without one.
+ * Needs a built UI (pnpm build) and Playwright's Chromium; WebKit when
+ * Playwright has it. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { chromium, webkit, type Browser, type BrowserContext, type Page } from "playwright";
@@ -86,6 +92,21 @@ await scenario("the chat under a thread reads what it missed when the thread clo
   await page.goto(`${host.url}/#/chat`);
   await page.getByText("while the thread was open").waitFor({ timeout: LOADS_MS });
   assert.equal(await page.locator(".composer textarea").count() > 0, true, "the chat's composer is there");
+});
+
+await scenario("a stream that ended with an error and comes back unchanged clears the error", async (host, context) => {
+  const page = await open(context, host, "#/t/t1", "the thread's answer");
+  const thread = page.locator(".page-panel");
+  await page.route("**/api/threads/t1/stream*", route => route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "the thread stream was refused" }) }));
+  host.drop();
+  await thread.getByRole("alert").filter({ hasText: "the thread stream was refused" }).waitFor({ timeout: LOADS_MS });
+  await page.unroute("**/api/threads/t1/stream*");
+  await setHidden(page, true);
+  await setHidden(page, false);
+  for (let at = Date.now(); host.streaming < 1 && Date.now() - at < LOADS_MS;) await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(host.streaming, 1, "the thread follows its stream again");
+  await thread.getByRole("alert").filter({ hasText: "the thread stream was refused" }).waitFor({ state: "detached", timeout: LOADS_MS });
+  await thread.getByText("the thread's answer").waitFor();
 });
 
 for (const engine of engines) {
