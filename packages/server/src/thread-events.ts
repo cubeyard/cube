@@ -176,9 +176,6 @@ export class HttpThreadEvents implements ThreadEvents {
       while (!controller.signal.aborted) {
         // A connection of its own, ended at once to start again (advance,
         // a window to choose again) without reporting an interruption.
-        // `stop` aborts it itself: in WebKit an AbortSignal.any() that
-        // nothing else holds did not end the fetch, which kept its
-        // connection, one of the six a browser has per host.
         const connection = new AbortController();
         current = connection;
         this.restart = () => connection.abort();

@@ -39,7 +39,6 @@
   const threadId = $derived(hash.match(/^#\/t\/([^/?]+)/)?.[1] ?? null);
   const projectId = $derived(hash.match(/^#\/projects\/([^/?]+)/)?.[1] ?? null);
   const artifactId = $derived(hash.match(/^#\/a\/([^/?]+)/)?.[1] ?? null);
-  /** A thread and an artifact take the whole sheet, over the chat. */
   const whole = $derived(!!threadId || !!artifactId);
   const artifactRevision = $derived(Number(hash.match(/^#\/a\/[^/?]+\?rev=(\d+)$/)?.[1] ?? "") || null);
   const artifactsRoute = $derived(/^#\/artifacts(?:[/?]|$)/.test(hash));
