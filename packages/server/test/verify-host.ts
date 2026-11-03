@@ -102,6 +102,7 @@ export async function startVerifyHost(options: { scratch: string; host?: string;
     return {
       url,
       port,
+      server,
       state,
       repository,
       owner,

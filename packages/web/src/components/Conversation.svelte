@@ -19,7 +19,7 @@
   import ThinkingCube from "./ThinkingCube.svelte";
 
   let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, recheck, notice = null, empty = null, placeholder = "message this thread", images = null,
-    sheet = false, foldTools = false, onRows, toolLine, reportLabel, reportTitle, reportNamed, page, after, margin }: {
+    sheet = false, foldTools = false, covered = false, onRows, toolLine, reportLabel, reportTitle, reportNamed, page, after, margin }: {
     threadId?: string;
     /** Messages may be sent while the agent works; they reach it between tool calls. */
     steer?: boolean;
@@ -45,6 +45,7 @@
     sheet?: boolean;
     /** Each run of consecutive tool calls is one folded line (lib/tool-groups.ts). */
     foldTools?: boolean;
+    covered?: boolean;
     /** Told the rows shown, for what is drawn beside them. */
     onRows?: (rows: TranscriptRow[]) => void;
     /** A tool row's line in plain words, in place of its raw input. */
@@ -218,6 +219,9 @@
   async function onFrame(next: ThreadTranscript): Promise<void> {
     frames++;
     if (!disposed) reconnecting = false;
+    const same = letGo !== null && !loading && !historyError && JSON.stringify(next) === letGo;
+    letGo = null;
+    if (same) return;
     await show(next);
   }
 
@@ -255,6 +259,23 @@
       onEnd: cause => { if (!disposed) { historyError = errorText(cause); reconnecting = false; loading = false; } },
     });
   }
+  let letGo: string | null = null;
+  function unfollow(): void {
+    if (!watching) return;
+    void watching.then(watch => watch.stop());
+    watching = null;
+    letGo = JSON.stringify(transcript);
+  }
+  // A live stream holds one of the browser's connections to the host, and
+  // over HTTP/1.1 a browser has six per host for all its windows: six held
+  // streams and no other window loads or polls.
+  let hidden = $state(document.hidden);
+  const live = $derived(!hidden && !covered);
+  $effect(() => {
+    if (!live) return;
+    untrack(follow);
+    return unfollow;
+  });
   // A thread's history cannot be read while its machine waits (for a free
   // slot or a runner): the stream that ended then follows again once the
   // wait is over.
@@ -266,8 +287,8 @@
     untrack(() => {
       historyError = null;
       loading = true;
-      void watching?.then(watch => watch.stop());
-      follow();
+      unfollow();
+      if (live) follow();
     });
   });
 
@@ -283,7 +304,8 @@
       keep(base, { note: recovery.note });
       void tick().then(resizeComposer);
     });
-    follow();
+    const onVisibility = () => { hidden = document.hidden; };
+    document.addEventListener("visibilitychange", onVisibility);
     const onScroll = () => { following = atBottom(); nearTop(); };
     scroller.addEventListener("scroll", onScroll, { passive: true });
     // An image in agent prose is markup, not a component: its failure is caught here.
@@ -303,7 +325,7 @@
       scroller.removeEventListener("scroll", onScroll);
       column.removeEventListener("error", onImageError, true);
       settle.disconnect();
-      void watching?.then(watch => watch.stop());
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   });
 

@@ -171,15 +171,17 @@ export class HttpThreadEvents implements ThreadEvents {
   async watch(listener: (transcript: ThreadTranscript) => void | Promise<void>, options: ThreadWatchOptions = {}): Promise<ThreadWatch> {
     const controller = new AbortController();
     let wake: (() => void) | undefined;
+    let current: AbortController | undefined;
     const closed = (async () => {
       while (!controller.signal.aborted) {
         // A connection of its own, ended at once to start again (advance,
         // a window to choose again) without reporting an interruption.
         const connection = new AbortController();
+        current = connection;
         this.restart = () => connection.abort();
         let failure: unknown = new Error("thread stream ended");
         try {
-          const response = await this.fetch(`${this.base}/stream${this.query()}`, { headers: { accept: "text/event-stream" }, signal: AbortSignal.any([controller.signal, connection.signal]) });
+          const response = await this.fetch(`${this.base}/stream${this.query()}`, { headers: { accept: "text/event-stream" }, signal: connection.signal });
           if (response.status >= 400 && response.status < 500) {
             const body = await response.json().catch(() => null) as { error?: unknown; reset?: unknown } | null;
             if (response.status === 409 && body?.reset === true && this.pin) { this.pin = null; continue; }
@@ -208,7 +210,7 @@ export class HttpThreadEvents implements ThreadEvents {
     })();
     return {
       closed,
-      async stop() { controller.abort(); wake?.(); await closed; },
+      async stop() { controller.abort(); current?.abort(); wake?.(); await closed; },
     };
   }
 }
