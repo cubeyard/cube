@@ -1254,7 +1254,7 @@ export async function serveUntilStopped(app: { server: http.Server; close(): Pro
   let stopped = false;
   const stop = (signal: NodeJS.Signals | "supervisor-exit") => {
     if (stopped) {
-      say(`stopped: ${signal} received after the stop; exiting`);
+      say(`stopping: ${signal} received after the close; exiting now`);
       process.exit();
     }
     if (shutdown) {
