@@ -45,7 +45,6 @@
     sheet?: boolean;
     /** Each run of consecutive tool calls is one folded line (lib/tool-groups.ts). */
     foldTools?: boolean;
-    /** A page covers this conversation edge to edge: nobody sees it. */
     covered?: boolean;
     /** Told the rows shown, for what is drawn beside them. */
     onRows?: (rows: TranscriptRow[]) => void;
@@ -220,8 +219,6 @@
   async function onFrame(next: ThreadTranscript): Promise<void> {
     frames++;
     if (!disposed) reconnecting = false;
-    // A stream followed again starts with the current transcript: when
-    // nothing changed meanwhile, the reader's place stays where it was.
     const same = letGo !== null && !loading && JSON.stringify(next) === letGo;
     letGo = null;
     if (same) return;
@@ -262,7 +259,6 @@
       onEnd: cause => { if (!disposed) { historyError = errorText(cause); reconnecting = false; loading = false; } },
     });
   }
-  /** The transcript shown when the stream was let go. */
   let letGo: string | null = null;
   function unfollow(): void {
     if (!watching) return;
@@ -272,9 +268,7 @@
   }
   // A live stream holds one of the browser's connections to the host, and
   // over HTTP/1.1 a browser has six per host for all its windows: six held
-  // streams and no other window loads or polls. Only a conversation someone
-  // can see holds one; shown again, its stream starts from the current
-  // transcript.
+  // streams and no other window loads or polls.
   let hidden = $state(document.hidden);
   const live = $derived(!hidden && !covered);
   $effect(() => {

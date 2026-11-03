@@ -1,13 +1,3 @@
-/** Many windows of one browser against the scripted host. Over HTTP/1.1 a
- * browser opens six connections to a host for all its windows, and every
- * live stream holds one: before, each window held the chat's stream and a
- * thread window the thread's too, so three thread windows (or six windows
- * in the background) left no connection and the next window never loaded.
- * A conversation now holds its stream only while it can be seen: one open
- * thread window holds one stream, a hidden window none, and a conversation
- * shown again reads what changed meanwhile, and a stream let go gives its
- * connection back, in Chromium and in WebKit (Safari's engine, when
- * Playwright has it). Needs a built UI (pnpm build) and Playwright's Chromium. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { chromium, webkit, type Browser, type BrowserContext, type Page } from "playwright";

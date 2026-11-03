@@ -99,7 +99,6 @@ try {
     await post("/api/optchat/prompt", { text: `turn ${i}: ${"synthetic history line. ".repeat(20)}`, model: host.model, requestId: randomUUID() });
     await settled("/api/optchat");
   }
-  // Archived rows: copies of the real thread's row, as a long-lived install keeps hundreds.
   const db = new DatabaseSync(path.join(host.state, "registry.sqlite"), { timeout: 5000 });
   const row = db.prepare("SELECT project_id, runner_id, data FROM thread WHERE id=?").get(thread) as { project_id: string; runner_id: string; data: string };
   const insert = db.prepare("INSERT INTO thread VALUES (?,?,?,?)");
@@ -152,7 +151,6 @@ try {
       tracing?.stderr.on("data", chunk => { traced += chunk; });
       let heapPeak = 0, rssPeak = 0;
       const sampler = setInterval(() => { const m = process.memoryUsage(); heapPeak = Math.max(heapPeak, m.heapUsed); rssPeak = Math.max(rssPeak, m.rss); }, 250);
-      // Idle load: what the open windows cost cubed with nobody touching them.
       handled = [];
       frames = 0; frameBytes = 0;
       const loop = monitorEventLoopDelay({ resolution: 5 });

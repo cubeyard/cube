@@ -26,7 +26,6 @@
     threads?: ThreadSummary[];
     /** Whether that list has been read at least once. */
     threadsLoaded?: boolean;
-    /** A page (a thread, an artifact) covers the chat edge to edge. */
     covered?: boolean;
   } = $props();
 
