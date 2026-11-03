@@ -41,6 +41,7 @@ OFFLINE_TESTS=(
   packages/server/test/runner-probe-test.ts
   packages/server/test/runner-observe-test.ts
   packages/server/test/api-test.ts
+  packages/server/test/serve-signals-test.ts
   packages/server/test/reattach-step-test.ts
   packages/server/test/models-test.ts
   packages/server/test/model-auth-test.ts

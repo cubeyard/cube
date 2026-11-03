@@ -1242,17 +1242,28 @@ async function main(argv: string[]): Promise<void> {
  * the process after that, so it exits by itself. The lifeline is read as a
  * socket: a file read of a pipe the supervisor keeps open (as it does while
  * it waits for this process to exit) would hold a threadpool request that
- * nothing can cancel, and the supervisor's SIGKILL would end every stop. */
+ * nothing can cancel, and the supervisor's SIGKILL would end every stop.
+ * The signal listeners stay until the process exits (they do not hold it):
+ * a signal sent during the close can be dispatched after it, and with
+ * `stop` gone signal-exit (proper-lockfile's) would re-raise it. A signal
+ * dispatched after the close settled exits with the close's outcome: Node
+ * cannot tell that late one from a new Ctrl-C at a process a leaked handle
+ * keeps alive, and exiting is right for both. */
 export async function serveUntilStopped(app: { server: http.Server; close(): Promise<void> }, say: (line: string) => void = line => console.log(line)): Promise<void> {
   let shutdown: Promise<void> | undefined;
+  let stopped = false;
   const stop = (signal: NodeJS.Signals | "supervisor-exit") => {
+    if (stopped) {
+      say(`stopping: ${signal} received after the close; exiting now`);
+      process.exit();
+    }
     if (shutdown) {
       say(`stopping: ${signal} received while shutdown is already in progress`);
       return;
     }
     say(`stopping: ${signal}; waiting for accepted work to reconcile`);
     shutdown = app.close().then(() => { say("stopped"); });
-    void shutdown.catch(error => { console.error(`cubed: shutdown failed: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; });
+    void shutdown.catch(error => { console.error(`cubed: shutdown failed: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }).finally(() => { stopped = true; });
   };
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, stop);
   let lifeline: net.Socket | undefined;
@@ -1265,7 +1276,6 @@ export async function serveUntilStopped(app: { server: http.Server; close(): Pro
   await new Promise<void>(resolve => app.server.once("close", resolve));
   await shutdown;
   lifeline?.destroy();
-  for (const signal of ["SIGTERM", "SIGINT"] as const) process.off(signal, stop);
 }
 
 if (import.meta.main) {
