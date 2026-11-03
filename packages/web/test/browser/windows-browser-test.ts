@@ -5,10 +5,12 @@
  * in the background) left no connection and the next window never loaded.
  * A conversation now holds its stream only while it can be seen: one open
  * thread window holds one stream, a hidden window none, and a conversation
- * shown again reads what changed meanwhile. Needs a built UI (pnpm build)
- * and Playwright's Chromium. */
+ * shown again reads what changed meanwhile, and a stream let go gives its
+ * connection back, in Chromium and in WebKit (Safari's engine, when
+ * Playwright has it). Needs a built UI (pnpm build) and Playwright's Chromium. */
 import assert from "node:assert/strict";
-import { chromium, type BrowserContext, type Page } from "playwright";
+import fs from "node:fs";
+import { chromium, webkit, type Browser, type BrowserContext, type Page } from "playwright";
 import type { ThreadEvent, ThreadTranscript } from "../../src/lib/types.ts";
 import { threads } from "./chat-sheet-data.ts";
 import { ScriptedHost } from "./scripted-host.ts";
@@ -19,12 +21,15 @@ const done: ThreadTranscript["status"] = { state: "completed", run: "r0", error:
 const LOADS_MS = 8000;
 
 const browser = await chromium.launch();
+const engines: Browser[] = [browser];
+if (fs.existsSync(webkit.executablePath())) engines.push(await webkit.launch());
+else console.log("SKIP: webkit (install it: bash scripts/setup-browsers.sh webkit)");
 let failed = false;
 
 /** A browser profile whose windows can say they are hidden (a background
  * tab), as headless Chromium shows every page. */
-async function profile(): Promise<BrowserContext> {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+async function profile(engine: Browser): Promise<BrowserContext> {
+  const context = await engine.newContext({ viewport: { width: 1280, height: 800 } });
   await context.addInitScript(() => {
     const state = window as unknown as { cubeHidden?: boolean };
     Object.defineProperty(document, "hidden", { get: () => !!state.cubeHidden });
@@ -37,21 +42,21 @@ const setHidden = (page: Page, hidden: boolean) => page.evaluate(value => {
   document.dispatchEvent(new Event("visibilitychange"));
 }, hidden);
 
-async function scenario(name: string, run: (host: ScriptedHost, context: BrowserContext) => Promise<void>): Promise<void> {
+async function scenario(name: string, run: (host: ScriptedHost, context: BrowserContext) => Promise<void>, engine = browser): Promise<void> {
   const host = await ScriptedHost.start();
   host.transcript = { ...host.transcript, status: done, events: [user("1.0", "thread question"), agent("2.0.0", "the thread's answer")] };
   host.chat = { ...host.transcript, events: [user("1.0", "chat question"), agent("2.0.0", "the chat's answer")] };
   host.thread = { ...threads[0]!, id: "t1" };
-  const context = await profile();
+  const context = await profile(engine);
   const errors: string[] = [];
   context.on("page", page => page.on("pageerror", error => errors.push(String(error))));
   try {
     await run(host, context);
     assert.deepEqual(errors, [], "no script errors");
-    console.log(`ok - ${name}`);
+    console.log(`ok - ${name} (${engine.browserType().name()})`);
   } catch (error) {
     failed = true;
-    console.error(`not ok - ${name}\n`, error);
+    console.error(`not ok - ${name} (${engine.browserType().name()})\n`, error);
   } finally {
     await context.close();
     await host.close();
@@ -93,7 +98,22 @@ await scenario("the chat under a thread reads what it missed when the thread clo
   assert.equal(await page.locator(".composer textarea").count() > 0, true, "the chat's composer is there");
 });
 
-await browser.close();
+for (const engine of engines) {
+  await scenario("a thread opened and closed eight times gives back its connections", async (host, context) => {
+    const page = await open(context, host, "#/chat", "the chat's answer");
+    for (let i = 0; i < 8; i++) {
+      await page.goto(`${host.url}/#/t/t1`);
+      await page.locator(".page-panel").getByText("the thread's answer").waitFor({ timeout: LOADS_MS });
+      await page.goto(`${host.url}/#/chat`);
+      await page.locator(".page-panel").waitFor({ state: "detached", timeout: LOADS_MS });
+    }
+    await open(context, host, "#/t/t1", "the thread's answer");
+    for (let at = Date.now(); host.streaming > 1 && Date.now() - at < LOADS_MS;) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(host.streaming, 1, "one thread stream open, the second window's: the first window's eight ended");
+  }, engine);
+}
+
+for (const engine of engines) await engine.close();
 if (failed) process.exit(1);
 console.log("windows browser: ok");
 process.exit(0);
