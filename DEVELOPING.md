@@ -177,8 +177,10 @@ enrolled runners' (relay > direct > loopback). `CUBED_VM_VCPUS`,
 project's own machine size (memory, processors; the project page) takes
 precedence for its new threads.
 `CUBED_TEMPLATES=off` turns machine templates off (every machine starts from
-the base image); `CUBED_TEMPLATE_TTL_HOURS` sets how long a template is reused
-(default 24). See ARCHITECTURE.md, "Machine templates and hooks".
+the base image). A template is reused until its key, `.agents/setup` or the
+inputs `.agents/setup-inputs` declares change (`CUBED_TEMPLATE_TTL_HOURS` is
+gone and ignored). See ARCHITECTURE.md, "Machine templates and hooks", and
+docs/project-hooks.md, "Setup inputs".
 `CUBED_GITHUB_TOKEN` gives the egress policy a GitHub token instead of
 `gh auth token`. `CUBED_GATEWAY_TEST_ARGS` (a JSON array) is for tests with a
 `test-hooks` gateway build only.

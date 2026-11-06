@@ -171,7 +171,7 @@ export interface RunnerMachinesOptions {
   /** Tests: how often and how long a wake tries a full runner. */
   /** Tests: `machine_suspend`'s wait (SUSPEND_TIMEOUT_MS). */
   suspendTimeoutMs?: number;
-  /** Machine templates on VM runners (default: from CUBED_TEMPLATES and CUBED_TEMPLATE_TTL_HOURS). */
+  /** Machine templates on VM runners (default: from CUBED_TEMPLATES). */
   templates?: TemplateSettings;
 }
 
@@ -206,6 +206,9 @@ export class RunnerMachines implements ThreadMachines {
     this.log = options.log ?? createLogger("runner-machines");
     this.events = new MachineEvents(options.threads);
     this.templates = options.templates ?? templateSettings();
+    if (!options.templates && process.env.CUBED_TEMPLATE_TTL_HOURS?.trim()) {
+      this.log.warn("CUBED_TEMPLATE_TTL_HOURS is ignored: a template is reused until its key, .agents/setup or its declared inputs change");
+    }
     this.activity = new MachineActivity(options.now);
   }
 
@@ -619,14 +622,14 @@ export class RunnerMachines implements ThreadMachines {
       return fresh("the runner's templates could not be listed");
     }
     const now = Date.now();
-    await this.removeTemplates(session, this.obsolete(templates, now), "obsolete");
-    const found = pickTemplate(templates, key, now, this.templates.ttlMs);
+    await this.removeTemplates(session, this.obsolete(templates), "obsolete");
+    const found = pickTemplate(templates, key);
     if (found) {
       registry.endStartupStep(thread.id, { name: "lookup", state: "ok", detail: `template ${found.id}, prepared ${minutes(now - found.createdAt)} ago` });
-      return registry.updateThreadVm(thread.id, { preparation: { source: "template", templateId: found.id, setupBlob: found.meta.setupBlob } });
+      return registry.updateThreadVm(thread.id, { preparation: { source: "template", templateId: found.id, setupBlob: found.meta.setupBlob, setupInputs: found.meta.setupInputs } });
     }
     const parts = keelTemplateParts(keyInput);
-    const missing = missingTemplate(templates, { projectId: thread.allocation.projectId, key, parts, now, ttlMs: this.templates.ttlMs });
+    const missing = missingTemplate(templates, { projectId: thread.allocation.projectId, key, parts });
     const flight = `${thread.runnerId}:${key}`;
     // One build per runner and key: a thread that comes meanwhile starts fresh.
     if (this.builds.has(flight)) return fresh(`${missing}; another thread is preparing the project's template now`);
@@ -644,7 +647,7 @@ export class RunnerMachines implements ThreadMachines {
     try {
       const template = await building;
       this.failedBuilds.delete(attempt);
-      return registry.updateThreadVm(thread.id, { preparation: { source: "template", templateId: template.id, setupBlob: template.meta.setupBlob } });
+      return registry.updateThreadVm(thread.id, { preparation: { source: "template", templateId: template.id, setupBlob: template.meta.setupBlob, setupInputs: template.meta.setupInputs } });
     } catch (error) {
       // The runner does not answer: the thread waits for it (it never moves).
       if (error instanceof RunnerError && error.code === "UNAVAILABLE") throw error;
@@ -667,7 +670,7 @@ export class RunnerMachines implements ThreadMachines {
    * deleted it) and only forgotten. Anything short of that publishes
    * nothing and the build machine is deleted. */
   private async build(thread: Thread, session: RunnerSession, runner: Runner, size: MessageInitShape<typeof SizeSchema>, key: string,
-    parts: TemplateParts): Promise<{ id: string; meta: TemplateMeta }> {
+    parts: TemplateParts): Promise<{ id: string; meta: TemplateMeta & { setupInputs: string } }> {
     const { registry } = this.options;
     if (!this.options.policy) throw new Error("this cubed has no egress policy for protocol-4 VM runners");
     const started = Date.now();
@@ -715,7 +718,8 @@ export class RunnerMachines implements ThreadMachines {
       // No seal: keel's template_publish cleans and checks the layer itself.
       step = "build-publish";
       registry.beginStartupStep(thread.id, { name: step, detail: "keel cleans the build machine's layer and writes it as the template" });
-      const meta: TemplateMeta = { format: TEMPLATE_FORMAT, projectId: thread.allocation.projectId, setupBlob: outcome.setupBlob ?? "none",
+      const meta: TemplateMeta & { setupInputs: string } = { format: TEMPLATE_FORMAT, projectId: thread.allocation.projectId, setupBlob: outcome.setupBlob ?? "none",
+        setupInputs: outcome.setupInputs ?? "none",
         commit: thread.allocation.repositories[0]?.baseOid ?? null, parts };
       const ask = { case: "templatePublish" as const, value: { from: ref, fence: this.fence(thread), key, meta: JSON.stringify(meta) } };
       const publish = async () => {
@@ -737,7 +741,7 @@ export class RunnerMachines implements ThreadMachines {
       this.events.record(thread.id, "template published", `template ${template.id}; the runner deleted the build machine`);
       // The project's older templates on this runner are superseded.
       try {
-        await this.removeTemplates(session, this.obsolete(await this.listTemplates(session), Date.now(), { projectId: meta.projectId, keep: template.id }), "superseded");
+        await this.removeTemplates(session, this.obsolete(await this.listTemplates(session), { projectId: meta.projectId, keep: template.id }), "superseded");
       } catch (error) { this.log.warn("removing superseded templates failed", { runner: session.nodeId, error }); }
       return { id: template.id, meta };
     } catch (error) {
@@ -783,10 +787,11 @@ export class RunnerMachines implements ThreadMachines {
 
   /** C7: `template_delete` has no owner or fence, so cubed deletes only
    * templates whose metadata it reads as its own (`templateMeta`), by the
-   * obsolete rule (expired, of a project that is gone, or superseded by
-   * `keep`); a template it cannot read is never touched. */
-  private obsolete(templates: RunnerTemplate[], now: number, superseded?: { projectId: string; keep: string }): string[] {
-    return obsoleteTemplates(templates.filter(template => templateMeta(template.meta) !== null), { now, ttlMs: this.templates.ttlMs,
+   * obsolete rule (made before cube tracked setup inputs, of a project that
+   * is gone, or superseded by `keep`); a template it cannot read is never
+   * touched. */
+  private obsolete(templates: RunnerTemplate[], superseded?: { projectId: string; keep: string }): string[] {
+    return obsoleteTemplates(templates.filter(template => templateMeta(template.meta) !== null), {
       projectExists: id => this.options.registry.getProject(id) !== null, ...(superseded ?? {}) });
   }
 

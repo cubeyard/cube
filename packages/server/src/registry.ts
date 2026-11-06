@@ -289,6 +289,8 @@ export interface MachinePreparation {
   templateId?: string;
   /** The template's `.agents/setup` blob, compared after the checkout. */
   setupBlob?: string;
+  /** The template's setup-inputs fingerprint; absent where an earlier cubed recorded the preparation. */
+  setupInputs?: string;
   /** Why the machine started fresh (no template, templates off, a failed build). */
   reason?: string;
   /** The template's seal reported a failure; the template was removed

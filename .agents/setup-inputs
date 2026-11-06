@@ -1,0 +1,5 @@
+package.json
+pnpm-lock.yaml
+pnpm-workspace.yaml
+rust-toolchain.toml
+scripts/setup-browsers.sh

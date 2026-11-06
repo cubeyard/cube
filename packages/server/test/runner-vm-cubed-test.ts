@@ -449,7 +449,7 @@ try {
   assert.ok(!steps2.some(step => step.startsWith("build-")), `nothing built for the second thread: ${steps2.join(", ")}`);
   assertInOrder(steps2, ["lookup:ok", "boot:ok", "prepare:ok", "resume:ok"]);
   assert.match(vm2.steps!.find(step => step.name === "lookup")!.detail ?? "", new RegExp(`^template ${templateId}, prepared `));
-  assert.deepEqual(vm2.preparation, { source: "template", templateId, setupBlob: vm.preparation!.setupBlob });
+  assert.deepEqual(vm2.preparation, { source: "template", templateId, setupBlob: vm.preparation!.setupBlob, setupInputs: vm.preparation!.setupInputs });
   assert.deepEqual(hookStatus(second), { "pre-setup": "skipped", setup: "skipped", "pre-resume": "ok", resume: "ok" });
   await firstTurn(second);
   const hooks2 = (await bash(second, "cat ~/ca-hooks.log")).split("\n");

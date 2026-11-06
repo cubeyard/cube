@@ -44,7 +44,8 @@ every boot:   pre-resume ─▶ .agents/resume ─▶ the agent opens
   template: the next thread prepares its machine from the start
   (ARCHITECTURE.md, "Machine templates and hooks"). On a template machine
   pre-setup and setup are `skipped` (the template ran them), unless the
-  pinned `.agents/setup` differs from the template's.
+  pinned `.agents/setup` or its declared inputs differ from the template's
+  ("Setup inputs" below).
 - Hooks are not secret storage. Every machine of the project can read them
   (`/etc/cube/hooks/`). Use the gateway's placeholders for credentials, never
   a secret in a hook.
@@ -53,11 +54,66 @@ every boot:   pre-resume ─▶ .agents/resume ─▶ the agent opens
   tool's daemon, say) keep their memory until the hook ends and are stopped
   with it; services it starts through systemd keep running.
 
+## Setup inputs
+
+A thread machine made from a template skips pre-setup and `.agents/setup`.
+That holds only while what they produced still fits the thread's commit. A
+template has no age limit. It is reused until one of these changes:
+
+- its key: the project, its repositories, the pre-setup hook, the runner's
+  base image, workload image, CA and platform, or the disk size;
+- the primary repository's `.agents/setup` at the thread's commit;
+- the inputs `.agents/setup-inputs` declares at that commit, or the
+  declaration itself.
+
+`.agents/setup-inputs` lists what setup reads besides itself: a lockfile, a
+toolchain pin, a script it calls. One path per line, a file or a
+directory, relative to the repository's root. Blank lines and lines that
+start with `#` are skipped.
+
+Cube's own:
+
+```text
+package.json
+pnpm-lock.yaml
+pnpm-workspace.yaml
+rust-toolchain.toml
+scripts/setup-browsers.sh
+```
+
+After the checkout, cube hashes the declaration's git blob id and each
+path's git object id at the pinned commit. A directory counts by its tree,
+so any file added, changed or removed under it counts. A path the commit
+does not have counts as missing, so adding it later is a change too. Only
+the commit's tree is read: untracked files, `..` and absolute paths never
+count (the last two always read as missing). Without the file nothing is
+declared, and only `.agents/setup` and the key decide.
+
+When the thread's fingerprint differs from the template's, that thread runs
+pre-setup and setup itself and the template is removed, so the next thread
+builds a new one. Declare only what setup installs from. Source that setup
+merely builds and that every consumer rebuilds anyway is better left out:
+each change would cost a new template. Cube's setup builds `packages/web`
+into `packages/web/dist` and does not declare it, so a template's `dist`
+may be older than the thread's commit; `scripts/test-browser.sh` and the
+verify-cube skill run `pnpm build` first.
+
+**Refreshing unpinned downloads.** Something setup fetches without a pin
+(`apt-get install` of the newest package, a `curl` of a "latest" URL) never
+changes a fingerprint. To make the next thread prepare a new template,
+change `.agents/setup-inputs` itself, even a comment such as
+`# refreshed 2026-11-06`, and commit it; or change the project's pre-setup
+hook. Put what must be fresh on every machine in a resume hook instead.
+
+A template made before cube tracked setup inputs is never reused: the next
+thread builds a new one and the old one is removed. `CUBED_TEMPLATE_TTL_HOURS`
+is gone; a cubed that has it set logs that it is ignored.
+
 ## Watching a machine start
 
 While a thread's machine starts, the thread shows each step cubed takes
 (`vm.steps` on the thread, oldest first, at most 40): whether a template
-was found and if not why (none yet, expired, which part of its key changed,
+was found and if not why (none yet, made before cube tracked setup inputs, which part of its key changed,
 a build already running, or a build that failed lately and when cube tries
 again), the template build's boot, preparation, seal and publication, the
 machine's boot (its size, and the runner's limit when it clamped the

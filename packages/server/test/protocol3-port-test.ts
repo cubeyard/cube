@@ -85,7 +85,7 @@ function retiredThread(): { registry: Registry; thread: Thread } {
 
 const { registry, thread } = retiredThread();
 const sessions: string[] = [];
-const options: RunnerMachinesOptions = { registry, threads: path.join(root, "threads"), log: quiet, templates: { enabled: false, ttlMs: 0 },
+const options: RunnerMachinesOptions = { registry, threads: path.join(root, "threads"), log: quiet, templates: { enabled: false },
   session: admission => { sessions.push(admission.configHash); return {} as RunnerSession; } };
 /** A RunnerMachines whose members forgot to ask whether the runner is retired. */
 class Ungated extends RunnerMachines { protected override retired(): boolean { return false; } }

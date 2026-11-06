@@ -53,7 +53,7 @@ registry.enrollRunner({ nodeId: NODE, threadId: RUNNER, environmentId: 1, config
 const berth = new FakeBerth(path.join(root, "runner"), 3);
 const quiet = { info() {}, warn() {}, error() {}, debug() {} } as never;
 const start = () => threadRuntime({ registry, threads: path.join(root, "threads"), models,
-  runner: { session: () => berth.session(), policy: { policyFor: () => ({}) }, log: quiet, templates: { enabled: false, ttlMs: 0 }, idleMs: 60_000 } });
+  runner: { session: () => berth.session(), policy: { policyFor: () => ({}) }, log: quiet, templates: { enabled: false }, idleMs: 60_000 } });
 let runtime = start();
 const fresh = (id: string) => registry.getThread(id)!;
 let requests = 0;
