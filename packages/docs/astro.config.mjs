@@ -9,9 +9,11 @@ import { docsRef, repository } from "./src/release.mjs";
 // `gh:PATH` in a page links to PATH in the repository at the release the
 // site is built from, so a page never points at code newer than it
 // describes. Rewritten in the built HTML, whatever Markdown processor ran.
-function repositoryLinks() {
+// Code in a table cell may break only after `_`, `/`, `.` or `-`, so a
+// phone wraps CUBED_STATE as CUBED_ and STATE, never mid-word.
+function builtPages() {
   return {
-    name: "cube-repository-links",
+    name: "cube-built-pages",
     hooks: {
       "astro:build:done": async ({ dir }) => {
         const root = fileURLToPath(dir);
@@ -19,7 +21,9 @@ function repositoryLinks() {
           if (!file.endsWith(".html")) continue;
           const page = path.join(root, file);
           const html = await readFile(page, "utf8");
-          const linked = html.replaceAll('href="gh:', `href="${repository}/blob/${docsRef}/`);
+          const linked = html
+            .replaceAll('href="gh:', `href="${repository}/blob/${docsRef}/`)
+            .replace(/<td[^>]*>(.*?)<\/td>/gs, (cell) => cell.replace(/(<code[^>]*>)([^<]*)<\/code>/g, (_, open, text) => `${open}${text.replace(/([_/.-])(?=\w)/g, "$1<wbr>")}</code>`));
           if (linked !== html) await writeFile(page, linked);
         }
       },
@@ -32,7 +36,7 @@ export default defineConfig({
   base: "/cube",
   trailingSlash: "always",
   integrations: [
-    repositoryLinks(),
+    builtPages(),
     starlight({
       title: "cube",
       description: "Self-hosted coding-agent threads, each in its own virtual machine.",

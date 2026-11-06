@@ -46,7 +46,7 @@ function rustString(file: string, name: string): string {
 }
 
 function block(text: string): string {
-  return ["```text", text.trimEnd(), "```"].join("\n");
+  return ["```text wrap", text.trimEnd(), "```"].join("\n");
 }
 
 const sections = [
