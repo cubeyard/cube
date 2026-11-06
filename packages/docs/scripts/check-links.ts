@@ -1,8 +1,3 @@
-// Checks every link in the built site (dist/): a link inside the site must
-// reach a built page or file, and its #fragment an id on that page; a link
-// into the repository (`gh:` in the source) must name a file or directory
-// that exists in this checkout, and an edit link a file git tracks (a page
-// written at build time has none). External links are not fetched.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";

@@ -6,11 +6,6 @@ import { defineConfig } from "astro/config";
 import { codeGlass } from "./src/code-glass.mjs";
 import { docsRef, repository } from "./src/release.mjs";
 
-// `gh:PATH` in a page links to PATH in the repository at the release the
-// site is built from, so a page never points at code newer than it
-// describes. Rewritten in the built HTML, whatever Markdown processor ran.
-// Code in a table cell may break only after `_`, `/`, `.` or `-`, so a
-// phone wraps CUBED_STATE as CUBED_ and STATE, never mid-word.
 function builtPages() {
   return {
     name: "cube-built-pages",

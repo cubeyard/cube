@@ -1,6 +1,3 @@
-// Code is one material in both themes (DESIGN.md, the One Glass Rule): the
-// app's dark glass and its --syn-* set. The comment ink is lighter than the
-// app's #767c8a, which is 4.24:1 on the glass; #878d9b is 5.33:1 (WCAG AA).
 const glass = {
   body: "#17181c",
   head: "#1f2126",

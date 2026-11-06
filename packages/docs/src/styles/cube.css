@@ -1,6 +1,4 @@
-/* cube's bench instrument (DESIGN.md) on Starlight: the putty sheet, the
-   black edition, one signal orange, lowercase silkscreen labels, code behind
-   dark glass. Starlight's own rules sit in @layer starlight.*, so these
+/* Starlight's own rules sit in @layer starlight.*, so these
    unlayered rules win without !important. */
 
 :root {
@@ -112,7 +110,6 @@
   --sl-nav-height: 3.25rem;
 }
 
-/* ------------------------------------------------------------ the sheet */
 
 html {
   accent-color: var(--cube-signal);
@@ -145,10 +142,7 @@ body {
   }
 }
 
-/* ------------------------------------------------------------ the sidebar */
 
-/* Group labels are silkscreen: 11px, 550, tracked, lowercase as written
-   (DESIGN.md, the Silkscreen Rule). */
 .sidebar-content .group-label .large {
   font-size: 0.6875rem;
   font-weight: 550;
@@ -169,8 +163,6 @@ body {
   color: var(--cube-ink);
 }
 
-/* The open page sits on a soft face in 650, never in the signal (DESIGN.md,
-   Settings: the selector bank). */
 .sidebar-content a[aria-current="page"],
 .sidebar-content a[aria-current="page"]:hover,
 .sidebar-content a[aria-current="page"]:focus {
@@ -197,7 +189,6 @@ starlight-toc a:hover {
   color: var(--cube-ink);
 }
 
-/* ------------------------------------------------------------ reading */
 
 .content-panel h1,
 .sl-markdown-content :is(h1, h2, h3, h4, h5) {
@@ -242,7 +233,6 @@ starlight-toc a:hover {
   color: var(--cube-ink);
 }
 
-/* Inline code is putty, not glass (DESIGN.md, Code Window). */
 .sl-markdown-content :not(pre) > code {
   background: var(--cube-s1);
   border: 1px solid var(--cube-line);
@@ -264,7 +254,6 @@ starlight-toc a:hover {
   border-color: var(--cube-line);
 }
 
-/* Machine text is read as written: no ligature turns `==>` into an arrow. */
 code,
 pre,
 kbd,
@@ -273,13 +262,10 @@ samp {
   font-feature-settings: "liga" 0, "calt" 0;
 }
 
-/* Long names in a table wrap at the breaks the build adds, and mid-word only
-   when nothing else fits. */
 .sl-markdown-content td code {
   overflow-wrap: break-word;
 }
 
-/* Tables are hairline frames with tabular numerals. */
 .sl-markdown-content table {
   font-size: 0.9rem;
   border-collapse: collapse;
@@ -307,8 +293,6 @@ samp {
   background: transparent;
 }
 
-/* Asides are printed notices: a hairline frame on a silkscreen wash. A
-   caution prints its title in error ink, never a colored stripe. */
 .sl-markdown-content .starlight-aside {
   border: 1px solid var(--cube-note-line);
   border-radius: 7px;
@@ -327,8 +311,6 @@ samp {
   display: none;
 }
 
-/* On a notice's wash the light signal is 4.27:1; links there take a deeper
-   orange (4.85:1). */
 :root[data-theme="light"] .sl-markdown-content .starlight-aside a {
   color: #bd3a00;
 }
@@ -338,7 +320,6 @@ samp {
   color: var(--cube-bad);
 }
 
-/* ------------------------------------------------------------ keys */
 
 .pagination-links a {
   border: 1px solid var(--cube-line);
@@ -385,7 +366,6 @@ site-search dialog {
   box-shadow: var(--cube-shadow-float);
 }
 
-/* The phone's menu key: a square key, not a floating circle. */
 .sl-menu-button {
   background-color: var(--cube-s3);
   border: 1px solid var(--cube-line);
@@ -418,7 +398,6 @@ site-search dialog {
   color: var(--cube-ink);
 }
 
-/* ------------------------------------------------------------ the front page */
 
 .cube-front .lede {
   font-size: 1.1875rem;
@@ -427,7 +406,6 @@ site-search dialog {
   max-width: 38rem;
 }
 
-/* The ways in: one hairline-divided bank, not cards. */
 .sl-markdown-content .doorways {
   list-style: none;
   padding: 0;
@@ -488,7 +466,6 @@ site-search dialog {
   transform: translateX(2px);
 }
 
-/* A diagram of the pieces: geometry in the palette's inks. */
 .cube-diagram {
   margin: 1.6rem 0;
   border: 1px solid var(--cube-line);

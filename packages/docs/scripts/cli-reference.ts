@@ -1,10 +1,3 @@
-// Writes the command-line reference page from the help texts of the tree it
-// is built from: `cubed --help` as cubed prints it (it needs the
-// repository's own Node dependencies), and the usage strings of `berth` and
-// of the `cube` command inside a thread machine (keel's guest agent), read
-// from their Rust source so the docs build needs no Rust toolchain.
-//
-//   node scripts/cli-reference.ts [output file]
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";

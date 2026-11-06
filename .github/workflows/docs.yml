@@ -1,11 +1,3 @@
-# The public docs site (packages/docs) at https://cubeyard.github.io/cube/.
-# A pull request that touches the site or what it is generated from builds it
-# and checks its links. The site documents the latest published release only:
-# a published stable release, or a run by hand naming that same release,
-# builds the site from the release's tag and deploys it to GitHub Pages.
-# Nothing from main is ever published. A release whose tag has no
-# packages/docs (every release before the site existed) fails before the
-# build and changes nothing.
 name: docs
 
 on:
@@ -13,13 +5,10 @@ on:
     paths:
       - packages/docs/**
       - .github/workflows/docs.yml
-      # Files the site links to at its release: the link check catches a
-      # moved file or heading before a release, not at its deploy.
       - docs/**
       - '*.md'
       - packages/*/README.md
       - scripts/cubed/update-public-key.fingerprint
-      # The command-line reference is written from these help texts.
       - packages/server/src/index.ts
       - packages/berth/src/main.rs
       - packages/keel/agent/src/cli.rs
@@ -36,8 +25,6 @@ on:
 permissions:
   contents: read
 
-# One deployment at a time, never cancelled half way; a pull request's newer
-# push cancels its older build.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.event.pull_request.number) || 'docs-pages' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -70,7 +57,6 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           [ -f packages/docs/package.json ] || { echo "::error::$TAG has no packages/docs: the site starts with the first release that contains it"; exit 1; }
-      # cubed's own dependencies: the command-line reference runs `cubed --help`.
       - uses: ./.github/actions/node-deps
       - name: the site's dependencies
         run: pnpm --dir packages/docs install --frozen-lockfile
