@@ -27,6 +27,16 @@ function target(pathname: string): string | null {
   return null;
 }
 
+function githubHeadingIds(markdown: string): string[] {
+  let fenced = false;
+  const ids: string[] = [];
+  for (const line of markdown.split("\n")) {
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    else if (!fenced && /^#+ /.test(line)) ids.push(line.replace(/^#+ /, "").toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, "").trim().replace(/\s/g, "-"));
+  }
+  return ids;
+}
+
 const problems: string[] = [];
 let checked = 0;
 for (const [page, text] of html) {
@@ -47,8 +57,7 @@ for (const [page, text] of html) {
       if (!fs.existsSync(path.join(root, decodeURIComponent(inRepository[1]!)))) problems.push(`${page}: ${link} names no file in the repository`);
       const anchor = link.split("#")[1];
       if (anchor && inRepository[1]!.endsWith(".md")) {
-        const heading = fs.readFileSync(path.join(root, inRepository[1]!), "utf8").split("\n").filter(line => /^#+ /.test(line))
-          .map(line => line.replace(/^#+ /, "").toLowerCase().replace(/[^\p{L}\p{N}\s-]/gu, "").trim().replace(/\s/g, "-"));
+        const heading = githubHeadingIds(fs.readFileSync(path.join(root, inRepository[1]!), "utf8"));
         if (!heading.includes(anchor)) problems.push(`${page}: ${link} names no heading in ${inRepository[1]}`);
       }
       continue;
