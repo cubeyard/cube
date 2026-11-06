@@ -9,7 +9,7 @@ On Linux you install cubed from a signed release with `install.sh`, and run the 
 
 - Linux on x86-64 with glibc 2.39 or newer (Ubuntu 24.04 or later, Debian trixie).
 - KVM: `/dev/kvm` exists and your account can open it.
-- QEMU 11.1.x or newer and its `qemu-img`, at explicit paths. keel refuses older QEMU, such as Ubuntu 24.04's 8.2.2.
+- A QEMU that meets [keel's floor](/cube/reference/platforms/#keels-qemu-floor), and its `qemu-img`, at explicit paths. QEMU 11.1.2 does; Ubuntu 24.04's 8.2.2 does not. berth checks the binary's features when it starts and names any that are missing.
 - `mkfs.erofs` from erofs-utils.
 - Node 26, git and `gh`. The bootstrap installer needs Node 26; cubed then runs on the Node runtime bundled in each release.
 - Minimal images also need `libatomic1`.

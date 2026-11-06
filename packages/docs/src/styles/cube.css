@@ -327,6 +327,12 @@ samp {
   display: none;
 }
 
+/* On a notice's wash the light signal is 4.27:1; links there take a deeper
+   orange (4.85:1). */
+:root[data-theme="light"] .sl-markdown-content .starlight-aside a {
+  color: #bd3a00;
+}
+
 .starlight-aside--caution .starlight-aside__title,
 .starlight-aside--danger .starlight-aside__title {
   color: var(--cube-bad);

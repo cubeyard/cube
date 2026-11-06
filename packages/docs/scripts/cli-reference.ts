@@ -79,6 +79,7 @@ const sections = [
 const page = [
   "---",
   "title: command line",
+  "editUrl: false",
   "description: The help text of cubed, berth and the cube command in a thread machine, as the programs print it.",
   "tableOfContents:",
   "  maxHeadingLevel: 2",

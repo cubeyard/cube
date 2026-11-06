@@ -3,20 +3,28 @@ title: platforms
 description: Which operating systems and architectures cubed and the runner support, and what each needs.
 ---
 
+cubed and the runner have separate releases per platform. A thread machine runs wherever a `berth vm` runs.
+
 ## support matrix
 
-| | cubed | `berth vm`: thread machines |
+| platform | cubed | `berth vm`: thread machines |
 |---|---|---|
-| macOS, Apple Silicon | signed release (`darwin-arm64`), with Homebrew or `install.sh` | Hypervisor.framework, with Homebrew's QEMU 11.1.x, without `-sandbox` |
+| macOS, Apple Silicon | signed release (`darwin-arm64`), with Homebrew or `install.sh` | Hypervisor.framework, with Homebrew's QEMU, without `-sandbox` |
 | macOS, Intel | no release; source checkout only | no |
-| Linux x86-64, glibc | signed release (`linux-x64-gnu`) | KVM, glibc 2.39 or newer, QEMU 11.1.2 or newer at an explicit path, run with `-sandbox on` |
+| Linux x86-64, glibc | signed release (`linux-x64-gnu`) | KVM, glibc 2.39 or newer, a QEMU that meets keel's floor at an explicit path, run with `-sandbox on` |
 | Linux arm64, glibc | signed release (`linux-arm64-gnu`) | no berth release |
 | Windows, musl Linux | no | no |
 
 ## what else each part needs
 
 - **cubed:** Git and `gh` on the host. Releases bundle their own Node runtime. The bootstrap `install.sh` needs Node 26, and a source checkout runs on Node 26.
-- **The runner:** a QEMU at or above keel's floor, its `qemu-img`, `mkfs.erofs` from erofs-utils, and keel's kernel and base of the same release. keel refuses an older QEMU, such as Ubuntu 24.04's 8.2.2.
+- **The runner:** a QEMU that meets keel's floor, its `qemu-img`, `mkfs.erofs` from erofs-utils, and keel's kernel and base of the same release.
+
+## keel's QEMU floor
+
+berth checks the QEMU binary it is given for the features keel needs, not for a version number, and refuses one that lacks any of them. It names what is missing. The features are the virtio devices keel's machines use, the balloon's `free-page-reporting`, the `mapped-ram` migration capability and the `cpr-reboot` migration mode that suspend uses, `dgram` network backends, the migration commands, a versioned machine type, the accelerator, and on x86-64 the `vmgenid` device.
+
+QEMU 11.1.2 on Linux and Homebrew's QEMU 11.1 on macOS meet the floor. Ubuntu 24.04's QEMU 8.2.2 does not.
 - **Pi threads:** a model provider Pi supports, connected under **settings** › **model providers**.
 - **Claude Code threads:** Claude Code and a Claude login on the cubed host.
 
