@@ -33,6 +33,10 @@ DEVELOPING.md before changing behavior.
   `packages/berth/src/vm/egress.rs`); the gateway uses its HTTP half.
 - `packages/git`: host-side repository capabilities; credentials stay here.
 - `packages/web`: Svelte 5/Vite UI, built to `packages/web/dist`.
+- `packages/docs`: the public docs site (Astro Starlight, its own pnpm
+  workspace), published from release tags by `.github/workflows/docs.yml`.
+  A change to user-visible behavior updates the matching page in the same
+  pull request.
 - `packages/keel`: keel, what runs inside a thread machine: the guest kernel
   (one `defconfig` per architecture, derived from nerdbox's), the image layer
   format (`packages/keel/layers`, `keel-layers`: OCI layer to EROFS, the
