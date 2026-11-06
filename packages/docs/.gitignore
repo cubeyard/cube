@@ -1,0 +1,4 @@
+dist/
+.astro/
+# Written from the source at build time (scripts/cli-reference.ts).
+src/content/docs/reference/cli.md

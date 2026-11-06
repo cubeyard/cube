@@ -1,0 +1,45 @@
+---
+import { docsRef, isRelease } from "../release.mjs";
+
+const { siteTitleHref } = Astro.locals.starlightRoute;
+const edition = isRelease ? docsRef : "unreleased";
+---
+
+<a href={siteTitleHref} class="site-title">
+  <svg class="glyph" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+    <path d="M12 2 21 7 V17 L12 22 3 17 V7 Z"></path>
+    <path d="M3 7 L12 12 21 7 M12 12 V22"></path>
+  </svg>
+  <span class="name" translate="no">cube</span>
+  <span class="edition">docs <span class="sr-only">for</span> {edition}</span>
+</a>
+
+<style>
+  .site-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+    color: var(--cube-ink);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .glyph {
+    flex: none;
+    color: var(--cube-signal);
+  }
+  .name {
+    font-size: 1.0625rem;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+  }
+  .edition {
+    font-size: 0.6875rem;
+    font-weight: 550;
+    letter-spacing: 0.08em;
+    color: var(--cube-ink-3);
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+</style>

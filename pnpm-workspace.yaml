@@ -1,5 +1,8 @@
 packages:
   - packages/*
+  # Its own workspace and lockfile: the docs site's toolchain never enters
+  # cubed's dependency graph or the code CI's install.
+  - '!packages/docs'
 allowBuilds:
   '@bufbuild/buf': false
   '@google/genai': false
