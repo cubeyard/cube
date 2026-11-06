@@ -1,0 +1,90 @@
+// Lighter than the app's comment ink, which is below AA on the glass.
+const glass = {
+  body: "#17181c",
+  head: "#1f2126",
+  ink: "#d9dae2",
+  line: "#2c2e35",
+  chrome: "#9aa0ad",
+};
+const syn = {
+  keyword: "#c495e8",
+  string: "#85cf9f",
+  number: "#e0b06a",
+  title: "#8fb7f7",
+  type: "#74cbcb",
+  comment: "#878d9b",
+  meta: "#8aa8d0",
+  err: "#ef9a8d",
+};
+
+const rule = (scope, foreground, fontStyle) => ({ scope, settings: fontStyle ? { foreground, fontStyle } : { foreground } });
+
+const theme = {
+  name: "cube-glass",
+  type: "dark",
+  colors: {
+    "editor.background": glass.body,
+    "editor.foreground": glass.ink,
+    "editor.selectionBackground": "#cc3f0055",
+    "terminal.background": glass.body,
+    "terminal.foreground": glass.ink,
+  },
+  tokenColors: [
+    rule(["comment", "punctuation.definition.comment"], syn.comment, "italic"),
+    rule(["keyword", "storage", "storage.type", "keyword.operator.new", "keyword.control"], syn.keyword),
+    rule(["string", "string.quoted", "markup.inline.raw"], syn.string),
+    rule(["constant.numeric", "constant.language", "constant.character"], syn.number),
+    rule(["entity.name.function", "support.function", "meta.function-call", "entity.name.command"], syn.title),
+    rule(["entity.name.type", "support.type", "entity.name.class", "support.class"], syn.type),
+    rule(["meta.preprocessor", "entity.other.attribute-name", "variable.parameter", "punctuation.definition.variable", "variable.other.normal.shell"], syn.meta),
+    rule(["invalid", "markup.deleted"], syn.err),
+    rule(["markup.inserted"], syn.string),
+    rule(["keyword.operator", "punctuation"], glass.chrome),
+  ],
+};
+
+export const codeGlass = {
+  themes: [theme],
+  defaultProps: { frame: "none" },
+  useStarlightDarkModeSwitch: false,
+  useStarlightUiThemeColors: false,
+  styleOverrides: {
+    borderRadius: "6px",
+    borderColor: glass.line,
+    borderWidth: "1px",
+    codeBackground: glass.body,
+    codeForeground: glass.ink,
+    codeFontFamily: "var(--__sl-font-mono)",
+    codeFontSize: "0.8125rem",
+    codeLineHeight: "1.6",
+    codePaddingBlock: "0.85rem",
+    codePaddingInline: "1rem",
+    uiFontFamily: "var(--__sl-font)",
+    uiFontSize: "0.75rem",
+    focusBorder: "var(--sl-color-accent)",
+    scrollbarThumbColor: "#ffffff22",
+    scrollbarThumbHoverColor: "#ffffff44",
+    frames: {
+      shadowColor: "transparent",
+      frameBoxShadowCssValue: "inset 0 1px 3px rgba(0, 0, 0, 0.35)",
+      editorBackground: glass.body,
+      editorActiveTabBackground: glass.head,
+      editorActiveTabForeground: glass.chrome,
+      editorActiveTabIndicatorTopColor: "transparent",
+      editorActiveTabIndicatorBottomColor: "transparent",
+      editorTabBarBackground: glass.head,
+      editorTabBarBorderBottomColor: glass.line,
+      terminalBackground: glass.body,
+      terminalTitlebarBackground: glass.head,
+      terminalTitlebarForeground: glass.chrome,
+      terminalTitlebarDotsForeground: glass.line,
+      terminalTitlebarDotsOpacity: "0",
+      terminalTitlebarBorderBottomColor: glass.line,
+      inlineButtonForeground: glass.chrome,
+      inlineButtonBorder: glass.line,
+      inlineButtonBackground: glass.head,
+      tooltipSuccessBackground: "#2e7d4a",
+      tooltipSuccessForeground: "#ffffff",
+    },
+  },
+};

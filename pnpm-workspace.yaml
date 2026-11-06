@@ -1,5 +1,8 @@
 packages:
   - packages/*
+  # Its own workspace and lockfile: Astro in the root workspace re-resolves
+  # cubed's dependencies (it gave the server's Pi packages a zod peer).
+  - '!packages/docs'
 allowBuilds:
   '@bufbuild/buf': false
   '@google/genai': false

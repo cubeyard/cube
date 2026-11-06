@@ -1,0 +1,44 @@
+---
+title: how cube works
+description: The pieces of a cube installation, cubed, berth and keel, and why a thread's agent runs on one machine while its tools run on another.
+---
+
+import PiecesDiagram from "../../../components/PiecesDiagram.astro";
+
+cube is three programs. **cubed** is the control plane you talk to. **berth** is the runner that hosts thread machines. **keel** is what runs inside a thread machine. On a Mac with Homebrew all three run on the one Mac. They can also run on separate machines.
+
+<PiecesDiagram />
+
+## cubed, the control plane
+
+cubed serves the web UI and runs everything that decides: the chat, projects, the threads' agents and their conversations. It keeps state in one directory, `~/.cube-host` by default, and holds every credential: your model logins and your GitHub token.
+
+A thread's agent, Pi or Claude Code, runs inside cubed's host as your user. The agent decides what to do. Each tool call it makes, a command, a file read or a write, goes to the thread's machine and runs there.
+
+That split is the point of the design. The agent's reasoning and credentials stay where you control them, while everything it executes, including whatever a repository's code does when it runs, happens in a machine that holds no secret and can reach only public HTTP and HTTPS hosts.
+
+**cube-gateway** is the one process that holds the GitHub token a thread uses. A thread machine has a placeholder. When the machine sends an HTTPS request to github.com or api.github.com, the gateway swaps the placeholder for the token on its way out and swaps it back in the answer.
+
+## berth, the runner
+
+`berth vm` runs one QEMU virtual machine per open thread, up to its limit, with KVM on Linux or Hypervisor.framework on an Apple Silicon Mac. It gives each machine its own network, checks every connection against the policy cubed sends, and can save an idle machine to disk and resume it later. cubed and berth talk over Iroh, an encrypted QUIC connection between pinned keys, so a runner can be the same Mac or a machine elsewhere.
+
+## keel, inside the machine
+
+A thread machine boots keel's kernel and init directly, with an OCI image as its read-only base. cube's default is official Debian trixie, prepared with the tools a machine needs. The thread's own changes go to a writable disk on top. keel's agent in the machine runs commands, reads and writes files, runs the setup scripts and the hooks, and supervises the web servers a thread starts.
+
+Because the base is read-only and shared, a project's first machine can be kept as a **template** after its setup ran. Later threads of the project start from it in seconds instead of running setup again.
+
+## threads and the chat
+
+A thread is one task, one agent and one machine. The chat is the interface over all of them: it starts threads, passes them more work, reads their reports and archives them. It has no machine and runs nothing itself. That keeps your one conversation with cube readable while the work happens elsewhere, in parallel, and survives a closed tab or a restart.
+
+## durable by design
+
+cubed keeps each thread's conversation in the agent's own store. A browser that reconnects reads the saved transcript and the partial answer, without duplicates. A cubed restart reopens each thread where its store says it was. A runner restart stops machines but keeps their disks, and cubed starts each again when its thread needs it.
+
+## read more
+
+- [A thread's life](/cube/concepts/thread-lifecycle/): starting, suspending, waking and archiving.
+- [Security model](/cube/concepts/security-model/): what the machine isolates and what it does not.
+- [ARCHITECTURE.md](gh:ARCHITECTURE.md) on GitHub, for maintainers.

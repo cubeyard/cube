@@ -1,0 +1,22 @@
+{
+  "skipLink.label": "skip to content",
+  "search.label": "search",
+  "search.cancelLabel": "cancel",
+  "themeSelect.accessibleLabel": "theme",
+  "themeSelect.dark": "dark",
+  "themeSelect.light": "light",
+  "themeSelect.auto": "auto",
+  "menuButton.accessibleLabel": "menu",
+  "sidebarNav.accessibleLabel": "docs",
+  "tableOfContents.onThisPage": "on this page",
+  "tableOfContents.overview": "overview",
+  "page.editLink": "edit this page",
+  "page.previousLink": "previous",
+  "page.nextLink": "next",
+  "404.text": "This page is not in the docs. Search, or start from the front page.",
+  "aside.note": "note",
+  "aside.tip": "tip",
+  "aside.caution": "caution",
+  "aside.danger": "danger",
+  "heading.anchorLabel": "section: {{title}}"
+}

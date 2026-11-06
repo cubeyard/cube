@@ -1,0 +1,88 @@
+name: docs
+
+on:
+  pull_request:
+    paths:
+      - packages/docs/**
+      - .github/workflows/docs.yml
+      # Files the site links to or reads its command-line page from.
+      - docs/**
+      - '*.md'
+      - packages/*/README.md
+      - scripts/cubed/update-public-key.fingerprint
+      - packages/server/src/index.ts
+      - packages/berth/src/main.rs
+      - packages/keel/agent/src/cli.rs
+      - packages/keel/agent/src/hooks.rs
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The latest published stable release (vX.Y.Z)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.event.pull_request.number) || 'docs-pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    if: github.event_name != 'release' || (!github.event.release.prerelease && !github.event.release.draft)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: the release is the latest stable one
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$TAG is not a stable release tag (vX.Y.Z)"; exit 1; }
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease \
+            --jq 'if .isDraft or .isPrerelease then error("stable published release required") else true end'
+          latest="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          [ "$TAG" = "$latest" ] || { echo "::error::$TAG is not the latest release ($latest); the site documents the latest release only"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.sha || format('refs/tags/{0}', env.TAG) }}
+          persist-credentials: false
+      - name: the release has the docs site
+        if: github.event_name != 'pull_request'
+        run: |
+          [ -f packages/docs/package.json ] || { echo "::error::$TAG has no packages/docs: the site starts with the first release that contains it"; exit 1; }
+      - name: cubed's dependencies, for cubed --help
+        uses: ./.github/actions/node-deps
+      - name: the site's dependencies
+        run: pnpm --dir packages/docs install --frozen-lockfile
+      - name: build and check links
+        run: pnpm --dir packages/docs build
+        env:
+          CUBE_DOCS_REF: ${{ github.event_name == 'pull_request' && 'main' || env.TAG }}
+          ASTRO_TELEMETRY_DISABLED: '1'
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: github.event_name != 'pull_request'
+        with:
+          path: packages/docs/dist
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
