@@ -240,15 +240,7 @@ const HOOK_SHELL = [
  *   template ran (`setupBlob`, `setupInputs`), then both run here and the
  *   template is stale.
  * Hooks may fail without failing the thread (the agent can read the logs);
- * a checkout that fails does.
- *
- * `.agents/setup-inputs` in the primary checkout declares what its setup
- * depends on besides itself: one path per line, a file or a directory,
- * relative to the repository's root (`#` lines and blank lines aside). The
- * fingerprint is a git hash of the declaration's blob id and each path's
- * object id at the pinned commit ("missing" where it has none), so it reads
- * only the commit's tree and is the same in every machine; "none" without a
- * declaration. */
+ * a checkout that fails does. */
 export type PreparationMode = { kind: "fresh" } | { kind: "template"; setupBlob: string; setupInputs: string };
 
 export function preparationScript(allocation: WorkspaceAllocation, mode: PreparationMode = { kind: "fresh" }): string {

@@ -309,9 +309,6 @@ try {
   assert.deepEqual(steps(off), ["lookup:ok", "boot:ok"]);
   console.log("ok: no template capability, or CUBED_TEMPLATES=off: the base, and the lookup says why");
 
-  // The lookup's housekeeping (C7): a template made before cube tracked setup inputs and a gone
-  // project's template of this cubed are deleted; one it cannot read (not cubed's meta) and another
-  // project's are never touched, however old.
   listed("e0e0e0e0e0e0e0e0", "k-legacy", JSON.stringify({ format: TEMPLATE_FORMAT, projectId: "p", setupBlob: "none", commit: null }), 2 * DAY_MS);
   listed("9090909090909090", "k-gone", meta("gone-project"));
   listed("aaaaaaaaaaaaaaaa", "v10-key", "{\"setup\":\"v10\"}", 30 * DAY_MS);
@@ -353,7 +350,6 @@ try {
   const afterA = registry.getThread(a.id)!.vm!;
   assert.deepEqual(steps(a), ["lookup:ok", "build-boot:ok", "build-prepare:ok", "build-publish:ok", "boot:ok"], "no build-seal: keel cleans the layer itself");
   assert.equal(step(a, "lookup").detail, "the pre-setup hook changed since template cccccccccccccccc: building one");
-  // C7: deleted are the legacy and the gone project's ones at the lookup, the superseded one after the publication.
   assert.deepEqual(of("templateDelete").map(call => call.value.id), ["e0e0e0e0e0e0e0e0", "9090909090909090", "cccccccccccccccc"]);
   assert.ok(templates.has("aaaaaaaaaaaaaaaa") && templates.has("bbbbbbbbbbbbbbbb"), "a template cubed cannot read, and another project's 30-day-old one, stay");
   // The build machine: its own id, base, build disk, the thread's size; its own documents and policy.
@@ -412,7 +408,6 @@ try {
   assert.equal(of("templatePublish").length, 0);
   console.log("ok: thread B starts from the template; nothing is built");
 
-  // No age limit: a template prepared 30 days ago is still the project's, and nothing is deleted.
   {
     const shown = templates.get(buildId)!;
     const createdAt = shown.createdAt;

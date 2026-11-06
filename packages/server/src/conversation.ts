@@ -580,7 +580,6 @@ export class Conversations {
       if (outcome) this.endPrepare(id, last, outcome, true);
       if (!outcome || outcome.error) {
         const attempt = last + 1;
-        // A preparation recorded before cube tracked setup inputs has none: "" never matches, so setup runs here and the template goes.
         const mode = preparation?.source === "template" && preparation.setupBlob
           ? { kind: "template" as const, setupBlob: preparation.setupBlob, setupInputs: preparation.setupInputs ?? "" } : { kind: "fresh" as const };
         this.registry.updateThreadVm(id, { provisionAttempt: attempt });

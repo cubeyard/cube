@@ -14,8 +14,7 @@
  * before booting. The repository's `.agents/setup` and the inputs it
  * declares in `.agents/setup-inputs` are only known after the checkout, so
  * their fingerprints travel in the template's metadata, and a machine whose
- * pinned ones differ runs setup itself and invalidates the template. A
- * template has no age limit: it is reused until one of these changes.
+ * pinned ones differ runs setup itself and invalidates the template.
  * Templates are per runner and per project, never shared across projects. */
 import { createHash, X509Certificate } from "node:crypto";
 import type { RunnerTemplate } from "./runner-types.ts";

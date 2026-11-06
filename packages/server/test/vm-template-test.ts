@@ -2,7 +2,7 @@
  * with the real guest helper under a temporary root (vm.ts scripts), resume
  * once per boot, a template's checkout refresh and stale setup, the declared
  * setup inputs, the template key and its invalidation, selection and
- * collection (no age limit), the hooks in a keel
+ * collection, the hooks in a keel
  * machine's boot documents, and project hook validation. Templates on
  * berth vm: runner-vm-templates-test.ts and runner-vm-cubed-test.ts. */
 import assert from "node:assert/strict";
@@ -189,7 +189,6 @@ try {
     console.log("ok: template machine: refreshed checkout, setup skipped; a changed .agents/setup runs here and marks the template stale");
   }
 
-  // 3b. Declared setup inputs (.agents/setup-inputs): what changes them makes the template stale, and nothing else does.
   {
     const commit = (message: string, change: () => void) => {
       change();
@@ -225,7 +224,6 @@ try {
     };
     const reused = { stale: false, ran: [], inputs: fingerprint };
     assert.deepEqual(await onTemplate(declared), reused, "the commit the template was made at");
-    // An untracked file at a declared path and changes outside the declared paths are not inputs.
     fs.writeFileSync(path.join(m.guest.root, "workspace", "later.txt"), "untracked\n");
     const unrelated = commit("an unrelated change", () => write("README.md", "unrelated\n"));
     assert.deepEqual(await onTemplate(unrelated), reused, "another file changed: still the template's preparation");
