@@ -1,11 +1,3 @@
-# The public docs site (packages/docs) at https://cubeyard.github.io/cube/.
-# A pull request that touches the site or what it is generated from builds it
-# and checks its links. The site documents the latest published release only:
-# a published stable release, or a run by hand naming that same release,
-# builds the site from the release's tag and deploys it to GitHub Pages.
-# Nothing from main is ever published. A release whose tag has no
-# packages/docs (every release before the site existed) fails before the
-# build and changes nothing.
 name: docs
 
 on:
@@ -36,8 +28,6 @@ on:
 permissions:
   contents: read
 
-# One deployment at a time, never cancelled half way; a pull request's newer
-# push cancels its older build.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.event.pull_request.number) || 'docs-pages' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

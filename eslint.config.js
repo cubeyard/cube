@@ -18,7 +18,6 @@ export default defineConfig([
     "packages/claude-mod/.claude-plugin/types/",
     // Generated from packages/node-transport/proto/runner.proto (pnpm proto:check).
     "packages/server/src/gen/",
-    // Astro's generated types for the docs site.
     "packages/docs/.astro/",
   ]),
   js.configs.recommended,
