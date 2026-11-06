@@ -1,7 +1,9 @@
 // Checks every link in the built site (dist/): a link inside the site must
 // reach a built page or file, and its #fragment an id on that page; a link
 // into the repository (`gh:` in the source) must name a file or directory
-// that exists in this checkout. External links are not fetched.
+// that exists in this checkout, and an edit link a file git tracks (a page
+// written at build time has none). External links are not fetched.
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -11,6 +13,7 @@ const dist = path.join(docs, "dist");
 const base = "/cube/";
 const repository = /^https:\/\/github\.com\/cubeyard\/cube\/(?:blob|tree|edit)\/[^/]+\/([^#?]*)/;
 
+const tracked = new Set(execFileSync("git", ["ls-files"], { cwd: root, encoding: "utf8" }).split("\n"));
 const pages = fs.readdirSync(dist, { recursive: true, encoding: "utf8" }).filter(file => file.endsWith(".html"));
 const ids = new Map<string, Set<string>>();
 const html = new Map<string, string>();
@@ -42,7 +45,10 @@ for (const [page, text] of html) {
     const inRepository = repository.exec(link);
     if (inRepository) {
       checked++;
-      if (link.includes("/edit/")) continue;
+      if (link.includes("/edit/")) {
+        if (!tracked.has(decodeURIComponent(inRepository[1]!))) problems.push(`${page}: ${link} edits a file git does not track`);
+        continue;
+      }
       if (!fs.existsSync(path.join(root, decodeURIComponent(inRepository[1]!)))) problems.push(`${page}: ${link} names no file in the repository`);
       const anchor = link.split("#")[1];
       if (anchor && inRepository[1]!.endsWith(".md")) {

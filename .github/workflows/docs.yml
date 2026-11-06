@@ -13,6 +13,12 @@ on:
     paths:
       - packages/docs/**
       - .github/workflows/docs.yml
+      # Files the site links to at its release: the link check catches a
+      # moved file or heading before a release, not at its deploy.
+      - docs/**
+      - '*.md'
+      - packages/*/README.md
+      - scripts/cubed/update-public-key.fingerprint
       # The command-line reference is written from these help texts.
       - packages/server/src/index.ts
       - packages/berth/src/main.rs
