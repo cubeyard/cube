@@ -1,0 +1,64 @@
+---
+// The pieces of a cube installation and the one path a request takes. Drawn
+// as plain geometry in the palette's inks, so it follows the light and dark
+// themes and stays sharp at any size.
+---
+
+<figure class="cube-diagram">
+  <div class="scroll" tabindex="0" role="region" aria-label="diagram: the pieces of cube">
+    <svg viewBox="0 0 720 300" role="img" aria-labelledby="pieces-title pieces-desc">
+      <title id="pieces-title">the pieces of cube</title>
+      <desc id="pieces-desc">Your browser talks to cubed on the cubed host. cubed runs the chat, the threads' agents and the gateway, and holds the credentials. It reaches each runner over an encrypted connection. Each runner, berth vm, hosts one virtual machine per open thread. A thread machine reaches only public HTTP and HTTPS hosts; its requests to GitHub get the token from the gateway.</desc>
+      <defs>
+        <marker id="pieces-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 1 L9 5 L0 9" fill="none" stroke="var(--cube-ink-3)" stroke-width="1.6" stroke-linejoin="round"></path>
+        </marker>
+      </defs>
+      <style>
+        .frame { fill: var(--cube-s4); stroke: var(--cube-line-2); stroke-width: 1; }
+        .face { fill: var(--cube-s3); stroke: var(--cube-line); stroke-width: 1; }
+        .glass { fill: #17181c; stroke: #2c2e35; stroke-width: 1; }
+        .label { font: 550 11px var(--__sl-font); letter-spacing: 0.08em; fill: var(--cube-ink-3); }
+        .name { font: 650 14px var(--__sl-font); fill: var(--cube-ink); }
+        .note { font: 400 12px var(--__sl-font); fill: var(--cube-ink-2); }
+        .mono { font: 400 11.5px var(--__sl-font-mono); fill: #d9dae2; }
+        .wire { stroke: var(--cube-ink-3); stroke-width: 1.4; fill: none; }
+        .dashed { stroke-dasharray: 4 4; }
+        .signal { fill: none; stroke: var(--cube-signal); stroke-width: 1.6; stroke-linejoin: round; }
+      </style>
+
+      <rect class="face" x="8" y="118" width="128" height="64" rx="6"></rect>
+      <text class="name" x="24" y="146">browser</text>
+      <text class="note" x="24" y="166">loopback or tailnet</text>
+
+      <rect class="frame" x="160" y="40" width="230" height="220" rx="12"></rect>
+      <text class="label" x="176" y="64">cubed host</text>
+      <path class="signal" d="M182 82 l9 -5 l9 5 v10 l-9 5 l-9 -5 Z M182 82 l9 5 l9 -5 M191 87 v10"></path>
+      <text class="name" x="210" y="94">cubed</text>
+      <text class="note" x="176" y="122">the chat, projects, the web UI</text>
+      <text class="note" x="176" y="142">threads' agents: Pi or Claude Code</text>
+      <text class="note" x="176" y="162">cube-gateway: the GitHub token</text>
+      <text class="note" x="176" y="182">state, model logins</text>
+      <line class="wire" x1="176" y1="204" x2="374" y2="204" stroke-width="1"></line>
+      <text class="note" x="176" y="232">nothing here is sandboxed</text>
+
+      <rect class="frame" x="440" y="16" width="272" height="268" rx="12"></rect>
+      <text class="label" x="456" y="40">runner: berth vm</text>
+      <text class="note" x="456" y="62">KVM on Linux, HVF on a Mac</text>
+
+      <rect class="glass" x="456" y="80" width="240" height="56" rx="6"></rect>
+      <text class="mono" x="470" y="104">thread machine</text>
+      <text class="mono" x="470" y="124">/workspace · agent · keel</text>
+      <rect class="glass" x="456" y="146" width="240" height="56" rx="6"></rect>
+      <text class="mono" x="470" y="170">thread machine</text>
+      <text class="mono" x="470" y="190">one per open thread</text>
+      <text class="note" x="456" y="226">each machine is its thread's sandbox</text>
+      <text class="note" x="456" y="246">network: public HTTP and HTTPS only</text>
+
+      <line class="wire" x1="136" y1="150" x2="158" y2="150" marker-end="url(#pieces-arrow)"></line>
+      <line class="wire" x1="390" y1="150" x2="438" y2="150" marker-end="url(#pieces-arrow)" marker-start="url(#pieces-arrow)"></line>
+      <text class="label" x="396" y="140">iroh</text>
+    </svg>
+  </div>
+  <figcaption>One cubed host, one or more runners. A thread's tools run in its machine; its agent and every credential stay on the cubed host.</figcaption>
+</figure>

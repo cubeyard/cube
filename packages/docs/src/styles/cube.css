@@ -1,0 +1,519 @@
+/* cube's bench instrument (DESIGN.md) on Starlight: the putty sheet, the
+   black edition, one signal orange, lowercase silkscreen labels, code behind
+   dark glass. Starlight's own rules sit in @layer starlight.*, so these
+   unlayered rules win without !important. */
+
+:root {
+  --cube-s1: #0f0f12;
+  --cube-s2: #17171b;
+  --cube-s3: #24242b;
+  --cube-s4: #101013;
+  --cube-ink: #eae8e2;
+  --cube-ink-2: #b0ada6;
+  --cube-ink-3: #8b8880;
+  --cube-line: #2b2b32;
+  --cube-line-2: #3d3d46;
+  --cube-signal: #ff5a14;
+  --cube-signal-ink: #1c0d03;
+  --cube-signal-soft: rgba(255, 90, 20, 0.14);
+  --cube-bad: #e5604a;
+  --cube-ok: #57c97e;
+  --cube-wait: #e5a33c;
+  --cube-note-soft: rgba(176, 173, 166, 0.07);
+  --cube-note-line: rgba(176, 173, 166, 0.25);
+  --cube-shadow-key: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --cube-shadow-float: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+:root[data-theme="light"] {
+  --cube-s1: #e4e0d4;
+  --cube-s2: #ece8df;
+  --cube-s3: #f4f1ea;
+  --cube-s4: #fbfaf6;
+  --cube-ink: #26231c;
+  --cube-ink-2: #55503f;
+  --cube-ink-3: #635e51;
+  --cube-line: #cdc7b8;
+  --cube-line-2: #b3ac9c;
+  --cube-signal: #cc3f00;
+  --cube-signal-ink: #ffffff;
+  --cube-signal-soft: rgba(204, 63, 0, 0.12);
+  --cube-bad: #a03522;
+  --cube-ok: #2e7d4a;
+  --cube-wait: #b06f14;
+  --cube-note-soft: rgba(85, 80, 63, 0.06);
+  --cube-note-line: rgba(85, 80, 63, 0.25);
+  --cube-shadow-key: 0 1px 2px rgba(38, 32, 18, 0.1);
+  --cube-shadow-float: 0 2px 8px rgba(38, 32, 18, 0.18);
+}
+
+:root,
+:root[data-theme="light"] {
+  --sl-color-black: var(--cube-s4);
+  --sl-color-gray-7: var(--cube-s3);
+  --sl-color-gray-6: var(--cube-s2);
+  --sl-color-gray-5: var(--cube-line);
+  --sl-color-gray-4: var(--cube-line-2);
+  --sl-color-gray-3: var(--cube-ink-3);
+  --sl-color-gray-2: var(--cube-ink-2);
+  --sl-color-gray-1: var(--cube-ink);
+  --sl-color-white: var(--cube-ink);
+
+  --sl-color-accent-low: var(--cube-signal-soft);
+  --sl-color-accent: var(--cube-signal);
+  --sl-color-accent-high: var(--cube-signal);
+  --sl-color-text: var(--cube-ink);
+  --sl-color-text-accent: var(--cube-signal);
+  --sl-color-text-invert: var(--cube-signal-ink);
+  --sl-color-bg: var(--cube-s4);
+  --sl-color-bg-nav: var(--cube-s4);
+  --sl-color-bg-sidebar: var(--cube-s4);
+  --sl-color-bg-inline-code: var(--cube-s1);
+  --sl-color-bg-accent: var(--cube-signal);
+  --sl-color-hairline-light: var(--cube-line);
+  --sl-color-hairline: var(--cube-line);
+  --sl-color-hairline-shade: var(--cube-line);
+  --sl-color-backdrop-overlay: rgba(16, 16, 19, 0.5);
+
+  --sl-color-orange-low: var(--cube-note-soft);
+  --sl-color-orange: var(--cube-wait);
+  --sl-color-orange-high: var(--cube-ink);
+  --sl-color-red-low: var(--cube-note-soft);
+  --sl-color-red: var(--cube-bad);
+  --sl-color-red-high: var(--cube-ink);
+  --sl-color-green-low: var(--cube-note-soft);
+  --sl-color-green: var(--cube-ok);
+  --sl-color-green-high: var(--cube-ink);
+  --sl-color-blue-low: var(--cube-note-soft);
+  --sl-color-blue: var(--cube-ink-3);
+  --sl-color-blue-high: var(--cube-ink);
+  --sl-color-purple-low: var(--cube-note-soft);
+  --sl-color-purple: var(--cube-ink-3);
+  --sl-color-purple-high: var(--cube-ink);
+
+  --sl-shadow-sm: var(--cube-shadow-key);
+  --sl-shadow-md: var(--cube-shadow-float);
+  --sl-shadow-lg: var(--cube-shadow-float);
+
+  --sl-font: "Archivo Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --sl-font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --sl-text-body: 1rem;
+  --sl-text-code: 0.8125rem;
+  --sl-text-code-sm: 0.75rem;
+  --sl-text-h1: 2.125rem;
+  --sl-text-h2: 1.5rem;
+  --sl-text-h3: 1.1875rem;
+  --sl-text-h4: 1.0625rem;
+  --sl-text-h5: 1rem;
+  --sl-line-height: 1.65;
+  --sl-line-height-headings: 1.25;
+  --sl-content-width: 47rem;
+  --sl-sidebar-width: 17rem;
+  --sl-nav-height: 3.25rem;
+}
+
+/* ------------------------------------------------------------ the sheet */
+
+html {
+  accent-color: var(--cube-signal);
+  scrollbar-color: var(--cube-line-2) transparent;
+}
+
+::selection {
+  background: var(--cube-signal-soft);
+  color: inherit;
+}
+
+body {
+  caret-color: var(--cube-signal);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--cube-signal);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ------------------------------------------------------------ the sidebar */
+
+/* Group labels are silkscreen: 11px, 550, tracked, lowercase as written
+   (DESIGN.md, the Silkscreen Rule). */
+.sidebar-content .group-label .large {
+  font-size: 0.6875rem;
+  font-weight: 550;
+  letter-spacing: 0.08em;
+  color: var(--cube-ink-3);
+}
+
+.sidebar-content a {
+  font-size: 0.875rem;
+  color: var(--cube-ink-2);
+  border-radius: 6px;
+  padding-block: 0.3rem;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.sidebar-content a:hover {
+  background-color: var(--cube-s3);
+  color: var(--cube-ink);
+}
+
+/* The open page sits on a soft face in 650, never in the signal (DESIGN.md,
+   Settings: the selector bank). */
+.sidebar-content a[aria-current="page"],
+.sidebar-content a[aria-current="page"]:hover,
+.sidebar-content a[aria-current="page"]:focus {
+  background-color: var(--cube-s3);
+  color: var(--cube-ink);
+  font-weight: 650;
+}
+
+starlight-toc h2,
+mobile-starlight-toc .toggle {
+  font-size: 0.6875rem;
+  font-weight: 550;
+  letter-spacing: 0.08em;
+  color: var(--cube-ink-3);
+}
+
+starlight-toc a {
+  color: var(--cube-ink-3);
+  font-size: 0.8125rem;
+}
+
+starlight-toc a[aria-current="true"],
+starlight-toc a:hover {
+  color: var(--cube-ink);
+}
+
+/* ------------------------------------------------------------ reading */
+
+.content-panel h1,
+.sl-markdown-content :is(h1, h2, h3, h4, h5) {
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--cube-ink);
+  text-wrap: balance;
+}
+
+.content-panel h1#_top {
+  font-size: var(--sl-text-h1);
+  letter-spacing: -0.02em;
+}
+
+.sl-markdown-content .sl-heading-wrapper.level-h2 {
+  margin-top: 2.6rem;
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--cube-line);
+}
+
+.sl-markdown-content h3 {
+  margin-top: 1.9rem;
+}
+
+.sl-markdown-content :is(p, li) {
+  text-wrap: pretty;
+}
+
+.sl-markdown-content a:not(:where(.not-content *)) {
+  color: var(--cube-signal);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  text-decoration-color: color-mix(in srgb, var(--cube-signal) 45%, transparent);
+}
+
+.sl-markdown-content a:not(:where(.not-content *)):hover {
+  text-decoration-color: currentColor;
+}
+
+.sl-markdown-content strong {
+  font-weight: 650;
+  color: var(--cube-ink);
+}
+
+/* Inline code is putty, not glass (DESIGN.md, Code Window). */
+.sl-markdown-content :not(pre) > code {
+  background: var(--cube-s1);
+  border: 1px solid var(--cube-line);
+  border-radius: 4px;
+  padding: 0.05em 0.32em;
+  font-size: 0.84em;
+  color: var(--cube-ink);
+}
+
+:root:not([data-theme="light"]) .sl-markdown-content :not(pre) > code {
+  background: var(--cube-s3);
+}
+
+.sl-markdown-content :is(ul, ol) > li::marker {
+  color: var(--cube-ink-3);
+}
+
+.sl-markdown-content hr {
+  border-color: var(--cube-line);
+}
+
+/* Machine text is read as written: no ligature turns `==>` into an arrow. */
+code,
+pre,
+kbd,
+samp {
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+}
+
+/* Long names in a table wrap rather than push the table past a phone's width. */
+.sl-markdown-content td code {
+  overflow-wrap: anywhere;
+}
+
+/* Tables are hairline frames with tabular numerals. */
+.sl-markdown-content table {
+  font-size: 0.9rem;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.sl-markdown-content :is(th, td) {
+  border: 0;
+  border-bottom: 1px solid var(--cube-line);
+  padding: 0.5rem 0.9rem 0.5rem 0;
+  vertical-align: top;
+}
+
+.sl-markdown-content th {
+  font-size: 0.6875rem;
+  font-weight: 550;
+  letter-spacing: 0.08em;
+  color: var(--cube-ink-3);
+  text-align: start;
+  background: transparent;
+  border-bottom-color: var(--cube-line-2);
+}
+
+.sl-markdown-content tr:nth-child(2n) {
+  background: transparent;
+}
+
+/* Asides are printed notices: a hairline frame on a silkscreen wash. A
+   caution prints its title in error ink, never a colored stripe. */
+.sl-markdown-content .starlight-aside {
+  border: 1px solid var(--cube-note-line);
+  border-radius: 7px;
+  background: var(--cube-note-soft);
+  padding: 0.85rem 1rem;
+}
+
+.starlight-aside__title {
+  font-size: 0.6875rem;
+  font-weight: 550;
+  letter-spacing: 0.08em;
+  color: var(--cube-ink-2);
+}
+
+.starlight-aside__icon {
+  display: none;
+}
+
+.starlight-aside--caution .starlight-aside__title,
+.starlight-aside--danger .starlight-aside__title {
+  color: var(--cube-bad);
+}
+
+/* ------------------------------------------------------------ keys */
+
+.pagination-links a {
+  border: 1px solid var(--cube-line);
+  border-radius: 12px;
+  background: var(--cube-s4);
+  box-shadow: none;
+  color: var(--cube-ink-2);
+  transition: background-color 120ms ease;
+}
+
+.pagination-links a:hover {
+  background: var(--cube-s3);
+  border-color: var(--cube-line-2);
+}
+
+.pagination-links a .link-title {
+  color: var(--cube-ink);
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+site-search button[data-open-modal] {
+  background: var(--cube-s3);
+  border: 1px solid var(--cube-line);
+  border-radius: 6px;
+  box-shadow: var(--cube-shadow-key);
+  color: var(--cube-ink-2);
+  transition: background-color 120ms ease, transform 80ms ease;
+}
+
+site-search button[data-open-modal]:hover {
+  background: var(--cube-s4);
+  color: var(--cube-ink);
+}
+
+site-search button[data-open-modal]:active {
+  transform: translateY(1px);
+}
+
+site-search dialog {
+  border: 1px solid var(--cube-line);
+  border-radius: 12px;
+  background: var(--cube-s4);
+  box-shadow: var(--cube-shadow-float);
+}
+
+/* The phone's menu key: a square key, not a floating circle. */
+.sl-menu-button {
+  background-color: var(--cube-s3);
+  border: 1px solid var(--cube-line);
+  border-radius: 6px;
+  color: var(--cube-ink);
+  box-shadow: var(--cube-shadow-key);
+  transition: background-color 120ms ease, transform 80ms ease;
+}
+
+.sl-menu-button:active {
+  transform: translateY(1px);
+}
+
+.sl-menu-button:has(~ :popover-open) {
+  background-color: var(--cube-s1);
+  box-shadow: none;
+}
+
+#starlight__search {
+  --pagefind-ui-primary: var(--cube-signal);
+  --pagefind-ui-text: var(--cube-ink);
+  --pagefind-ui-background: var(--cube-s4);
+  --pagefind-ui-border: var(--cube-line);
+  --pagefind-ui-tag: var(--cube-s3);
+  --pagefind-ui-font: var(--sl-font);
+}
+
+#starlight__search mark {
+  background: var(--cube-signal-soft);
+  color: var(--cube-ink);
+}
+
+/* ------------------------------------------------------------ the front page */
+
+.cube-front .lede {
+  font-size: 1.1875rem;
+  line-height: 1.55;
+  color: var(--cube-ink);
+  max-width: 38rem;
+}
+
+/* The ways in: one hairline-divided bank, not cards. */
+.sl-markdown-content .doorways {
+  list-style: none;
+  padding: 0;
+  margin: 1.4rem 0 0;
+  border: 1px solid var(--cube-line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.sl-markdown-content .doorways li {
+  margin: 0;
+  padding: 0;
+}
+
+.sl-markdown-content .doorways li + li {
+  border-top: 1px solid var(--cube-line);
+}
+
+.sl-markdown-content .doorways a {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  column-gap: 1rem;
+  align-items: center;
+  padding: 0.85rem 1.1rem;
+  color: var(--cube-ink);
+  text-decoration: none;
+  transition: background-color 120ms ease;
+}
+
+.sl-markdown-content .doorways a:hover {
+  background: var(--cube-s3);
+}
+
+.sl-markdown-content .doorways a:focus-visible {
+  outline-offset: -2px;
+}
+
+.doorways .door-name {
+  font-weight: 650;
+}
+
+.doorways .door-hint {
+  grid-column: 1;
+  color: var(--cube-ink-2);
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.doorways svg {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  color: var(--cube-ink-3);
+  transition: transform 120ms ease, color 120ms ease;
+}
+
+.doorways a:hover svg {
+  color: var(--cube-signal);
+  transform: translateX(2px);
+}
+
+/* A diagram of the pieces: geometry in the palette's inks. */
+.cube-diagram {
+  margin: 1.6rem 0;
+  border: 1px solid var(--cube-line);
+  border-radius: 12px;
+  padding: 1rem 1rem 0.8rem;
+}
+
+.cube-diagram .scroll {
+  overflow-x: auto;
+}
+
+.cube-diagram svg {
+  display: block;
+  width: 100%;
+  min-width: 36rem;
+  height: auto;
+}
+
+.cube-diagram figcaption {
+  font-size: 0.8125rem;
+  color: var(--cube-ink-2);
+  margin-top: 0.6rem;
+}
+
+@media (max-width: 50rem) {
+  :root,
+  :root[data-theme="light"] {
+    --sl-text-h1: 1.75rem;
+    --sl-text-h2: 1.3125rem;
+  }
+
+  .cube-front .lede {
+    font-size: 1.0625rem;
+  }
+}

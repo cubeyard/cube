@@ -1,0 +1,38 @@
+---
+title: cube
+description: Self-hosted coding-agent threads, each in its own virtual machine. Install cube, start your first thread and run it on your own hardware.
+template: splash
+editUrl: false
+tableOfContents: false
+pagefind: false
+---
+
+import Doorway from "../../components/Doorway.astro";
+
+<div class="cube-front">
+
+<p class="lede">You talk to one chat in your browser. It starts threads in your projects. Each thread's agent works in a fresh virtual machine of its own, reaches only HTTP and HTTPS, and reports back. Closing the tab or restarting cube keeps the work.</p>
+
+cube runs on your own Mac or Linux machine. Your code, your model logins and your GitHub token stay on that host.
+
+```sh
+brew trust cubeyard/tap
+brew install cubeyard/tap/cube
+cubed runners init-local
+brew services restart cubeyard/tap/cube-berth cubeyard/tap/cube
+open http://127.0.0.1:7777
+```
+
+On an Apple Silicon Mac with [Homebrew](https://brew.sh). For Linux, see [install on Linux](/cube/start/install-linux/).
+
+<ul class="doorways">
+  <Doorway href="/cube/start/first-thread/" name="your first thread" hint="From install to a finished thread and its report." />
+  <Doorway href="/cube/concepts/how-cube-works/" name="how cube works" hint="The chat, threads, runners and machines, and which part runs where." />
+  <Doorway href="/cube/concepts/security-model/" name="security model" hint="What the thread machine isolates, and what it does not. Read it before you expose cube to anything but your own browser." />
+</ul>
+
+:::caution[experimental software]
+cube runs agents with real tools against your repositories and your GitHub token. It has no login of its own. Anyone who can reach it is you. Keep it on loopback or behind a private network you control.
+:::
+
+</div>
