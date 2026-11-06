@@ -273,9 +273,10 @@ samp {
   font-feature-settings: "liga" 0, "calt" 0;
 }
 
-/* Long names in a table wrap rather than push the table past a phone's width. */
+/* Long names in a table wrap at the breaks the build adds, and mid-word only
+   when nothing else fits. */
 .sl-markdown-content td code {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 /* Tables are hairline frames with tabular numerals. */
