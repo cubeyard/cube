@@ -240,8 +240,11 @@ const HOOK_SHELL = [
  *   template ran (`setupBlob`, `setupInputs`), then both run here and the
  *   template is stale.
  * Hooks may fail without failing the thread (the agent can read the logs);
- * a checkout that fails does. */
-export type PreparationMode = { kind: "fresh" } | { kind: "template"; setupBlob: string; setupInputs: string };
+ * a checkout that fails does. `.agents/setup-inputs`: docs/project-hooks.md,
+ * "Setup inputs". */
+export type PreparationMode = { kind: "fresh" } | { kind: "template"; setupBlob: string;
+  /** null: recorded without a fingerprint (an earlier cubed), so stale. */
+  setupInputs: string | null };
 
 export function preparationScript(allocation: WorkspaceAllocation, mode: PreparationMode = { kind: "fresh" }): string {
   const items = checkouts(allocation);
@@ -282,8 +285,9 @@ export function preparationScript(allocation: WorkspaceAllocation, mode: Prepara
     "  else outcome setup notrun 0; fi",
     "}",
     ...(mode.kind === "template"
-      ? [`if [ "$blob" = ${quote(mode.setupBlob)} ] && [ "$inputs" = ${quote(mode.setupInputs)} ]; then outcome pre-setup skipped 0; outcome setup skipped 0`,
-        "else echo \"cube-template stale\"; prepare; fi"]
+      ? mode.setupInputs === null ? ["echo \"cube-template stale\"; prepare"]
+        : [`if [ "$blob" = ${quote(mode.setupBlob)} ] && [ "$inputs" = ${quote(mode.setupInputs)} ]; then outcome pre-setup skipped 0; outcome setup skipped 0`,
+          "else echo \"cube-template stale\"; prepare; fi"]
       : ["prepare"]),
     "echo provisioned",
   ];

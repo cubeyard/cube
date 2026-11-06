@@ -581,7 +581,7 @@ export class Conversations {
       if (!outcome || outcome.error) {
         const attempt = last + 1;
         const mode = preparation?.source === "template" && preparation.setupBlob
-          ? { kind: "template" as const, setupBlob: preparation.setupBlob, setupInputs: preparation.setupInputs ?? "" } : { kind: "fresh" as const };
+          ? { kind: "template" as const, setupBlob: preparation.setupBlob, setupInputs: preparation.setupInputs ?? null } : { kind: "fresh" as const };
         this.registry.updateThreadVm(id, { provisionAttempt: attempt });
         this.registry.beginStartupStep(id, { name: "prepare", attempt,
           detail: mode.kind === "template" ? "checkout on the template's disk" : "checkout, pre-setup and .agents/setup" });

@@ -71,10 +71,12 @@ toolchain pin, a script it calls. One path per line, a file or a
 directory, relative to the repository's root. Blank lines and lines that
 start with `#` are skipped.
 
+Cube's own:
+
 ```text
-# What .agents/setup installs from.
 package.json
 pnpm-lock.yaml
+pnpm-workspace.yaml
 rust-toolchain.toml
 scripts/setup-browsers.sh
 ```
@@ -91,7 +93,10 @@ When the thread's fingerprint differs from the template's, that thread runs
 pre-setup and setup itself and the template is removed, so the next thread
 builds a new one. Declare only what setup installs from. Source that setup
 merely builds and that every consumer rebuilds anyway is better left out:
-each change would cost a new template.
+each change would cost a new template. Cube's setup builds `packages/web`
+into `packages/web/dist` and does not declare it, so a template's `dist`
+may be older than the thread's commit; `scripts/test-browser.sh` and the
+verify-cube skill run `pnpm build` first.
 
 **Refreshing unpinned downloads.** Something setup fetches without a pin
 (`apt-get install` of the newest package, a `curl` of a "latest" URL) never

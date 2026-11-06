@@ -217,7 +217,7 @@ try {
 
     const m = machine({ preSetup, preResume });
     let attempt = 0;
-    const onTemplate = async (oid: string, inputs = fingerprint) => {
+    const onTemplate = async (oid: string, inputs: string | null = fingerprint) => {
       fs.writeFileSync(path.join(m.guest.root, "order"), "");
       const outcome = await provisionWorkspace(m.workspace, "pi", allocation(oid), ++attempt, { kind: "template", setupBlob, setupInputs: inputs });
       return { stale: outcome.stale, ran: m.order(), inputs: outcome.setupInputs };
@@ -246,7 +246,8 @@ try {
     await stale("only a comment of the declaration changes (the refresh lever)", () => write(".agents/setup-inputs", declaration.replace("# what", "# refreshed: what")));
     const undeclared = await stale("the declaration is removed", () => fs.rmSync(path.join(work, ".agents/setup-inputs")));
     assert.equal((await onTemplate(undeclared, "none")).stale, false, "no declaration on either side: the template holds");
-    assert.equal((await onTemplate(undeclared, "")).stale, true, "a preparation recorded before cube tracked setup inputs never matches");
+    const unrecorded = await onTemplate(undeclared, null);
+    assert.deepEqual([unrecorded.stale, unrecorded.ran], [true, ["pre-setup", "setup"]], "a preparation recorded without a fingerprint is stale");
     console.log("ok: declared setup inputs: files, directories, missing, added, deleted and the declaration itself make the template stale; other changes do not");
   }
 
