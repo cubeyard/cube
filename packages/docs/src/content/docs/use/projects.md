@@ -41,7 +41,35 @@ Both run as user `agent` in the machine, with `sudo` available and the machine's
 
 The first thread of a project prepares its machine from the image: boot, checkout, setup. cube then keeps what that machine's setup wrote as the project's **template** on that runner. Later threads start from the template in seconds, with `.agents/setup` marked as skipped.
 
-When the template's inputs change, such as the repository's `.agents/setup`, the project's pre-setup hook or the runner's image, the next thread prepares a new template from the start.
+A template has no age limit. cube reuses it until one of these changes:
+
+- the project, its repositories, the pre-setup hook, the machine's disk size, or the runner's image, CA or platform;
+- the primary repository's `.agents/setup` at the thread's commit;
+- what `.agents/setup-inputs` declares at that commit, or the declaration itself.
+
+Then that thread runs pre-setup and setup itself, and the next thread builds a new template.
+
+A template made by a cube release before setup inputs were tracked is not reused. The first thread after the update builds a new one.
+
+### declare what setup reads
+
+`.agents/setup-inputs` lists what `.agents/setup` reads besides itself: a lockfile, a toolchain pin, a script it calls. Write one path per line, a file or a directory, relative to the repository's root. cube skips blank lines and lines that start with `#`. cube's own repository declares:
+
+```text
+package.json
+pnpm-lock.yaml
+pnpm-workspace.yaml
+rust-toolchain.toml
+scripts/setup-browsers.sh
+```
+
+cube compares each path's git object at the thread's commit with the template's. A directory counts by its tree, so any file added, changed or removed under it counts. A path the commit does not have counts as missing, so adding it later is a change too. Only committed files count: untracked files, `..` and absolute paths never do. Without the file, only `.agents/setup` and the list above decide.
+
+Declare only what setup installs from. Source code that setup merely builds, and that every consumer rebuilds anyway, is better left out: each change to it would cost a new template.
+
+### refresh unpinned downloads
+
+What setup fetches without a pin, such as `apt-get install` of the newest package or a download from a "latest" URL, never invalidates a template. To make the next thread prepare a new one, change `.agents/setup-inputs` itself and commit it. A comment line such as `# refreshed 2026-11-06` is enough. Changing the project's pre-setup hook works too. Put what must be fresh on every machine in `.agents/resume` or the pre-resume hook instead.
 
 ## hooks of your own
 
