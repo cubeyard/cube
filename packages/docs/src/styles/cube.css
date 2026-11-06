@@ -260,7 +260,6 @@ samp {
   font-feature-settings: "liga" 0, "calt" 0;
 }
 
-/* Breaks come from <wbr> the build adds (astro.config.mjs). */
 .sl-markdown-content td code {
   overflow-wrap: break-word;
 }
@@ -310,8 +309,7 @@ samp {
   display: none;
 }
 
-/* On a notice's wash the light signal is 4.27:1; links there take a deeper
-   orange (4.85:1). */
+/* The light signal is below AA on a notice's wash. */
 :root[data-theme="light"] .sl-markdown-content .starlight-aside a {
   color: #bd3a00;
 }

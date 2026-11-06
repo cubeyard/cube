@@ -1,5 +1,4 @@
-// The comment ink is lighter than the app's #767c8a (4.24:1 on the glass,
-// below WCAG AA): #878d9b is 5.33:1.
+// Lighter than the app's comment ink, which is below AA on the glass.
 const glass = {
   body: "#17181c",
   head: "#1f2126",

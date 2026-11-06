@@ -1,4 +1,3 @@
 dist/
 .astro/
-# Written at build time by scripts/cli-reference.ts.
 src/content/docs/reference/cli.md

@@ -1,5 +1,4 @@
-// berth's and the guest cube's usage strings are read from their Rust source,
-// so the docs build needs no Rust toolchain.
+// Read from Rust source: the docs build has no Rust toolchain.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
