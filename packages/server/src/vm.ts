@@ -236,11 +236,20 @@ const HOOK_SHELL = [
  *   `.agents/setup` (only if pre-setup succeeded).
  * - `template` (an overlay on a template): bring the template's checkouts to
  *   the thread's pinned commits; pre-setup and setup are skipped, unless the
- *   pinned `.agents/setup` differs from the one the template ran
- *   (`setupBlob`), then both run here and the template is stale.
+ *   pinned `.agents/setup` or its declared inputs differ from the ones the
+ *   template ran (`setupBlob`, `setupInputs`), then both run here and the
+ *   template is stale.
  * Hooks may fail without failing the thread (the agent can read the logs);
- * a checkout that fails does. */
-export type PreparationMode = { kind: "fresh" } | { kind: "template"; setupBlob: string };
+ * a checkout that fails does.
+ *
+ * `.agents/setup-inputs` in the primary checkout declares what its setup
+ * depends on besides itself: one path per line, a file or a directory,
+ * relative to the repository's root (`#` lines and blank lines aside). The
+ * fingerprint is a git hash of the declaration's blob id and each path's
+ * object id at the pinned commit ("missing" where it has none), so it reads
+ * only the commit's tree and is the same in every machine; "none" without a
+ * declaration. */
+export type PreparationMode = { kind: "fresh" } | { kind: "template"; setupBlob: string; setupInputs: string };
 
 export function preparationScript(allocation: WorkspaceAllocation, mode: PreparationMode = { kind: "fresh" }): string {
   const items = checkouts(allocation);
@@ -265,12 +274,23 @@ export function preparationScript(allocation: WorkspaceAllocation, mode: Prepara
     ...HOOK_SHELL,
     "blob=$(git rev-parse -q --verify 'HEAD:.agents/setup' 2>/dev/null || echo none)",
     "echo \"cube-setup-blob $blob\"",
+    "inputs=$(git rev-parse -q --verify 'HEAD:.agents/setup-inputs' 2>/dev/null || echo none)",
+    "if [ \"$inputs\" != none ]; then",
+    "  inputs=$(git cat-file blob \"$inputs\" | {",
+    "    echo \"setup-inputs $inputs\"",
+    "    while read -r input || [ -n \"$input\" ]; do",
+    "      case \"$input\" in ''|'#'*) continue ;; esac",
+    "      echo \"$(git rev-parse -q --verify \"HEAD:$input\" 2>/dev/null </dev/null || echo missing) $input\"",
+    "    done",
+    "  } | git hash-object --stdin)",
+    "fi",
+    "echo \"cube-setup-inputs $inputs\"",
     "prepare() {",
     "  if hook pre-setup \"$hooks/pre-setup\" pre-setup.log; then hook setup .agents/setup setup.log",
     "  else outcome setup notrun 0; fi",
     "}",
     ...(mode.kind === "template"
-      ? [`if [ "$blob" = ${quote(mode.setupBlob)} ]; then outcome pre-setup skipped 0; outcome setup skipped 0`,
+      ? [`if [ "$blob" = ${quote(mode.setupBlob)} ] && [ "$inputs" = ${quote(mode.setupInputs)} ]; then outcome pre-setup skipped 0; outcome setup skipped 0`,
         "else echo \"cube-template stale\"; prepare; fi"]
       : ["prepare"]),
     "echo provisioned",
@@ -330,6 +350,8 @@ export interface PreparationOutcome {
   running?: string;
   /** The primary checkout's `.agents/setup` blob ("none" without one). */
   setupBlob?: string;
+  /** The fingerprint of its declared setup inputs ("none" without a declaration). */
+  setupInputs?: string;
   /** A template's setup differed from the pinned one; setup ran here. */
   stale: boolean;
   /** The checkout (or the command) failed. */
@@ -342,6 +364,7 @@ export function preparationOutcome(state: Awaited<ReturnType<typeof settleOperat
   const text = Buffer.from(state.output).toString("utf8");
   const hooks: Record<string, HookOutcome> = {};
   let setupBlob: string | undefined;
+  let setupInputs: string | undefined;
   // The hook that had started and not ended when the command stopped.
   let running: string | undefined;
   // The lines the script printed of the last hook that failed.
@@ -361,6 +384,8 @@ export function preparationOutcome(state: Awaited<ReturnType<typeof settleOperat
     }
     const blob = /^cube-setup-blob ([0-9a-f]{40}|[0-9a-f]{64}|none)$/.exec(line.trim());
     if (blob) setupBlob = blob[1];
+    const inputs = /^cube-setup-inputs ([0-9a-f]{40}|[0-9a-f]{64}|none)$/.exec(line.trim());
+    if (inputs) setupInputs = inputs[1];
   }
   const stale = /^cube-template stale$/m.test(text);
   const memory = { ...(state.memory ? { memory: state.memory } : {}), ...(failureLog?.join("\n").trim() ? { log: stepLog(failureLog.join("\n")) } : {}),
@@ -368,11 +393,11 @@ export function preparationOutcome(state: Awaited<ReturnType<typeof settleOperat
   if (state.exitCode !== 0) {
     const what = running ?? "the preparation";
     const stopped = stoppedBecause(state);
-    if (stopped) return { hooks, stale, ...(setupBlob ? { setupBlob } : {}), ...memory, error: `${what} was stopped: ${stopped}` };
+    if (stopped) return { hooks, stale, ...(setupBlob ? { setupBlob } : {}), ...(setupInputs ? { setupInputs } : {}), ...memory, error: `${what} was stopped: ${stopped}` };
     const tail = text.trim().split("\n").filter(line => !line.startsWith("cube-")).slice(-4).join("; ");
-    return { hooks, stale, ...(setupBlob ? { setupBlob } : {}), ...memory, error: `checking out the project failed${tail ? `: ${tail}` : ""}` };
+    return { hooks, stale, ...(setupBlob ? { setupBlob } : {}), ...(setupInputs ? { setupInputs } : {}), ...memory, error: `checking out the project failed${tail ? `: ${tail}` : ""}` };
   }
-  return { hooks, stale, ...(setupBlob ? { setupBlob } : {}), ...memory };
+  return { hooks, stale, ...(setupBlob ? { setupBlob } : {}), ...(setupInputs ? { setupInputs } : {}), ...memory };
 }
 
 /** Why a command that did not exit on its own stopped, in words; null for

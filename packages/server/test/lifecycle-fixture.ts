@@ -211,7 +211,7 @@ export function lifecycle(root: string, options: { slots: number; idleMs?: numbe
   const start = (restart: { wakeWaitMs?: number } = {}): Cubed => {
     const { machines, conversations } = threadRuntime({ registry, threads: path.join(root, "threads"), models, now: () => clock.now,
       patience: { retryMs: 50, wakeMs: restart.wakeWaitMs ?? options.wakeWaitMs ?? 600, restartMs: options.restartMs ?? 0 },
-      runner: { session: () => berth.session(), policy, log: quiet, templates: { enabled: false, ttlMs: 0 }, idleMs: options.idleMs ?? 60_000 } });
+      runner: { session: () => berth.session(), policy, log: quiet, templates: { enabled: false }, idleMs: options.idleMs ?? 60_000 } });
     return { conversations, machines, close: () => conversations.close(2000) };
   };
   let requests = 0;

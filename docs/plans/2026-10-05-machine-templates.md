@@ -16,7 +16,9 @@ file keeps the proposal and records where the build differs from it.
   (The proposal reran setup every time.)
 - **24 hours**, not 72 (`CUBED_TEMPLATE_TTL_HOURS`): reuse skips setup, so
   the TTL bounds how stale dependencies may get; rebuilding costs one extra
-  boot for one thread a day.
+  boot for one thread a day. Later replaced: a template has no age limit and
+  is invalidated by the setup inputs a repository declares
+  (docs/project-hooks.md, "Setup inputs").
 - **Builds use the triggering thread's slot**, before its own machine
   exists, instead of idle runners: no capacity is taken from waiting
   threads and nothing schedules background work. The first thread of a

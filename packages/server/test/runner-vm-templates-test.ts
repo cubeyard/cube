@@ -37,7 +37,7 @@ import { registryCredentialRoute } from "../src/runner-credentials.ts";
 import { RunnerMachines } from "../src/runner-machines.ts";
 import { callTimeout, PUBLISH_TIMEOUT_MS, RunnerError, type RunnerSession } from "../src/runner-session.ts";
 import { currentMachineEpoch } from "../src/vm.ts";
-import { DEFAULT_TEMPLATE_TTL_MS, TEMPLATE_FORMAT, keelTemplateKey, keelTemplateParts, runnerCaSha256, templateMeta } from "../src/vm-template.ts";
+import { TEMPLATE_FORMAT, keelTemplateKey, keelTemplateParts, runnerCaSha256, templateMeta } from "../src/vm-template.ts";
 import { LocalGuestTransport } from "./local-guest.ts";
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cube-vm-templates-")));
@@ -225,7 +225,7 @@ const policy = new EgressPolicy({ vms: { vm: () => null }, secrets: [{ name: "gi
 const vmSession = fakeSession(Runner_Kind.VM);
 const hostSession = fakeSession(Runner_Kind.HOST);
 const sizes = { vcpus: 2, memoryMiB: 2048, diskGiB: 16 };
-const machinesFor = (templatesOn = true) => new RunnerMachines({ registry, threads, sizes, policy, log: quiet, templates: { enabled: templatesOn, ttlMs: DEFAULT_TEMPLATE_TTL_MS },
+const machinesFor = (templatesOn = true) => new RunnerMachines({ registry, threads, sizes, policy, log: quiet, templates: { enabled: templatesOn },
   session: admission => admission.configHash === "host1" ? hostSession : vmSession });
 const vms = machinesFor();
 const route = registryCredentialRoute({ registry, threads, socket: () => null });
@@ -235,7 +235,8 @@ const newThread = (projectId: string, runnerId = NODE) => registry.createThread(
 const steps = (thread: Thread) => registry.getThread(thread.id)!.vm!.steps!.map(step => `${step.name}:${step.state}`);
 const step = (thread: Thread, name: string) => registry.getThread(thread.id)!.vm!.steps!.findLast(item => item.name === name)!;
 const created = (thread: Thread) => of("machineCreate").filter(call => call.value.ref.id === registry.getThread(thread.id)!.vm!.vmId);
-const meta = (projectId: string) => JSON.stringify({ format: TEMPLATE_FORMAT, projectId, setupBlob: "none", commit: null });
+const meta = (projectId: string) => JSON.stringify({ format: TEMPLATE_FORMAT, projectId, setupBlob: "none", setupInputs: "none", commit: null });
+const DAY_MS = 24 * 60 * 60 * 1000;
 const listed = (id: string, key: string, metaText: string, ageMs = 0) => templates.set(id, create(TemplateSchema, { id, key, meta: metaText, state: Template_State.READY,
   diskGib: 16, bytes: 1n, createdAt: { seconds: BigInt(Math.floor((Date.now() - ageMs) / 1000)), nanos: 0 } }));
 
@@ -308,13 +309,14 @@ try {
   assert.deepEqual(steps(off), ["lookup:ok", "boot:ok"]);
   console.log("ok: no template capability, or CUBED_TEMPLATES=off: the base, and the lookup says why");
 
-  // The lookup's housekeeping (C7): an expired and a gone project's template of this cubed are deleted;
-  // one it cannot read (not cubed's meta) and a fresh one of another project are never touched.
-  listed("e0e0e0e0e0e0e0e0", "k-expired", meta("p"), DEFAULT_TEMPLATE_TTL_MS + 60000);
+  // The lookup's housekeeping (C7): a template made before cube tracked setup inputs and a gone
+  // project's template of this cubed are deleted; one it cannot read (not cubed's meta) and another
+  // project's are never touched, however old.
+  listed("e0e0e0e0e0e0e0e0", "k-legacy", JSON.stringify({ format: TEMPLATE_FORMAT, projectId: "p", setupBlob: "none", commit: null }), 2 * DAY_MS);
   listed("9090909090909090", "k-gone", meta("gone-project"));
-  listed("aaaaaaaaaaaaaaaa", "v10-key", "{\"setup\":\"v10\"}", DEFAULT_TEMPLATE_TTL_MS + 60000);
-  listed("bbbbbbbbbbbbbbbb", "k-r", meta("r"));
-  listed("cccccccccccccccc", "k-p-old", JSON.stringify({ format: TEMPLATE_FORMAT, projectId: "p", setupBlob: "none", commit: null,
+  listed("aaaaaaaaaaaaaaaa", "v10-key", "{\"setup\":\"v10\"}", 30 * DAY_MS);
+  listed("bbbbbbbbbbbbbbbb", "k-r", meta("r"), 30 * DAY_MS);
+  listed("cccccccccccccccc", "k-p-old", JSON.stringify({ format: TEMPLATE_FORMAT, projectId: "p", setupBlob: "none", setupInputs: "none", commit: null,
     parts: { ...keelTemplateParts(keyInput), preSetup: "0123456789abcdef" } }), 60000);
 
   // Thread A builds the project's template in its slot; thread C comes meanwhile and starts fresh.
@@ -351,9 +353,9 @@ try {
   const afterA = registry.getThread(a.id)!.vm!;
   assert.deepEqual(steps(a), ["lookup:ok", "build-boot:ok", "build-prepare:ok", "build-publish:ok", "boot:ok"], "no build-seal: keel cleans the layer itself");
   assert.equal(step(a, "lookup").detail, "the pre-setup hook changed since template cccccccccccccccc: building one");
-  // C7: deleted are the expired and the gone project's ones at the lookup, the superseded one after the publication.
+  // C7: deleted are the legacy and the gone project's ones at the lookup, the superseded one after the publication.
   assert.deepEqual(of("templateDelete").map(call => call.value.id), ["e0e0e0e0e0e0e0e0", "9090909090909090", "cccccccccccccccc"]);
-  assert.ok(templates.has("aaaaaaaaaaaaaaaa") && templates.has("bbbbbbbbbbbbbbbb"), "a template cubed cannot read, and another project's, stay");
+  assert.ok(templates.has("aaaaaaaaaaaaaaaa") && templates.has("bbbbbbbbbbbbbbbb"), "a template cubed cannot read, and another project's 30-day-old one, stay");
   // The build machine: its own id, base, build disk, the thread's size; its own documents and policy.
   const [buildCreate] = of("machineCreate").filter(call => call.value.spec.build === true);
   const buildId = buildCreate!.value.ref.id as string;
@@ -384,7 +386,7 @@ try {
   assert.deepEqual([publish!.value.from, publish!.value.key], [{ owner: a.id, id: buildId }, key]);
   const published = templateMeta(publish!.value.meta)!;
   const blob = git(path.join(root, "git", "good-seed"), "rev-parse", "HEAD:.agents/setup");
-  assert.deepEqual([published.projectId, published.setupBlob, published.commit, published.parts?.guest], ["p", blob, good.oid, undefined]);
+  assert.deepEqual([published.projectId, published.setupBlob, published.setupInputs, published.commit, published.parts?.guest], ["p", blob, "none", good.oid, undefined]);
   assert.equal(step(a, "build-publish").detail, "template " + buildId + ", 384 MB");
   // C1: the build machine is used up; cubed forgets it and never deletes it.
   assert.equal(of("machineDelete").filter(call => call.value.ref.id === buildId).length, 0, "C1: no machine_delete of a published build machine");
@@ -394,7 +396,7 @@ try {
   assert.equal(route.refuse(runnerAdmission, { owner: a.id, id: buildId }, BigInt(currentMachineEpoch(path.join(threads, a.id, "vm")))) !== null, true,
     "after the publication the build machine is refused");
   // The thread's machine from the template.
-  assert.deepEqual(afterA.preparation, { source: "template", templateId: buildId, setupBlob: blob });
+  assert.deepEqual(afterA.preparation, { source: "template", templateId: buildId, setupBlob: blob, setupInputs: "none" });
   assert.deepEqual(created(a).map(call => call.value.spec.source), [{ case: "templateId", value: buildId }]);
   console.log(`ok: thread A built template ${buildId}: own id, placeholder, documents and policy, build disk, checkout + pre-setup + setup by cubed, `
     + "published with key and meta; C1: never deleted; superseded and obsolete templates of this cubed deleted, one it cannot read kept; the thread's machine from it");
@@ -405,10 +407,26 @@ try {
   await vms.start(b);
   assert.deepEqual(steps(b), ["lookup:ok", "boot:ok"]);
   assert.match(step(b, "lookup").detail!, new RegExp(`^template ${buildId}, prepared under a minute ago$`));
-  assert.deepEqual(registry.getThread(b.id)!.vm!.preparation, { source: "template", templateId: buildId, setupBlob: blob });
+  assert.deepEqual(registry.getThread(b.id)!.vm!.preparation, { source: "template", templateId: buildId, setupBlob: blob, setupInputs: "none" });
   assert.deepEqual(created(b).map(call => call.value.spec.source), [{ case: "templateId", value: buildId }]);
   assert.equal(of("templatePublish").length, 0);
   console.log("ok: thread B starts from the template; nothing is built");
+
+  // No age limit: a template prepared 30 days ago is still the project's, and nothing is deleted.
+  {
+    const shown = templates.get(buildId)!;
+    const createdAt = shown.createdAt;
+    shown.createdAt = { ...createdAt!, seconds: createdAt!.seconds - BigInt(30 * DAY_MS / 1000) };
+    calls.length = 0;
+    const late = newThread("p");
+    await vms.start(late);
+    assert.deepEqual(steps(late), ["lookup:ok", "boot:ok"]);
+    assert.match(step(late, "lookup").detail!, new RegExp(`^template ${buildId}, prepared `));
+    assert.deepEqual(created(late).map(call => call.value.spec.source), [{ case: "templateId", value: buildId }]);
+    assert.deepEqual([of("templatePublish").length, of("templateDelete").length], [0, 0]);
+    shown.createdAt = createdAt;
+    console.log("ok: a 30-day-old template with the same key is reused; age deletes nothing");
+  }
 
   // The template is gone or refused before the machine is created: the base, with the reason.
   for (const [refusal, reason] of [[null, `template ${buildId} was removed before the machine was created`],
@@ -419,7 +437,7 @@ try {
     let saved: Template | undefined;
     // Refused, or removed between the lookup and the create.
     if (refusal) fake.refuseTemplate.set(buildId, refusal);
-    const machinesOf = new RunnerMachines({ registry, threads, sizes, policy, log: quiet, templates: { enabled: true, ttlMs: DEFAULT_TEMPLATE_TTL_MS },
+    const machinesOf = new RunnerMachines({ registry, threads, sizes, policy, log: quiet, templates: { enabled: true },
       session: () => ({ ...vmSession, hello: vmSession.hello, call: vmSession.call, machine: async (verb: { case: string; value: any }) => {
         if (!refusal && verb.case === "machineCreate" && verb.value.spec.source?.case === "templateId") { saved = templates.get(buildId); templates.delete(buildId); }
         return vmSession.machine(verb as never);

@@ -39,7 +39,7 @@ const asked: string[] = [];
 const quiet = { info() {}, warn() {}, error() {}, debug() {} } as never;
 const open = () => createCubed({ state, models, claude: null, gateway: null, skillSource: null, runnerProbeIntervalMs: 20,
   runnerHealth: async runner => { asked.push(runner.nodeId); return { ...health, kind: runner.kind ?? "vm" }; },
-  runner: { log: quiet, templates: { enabled: false, ttlMs: 0 },
+  runner: { log: quiet, templates: { enabled: false },
     session: admission => { sessions.push(admission.configHash); return berths[admission.configHash]!.session(); } } });
 /** A stored history page's transcript: its status and events (not which agent holds it now). */
 const texts = (page: { status?: unknown; total?: number; events?: unknown[] } | null) => JSON.stringify(page ? { status: page.status, total: page.total, events: page.events } : null);

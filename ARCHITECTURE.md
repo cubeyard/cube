@@ -786,9 +786,11 @@ project's template on that runner when there is one: a read-only EROFS layer
 preparation: the template's checkouts are moved to the thread's pinned
 commits (fetch, `checkout -f`, reflogs expired), pre-setup and setup are
 `skipped`, and resume runs as on every boot. If the pinned `.agents/setup`
-blob differs from the one the template ran (its metadata), pre-setup and
-setup run in this machine and the template is removed so the next thread
-builds a new one. Without a template the thread's slot is first used by a
+blob or the fingerprint of the inputs `.agents/setup-inputs` declares
+differs from the one the template ran (its metadata, `setupBlob` and
+`setupInputs`; docs/project-hooks.md, "Setup inputs"), pre-setup and setup
+run in this machine and the template is removed so the next thread builds a
+new one. Without a template the thread's slot is first used by a
 **build machine** (`build: true`): the base, its own machine id and GitHub
 placeholder (registered so the credential path serves it), the thread's
 pinned checkouts, pre-setup and `.agents/setup`. Only if all of that
@@ -821,12 +823,13 @@ never enter a guest.
 **Key and lifetime.** A template is reused when its key matches: the
 project, its repositories (URL, branch, checkout name), the pre-setup hook,
 the runner's base image and platform and the disk size (`keelTemplateKey`). The commit is not in it (the checkout is refreshed) and neither
-are resume hooks (they always run). It is reused for 24 hours
-(`CUBED_TEMPLATE_TTL_HOURS`; the age compares the runner's clock at
-publication with cubed's, so clock skew between the hosts shifts it), which bounds how stale dependencies that
-`.agents/setup` installed can be while the setup file itself is unchanged;
-put what must be fresh per thread in a resume hook. Publishing a template
-removes the project's older ones on that runner; expired templates and those
+are resume hooks (they always run). A template has no age limit: it is
+reused until its key, the pinned `.agents/setup` or its declared inputs
+change. What setup downloads without a pin is refreshed by changing
+`.agents/setup-inputs` (docs/project-hooks.md, "Setup inputs"); put what
+must be fresh per thread in a resume hook. Publishing a template removes
+the project's older ones on that runner; templates made before cube tracked
+setup inputs (no `setupInputs` in their metadata, never reused) and those
 of deleted projects are removed when the next machine is allocated there.
 The runner deletes a removed template once no machine depends on it
 (retained ones included). One build per runner and key runs at a time: a
@@ -834,7 +837,7 @@ thread that comes meanwhile starts fresh. `CUBED_TEMPLATES=off`, a runner
 without the template capabilities or a `berth host` means every machine
 starts fresh. A template's metadata also keeps short
 hashes of its key's parts, so a thread that finds none can say why: none
-yet, expired, or which part changed (repositories, pre-setup, the base
+yet, made before cube tracked setup inputs, or which part changed (repositories, pre-setup, the base
 image, the disk size). The startup phases (`allocate`,
 `build-*`, `boot`, `prepare`, `resume`) and the total from creation to ready
 are logged ("machine ready for the agent") and kept in `thread.vm.startup`.

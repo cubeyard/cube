@@ -32,7 +32,7 @@ async function scenario(name: string, drop: boolean): Promise<void> {
   const open = () => createCubed({ state, models: createModels(), claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")],
     claudeOptions: { stopGraceMs: 2000 }, gateway: null, skillSource: null, now: () => clock.now,
     patience: { retryMs: 50, wakeMs: 20_000, restartMs: 0 },
-    runner: { session: () => berth.session(), log: quiet, templates: { enabled: false, ttlMs: 0 }, idleMs: 60_000 } });
+    runner: { session: () => berth.session(), log: quiet, templates: { enabled: false }, idleMs: 60_000 } });
   let app = await open();
   try {
     app.registry.saveProject(project);

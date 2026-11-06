@@ -580,7 +580,9 @@ export class Conversations {
       if (outcome) this.endPrepare(id, last, outcome, true);
       if (!outcome || outcome.error) {
         const attempt = last + 1;
-        const mode = preparation?.source === "template" && preparation.setupBlob ? { kind: "template" as const, setupBlob: preparation.setupBlob } : { kind: "fresh" as const };
+        // A preparation recorded before cube tracked setup inputs has none: "" never matches, so setup runs here and the template goes.
+        const mode = preparation?.source === "template" && preparation.setupBlob
+          ? { kind: "template" as const, setupBlob: preparation.setupBlob, setupInputs: preparation.setupInputs ?? "" } : { kind: "fresh" as const };
         this.registry.updateThreadVm(id, { provisionAttempt: attempt });
         this.registry.beginStartupStep(id, { name: "prepare", attempt,
           detail: mode.kind === "template" ? "checkout on the template's disk" : "checkout, pre-setup and .agents/setup" });
@@ -593,7 +595,7 @@ export class Conversations {
       }
       this.recordHooks(id, outcome.hooks, "prepare", preparing);
       if (outcome.stale && preparation?.templateId) {
-        log.info("template is stale: the pinned .agents/setup changed", { thread: id, template: preparation.templateId });
+        log.info("template is stale: the pinned .agents/setup or its declared inputs changed", { thread: id, template: preparation.templateId });
         await this.machines.invalidateTemplate(thread, preparation.templateId).catch(error => log.warn("invalidating the template failed", { thread: id, error }));
       }
       await this.resume(id, true);
