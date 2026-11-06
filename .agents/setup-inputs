@@ -1,0 +1,13 @@
+# What .agents/setup installs from, besides itself. A change to any of these
+# files at a thread's commit makes the project's machine template stale: that
+# thread runs setup itself and the next one builds a new template
+# (docs/project-hooks.md, "Setup inputs").
+#
+# Not listed: packages/web, which setup only builds into packages/web/dist.
+# It changes several times a day, and everything that serves or tests the
+# build runs `pnpm build` first (scripts/test-browser.sh, verify-cube).
+package.json
+pnpm-lock.yaml
+pnpm-workspace.yaml
+rust-toolchain.toml
+scripts/setup-browsers.sh
