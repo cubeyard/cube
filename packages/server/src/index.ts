@@ -652,7 +652,7 @@ export async function createCubed(options: {
       if (url.pathname === "/api/state" && method === "GET") {
         const available = await catalog();
         // With no Pi provider, Claude Code on this host still runs threads on
-        // its own login (which cubed cannot see); do not point to providers.
+        // the host's Claude token (the model channel); do not point to providers.
         const auth = available.length ? { state: "ok", provider: available[0].provider, credentialType: "host" }
           : conversations.claudeAvailable ? { state: "ok", provider: CLAUDE_PROVIDER, credentialType: "claude code login" }
           : { state: "missing", provider: "model" };

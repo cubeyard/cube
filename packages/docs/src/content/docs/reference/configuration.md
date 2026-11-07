@@ -15,6 +15,7 @@ cubed reads its settings from the environment. The release launcher and the Home
 | `CUBED_ALLOWED_HOSTS` | none | comma-separated host names accepted in requests, besides `localhost`, `127.0.0.1` and `[::1]`; protects against DNS rebinding, not access control |
 | `CUBED_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 | `CUBED_CLAUDE` | the first `claude` on `PATH` | the Claude Code program for Claude Code threads, or `off` |
+| `CLAUDE_CODE_OAUTH_TOKEN` | none | the long-lived token from `claude setup-token`; the gateway gives it to Claude Code threads' model requests, and Claude Code itself gets a placeholder |
 | `CUBED_GITHUB_TOKEN` | `gh auth token` | the GitHub token the gateway gives threads' requests to GitHub |
 | `CUBED_GATEWAY` | the release's `bin/cube-gateway` | the `cube-gateway` program |
 | `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Pi's directory: model logins (`auth.json`), custom models (`models.json`) and default model |

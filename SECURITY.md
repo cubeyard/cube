@@ -133,12 +133,39 @@ project, not another project's; a revision keeps the earlier ones whole,
 runs nothing, and keeps a merge pinned to the head it names.
 
 Claude Code threads run the unmodified `claude` binary on the cubed host, as the
-cubed user, with that user's own Claude login. cubed never stores Claude
-credentials. The child's environment is an allow-list (home, path, locale,
-temporary and XDG directories, proxies and certificates, `CLAUDE_CONFIG_DIR` and
-`CLAUDE_CODE_OAUTH_TOKEN`) plus the workspace variables: no `ANTHROPIC_*`
-variable, no Bedrock/Vertex/Foundry switch, and none of cubed's provider, Git or
-cloud credentials. Claude Code starts with `--setting-sources ""`,
+cubed user. Their model traffic goes through cube-gateway's model channel: a
+listener on `127.0.0.1` that the gateway picks a port for. The child gets
+`ANTHROPIC_BASE_URL` pointing at it (the thread's id in the path, the
+host added to `NO_PROXY`) and `CLAUDE_CODE_OAUTH_TOKEN` set to that thread's
+placeholder (`cube_ph_claude_…`), never the real token. The real token is the
+host's long-lived one from `claude setup-token`, given to cubed as
+`CLAUDE_CODE_OAUTH_TOKEN` in cubed's own environment; cubed does not store it.
+Any local process can connect to the listener, so the placeholder is what
+authorizes a request: the gateway refuses one without exactly one `claude`
+placeholder, to a route other than `POST /v1/messages` and
+`POST /v1/messages/count_tokens`, or that cubed's policy denies (the
+placeholder must be the live one of the thread the path names; 5 s, fail
+closed). It then substitutes the token, sends the request to
+api.anthropic.com over TLS and turns the token back into the placeholder in
+the streamed answer. Each exchange, refusals included, is kept in
+`CUBED_STATE/model-audit.sqlite` (0600, append-only): the request body as the
+child sent it and the answer as the child got it, by SHA-256, with an
+allow-list of headers (never `Authorization`), and web search results as events
+of their own. That file holds the threads' prompts, code and answers in full;
+protect it like the state directory. Without the token or the listener a
+Claude Code turn fails and says why; there is no fallback to Claude Code's own
+login or an API key. Claude Code still reaches some Anthropic services
+directly, not through the base URL (start-up bootstrap, feature flags,
+telemetry); those requests carry only the placeholder, so Anthropic refuses
+them. The child's environment is otherwise an allow-list (home, path,
+locale, temporary and XDG directories, proxies and certificates,
+`CLAUDE_CONFIG_DIR`) plus the workspace variables: no inherited `ANTHROPIC_*`
+or `CLAUDE_CODE_OAUTH_TOKEN`, no Bedrock/Vertex/Foundry switch, and none of
+cubed's provider, Git or cloud credentials. The child runs as the cubed user,
+so it can still read what that user can, a login Claude Code stored in its
+config directory included: the placeholder keeps the token out of its
+environment and requests, not out of reach of a process with the cubed user's
+authority. Claude Code starts with `--setting-sources ""`,
 `--strict-mcp-config` and an empty MCP configuration, so the user's settings
 hooks and MCP servers do not load, and `--tools` limits it to the mod's
 allow-list. The mod sends Bash, Read, Write and Edit to the thread's machine (a
@@ -146,7 +173,7 @@ file path outside the workspace names a file in that machine, read and written
 with the guest `agent` account's permissions, never one on the cubed host) and
 refuses every other tool not on that list (MCP tools and unknown built-ins
 included) and every subagent. Claude Code itself still runs on the cubed host with the cubed user's
-authority and reads its own login from its config directory: it is not
+authority (it holds a placeholder for its model, not the token): it is not
 sandboxed either, and these guards depend on Claude Code honouring its flags
 and hooks, which no real session has verified yet. The mod reaches the
 thread workspace on a mode-0600 Unix socket under `CUBED_STATE/run` that serves

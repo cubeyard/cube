@@ -28,7 +28,12 @@
 - **cube-gateway:** started and supervised by cubed; the credential proxy:
   a `berth vm`'s request a credential rule matches comes over a `credential`
   stream through cubed, is decided by cubed's egress policy and gets the real
-  secret here, the only process that holds it. The network stack (LAN, DNS,
+  secret here, the only process that holds it. It is also Claude Code's
+  model channel: a claude-code thread's `claude` child sends its model
+  requests to the gateway's loopback listener with a per-thread placeholder,
+  and the gateway substitutes the host's token, streams the answer back and
+  keeps an append-only audit (`CUBED_STATE/model-audit.sqlite`; "Claude Code
+  threads" below). The network stack (LAN, DNS,
   address check, CA, the guest-facing half of HTTP) is the library
   `cube-netstack` (`packages/netstack`), which berth vm runs per machine.
 - **OptChat:** the user's one endless chat (`optchat*.ts`). A second
@@ -292,8 +297,9 @@ it, and keeps the chat working meanwhile.
 ## Claude Code threads
 
 Claude Code is an alternative thread agent for one purpose: to use the person's
-own Claude Max subscription through the unmodified `claude` binary and its own
-login (`claude /login` or `claude setup-token`). Choosing a model under
+own Claude Max subscription through the unmodified `claude` binary, with the
+host's long-lived token from `claude setup-token` held by cubed and the
+gateway, never by the child (the model channel below). Choosing a model under
 "claude · max" at thread creation makes a `claude-code` thread; the agent is
 fixed for the thread, and within it only Claude Code's own models (`fable`, `opus`,
 `sonnet`, `haiku`) can be chosen. Claude Code is not a provider in cube's model
@@ -341,11 +347,62 @@ kills the child, when the child dies mid-turn and on close, because the mod
 never sees an abort then. A model
 change closes the idle child so the next prompt resumes with the new
 `--model`. An idle child is closed after ten minutes, never while a background agent still runs: ending the child ends it (threads start none now, see the mod below; the tracking keeps the records of sessions that did). cubed follows Claude Code's `task_started`/`task_notification` messages; the turn Claude Code takes by itself for a finished background agent is recorded as a run of its own, and background agents that can no longer finish (the child ended, cubed stopped, 4 hours passed) as a failed run, so watchers hear of them once (docs/optchat.md, "Follow-up and unattended work"). cubed never stores Claude
-credentials; the child gets an allow-listed environment without any
-`ANTHROPIC_*` variable or Bedrock/Vertex switch, so the subscription is used
-instead of API billing, and without cubed's other credentials. The user's
+credentials; the child gets an allow-listed environment without any inherited
+`ANTHROPIC_*` variable, Claude token or Bedrock/Vertex switch, and without
+cubed's other credentials, plus the model channel's two variables. The user's
 settings files and MCP servers are not loaded. `findClaude()` locates the binary (`CUBED_CLAUDE` names
 it, or `off`); without one, claude · max is not offered.
+
+### The model channel
+
+```
+claude (cubed's child)                       cube-gateway (model.rs)                      cubed
+  ANTHROPIC_BASE_URL=http://127.0.0.1:P/t/<thread>
+  CLAUDE_CODE_OAUTH_TOKEN=cube_ph_claude_…
+  POST /t/<thread>/v1/messages ─────────────▶ route on the list? one claude placeholder?
+                                               POST /v1/decide {channel: model, thread} ─▶ the thread's live placeholder? ─▶ token
+                                               token substituted, TLS to api.anthropic.com
+  ◀── SSE as it comes, token turned back ───── B6 (reverse.rs), copy kept ─▶ model-audit.sqlite
+```
+
+`ClaudeModelChannel` (`model-channel.ts`) gives each claude-code thread a
+placeholder while its agent is open (withdrawn on close) and the base URL of
+the gateway's model listener, which the supervisor asks for with
+`--model-listen` and `--model-audit` when cubed runs Claude Code. The
+listener is loopback TCP: `ANTHROPIC_BASE_URL` takes an HTTP URL, and Claude
+Code's only socket transport (`ANTHROPIC_UNIX_SOCKET`) is undocumented and
+switches it into a host-managed-provider mode. The port is the gateway's
+choice on its first start and asked for again on every restart, so a running
+child's base URL stays right; its host is added to the child's `NO_PROXY`
+(Claude Code would send even a loopback base URL through `HTTPS_PROXY`).
+cubed's policy (`egress-policy.ts`, `channel: "model"`) allows a request only
+with the placeholder of the thread the path names, over HTTPS to
+api.anthropic.com, and returns `claudeSecret`, `CLAUDE_CODE_OAUTH_TOKEN` in
+cubed's environment; the guests' secrets and rules never include it. The
+gateway forwards only `POST /v1/messages` and `POST /v1/messages/count_tokens`
+(Claude Code's model routes) and refuses every other route. It refuses a request
+without exactly one `claude` placeholder or that cubed denies (5 s, fail closed),
+recording each refusal. The answer streams frame by frame: B6 holds back only a
+tail that could still begin the token. Without the listener or the token,
+`ClaudeAgent` records the turn as failed with the reason and starts nothing.
+
+The audit (`audit.rs`) is the gateway's own append-only SQLite file
+(triggers refuse UPDATE and DELETE), written on one thread: per exchange the
+thread, route, outcome (`forwarded`, `refused`, `failed`, `cut`), status, an
+allow-list of headers, and the request body as the child sent it and the
+answer as it got it, stored once by SHA-256; each `web_search_tool_result`
+block of an answer is an event of its own. It holds no token and no
+`Authorization`. Nothing reads it back as an agent's input.
+
+Claude Code 2.1.319 sends its model requests to the base URL with
+`Authorization: Bearer <placeholder>` and the `oauth-2025-04-20` beta, the
+subscription's own auth mode. It still reaches a few Anthropic services
+directly (`/api/claude_cli/bootstrap`, `/api/eval/…`,
+`/api/event_logging/v2/batch`, `/mcp-registry/…`), which carry only the
+placeholder and are refused there. `scripts/check-claude-model-channel.ts`
+runs a real `claude` through the real gateway, cubed's policy and channel:
+offline against a TLS fake of api.anthropic.com, or `--real` for one
+subscription session.
 
 The mod (`packages/claude-mod`) is a Claude Code plugin of function hooks. Its
 `tool.call` hooks answer Bash, Read, Write and Edit from the thread Workspace,
@@ -474,6 +531,8 @@ keys there; they are left as they are).
 of OptChat (derived, rebuildable from the stores above).
 `CUBED_STATE/artifacts.sqlite` holds work artifacts, their revisions,
 comments and action runs.
+`CUBED_STATE/model-audit.sqlite` is cube-gateway's append-only audit of
+claude-code threads' model traffic (0600), written by the gateway only.
 `CUBED_STATE/run/` holds the private sockets (`workspace.sock`,
 `credential.sock`, `egress.sock`); `CUBED_STATE/gateway/`, the protocol-3
 gateway's Iroh key and CA, is kept where it exists and no longer read. The

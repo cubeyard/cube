@@ -26,6 +26,8 @@ The agents themselves are not sandboxed. Pi, its code-mode worker and Claude Cod
 
 Claude Code threads start with a fixed tool list, no user settings, hooks or MCP servers, and Bash, Read, Write and Edit sent to the machine. These guards depend on Claude Code honoring its flags, and Claude Code itself still runs as your user.
 
+Claude Code holds a placeholder, not your Claude token. Its model requests go to cube's gateway on `127.0.0.1`, which puts in the token from `claude setup-token`, sends them to Anthropic and keeps a per-thread record in `model-audit.sqlite`. Claude Code runs as your user, so it can still read files that user can read, a login it saved earlier included.
+
 ## what a thread can read
 
 - **Your chat with cube.** Every new thread gets a view of the chat in its prompt and can read any message of it, including briefs and reports of other threads and projects. Secret-looking values are redacted: tokens, `key=value` pairs, passwords in URLs and private keys. A secret written in plain words is not. The thread's model provider receives what the thread reads.
