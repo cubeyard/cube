@@ -76,6 +76,8 @@ fn events(auth: &str) -> (String, String) {
         concat!(
             "event: content_block_start\n",
             "data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"s\",\"content\":[{{\"type\":\"web_search_result\",\"url\":\"https://example.com/{auth}\"}}]}}}}\n\n",
+            "event: content_block_start\n",
+            "data: {{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n",
             "event: content_block_delta\n",
             "data: {{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{auth}{auth}\"}}}}\n\n",
             "event: message_stop\n",
@@ -277,7 +279,7 @@ fn read_exchanges(audit: &Path) -> Vec<serde_json::Value> {
     let mut statement = connection
         .prepare(
             "SELECT seq, thread, method, route, outcome, status, reason, request_headers, request_sha256,
-               response_headers, response_sha256, (SELECT count(*) FROM event WHERE exchange=seq)
+               response_headers, response_sha256, (SELECT count(*) FROM event WHERE event.exchange=exchange.seq), response_message_sha256
              FROM exchange ORDER BY seq",
         )
         .unwrap();
@@ -296,6 +298,7 @@ fn read_exchanges(audit: &Path) -> Vec<serde_json::Value> {
                 "response_headers": row.get::<_, String>(9)?,
                 "response": row.get::<_, Option<String>>(10)?,
                 "events": row.get::<_, i64>(11)?,
+                "message": row.get::<_, Option<String>>(12)?,
             }))
         })
         .unwrap()
@@ -345,6 +348,23 @@ fn post(path: &str, auth: Option<&str>, extra: &[(&str, &str)]) -> hyper::Reques
 
 fn substitute() -> DecideFn {
     allow_with(&[(PH, TOKEN)])
+}
+
+/// The answer as the audit reconstructs it: one message, placeholder only.
+fn expected_message() -> serde_json::Value {
+    serde_json::json!({
+        "id": "m", "echo": PH,
+        "content": [
+            { "type": "web_search_tool_result", "tool_use_id": "s",
+              "content": [{ "type": "web_search_result", "url": format!("https://example.com/{PH}") }] },
+            { "type": "text", "text": format!("{PH}{PH}") },
+        ],
+    })
+}
+
+fn message_of(audit: &Path, row: &serde_json::Value) -> serde_json::Value {
+    let hash = row["message"].as_str().expect("a reconstructed message");
+    serde_json::from_slice(&blob(audit, hash)).unwrap()
 }
 
 fn expected_answer() -> String {
@@ -427,6 +447,11 @@ async fn sse_streams_as_it_comes_with_the_token_upstream_and_only_the_placeholde
         blob(&channel.audit, row["response"].as_str().unwrap()),
         received
     );
+    assert_eq!(
+        message_of(&channel.audit, row),
+        expected_message(),
+        "the stream reconstructed as one message"
+    );
     let request_headers = row["request_headers"].as_str().unwrap();
     assert!(
         request_headers.contains("anthropic-beta") && !request_headers.contains("authorization")
@@ -468,6 +493,23 @@ async fn the_answer_is_the_same_however_the_upstream_chunks_it() {
     assert_eq!(body, format!("{{\"input_tokens\":3,\"echo\":\"{PH}\"}}"));
     let rows = channel.exchanges(8).await;
     assert!(rows.iter().all(|row| row["outcome"] == "forwarded"));
+    // Every chunking, the token split anywhere: the same message, the same
+    // hash, and its web search result an event of its own.
+    for row in &rows[..7] {
+        assert_eq!(
+            message_of(&channel.audit, row),
+            expected_message(),
+            "{}",
+            row["seq"]
+        );
+        assert_eq!(row["message"], rows[0]["message"]);
+        assert_eq!(row["events"], 1);
+    }
+    assert_eq!(
+        message_of(&channel.audit, &rows[7])["echo"],
+        PH,
+        "a whole JSON answer is its own message"
+    );
     assert!(!contains(&audit_bytes(&channel.audit), TOKEN));
 }
 

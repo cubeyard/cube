@@ -147,7 +147,7 @@ try {
   try { result = JSON.parse(stdout) as typeof result; } catch { /* reported below */ }
   await new Promise(resolve => setTimeout(resolve, 500));
   const db = new DatabaseSync(audit, { readOnly: true });
-  const rows = db.prepare("SELECT seq, method, route, outcome, status, reason, request_sha256 AS request, response_sha256 AS response, request_headers AS headers, (SELECT count(*) FROM event WHERE exchange=seq) AS events FROM exchange WHERE thread=? ORDER BY seq").all(THREAD) as Array<Record<string, unknown>>;
+  const rows = db.prepare("SELECT seq, method, route, outcome, status, reason, request_sha256 AS request, response_sha256 AS response, response_message_sha256 AS message, request_headers AS headers, (SELECT count(*) FROM event WHERE event.exchange=exchange.seq) AS events FROM exchange WHERE thread=? ORDER BY seq").all(THREAD) as Array<Record<string, unknown>>;
   db.close();
   const files = ["", "-wal", "-shm"].map(suffix => `${audit}${suffix}`).filter(file => fs.existsSync(file));
   const leaks = {
@@ -160,7 +160,7 @@ try {
     claude: version, exit: code, subtype: result.subtype ?? null, isError: result.is_error ?? null, apiErrorStatus: result.api_error_status ?? null,
     resultSha256: result.result ? sha(result.result) : null, resultLength: result.result?.length ?? null,
     routes: rows.map(row => ({ method: row.method, route: row.route, outcome: row.outcome, status: row.status, reason: row.reason, events: row.events,
-      requestSha256: row.request, responseSha256: row.response,
+      requestSha256: row.request, responseSha256: row.response, messageSha256: row.message,
       oauthBeta: String(row.headers).includes("oauth-2025-04-20") })),
     directHosts: [...new Set(proxy.hosts)],
     tokenFound: leaks,
@@ -176,6 +176,11 @@ try {
     assert.ok(fake.seen.length > 0 && fake.seen.every(seen => seen.auth === `Bearer ${token}`), "the token went upstream");
     assert.ok(result.result?.includes(modelEnv.CLAUDE_CODE_OAUTH_TOKEN), "the echoed token came back as the placeholder");
     assert.ok(forwarded.some(row => Number(row.events) === 1), "the web search result is its own audit event");
+    const db2 = new DatabaseSync(audit, { readOnly: true });
+    const message = JSON.parse(Buffer.from((db2.prepare("SELECT bytes FROM blob WHERE sha256=?").get(String(forwarded[0]!.message)) as { bytes: Uint8Array }).bytes).toString("utf8")) as { content: Array<{ type: string; text?: string }> };
+    db2.close();
+    assert.deepEqual(message.content.map(block => block.type), ["web_search_tool_result", "text"], "the stream reconstructed as one message");
+    assert.ok(message.content[1]!.text?.includes(modelEnv.CLAUDE_CODE_OAUTH_TOKEN), "the reconstructed text holds the placeholder");
   }
   console.log(`ok: ${report.mode}: claude ${version} through cube's model channel; token only upstream; audit by hash`);
   exitCode = 0;
