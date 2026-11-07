@@ -14,7 +14,7 @@ What `brew install` does, and what stays yours to do:
 | `cubed`: the control plane with its own Node runtime, `cube-gateway` and the web UI (the signed `darwin-arm64` release bundle, verified by its pinned sha256, minus other platforms' prebuilt native modules) | nothing about images: berth pulls cube's default image (official Debian trixie, pinned) and prepares it for cube |
 | `cube-berth`: the runner, `berth vm`, with keel's arm64 guest kernel and base of the same release (each pinned by sha256); Homebrew's `qemu` and `erofs-utils` | run `cubed runners init-local` |
 | `gh`, so threads can use your GitHub access | `gh auth login`; connect a model in the UI |
-| user services (`brew services`) for both daemons, loopback only | optional: Claude Code login, Tailscale access |
+| user services (`brew services`) for both daemons, loopback only | optional: a Claude Code setup-token, Tailscale access |
 
 ## Install
 

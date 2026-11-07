@@ -23,11 +23,13 @@ export interface ModelChannel {
   release(threadId: string): void;
   /** Settles once the channel is up or has said why not (a starting gateway). */
   ready(): Promise<void>;
+  /** Whether the host has the token the channel substitutes. */
+  readonly configured: boolean;
 }
 
 export class ClaudeModelChannel implements ModelChannel, ModelSecrets {
   readonly secret: SecretSource;
-  private readonly configured: () => boolean;
+  private readonly isConfigured: () => boolean;
   private readonly address: () => string | null;
   private readonly unavailable: () => string | null;
   private readonly started: () => Promise<unknown>;
@@ -43,7 +45,7 @@ export class ClaudeModelChannel implements ModelChannel, ModelSecrets {
     started?: () => Promise<unknown>;
   }) {
     this.secret = options.secret;
-    this.configured = () => options.secret.configured();
+    this.isConfigured = () => options.secret.configured();
     this.address = options.address;
     this.unavailable = options.unavailable ?? (() => null);
     this.started = options.started ?? (async () => {});
@@ -57,13 +59,15 @@ export class ClaudeModelChannel implements ModelChannel, ModelSecrets {
   environment(threadId: string): { ANTHROPIC_BASE_URL: string; CLAUDE_CODE_OAUTH_TOKEN: string } {
     const address = this.address();
     if (!address) throw new ModelChannelUnavailable(this.unavailable() ?? "cube-gateway's model channel is not running");
-    if (!this.configured()) throw new ModelChannelUnavailable(CLAUDE_TOKEN_MISSING);
+    if (!this.isConfigured()) throw new ModelChannelUnavailable(CLAUDE_TOKEN_MISSING);
     let placeholder = this.placeholders.get(threadId);
     if (!placeholder) this.placeholders.set(threadId, placeholder = newPlaceholder(this.secret.name));
     return { ANTHROPIC_BASE_URL: `http://${address}/t/${encodeURIComponent(threadId)}`, CLAUDE_CODE_OAUTH_TOKEN: placeholder };
   }
 
   release(threadId: string): void { this.placeholders.delete(threadId); }
+
+  get configured(): boolean { return this.isConfigured(); }
 
   placeholder(threadId: string): string | null { return this.placeholders.get(threadId) ?? null; }
 }

@@ -20,7 +20,7 @@ cubed and the runner have separate releases per platform. A thread machine runs 
 - **cubed:** Git and `gh` on the host. Releases bundle their own Node runtime. The bootstrap `install.sh` needs Node 26, and a source checkout runs on Node 26.
 - **The runner:** a QEMU that meets keel's floor, its `qemu-img`, `mkfs.erofs` from erofs-utils, and keel's kernel and base of the same release.
 - **Pi threads:** a model provider Pi supports, connected under **settings** › **model providers**.
-- **Claude Code threads:** Claude Code and a Claude login on the cubed host.
+- **Claude Code threads:** Claude Code on the cubed host, and its long-lived token from `claude setup-token` as `CLAUDE_CODE_OAUTH_TOKEN` in cubed's environment.
 
 ## keel's QEMU floor
 

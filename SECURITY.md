@@ -149,7 +149,8 @@ closed). It then substitutes the token, sends the request to
 api.anthropic.com over TLS and turns the token back into the placeholder in
 the streamed answer. Each exchange, refusals included, is kept in
 `CUBED_STATE/model-audit.sqlite` (0600, append-only): the request body as the
-child sent it and the answer as the child got it, by SHA-256, with an
+child sent it and the answer as the child got it, raw and reconstructed as one
+message, by SHA-256, with an
 allow-list of headers (never `Authorization`), and web search results as events
 of their own. That file holds the threads' prompts, code and answers in full;
 protect it like the state directory. Without the token or the listener a

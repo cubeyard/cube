@@ -384,14 +384,20 @@ gateway forwards only `POST /v1/messages` and `POST /v1/messages/count_tokens`
 without exactly one `claude` placeholder or that cubed denies (5 s, fail closed),
 recording each refusal. The answer streams frame by frame: B6 holds back only a
 tail that could still begin the token. Without the listener or the token,
-`ClaudeAgent` records the turn as failed with the reason and starts nothing.
+`ClaudeAgent` records the turn as failed with the reason and starts nothing,
+and claude · max is offered (the thread catalog, `/api/state`) only when
+cubed has both `claude` and the token: a host with only `claude /login` is
+not reported ready.
 
 The audit (`audit.rs`) is the gateway's own append-only SQLite file
 (triggers refuse UPDATE and DELETE), written on one thread: per exchange the
 thread, route, outcome (`forwarded`, `refused`, `failed`, `cut`), status, an
-allow-list of headers, and the request body as the child sent it and the
-answer as it got it, stored once by SHA-256; each `web_search_tool_result`
-block of an answer is an event of its own. It holds no token and no
+allow-list of headers, the request body as the child sent it, the answer's
+bytes as it got them (for a stream, the SSE itself) and the answer
+reconstructed as one Messages API message (`reconstruct`: the events folded
+into its content blocks, stop reason and usage), each stored once by
+SHA-256; each `web_search_tool_result` block of that message is an event
+of its own. It holds no token and no
 `Authorization`. Nothing reads it back as an agent's input.
 
 Claude Code 2.1.319 sends its model requests to the base URL with

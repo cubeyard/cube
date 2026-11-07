@@ -68,9 +68,10 @@ placeholder as `CLAUDE_CODE_OAUTH_TOKEN`. Per request:
 - each exchange, refusals included, recorded in the audit file
   (`src/audit.rs`): an append-only SQLite (0600, triggers refuse UPDATE and
   DELETE) of the thread, route, outcome, status, an allow-list of headers
-  (never `Authorization`), and the request and answer bodies as the child
-  sent and got them (no token), stored by SHA-256; each
-  `web_search_tool_result` block of an answer is a separate event.
+  (never `Authorization`), the request body as the child sent it, the
+  answer's bytes as it got them and the answer reconstructed as one
+  Messages API message (no token in any), stored by SHA-256; each
+  `web_search_tool_result` block of that message is a separate event.
 
 The listener binds loopback only; the ready line names it
 (`{"ready":true,"version":…,"model":"127.0.0.1:PORT"}`), and cubed asks for

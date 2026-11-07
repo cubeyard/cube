@@ -119,6 +119,7 @@ OFFLINE_TESTS=(
   packages/server/test/skills-test.ts
   packages/server/test/optchat-skills-test.ts
   packages/server/test/claude-agent-test.ts
+  packages/server/test/claude-readiness-test.ts
   packages/server/test/usage-test.ts
   packages/server/test/telemetry-test.ts
   packages/server/test/portal-test.ts

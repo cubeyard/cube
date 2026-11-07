@@ -50,7 +50,7 @@
     <h1 id="providers-title">model providers</h1>
     <p>connect a provider to choose its models in your threads. credentials stay on this host and are managed by pi.</p>
     <p class="hint">disconnect removes the saved login, not credentials supplied by the host environment. it does not change a thread's selected model.</p>
-    <p class="hint">claude pro or max is not a pi login. choose claude · max when you start a thread: claude code then runs it with its own login on this host (claude /login). pi reaches anthropic models with an api key.</p>
+    <p class="hint">claude pro or max is not a pi login. choose claude · max when you start a thread: claude code then runs it on this host with your subscription's long-lived token: run claude setup-token there and give cubed the token as CLAUDE_CODE_OAUTH_TOKEN. a claude /login alone is not enough. pi reaches anthropic models with an api key.</p>
   </div>
   <label class="search">find a provider <input type="search" bind:value={search} placeholder="provider name" /></label>
   {#if error}<p class="error" role="alert">{error} <button class="key" onclick={() => { error = null; void refresh(); }}>retry</button></p>{/if}
