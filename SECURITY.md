@@ -157,7 +157,10 @@ written when an exchange ends, by a writer thread, and fails open: an
 exchange still streaming when the gateway is killed or crashes, and records
 queued but not yet written when it stops, are lost; a failed write is
 logged and does not stop requests (docs/plans/2026-11-07-claude-model-channel.md,
-"Audit durability", proposes the fix). That file holds the threads' prompts, code and answers in full;
+"Audit durability", proposes the fix). cubed's own host commands that are not agents (`gh`, `git`, runner
+enrollment's `berth`, Pi's provider key commands) inherit cubed's whole
+environment, `CLAUDE_CODE_OAUTH_TOKEN` included, as they inherit its other
+credentials; only the `claude` child's environment is filtered. That file holds the threads' prompts, code and answers in full;
 protect it like the state directory. Without the token or the listener a
 Claude Code turn fails and says why; there is no fallback to Claude Code's own
 login or an API key. Claude Code still reaches some Anthropic services
