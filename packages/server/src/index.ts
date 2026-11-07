@@ -14,7 +14,8 @@ import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { PATIENCE, THREADS_CLOSE_MS } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
 import type { TrustedRunnerHealth } from "./runner-types.ts";
-import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
+import { claudeSecret, EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
+import { ClaudeModelChannel, type ModelChannel } from "./model-channel.ts";
 import { GatewaySupervisor, locateGateway } from "./gateway.ts";
 import { errorText, machineFor, vmSizes, type ThreadMachines } from "./vm.ts";
 import { registryCredentialRoute } from "./runner-credentials.ts";
@@ -305,6 +306,9 @@ export async function createCubed(options: {
   /** The skill source before the user's (docs/skills.md); none when absent.
    * The cubed command passes DEFAULT_SKILL_SOURCE. */
   skillSource?: SkillSource | null;
+  /** Tests without a gateway: Claude Code's model channel. Default:
+   * cube-gateway's, with the host's token from CLAUDE_CODE_OAUTH_TOKEN. */
+  modelChannel?: ModelChannel;
 }) {
   const { directory: run, socket, temporary: socketDirectory } = await runDirectory(options.state);
   const registry = new Registry(path.join(options.state, "registry.sqlite"));
@@ -314,16 +318,22 @@ export async function createCubed(options: {
   const github = new GithubAuth();
   // Every guest request is decided here; secrets never leave the host
   // except as the gateway's substitution for an allowed request.
+  let gateway: GatewaySupervisor | null = null;
+  // Claude Code's model requests go through the gateway with a per-thread
+  // placeholder; only the gateway gets the host's token, per request.
+  const claudeChannel = new ClaudeModelChannel({ secret: claudeSecret(), address: () => gateway?.modelAddress ?? null,
+    unavailable: () => gateway ? gateway.unavailable : "this cubed runs no cube-gateway", started: () => gateway?.ready() ?? Promise.resolve() });
   const policy = new EgressPolicy({
     vms: { vm: vmId => machineFor(registry, vmId) },
     secrets: options.secrets ?? [githubSecret(() => github.token())],
+    model: claudeChannel,
   });
   const egress = await serveEgress(path.join(run, "egress.sock"), policy);
-  let gateway: GatewaySupervisor | null = null;
   const threadsDirectory = path.join(options.state, "threads");
   if (!options.machines) {
     const credential = path.join(run, "credential.sock");
     gateway = new GatewaySupervisor({ decide: path.join(run, "egress.sock"), credential, extraArgs: gatewayTestArgs(process.env),
+      ...claudeCommand ? { model: { audit: path.join(options.state, "model-audit.sqlite") } } : {},
       ...(options.gateway === undefined ? {} : { binary: options.gateway }) });
     gateway.start();
     // Protocol-4 runners' credential streams go to the gateway's proxy.
@@ -350,7 +360,7 @@ export async function createCubed(options: {
   const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, latestCommits, modelProblem: model => modelProblem(model),
     claudeBeforePrompt: (id, signal) => memory.text(id, "claude-code", { signal, final: true }), ...options.machines ? { machines: options.machines } : {}, ...options.now ? { now: options.now } : {},
     ...options.patience ? { patience: options.patience } : {}, runner: { policy, ...options.runner }, claude: claudeCommand ? {
-    command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
+    command: claudeCommand, socket, mod: claudeMod(options.state), channel: options.modelChannel ?? claudeChannel, ...options.claudeOptions,
   } : null, portal: thread => portal!.guest(thread),
   hostTools: thread => ({ readFile, key }) => ({
     note: `artifact_write, artifact_read and artifact_edit keep documents for the user (work artifacts). ${ARTIFACT_GUIDE}`,

@@ -11,6 +11,7 @@ import { createRegistry, defineExtension, defineTool, Harness } from "@earendil-
 import { ClaudeAgent } from "../src/claude-agent.ts";
 import { openStorage } from "../src/durable-agent.ts";
 import type { Workspace } from "../src/workspace.ts";
+import { stubModelChannel } from "./model-channel-stub.ts";
 
 const context = BACKGROUND_CONTEXT;
 /** Output that looks like a build log: varied lines, not one repeated byte. */
@@ -60,7 +61,7 @@ export async function piStore(directory: string, options: { runs: number; calls:
 /** A Claude Code store: `turns` submissions, each with `calls` Bash calls. */
 export async function claudeStore(directory: string, options: { turns: number; calls: number; bytes: number }): Promise<void> {
   const workspace = { lease: async () => ({ token: "t" }), release: async () => {}, cancel: async () => {} } as unknown as Workspace;
-  await (await ClaudeAgent.open({ directory, threadId: "bench", workspace, runtime: { command: ["false"], mod: "", socket: "" }, model: "opus" })).close();
+  await (await ClaudeAgent.open({ directory, threadId: "bench", workspace, runtime: { command: ["false"], mod: "", socket: "", channel: stubModelChannel() }, model: "opus" })).close();
   const db = new DatabaseSync(path.join(directory, "claude.sqlite"));
   const root = path.join(directory, "claude");
   try {

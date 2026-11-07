@@ -59,7 +59,7 @@ if (flag("--permission-mode") !== "dontAsk" || !guard || guard.hooks[0]?.command
 const session = flag("--resume") ?? randomUUID();
 if (process.env.FAKE_CLAUDE_LOG) {
   fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, `${JSON.stringify({ args, cwd: process.cwd(), session,
-    apiKey: "ANTHROPIC_API_KEY" in process.env, authToken: "ANTHROPIC_AUTH_TOKEN" in process.env, env: Object.keys(process.env).sort(), pid: process.pid })}\n`);
+    apiKey: "ANTHROPIC_API_KEY" in process.env, authToken: "ANTHROPIC_AUTH_TOKEN" in process.env, env: Object.keys(process.env).sort(), values: { ...process.env }, pid: process.pid })}\n`);
 }
 const env = process.env;
 if (!env.CUBE_WORKSPACE_SOCKET || !env.CUBE_WORKSPACE_PATH || !env.CUBE_WORKSPACE_TOKEN || !env.CUBE_WORKSPACE_ROOT) fail("expected the cube workspace environment");

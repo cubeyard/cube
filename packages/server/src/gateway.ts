@@ -13,7 +13,11 @@ import path from "node:path";
 import readline from "node:readline";
 import { createLogger, type Logger } from "./log.ts";
 
-export interface GatewayHello { version: string }
+export interface GatewayHello {
+  version: string;
+  /** The model channel's loopback address (`127.0.0.1:PORT`), when asked for. */
+  model?: string;
+}
 
 export class GatewayUnavailable extends Error {
   constructor(reason: string) { super(`gateway unavailable: ${reason}`); this.name = "GatewayUnavailable"; }
@@ -41,6 +45,11 @@ export interface GatewaySupervisorOptions {
   /** The credential proxy's socket the gateway serves for protocol-4
    * runners' `credential` streams (runner-credentials.ts). */
   credential: string;
+  /** The model channel for claude-code threads (model-channel.ts): its
+   * append-only audit file. The listener's port is the gateway's choice on
+   * its first start and kept across restarts, so a running child's
+   * ANTHROPIC_BASE_URL stays right. */
+  model?: { audit: string };
   /** null: no gateway on this host. Default: locateGateway(). */
   binary?: string | null;
   /** Test builds only (`test-hooks`): extra `serve` arguments. */
@@ -68,6 +77,8 @@ export class GatewaySupervisor {
   private starts = 0;
   private lastError: string | null = null;
   private readyAt = 0;
+  /** The model listener's address since the first ready line. */
+  private modelAt: string | null = null;
 
   constructor(options: GatewaySupervisorOptions) {
     this.options = options;
@@ -88,6 +99,10 @@ export class GatewaySupervisor {
     if (this.stopping || this.child || !this.binary) return;
     this.spawn();
   }
+
+  /** Where the model channel listens: known from the first ready line on,
+   * also while the gateway restarts (on the same port). */
+  get modelAddress(): string | null { return this.modelAt; }
 
   /** The running gateway, if one is ready now; never starts one. */
   get running(): GatewayHello | undefined { return this.current; }
@@ -124,7 +139,8 @@ export class GatewaySupervisor {
 
   private spawn(): void {
     const binary = this.binary!;
-    const args = ["serve", "--decide", this.options.decide, "--credential", this.options.credential, ...(this.options.extraArgs ?? [])];
+    const model = this.options.model ? ["--model-listen", this.modelAt ?? "127.0.0.1:0", "--model-audit", this.options.model.audit] : [];
+    const args = ["serve", "--decide", this.options.decide, "--credential", this.options.credential, ...model, ...(this.options.extraArgs ?? [])];
     const child = spawn(binary, args, { stdio: ["pipe", "pipe", "pipe"],
       env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? "/", ...this.options.env } });
     this.child = child;
@@ -162,9 +178,11 @@ export class GatewaySupervisor {
   }
 
   private ready_(line: string, restart: boolean): void {
-    const ready = JSON.parse(line) as { ready?: unknown; version?: unknown };
+    const ready = JSON.parse(line) as { ready?: unknown; version?: unknown; model?: unknown };
     if (ready.ready !== true || typeof ready.version !== "string") throw new Error("unexpected ready line");
-    this.current = { version: ready.version };
+    if (this.options.model && (typeof ready.model !== "string" || !/^127\.0\.0\.1:\d+$/.test(ready.model))) throw new Error("no model channel on loopback in the ready line");
+    if (typeof ready.model === "string") this.modelAt = ready.model;
+    this.current = { version: ready.version, ...typeof ready.model === "string" ? { model: ready.model } : {} };
     this.lastError = null;
     this.readyAt = Date.now();
     this.log.info("ready", { version: ready.version, restart });

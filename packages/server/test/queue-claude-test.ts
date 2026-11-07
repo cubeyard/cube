@@ -17,6 +17,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
 import { slotWait } from "../src/machine-sleep.ts";
 import { FakeBerth, NODE, Phase, project, RUNNER, until } from "./lifecycle-fixture.ts";
+import { stubModelChannel } from "./model-channel-stub.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-queue-claude-"));
 const quiet = { info() {}, warn() {}, error() {}, debug() {} } as never;
@@ -29,7 +30,7 @@ async function scenario(name: string, drop: boolean): Promise<void> {
   const state = path.join(root, name, "state");
   const berth = new FakeBerth(path.join(root, name, "runner"), 1);
   const clock = { now: Date.now() };
-  const open = () => createCubed({ state, models: createModels(), claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")],
+  const open = () => createCubed({ state, models: createModels(), claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], modelChannel: stubModelChannel(),
     claudeOptions: { stopGraceMs: 2000 }, gateway: null, skillSource: null, now: () => clock.now,
     patience: { retryMs: 50, wakeMs: 20_000, restartMs: 0 },
     runner: { session: () => berth.session(), log: quiet, templates: { enabled: false }, idleMs: 60_000 } });

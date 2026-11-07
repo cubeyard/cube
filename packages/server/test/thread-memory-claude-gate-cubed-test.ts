@@ -17,6 +17,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, type Models } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
 import { LocalMachines } from "./local-guest.ts";
+import { stubModelChannel } from "./model-channel-stub.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-claude-gate-"));
 const repository = path.join(root, "repository");
@@ -44,7 +45,7 @@ const models = new Proxy(real, {
 }) as Models;
 const WAIT_MS = 400;
 const app = await createCubed({ state: path.join(root, "state"), models, machines: new LocalMachines(path.join(root, "machines")), gateway: null, memoryWaitMs: WAIT_MS,
-  claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], claudeOptions: { stopGraceMs: 2000 } });
+  claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], modelChannel: stubModelChannel(), claudeOptions: { stopGraceMs: 2000 } });
 app.registry.enrollRunner({ nodeId: "node-1", environmentId: 1, threadId: "runner-1", configPath: "/private/1.json", configHash: "h1", protocol: 4, kind: "vm" });
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
 const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;

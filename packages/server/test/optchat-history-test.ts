@@ -23,6 +23,7 @@ import type { ThreadEvent, ThreadTranscript } from "../src/thread-events.ts";
 import { pageOf, readPiHistory, type HistoryRequest } from "../src/thread-history.ts";
 import type { Workspace } from "../src/workspace.ts";
 import { NoMachines } from "./local-guest.ts";
+import { stubModelChannel } from "./model-channel-stub.ts";
 
 const context = BACKGROUND_CONTEXT;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-history-"));
@@ -225,7 +226,7 @@ try {
     assert.equal(ClaudeAgent.stored(directory), null, "no store: null");
     const leases: string[] = [];
     const workspace = { lease: async () => { leases.push("taken"); return { token: "t" }; }, release: async () => {}, cancel: async () => {} } as unknown as Workspace;
-    await (await ClaudeAgent.open({ directory, threadId: ID, workspace, runtime: { command: ["false"], mod: "", socket: "" }, model: "opus" })).close();
+    await (await ClaudeAgent.open({ directory, threadId: ID, workspace, runtime: { command: ["false"], mod: "", socket: "", channel: stubModelChannel() }, model: "opus" })).close();
     const db = new DatabaseSync(path.join(directory, "claude.sqlite"));
     db.prepare("INSERT INTO submission(request_id, text, state, error, created_at) VALUES ('cube:initial', 'the question', 'completed', NULL, 0)").run();
     db.prepare("INSERT INTO message(submission, data) VALUES (1, ?)").run(JSON.stringify({ type: "assistant", message: { content: [

@@ -22,6 +22,7 @@ import { VmWorkspace } from "../src/vm-workspace.ts";
 import { workspaceRoute } from "../src/workspace-http.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
 import { LocalGuestTransport } from "./local-guest.ts";
+import { stubModelChannel } from "./model-channel-stub.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-claude-memory-"));
 const file = path.join(root, "registry.sqlite");
@@ -61,7 +62,7 @@ const server = http.createServer(async (request, response) => {
   send(result.status, result.body);
 });
 await new Promise<void>(resolve => server.listen(socket, resolve));
-const runtime: ClaudeRuntime = { command: [process.execPath, path.join(import.meta.dirname, "fake-claude.ts")], mod: path.resolve(import.meta.dirname, "../../claude-mod"), socket, stopGraceMs: 1000 };
+const runtime: ClaudeRuntime = { command: [process.execPath, path.join(import.meta.dirname, "fake-claude.ts")], mod: path.resolve(import.meta.dirname, "../../claude-mod"), socket, channel: stubModelChannel(), stopGraceMs: 1000 };
 /** The agent as conversation.ts opens it, its gate as index.ts wires it. */
 const open = (thread: string) => ClaudeAgent.open({ directory: path.join(root, thread), threadId: thread, workspace, runtime, model: "sonnet",
   beforePrompt: signal => threads.text(thread, "claude-code", { signal, final: true }) });

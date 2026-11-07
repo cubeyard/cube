@@ -32,6 +32,7 @@ import { Memory } from "../packages/server/src/optchat-memory.ts";
 import { Registry } from "../packages/server/src/registry.ts";
 import { MEMORY_PROMPT_WAIT_MS, ThreadMemory, type ChatMemory } from "../packages/server/src/thread-memory.ts";
 import { LocalGuestTransport } from "../packages/server/test/local-guest.ts";
+import { stubModelChannel } from "../packages/server/test/model-channel-stub.ts";
 
 const claude = process.env.CLAUDE ?? "claude";
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "cube-claude-memory-"));
@@ -108,7 +109,7 @@ const mod = path.join(temp, "mod");
 fs.cpSync(path.resolve(import.meta.dirname, "../packages/claude-mod"), mod, { recursive: true, filter: source => !source.includes(`${path.sep}.claude-plugin${path.sep}types`) });
 const runtime: ClaudeRuntime = {
   command: ["/usr/bin/env", ...Object.entries(apiEnv).map(([name, value]) => `${name}=${value}`), `CLAUDE_CONFIG_DIR=${path.join(temp, "config")}`, `HOME=${temp}`, claude],
-  mod, socket, modReadyMs: 15000,
+  mod, socket, channel: stubModelChannel(), modReadyMs: 15000,
 };
 // The registry part: cubed's memory over a real registry, the gate before
 // each prompt as index.ts wires it (ClaudeAgent beforePrompt, final).

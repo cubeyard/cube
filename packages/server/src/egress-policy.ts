@@ -20,6 +20,9 @@ import { createLogger, type Logger } from "./log.ts";
 export interface EgressRequest {
   vmId: string; threadId: string; scheme: "http" | "https"; method: string; host: string; port: number; path: string;
   placeholders: string[];
+  /** `model`: cube-gateway's model channel, a claude-code thread's Claude
+   * Code on this host (no VM); absent: a guest's request. */
+  channel?: "model";
 }
 export type EgressDecision = { allow: true; substitute?: Record<string, string> } | { allow: false; reason: string };
 
@@ -30,6 +33,15 @@ export interface SecretSource {
   readonly hosts: readonly string[];
   /** The current value, or null when the host has none (no substitution). */
   value(): Promise<string | null>;
+}
+
+/** The model channel's side of the policy: the one secret it substitutes
+ * and each claude-code thread's live placeholder (model-channel.ts). Apart
+ * from the guests' secrets, so a guest can never use it. */
+export interface ModelSecrets {
+  readonly secret: SecretSource;
+  /** The placeholder the thread's Claude Code holds now, or null. */
+  placeholder(threadId: string): string | null;
 }
 
 /** What the policy needs to know about VMs: whose placeholders are whose. */
@@ -53,11 +65,13 @@ export function newPlaceholder(name: string): string {
 export class EgressPolicy {
   private readonly vms: EgressVms;
   private readonly secrets: Map<string, SecretSource>;
+  private readonly model: ModelSecrets | null;
   private readonly log: Logger;
 
-  constructor(options: { vms: EgressVms; secrets: readonly SecretSource[]; log?: Logger }) {
+  constructor(options: { vms: EgressVms; secrets: readonly SecretSource[]; model?: ModelSecrets; log?: Logger }) {
     this.vms = options.vms;
     this.secrets = new Map(options.secrets.map(source => [source.name, source]));
+    this.model = options.model ?? null;
     this.log = options.log ?? createLogger("egress");
   }
 
@@ -82,7 +96,7 @@ export class EgressPolicy {
 
   async decide(request: EgressRequest): Promise<EgressDecision> {
     const decision = await this.evaluate(request);
-    const fields = { vm: request.vmId, thread: request.threadId, method: request.method, scheme: request.scheme, host: request.host,
+    const fields = { channel: request.channel, vm: request.vmId || undefined, thread: request.threadId, method: request.method, scheme: request.scheme, host: request.host,
       port: request.port, path: request.path.slice(0, MAX_LOGGED_PATH), secrets: request.placeholders.length || undefined };
     if (!decision.allow) this.log.info("denied", { ...fields, reason: decision.reason });
     else this.log.debug("allowed", { ...fields, substituted: Object.keys(decision.substitute ?? {}).length || undefined });
@@ -90,6 +104,7 @@ export class EgressPolicy {
   }
 
   private async evaluate(request: EgressRequest): Promise<EgressDecision> {
+    if (request.channel === "model") return this.evaluateModel(request);
     const vm = this.vms.vm(request.vmId);
     if (!vm || vm.threadId !== request.threadId) return { allow: false, reason: "unknown thread machine" };
     if (request.method.toUpperCase() === "CONNECT") return { allow: false, reason: "CONNECT is not allowed" };
@@ -108,6 +123,36 @@ export class EgressPolicy {
     }
     return Object.keys(substitute).length ? { allow: true, substitute } : { allow: true };
   }
+
+  /** A claude-code thread's model request: allowed only with that thread's
+   * own live placeholder, over HTTPS, to the secret's host, and only with
+   * the token (no answer without it: the gateway refuses that too). */
+  private async evaluateModel(request: EgressRequest): Promise<EgressDecision> {
+    const model = this.model;
+    if (!model) return { allow: false, reason: "this cubed has no model channel" };
+    const name = model.secret.name;
+    const held = model.placeholder(request.threadId);
+    if (!held) return { allow: false, reason: `thread ${request.threadId} has no claude code running with a ${name} placeholder` };
+    const placeholders = [...new Set(request.placeholders)];
+    if (placeholders.length !== 1 || placeholders[0] !== held) return { allow: false, reason: "a secret placeholder does not belong to this thread" };
+    if (request.scheme !== "https") return { allow: false, reason: `the ${name} secret is only sent over https` };
+    const host = request.host.toLowerCase().replace(/\.$/, "");
+    if (!model.secret.hosts.includes(host)) return { allow: false, reason: `the ${name} secret is not allowed for ${host}` };
+    const value = await model.secret.value();
+    if (value === null) return { allow: false, reason: CLAUDE_TOKEN_MISSING };
+    return { allow: true, substitute: { [held]: value } };
+  }
+}
+
+export const CLAUDE_TOKEN_MISSING = "this host has no long-lived claude token: run `claude setup-token` and give cubed its token as CLAUDE_CODE_OAUTH_TOKEN";
+
+/** The host's long-lived Claude token for api.anthropic.com, from
+ * `claude setup-token`: CLAUDE_CODE_OAUTH_TOKEN in cubed's environment.
+ * Only cube-gateway's model channel substitutes it; Claude Code gets a
+ * placeholder. */
+export function claudeSecret(env: NodeJS.ProcessEnv = process.env): SecretSource & { configured(): boolean } {
+  const token = () => env.CLAUDE_CODE_OAUTH_TOKEN?.trim() || null;
+  return { name: "claude", hosts: ["api.anthropic.com"], value: async () => token(), configured: () => token() !== null };
 }
 
 /** The host's GitHub token for github.com and api.github.com: CUBED_GITHUB_TOKEN
@@ -139,7 +184,8 @@ function parseRequest(value: unknown): EgressRequest | null {
   const row = value as Record<string, unknown>;
   if (typeof row.vmId !== "string" || typeof row.threadId !== "string" || (row.scheme !== "http" && row.scheme !== "https")
     || typeof row.method !== "string" || typeof row.host !== "string" || !Number.isSafeInteger(row.port) || typeof row.path !== "string"
-    || !Array.isArray(row.placeholders) || !row.placeholders.every(item => typeof item === "string") || row.placeholders.length > 64) return null;
+    || !Array.isArray(row.placeholders) || !row.placeholders.every(item => typeof item === "string") || row.placeholders.length > 64
+    || (row.channel !== undefined && row.channel !== "model")) return null;
   return row as unknown as EgressRequest;
 }
 

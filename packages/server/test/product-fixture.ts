@@ -4,6 +4,7 @@ import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from "
 import path from "node:path";
 import { createCubed } from "../src/index.ts";
 import { LocalMachines } from "./local-guest.ts";
+import { stubModelChannel } from "./model-channel-stub.ts";
 
 const [state, machinesRoot, mode] = process.argv.slice(2);
 const faux = fauxProvider({ models: mode === "removed-initial" ? [{ id: "faux-2" }] : mode === "removed-selected" ? [{ id: "faux-3" }] : [{ id: "faux-1" }, { id: "faux-2" }], tokensPerSecond: 100, tokenSize: { min: 1, max: 1 } });
@@ -19,7 +20,7 @@ faux.setResponses(Array.from({ length: 10 }, () => async request => {
 const models = createModels();
 models.setProvider(faux.provider);
 const app = await createCubed({ state, models, machines: new LocalMachines(machinesRoot),
-  claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], claudeOptions: { stopGraceMs: 2000 } });
+  claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], modelChannel: stubModelChannel(), claudeOptions: { stopGraceMs: 2000 } });
 if (app.registry.runnerCount() === 0) {
   app.registry.enrollRunner({ nodeId: "node-product", environmentId: 1, threadId: "runner-product", configPath: "/private/product.json", configHash: "product", protocol: 4, kind: "vm" });
 }

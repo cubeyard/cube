@@ -21,6 +21,7 @@ import { createCubed } from "../src/index.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
 import type { ThreadStatus } from "../src/thread-events.ts";
 import { LocalMachines } from "./local-guest.ts";
+import { stubModelChannel } from "./model-channel-stub.ts";
 
 const context = BACKGROUND_CONTEXT;
 const textOf = (message: Message) => typeof message.content === "string" ? message.content
@@ -60,7 +61,7 @@ const state = path.join(root, "state");
 fs.mkdirSync(state);
 
 async function open(machines: LocalMachines) {
-  const app = await createCubed({ state, models, machines, claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")],
+  const app = await createCubed({ state, models, machines, claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], modelChannel: stubModelChannel(),
     claudeOptions: { stopGraceMs: 2000 }, gateway: null });
   const threads = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: () => [piModel], runners: () => ({ runners: [] }) as never });
   return { app, threads };
