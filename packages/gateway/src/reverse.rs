@@ -107,10 +107,10 @@ impl Rewriter {
     /// What can be decided once `chunk` is added; the rest is held.
     pub fn feed(&mut self, chunk: &[u8]) -> Bytes {
         self.held.extend_from_slice(chunk);
-        let keep = self.pairs.longest().saturating_sub(1);
-        // Every position below `safe` has a whole window of the longest
-        // pattern after it, so its match is decided now.
-        let safe = self.held.len().saturating_sub(keep);
+        // Below `safe` no pattern can still begin a longer match, so every
+        // match there is decided now. Only a tail that is a proper prefix of
+        // a pattern waits: a streamed event is not held for the next one.
+        let safe = self.undecided();
         let mut out = BytesMut::with_capacity(self.held.len());
         let mut i = 0;
         while i < safe {
@@ -132,6 +132,21 @@ impl Rewriter {
         }
         let _ = self.held.split_to(i);
         out.freeze()
+    }
+
+    /// The first position whose rest is a proper prefix of some pattern.
+    fn undecided(&self) -> usize {
+        let len = self.held.len();
+        let keep = self.pairs.longest().saturating_sub(1);
+        (len.saturating_sub(keep)..len)
+            .find(|&i| {
+                let rest = &self.held[i..];
+                self.pairs
+                    .0
+                    .iter()
+                    .any(|(u, _)| u.len() > rest.len() && u.starts_with(rest))
+            })
+            .unwrap_or(len)
     }
 
     /// The end of the body: what was held, rewritten.
@@ -285,11 +300,16 @@ mod tests {
         let body = format!("{}{}", "x".repeat(50), &TOKEN[..20]);
         let mut rewriter = Rewriter::new(pairs.clone());
         let early = rewriter.feed(body.as_bytes());
-        // At most the longest pattern less one byte is held.
-        assert_eq!(early.len(), body.len() - (TOKEN.len() - 1));
-        assert!(body.as_bytes().starts_with(&early));
+        // Only the tail that could still be the token is held.
+        assert_eq!(&early[..], "x".repeat(50).as_bytes());
         let rest = rewriter.finish();
         assert_eq!([&early[..], &rest[..]].concat(), body.as_bytes());
+        // A tail that cannot begin a value passes at once: an SSE event
+        // is not held back for the next one.
+        let event = "event: ping\ndata: {\"type\":\"ping\"}\n\n";
+        let mut rewriter = Rewriter::new(pairs.clone());
+        assert_eq!(&rewriter.feed(event.as_bytes())[..], event.as_bytes());
+        assert!(rewriter.finish().is_empty());
         // Nothing to hold without pairs: bytes pass at once and unchanged.
         let mut none = Rewriter::new(Pairs::default());
         assert_eq!(&none.feed(TOKEN.as_bytes())[..], TOKEN.as_bytes());

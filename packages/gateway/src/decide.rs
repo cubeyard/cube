@@ -25,6 +25,10 @@ pub struct DecideRequest {
     pub port: u16,
     pub path: String,
     pub placeholders: Vec<String>,
+    /// `model` for the model channel (model.rs): a claude-code thread's
+    /// model traffic from cubed's own child. Absent for a guest's request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
