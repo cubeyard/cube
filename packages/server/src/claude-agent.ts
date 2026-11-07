@@ -132,6 +132,10 @@ export function claudeEnvironment(source: NodeJS.ProcessEnv, extra: Readonly<Rec
   for (const [name, value] of Object.entries(source)) if (value !== undefined && CLAUDE_ENV.test(name)) env[name] = value;
   Object.assign(env, extra);
   for (const name of Object.keys(env)) if (CLAUDE_REMOVED_ENV.test(name)) delete env[name];
+  // The model channel is on loopback: never through the host's proxy,
+  // which Claude Code would otherwise use for it too.
+  const base = workspace.ANTHROPIC_BASE_URL;
+  if (base) for (const name of ["NO_PROXY", "no_proxy"]) env[name] = [env[name], new URL(base).hostname].filter(Boolean).join(",");
   return { ...env, ...workspace };
 }
 

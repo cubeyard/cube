@@ -122,6 +122,10 @@ try {
   assert.equal(first!.values.CLAUDE_CODE_OAUTH_TOKEN, channel.placeholder("t1"), "the thread's own placeholder");
   assert.ok(Object.values(first!.values).every(value => !value.includes(process.env.CLAUDE_CODE_OAUTH_TOKEN!)), "the host's claude token reaches no variable of the child");
   assert.ok(first!.env.includes("HOME") && first!.env.includes("CUBE_WORKSPACE_TOKEN"));
+  // A proxy of the host's never carries the loopback channel (Claude Code would send it there).
+  assert.deepEqual(first!.values.NO_PROXY?.split(",").at(-1), "127.0.0.1");
+  const proxied = claudeEnvironment({ PATH: "/bin", HTTPS_PROXY: "http://proxy.example:3128", NO_PROXY: "corp.example" }, {}, { ANTHROPIC_BASE_URL: "http://127.0.0.1:4100/t/x" });
+  assert.deepEqual([proxied.NO_PROXY, proxied.no_proxy, proxied.HTTPS_PROXY], ["corp.example,127.0.0.1", "127.0.0.1", "http://proxy.example:3128"]);
   assert.ok(first!.env.includes("CUBE_WORKSPACE_REAL_ROOT"), "the mod also knows the root with its symlinks resolved");
   assert.ok(first!.env.includes("CUBE_SKILLS_PROMPT"), "the mod gets the thread's skills to list");
   assert.ok(first!.env.every(name => /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_\w+|TERM|TZ|TMPDIR|XDG_\w+|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_BASE_URL|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|CUBE_WORKSPACE_\w+|CUBE_MOD_NONCE|CUBE_SKILLS_PROMPT|FAKE_CLAUDE_LOG)$/.test(name)), `only allow-listed variables: ${first!.env.join(" ")}`);
