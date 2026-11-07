@@ -37,7 +37,7 @@ Claude Code models then appear as **claude · max** when you start a thread. A t
 
 cube starts Claude Code with its own minimal set of tools. Your Claude Code settings, hooks and MCP servers do not load. Bash, Read, Write and Edit go to the thread's machine; other tools and subagents are refused. Claude Code itself still runs on the cubed host as your user. See the [security model](/cube/concepts/security-model/#what-runs-on-the-cubed-host).
 
-Claude Code never gets the token. It gets a placeholder for its thread and sends its model requests to cube's gateway on `127.0.0.1`. The gateway puts the token in, sends the request to Anthropic and streams the answer back. It forwards only Claude Code's model requests and refuses any other address. Each request and answer is kept, per thread, in `model-audit.sqlite` in cube's state directory. That file holds the threads' prompts, code and answers, so protect it like the rest of the state directory.
+Claude Code never gets the token. It gets a placeholder for its thread and sends its model requests to cube's gateway on `127.0.0.1`. The gateway puts the token in, sends the request to Anthropic and streams the answer back. It forwards only Claude Code's model requests and refuses any other address. Each request and answer is kept, per thread, in `model-audit.sqlite` in cube's state directory, once the answer ends: a request still streaming when the gateway stops or crashes is not recorded yet. That file holds the threads' prompts, code and answers, so protect it like the rest of the state directory.
 
 ## cost
 

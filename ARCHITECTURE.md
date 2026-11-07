@@ -398,7 +398,12 @@ reconstructed as one Messages API message (`reconstruct`: the events folded
 into its content blocks, stop reason and usage), each stored once by
 SHA-256; each `web_search_tool_result` block of that message is an event
 of its own. It holds no token and no
-`Authorization`. Nothing reads it back as an agent's input.
+`Authorization`. Nothing reads it back as an agent's input. The record is
+written when an exchange ends, by a writer thread, and fails open: an
+exchange still streaming when the gateway is killed or crashes, and records
+queued but not yet written when it stops, are lost; a failed write is
+logged and does not stop requests (docs/plans/2026-11-07-claude-model-channel.md,
+"Audit durability", proposes the fix).
 
 Claude Code 2.1.319 sends its model requests to the base URL with
 `Authorization: Bearer <placeholder>` and the `oauth-2025-04-20` beta, the

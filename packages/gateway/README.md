@@ -65,13 +65,18 @@ placeholder as `CLAUDE_CODE_OAUTH_TOKEN`. Per request:
   identity`, TLS from this host to its public address; the answer streamed
   frame by frame with B6 (no fixed hold-back: only a tail that could still
   begin the token waits);
-- each exchange, refusals included, recorded in the audit file
+- each exchange that ends, refusals included, recorded in the audit file
   (`src/audit.rs`): an append-only SQLite (0600, triggers refuse UPDATE and
   DELETE) of the thread, route, outcome, status, an allow-list of headers
   (never `Authorization`), the request body as the child sent it, the
   answer's bytes as it got them and the answer reconstructed as one
   Messages API message (no token in any), stored by SHA-256; each
   `web_search_tool_result` block of that message is a separate event.
+
+The audit is written when an exchange ends and fails open: a gateway that
+is killed or crashes loses the exchanges still streaming and any record not
+yet written, and a write error is only logged (the plan's "Audit
+durability" section proposes the fix).
 
 The listener binds loopback only; the ready line names it
 (`{"ready":true,"version":…,"model":"127.0.0.1:PORT"}`), and cubed asks for

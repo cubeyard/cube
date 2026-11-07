@@ -152,7 +152,12 @@ the streamed answer. Each exchange, refusals included, is kept in
 child sent it and the answer as the child got it, raw and reconstructed as one
 message, by SHA-256, with an
 allow-list of headers (never `Authorization`), and web search results as events
-of their own. That file holds the threads' prompts, code and answers in full;
+of their own. The record is
+written when an exchange ends, by a writer thread, and fails open: an
+exchange still streaming when the gateway is killed or crashes, and records
+queued but not yet written when it stops, are lost; a failed write is
+logged and does not stop requests (docs/plans/2026-11-07-claude-model-channel.md,
+"Audit durability", proposes the fix). That file holds the threads' prompts, code and answers in full;
 protect it like the state directory. Without the token or the listener a
 Claude Code turn fails and says why; there is no fallback to Claude Code's own
 login or an API key. Claude Code still reaches some Anthropic services
