@@ -91,44 +91,46 @@ With `CLAUDE_CODE_OAUTH_TOKEN=cube_ph_claude_…` and
 `pnpm build`, the offline check above, and one real session with the
 host's token, or a blocker naming what it needs.
 
-## Audit durability (proposed, not implemented)
+## Audit durability (implemented, round 3)
 
-Today the audit row is written when an exchange ends, by a writer thread
-fed from memory, with `synchronous=NORMAL`, and a write error is only
-logged. So it fails open:
+Before this round the row was written when an exchange ended, from an
+in-memory queue, and a write error was only logged: a kill or crash lost
+forwarded requests, and the channel failed open. Now:
 
-| event | today |
-| --- | --- |
-| gateway SIGKILL, crash, power loss mid-stream | the forwarded request has no row at all |
-| SIGTERM or stdin EOF | tasks aborted and the process exits; queued rows lost |
-| a write fails (disk full, I/O error) | logged; requests go on forwarding unrecorded |
-| the writer thread dies | logged per exchange; requests go on |
+1. **Start before upstream, fail closed.** After cubed allows a request the
+   gateway reads its body whole, up to `MAX_BODY` (32 MiB, Anthropic's own
+   request limit; larger is 413, refused and recorded, nothing sent), and
+   commits an `exchange` row (thread, route, kept headers, request body by
+   hash) with `synchronous=FULL`. It waits at most 2 s for that commit; no
+   commit is 503 `x-cube-error`, and nothing goes upstream. A start that
+   commits after its request gave up gets an `outcome` of `failed` ("not
+   sent") from the writer itself.
+2. **Outcome rows.** When the answer ends, breaks or is dropped, an
+   `outcome` row (one per exchange) carries `forwarded`, `failed`, `cut` or
+   `refused`, the status, the raw and reconstructed answer hashes; events
+   as before. The answer still streams unbuffered; it is captured up to the
+   same `MAX_BODY` (past it: `response_truncated`).
+3. **Failed writes close the channel.** A write that fails stays queued in
+   the writer and is retried before any later write; while one is queued
+   every start fails, so no new request goes out unrecorded. A forwarded
+   answer is never cut for an audit failure.
+4. **One writer, then recovery.** The gateway takes an exclusive lock on
+   `model-audit.sqlite.lock` before it opens the file and holds it for its
+   life; a second gateway on the same audit refuses to start. Under that
+   lock, every `exchange` without an `outcome` (the previous gateway was
+   killed or crashed) gets `lost`.
+5. **Orderly stop inside cubed's bound.** cubed sends SIGTERM and closes
+   stdin, then SIGKILLs after 5 s. The gateway stops accepting, gives
+   in-flight answers 3 s, drops the rest (recorded `cut`), and waits at most
+   1 s for the writer to drain: 4 s in all. A kill past that leaves `lost`
+   on the next start, never silence.
+6. **Schema version.** `meta(schema=2)`; a file of another schema is refused
+   at start rather than written wrongly. `reconstruct` ignores block indexes
+   past 4096.
 
-Proposed, narrow, append-only throughout:
-
-1. **Start before upstream.** After cubed allows a request, the gateway reads
-   its body (bounded, 32 MiB, else 413), writes a `start` row with the
-   thread, route, kept headers and request body hash in its own committed
-   transaction (`synchronous=FULL`), and waits for that commit (2 s) before
-   sending anything upstream. No commit means 503 `x-cube-error: model
-   audit unavailable`, and nothing is sent. Answers still stream unbuffered;
-   only the request is read whole first (Claude Code sends whole JSON
-   bodies).
-2. **End row.** When the answer ends, breaks or is dropped, an `end` row
-   names its start and carries the outcome, status, raw and reconstructed
-   answer hashes and events. Refusals stay single rows.
-3. **Recovery.** On start the gateway appends `end(outcome='lost', reason='the
-   gateway stopped before the answer ended')` for every start without an
-   end, so a crash shows as a lost exchange, never as silence.
-4. **Failing writes close the channel.** A failed `end` write latches the
-   channel: later requests get 503 until a write succeeds again. A forwarded
-   answer is never cut for an audit failure, but no new one starts unrecorded.
-5. **Orderly stop.** On SIGTERM or EOF: stop accepting, give in-flight answers
-   a bound (10 s) to end, record the rest as `cut`, then close and join the
-   writer before exiting.
-
-Cost: one fsync'd write and the request body read before each upstream
-request (local, about milliseconds), and a `start`/`end` pair per exchange
-instead of one row. Tests: SIGKILL mid-stream then restart shows `lost`; a
-read-only or full audit file refuses with 503 and sends nothing upstream;
-SIGTERM mid-stream records `cut`.
+Tests (`cargo test -p cube-gateway`, offline): SIGKILL mid-stream then a
+restart shows `lost`; a locked audit gives 503 with nothing upstream, and
+the channel recovers when it frees; an outcome that cannot be written holds
+later requests at 503 until it is; 413 over the cap; 16 concurrent
+exchanges; a second gateway refused on the same audit; SIGTERM mid-stream
+exits within the bound with `cut` recorded.

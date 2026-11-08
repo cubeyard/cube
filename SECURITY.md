@@ -152,16 +152,22 @@ the streamed answer. Each exchange, refusals included, is kept in
 child sent it and the answer as the child got it, raw and reconstructed as one
 message, by SHA-256, with an
 allow-list of headers (never `Authorization`), and web search results as events
-of their own. The record is
-written when an exchange ends, by a writer thread, and fails open: an
-exchange still streaming when the gateway is killed or crashes, and records
-queued but not yet written when it stops, are lost; a failed write is
-logged and does not stop requests (docs/plans/2026-11-07-claude-model-channel.md,
-"Audit durability", proposes the fix). cubed's own host commands that are not agents (`gh`, `git`, runner
-enrollment's `berth`, Pi's provider key commands) inherit cubed's whole
-environment, `CLAUDE_CODE_OAUTH_TOKEN` included, as they inherit its other
-credentials; only the `claude` child's environment is filtered. That file holds the threads' prompts, code and answers in full;
-protect it like the state directory. Without the token or the listener a
+of their own. The audit fails
+closed: a request's row (route, kept headers, body by hash) is committed,
+`synchronous=FULL`, before the request goes upstream, and a request whose row
+does not commit within 2 s gets 503 and is not sent. Its outcome follows when
+the answer ends; an outcome that cannot be written is retried before every
+later write, and until it is written new requests get 503. Request bodies
+over 32 MiB are refused (413). One gateway writes the file at a time (an
+exclusive lock beside it), and on start it records every exchange its
+predecessor left open (killed, crashed) as `lost`; an orderly stop gives
+open answers 3 s, records the rest as `cut` and drains the writer, inside
+cubed's 5 s before SIGKILL. The audit file holds the threads' prompts, code
+and answers in full; protect it like the state directory. cubed's own host
+commands that are not agents (`gh`, `git`, runner enrollment's `berth`, Pi's
+provider key commands) inherit cubed's whole environment,
+`CLAUDE_CODE_OAUTH_TOKEN` included, as they inherit its other credentials;
+only the `claude` child's environment is filtered. Without the token or the listener a
 Claude Code turn fails and says why; there is no fallback to Claude Code's own
 login or an API key. Claude Code still reaches some Anthropic services
 directly, not through the base URL (start-up bootstrap, feature flags,

@@ -398,12 +398,21 @@ reconstructed as one Messages API message (`reconstruct`: the events folded
 into its content blocks, stop reason and usage), each stored once by
 SHA-256; each `web_search_tool_result` block of that message is an event
 of its own. It holds no token and no
-`Authorization`. Nothing reads it back as an agent's input. The record is
-written when an exchange ends, by a writer thread, and fails open: an
-exchange still streaming when the gateway is killed or crashes, and records
-queued but not yet written when it stops, are lost; a failed write is
-logged and does not stop requests (docs/plans/2026-11-07-claude-model-channel.md,
-"Audit durability", proposes the fix).
+`Authorization`. Nothing reads it back as an agent's input. Its tables
+are `exchange` (committed before the request leaves), `outcome` (one per
+exchange: `forwarded`, `refused`, `failed`, `cut` or `lost`), `event`,
+`blob` and `meta` (schema 2; another schema is refused at start), with the
+view `exchange_outcome` joining them. The audit fails
+closed: a request's row (route, kept headers, body by hash) is committed,
+`synchronous=FULL`, before the request goes upstream, and a request whose row
+does not commit within 2 s gets 503 and is not sent. Its outcome follows when
+the answer ends; an outcome that cannot be written is retried before every
+later write, and until it is written new requests get 503. Request bodies
+over 32 MiB are refused (413). One gateway writes the file at a time (an
+exclusive lock beside it), and on start it records every exchange its
+predecessor left open (killed, crashed) as `lost`; an orderly stop gives
+open answers 3 s, records the rest as `cut` and drains the writer, inside
+cubed's 5 s before SIGKILL.
 
 Claude Code 2.1.319 sends its model requests to the base URL with
 `Authorization: Bearer <placeholder>` and the `oauth-2025-04-20` beta, the
