@@ -66,15 +66,45 @@ pub struct Running {
     pub ready: serde_json::Value,
     pub credential: PathBuf,
     pub task: JoinHandle<Result<()>>,
-    pub model: Option<JoinHandle<Result<()>>>,
+    pub model: Option<ModelRunning>,
+}
+
+/// The model channel's task, its stop signal and its audit.
+pub struct ModelRunning {
+    pub task: JoinHandle<Result<()>>,
+    pub stop: tokio::sync::watch::Sender<bool>,
+    pub audit: audit::Audit,
 }
 
 impl Running {
+    /// Stops at once (tests): open exchanges are cut, queued writes may be
+    /// left for the next start's recovery.
     pub fn stop(self) {
         self.task.abort();
         if let Some(model) = self.model {
-            model.abort();
+            model.task.abort();
         }
+        let _ = fs::remove_file(&self.credential);
+    }
+
+    /// The orderly stop cubed asks for (SIGTERM, stdin closed): the model
+    /// channel accepts no more, lets open answers end for SHUTDOWN_GRACE,
+    /// cuts the rest and drains the audit for FLUSH_LIMIT; 4 s in all,
+    /// inside cubed's 5 s before SIGKILL.
+    pub async fn shutdown(self) {
+        if let Some(model) = self.model {
+            let _ = model.stop.send(true);
+            let bound = model::SHUTDOWN_GRACE + std::time::Duration::from_millis(250);
+            if tokio::time::timeout(bound, model.task).await.is_err() {
+                eprintln!("cube-gateway: the model channel did not stop in time");
+            }
+            if let Err(error) = model.audit.flush(model::FLUSH_LIMIT).await {
+                eprintln!(
+                    "cube-gateway: model audit not drained before stopping: {error} (the next start records what is open as lost)"
+                );
+            }
+        }
+        self.task.abort();
         let _ = fs::remove_file(&self.credential);
     }
 }
@@ -95,9 +125,14 @@ pub async fn start(options: ServeOptions) -> Result<Running> {
             let channel = Arc::new(model::ModelChannel {
                 decide: decide.clone(),
                 upstream: upstream.clone(),
-                audit,
+                audit: audit.clone(),
             });
-            Some(tokio::spawn(model::serve(listener, channel)))
+            let (stop, stopped) = tokio::sync::watch::channel(false);
+            Some(ModelRunning {
+                task: tokio::spawn(model::serve(listener, channel, stopped)),
+                stop,
+                audit,
+            })
         }
         None => None,
     };

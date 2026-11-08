@@ -133,7 +133,7 @@ async fn serve(mut options: Options) -> Result<()> {
         _ = tokio::signal::ctrl_c() => "SIGINT",
     };
     eprintln!("cube-gateway: stopping ({reason})");
-    running.stop();
+    running.shutdown().await;
     Ok(())
 }
 

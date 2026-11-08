@@ -65,7 +65,9 @@ placeholder as `CLAUDE_CODE_OAUTH_TOKEN`. Per request:
   identity`, TLS from this host to its public address; the answer streamed
   frame by frame with B6 (no fixed hold-back: only a tail that could still
   begin the token waits);
-- each exchange that ends, refusals included, recorded in the audit file
+- before the request leaves, its body read whole (over 32 MiB: 413) and its
+  row committed in the audit (no commit within 2 s: 503, nothing sent);
+- each exchange's outcome, refusals included, recorded in the audit file
   (`src/audit.rs`): an append-only SQLite (0600, triggers refuse UPDATE and
   DELETE) of the thread, route, outcome, status, an allow-list of headers
   (never `Authorization`), the request body as the child sent it, the
@@ -73,10 +75,17 @@ placeholder as `CLAUDE_CODE_OAUTH_TOKEN`. Per request:
   Messages API message (no token in any), stored by SHA-256; each
   `web_search_tool_result` block of that message is a separate event.
 
-The audit is written when an exchange ends and fails open: a gateway that
-is killed or crashes loses the exchanges still streaming and any record not
-yet written, and a write error is only logged (the plan's "Audit
-durability" section proposes the fix).
+The audit fails
+closed: a request's row (route, kept headers, body by hash) is committed,
+`synchronous=FULL`, before the request goes upstream, and a request whose row
+does not commit within 2 s gets 503 and is not sent. Its outcome follows when
+the answer ends; an outcome that cannot be written is retried before every
+later write, and until it is written new requests get 503. Request bodies
+over 32 MiB are refused (413). One gateway writes the file at a time (an
+exclusive lock beside it), and on start it records every exchange its
+predecessor left open (killed, crashed) as `lost`; an orderly stop gives
+open answers 3 s, records the rest as `cut` and drains the writer, inside
+cubed's 5 s before SIGKILL.
 
 The listener binds loopback only; the ready line names it
 (`{"ready":true,"version":…,"model":"127.0.0.1:PORT"}`), and cubed asks for

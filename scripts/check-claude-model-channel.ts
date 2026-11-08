@@ -147,7 +147,7 @@ try {
   try { result = JSON.parse(stdout) as typeof result; } catch { /* reported below */ }
   await new Promise(resolve => setTimeout(resolve, 500));
   const db = new DatabaseSync(audit, { readOnly: true });
-  const rows = db.prepare("SELECT seq, method, route, outcome, status, reason, request_sha256 AS request, response_sha256 AS response, response_message_sha256 AS message, request_headers AS headers, (SELECT count(*) FROM event WHERE event.exchange=exchange.seq) AS events FROM exchange WHERE thread=? ORDER BY seq").all(THREAD) as Array<Record<string, unknown>>;
+  const rows = db.prepare("SELECT seq, method, route, outcome, status, reason, request_sha256 AS request, response_sha256 AS response, response_message_sha256 AS message, request_headers AS headers, events FROM exchange_outcome WHERE thread=? ORDER BY seq").all(THREAD) as Array<Record<string, unknown>>;
   db.close();
   const files = ["", "-wal", "-shm"].map(suffix => `${audit}${suffix}`).filter(file => fs.existsSync(file));
   const leaks = {

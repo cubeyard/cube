@@ -262,7 +262,7 @@ async fn exchanges(audit: &Path, count: usize) -> Vec<serde_json::Value> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let rows = read_exchanges(audit);
-        if rows.len() >= count {
+        if rows.iter().filter(|row| !row["outcome"].is_null()).count() >= count {
             return rows;
         }
         assert!(
@@ -279,8 +279,8 @@ fn read_exchanges(audit: &Path) -> Vec<serde_json::Value> {
     let mut statement = connection
         .prepare(
             "SELECT seq, thread, method, route, outcome, status, reason, request_headers, request_sha256,
-               response_headers, response_sha256, (SELECT count(*) FROM event WHERE event.exchange=exchange.seq), response_message_sha256
-             FROM exchange ORDER BY seq",
+               response_headers, response_sha256, events, response_message_sha256
+             FROM exchange_outcome ORDER BY seq",
         )
         .unwrap();
     statement
@@ -290,12 +290,12 @@ fn read_exchanges(audit: &Path) -> Vec<serde_json::Value> {
                 "thread": row.get::<_, String>(1)?,
                 "method": row.get::<_, String>(2)?,
                 "route": row.get::<_, String>(3)?,
-                "outcome": row.get::<_, String>(4)?,
+                "outcome": row.get::<_, Option<String>>(4)?,
                 "status": row.get::<_, Option<i64>>(5)?,
                 "reason": row.get::<_, Option<String>>(6)?,
                 "request_headers": row.get::<_, String>(7)?,
                 "request": row.get::<_, Option<String>>(8)?,
-                "response_headers": row.get::<_, String>(9)?,
+                "response_headers": row.get::<_, Option<String>>(9)?,
                 "response": row.get::<_, Option<String>>(10)?,
                 "events": row.get::<_, i64>(11)?,
                 "message": row.get::<_, Option<String>>(12)?,
@@ -332,6 +332,15 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
 }
 
 fn post(path: &str, auth: Option<&str>, extra: &[(&str, &str)]) -> hyper::Request<Full<Bytes>> {
+    post_body(path, auth, extra, Bytes::from(REQUEST))
+}
+
+fn post_body(
+    path: &str,
+    auth: Option<&str>,
+    extra: &[(&str, &str)],
+    body: Bytes,
+) -> hyper::Request<Full<Bytes>> {
     let mut builder = hyper::Request::post(path)
         .header("host", "127.0.0.1")
         .header("content-type", "application/json")
@@ -343,7 +352,7 @@ fn post(path: &str, auth: Option<&str>, extra: &[(&str, &str)]) -> hyper::Reques
     for (k, v) in extra {
         builder = builder.header(*k, *v);
     }
-    builder.body(Full::new(Bytes::from(REQUEST))).unwrap()
+    builder.body(Full::new(body)).unwrap()
 }
 
 fn substitute() -> DecideFn {
@@ -725,4 +734,306 @@ fn pem(ca: &UpstreamCa) -> String {
         "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
         lines.join("\n")
     )
+}
+
+/// The real binary on its own state: started, restarted, killed.
+struct Binary {
+    dir: tempfile::TempDir,
+    decide: PathBuf,
+    _decider: FakeDecide,
+    ca_file: PathBuf,
+    upstream: std::net::SocketAddr,
+    fake: Fake,
+    audit: PathBuf,
+}
+
+impl Binary {
+    async fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let decide = dir.path().join("egress.sock");
+        let decider = FakeDecide::start(decide.clone(), substitute());
+        let ca = UpstreamCa::new();
+        let ca_file = dir.path().join("ca.pem");
+        std::fs::write(&ca_file, pem(&ca)).unwrap();
+        let fake = Fake::default();
+        let upstream = fake_anthropic(&ca, fake.clone()).await;
+        let audit = dir.path().join("model-audit.sqlite");
+        Self {
+            dir,
+            decide,
+            _decider: decider,
+            ca_file,
+            upstream,
+            fake,
+            audit,
+        }
+    }
+
+    fn command(&self) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_cube-gateway"));
+        command
+            .args(["serve", "--decide"])
+            .arg(&self.decide)
+            .arg("--credential")
+            .arg(self.dir.path().join("credential.sock"))
+            .args(["--model-listen", "127.0.0.1:0", "--model-audit"])
+            .arg(&self.audit)
+            .arg("--test-upstream")
+            .arg(format!("api.anthropic.com={}", self.upstream))
+            .arg("--test-upstream-ca")
+            .arg(&self.ca_file)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        command
+    }
+
+    /// A started gateway and its model listener.
+    async fn start(&self) -> (tokio::process::Child, std::net::SocketAddr) {
+        let mut child = self.command().spawn().unwrap();
+        let mut stdout = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        let line = stdout.next_line().await.unwrap().expect("a ready line");
+        let ready: serde_json::Value = serde_json::from_str(&line).unwrap();
+        (child, ready["model"].as_str().unwrap().parse().unwrap())
+    }
+}
+
+/// A streaming answer the fake holds after its first event, read that far.
+async fn held(address: std::net::SocketAddr) -> Incoming {
+    let stream = TcpStream::connect(address).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let response = sender
+        .send_request(post(
+            "/t/thread-1/v1/messages?beta=true",
+            Some(&format!("Bearer {PH}")),
+            &[("x-test-wait", "1")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let mut body = response.into_body();
+    let (first, _) = events(PH);
+    let mut received = 0;
+    while received < first.len() {
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        received += frame.into_data().unwrap().len();
+    }
+    body
+}
+
+/// The audit's exchanges as (seq, outcome), outcome None while open.
+fn outcomes(audit: &Path) -> Vec<(i64, Option<String>)> {
+    read_exchanges(audit)
+        .iter()
+        .map(|row| {
+            (
+                row["seq"].as_i64().unwrap(),
+                row["outcome"].as_str().map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+fn bearer() -> String {
+    format!("Bearer {PH}")
+}
+
+#[tokio::test]
+async fn a_killed_gateway_leaves_its_forwarded_request_recorded_and_lost_on_restart() {
+    let binary = Binary::new().await;
+    let (mut child, address) = binary.start().await;
+    let _answer = held(address).await;
+    assert_eq!(
+        outcomes(&binary.audit),
+        vec![(1, None)],
+        "recorded before it went upstream"
+    );
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+    assert_eq!(
+        outcomes(&binary.audit),
+        vec![(1, None)],
+        "SIGKILL leaves it open, not missing"
+    );
+    let (mut again, _) = binary.start().await;
+    assert_eq!(outcomes(&binary.audit), vec![(1, Some("lost".into()))]);
+    assert_eq!(binary.fake.seen.lock().unwrap().len(), 1);
+    again.kill().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_second_gateway_on_the_same_audit_is_refused() {
+    let binary = Binary::new().await;
+    let (mut first, _) = binary.start().await;
+    let second = binary.command().output().await.unwrap();
+    assert!(!second.status.success());
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("another cube-gateway writes the model audit"),
+        "{stderr}"
+    );
+    first.kill().await.unwrap();
+}
+
+#[tokio::test]
+async fn sigterm_records_what_ended_cuts_what_streams_and_exits_inside_cubeds_bound() {
+    let binary = Binary::new().await;
+    let (mut child, address) = binary.start().await;
+    let stream = TcpStream::connect(address).await.unwrap();
+    let (status, _, _) = request(
+        stream,
+        post("/t/thread-1/v1/messages", Some(&bearer()), &[]),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let mut answer = held(address).await;
+    let began = std::time::Instant::now();
+    let pid = child.id().unwrap();
+    let sent = std::process::Command::new("sh")
+        .args(["-c", &format!("kill -TERM {pid}")])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    let exit = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("it exits before cubed's SIGKILL at 5 s")
+        .unwrap();
+    let took = began.elapsed();
+    assert!(exit.success(), "{exit:?}");
+    assert!(
+        took >= Duration::from_millis(2900) && took < Duration::from_millis(4500),
+        "it gave the open answer its grace, then stopped: {took:?}"
+    );
+    while let Some(Ok(_)) = answer.frame().await {}
+    assert_eq!(
+        outcomes(&binary.audit),
+        vec![(1, Some("forwarded".into())), (2, Some("cut".into()))]
+    );
+}
+
+#[tokio::test]
+async fn a_locked_audit_refuses_with_503_and_sends_nothing_until_it_frees() {
+    let channel = Channel::start(substitute()).await;
+    let holder = rusqlite::Connection::open(&channel.audit).unwrap();
+    holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let (status, headers, _) = channel
+        .send(post("/t/thread-1/v1/messages", Some(&bearer()), &[]))
+        .await;
+    assert_eq!(status, 503);
+    assert!(
+        headers["x-cube-error"]
+            .to_str()
+            .unwrap()
+            .contains("model audit")
+    );
+    assert_eq!(channel.upstream_requests(), 0, "nothing went upstream");
+    holder.execute_batch("ROLLBACK").unwrap();
+    let (status, _, _) = channel
+        .send(post("/t/thread-1/v1/messages", Some(&bearer()), &[]))
+        .await;
+    assert_eq!(status, 200);
+    let rows = channel.exchanges(1).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "the refused request has no row: it was never started"
+    );
+    assert_eq!(rows[0]["outcome"], "forwarded");
+}
+
+#[tokio::test]
+async fn an_outcome_that_cannot_be_written_holds_new_requests_until_it_is() {
+    let channel = Channel::start(substitute()).await;
+    let mut answer = held(channel.address).await;
+    let holder = rusqlite::Connection::open(&channel.audit).unwrap();
+    holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    channel.fake.release.notify_one();
+    let mut rest = vec![];
+    while let Some(frame) = answer.frame().await {
+        rest.extend_from_slice(&frame.unwrap().into_data().unwrap());
+    }
+    let rest = String::from_utf8(rest).unwrap();
+    assert!(
+        rest.ends_with("message_stop\"}\n\n"),
+        "the answer is never cut for the audit"
+    );
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    let (status, _, _) = channel
+        .send(post("/t/thread-1/v1/messages", Some(&bearer()), &[]))
+        .await;
+    assert_eq!(status, 503, "no new request while an outcome is unwritten");
+    holder.execute_batch("ROLLBACK").unwrap();
+    let (status, _, _) = channel
+        .send(post("/t/thread-1/v1/messages", Some(&bearer()), &[]))
+        .await;
+    assert_eq!(status, 200);
+    let rows = channel.exchanges(2).await;
+    let kinds: Vec<&str> = rows
+        .iter()
+        .map(|row| row["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["forwarded", "forwarded"]);
+    assert_eq!(channel.upstream_requests(), 2);
+}
+
+#[tokio::test]
+async fn a_body_over_the_cap_is_refused_and_recorded() {
+    let channel = Channel::start(substitute()).await;
+    let big = Bytes::from(vec![b'x'; cube_gateway::audit::MAX_BODY + 1]);
+    let request = post_body("/t/thread-1/v1/messages", Some(&bearer()), &[], big);
+    let (status, headers, _) = channel.send(request).await;
+    assert_eq!(status, 413);
+    assert!(
+        headers["x-cube-denied"]
+            .to_str()
+            .unwrap()
+            .contains("32 MiB")
+    );
+    assert_eq!(channel.upstream_requests(), 0);
+    let rows = channel.exchanges(1).await;
+    assert_eq!(rows[0]["outcome"], "refused");
+    assert!(rows[0]["request"].is_null());
+}
+
+#[tokio::test]
+async fn concurrent_exchanges_each_get_their_own_rows() {
+    let channel = Arc::new(Channel::start(substitute()).await);
+    let mut tasks = vec![];
+    for n in 0..16 {
+        let channel = channel.clone();
+        tasks.push(tokio::spawn(async move {
+            let body = Bytes::from(format!("{{\"n\":{n}}}"));
+            let request = post_body("/t/thread-1/v1/messages", Some(&bearer()), &[], body);
+            let (status, _, answer) = channel.send(request).await;
+            assert_eq!(status, 200);
+            assert_eq!(
+                String::from_utf8(answer.to_vec()).unwrap(),
+                expected_answer()
+            );
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    let rows = channel.exchanges(16).await;
+    assert_eq!(rows.len(), 16);
+    let mut bodies: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            assert_eq!(row["outcome"], "forwarded");
+            assert_eq!(row["events"], 1);
+            String::from_utf8(blob(&channel.audit, row["request"].as_str().unwrap())).unwrap()
+        })
+        .collect();
+    bodies.sort();
+    let mut want: Vec<String> = (0..16).map(|n| format!("{{\"n\":{n}}}")).collect();
+    want.sort();
+    assert_eq!(bodies, want);
 }

@@ -19,7 +19,7 @@
 use anyhow::{Context as _, Result, ensure};
 use bytes::Bytes;
 use http::{HeaderValue, Request, Response, StatusCode, Uri, header};
-use http_body_util::{BodyExt, combinators::BoxBody};
+use http_body_util::{BodyExt, Full, Limited, combinators::BoxBody};
 use hyper::{
     body::{Body as HttpBody, Frame, Incoming, SizeHint},
     client::conn::http1::SendRequest,
@@ -31,14 +31,18 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::watch,
+    task::JoinSet,
+};
 
 use crate::{
-    audit::{Audit, Captured, Exchange, MAX_BODY, Outcome, kept_headers, now_ms},
+    audit::{Audit, Captured, End, MAX_BODY, Outcome, Start, kept_headers, now_ms},
     decide::{DecideClient, DecideRequest, Decision},
     http::{MAX_HEAD, Upstream, UpstreamError, denied, encoded, failed},
     reverse::{Pairs, Reversed},
@@ -56,7 +60,15 @@ pub const ROUTES: &[(&str, &str)] = &[
 ];
 /// The secret name of the channel's placeholders.
 pub const CREDENTIAL: &str = "claude";
+/// On stop, how long answers still streaming may go on; then they are cut.
+/// With FLUSH_LIMIT it stays inside cubed's 5 s between SIGTERM and SIGKILL
+/// (packages/server/src/gateway.ts `stop`).
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+/// On stop, how long the audit writer may take to drain.
+pub const FLUSH_LIMIT: Duration = Duration::from_secs(1);
 const HEADER_TIMEOUT: Duration = Duration::from_secs(60);
+/// A request body must arrive whole within this.
+const BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
@@ -77,17 +89,40 @@ pub async fn bind(address: SocketAddr) -> Result<TcpListener> {
         .with_context(|| format!("bind {address}"))
 }
 
-/// Serves the listener until it fails.
-pub async fn serve(listener: TcpListener, channel: Arc<ModelChannel>) -> Result<()> {
+/// Serves the listener until `stop` turns true; then it accepts no more,
+/// lets open exchanges end for SHUTDOWN_GRACE and drops the connections
+/// still open (their answers are recorded as cut).
+pub async fn serve(
+    listener: TcpListener,
+    channel: Arc<ModelChannel>,
+    mut stop: watch::Receiver<bool>,
+) -> Result<()> {
+    let mut connections = JoinSet::new();
     loop {
-        let (stream, _) = listener.accept().await?;
-        let channel = channel.clone();
-        tokio::spawn(async move {
-            if let Err(error) = connection(stream, channel).await {
-                eprintln!("cube-gateway: model channel connection: {error:#}");
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let channel = channel.clone();
+                connections.spawn(async move {
+                    if let Err(error) = connection(stream, channel).await {
+                        eprintln!("cube-gateway: model channel connection: {error:#}");
+                    }
+                });
             }
-        });
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+            _ = stop.wait_for(|stop| *stop) => break,
+        }
     }
+    drop(listener);
+    if !channel.audit.idle(SHUTDOWN_GRACE).await {
+        eprintln!(
+            "cube-gateway: model channel stopping with {} answer(s) still streaming; they are cut",
+            channel.audit.open_exchanges()
+        );
+    }
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
+    Ok(())
 }
 
 async fn connection(stream: TcpStream, channel: Arc<ModelChannel>) -> Result<()> {
@@ -126,7 +161,7 @@ pub fn target(path: &str) -> Option<(&str, &str)> {
 struct Connection {
     channel: Arc<ModelChannel>,
     /// One upstream connection per child connection, reused while alive.
-    upstream: tokio::sync::Mutex<Option<SendRequest<Tee<Incoming>>>>,
+    upstream: tokio::sync::Mutex<Option<SendRequest<Full<Bytes>>>>,
 }
 
 impl Connection {
@@ -135,33 +170,28 @@ impl Connection {
         let path = request.uri().path().to_string();
         let query = request.uri().query().map(|q| format!("?{q}"));
         let (thread, route) = target(&path).unwrap_or(("", path.as_str()));
-        let exchange = Exchange {
+        let start = Start {
             thread: thread.to_string(),
             at_ms: now_ms(),
             method: method.clone(),
             route: format!("{route}{}", query.as_deref().unwrap_or("")),
-            outcome: Outcome::Refused,
-            status: None,
-            reason: None,
             request_headers: kept_headers(request.headers(), true),
             request: None,
-            response_headers: vec![],
-            response: None,
         };
         if thread.is_empty() {
             return self.refuse(
-                exchange,
+                start,
                 StatusCode::NOT_FOUND,
                 "model requests go to /t/<thread>/…",
             );
         }
         if !ROUTES.contains(&(method.as_str(), route)) {
             let reason = format!("{method} {route} is not a model route cube allows");
-            return self.refuse(exchange, StatusCode::NOT_FOUND, &reason);
+            return self.refuse(start, StatusCode::NOT_FOUND, &reason);
         }
         if request.headers().contains_key(header::UPGRADE) {
             return self.refuse(
-                exchange,
+                start,
                 StatusCode::FORBIDDEN,
                 "protocol upgrades are not supported",
             );
@@ -169,7 +199,7 @@ impl Connection {
         let placeholders = secrets::scan_headers(request.headers());
         if placeholders.is_empty() {
             return self.refuse(
-                exchange,
+                start,
                 StatusCode::UNAUTHORIZED,
                 "the thread's claude placeholder is missing",
             );
@@ -178,7 +208,7 @@ impl Connection {
             || secrets::placeholder_name(&placeholders[0]) != Some(CREDENTIAL)
         {
             return self.refuse(
-                exchange,
+                start,
                 StatusCode::FORBIDDEN,
                 "only the thread's one claude placeholder goes through the model channel",
             );
@@ -199,9 +229,7 @@ impl Connection {
             })
             .await;
         let substitute: HashMap<String, String> = match decision {
-            Decision::Deny { reason } => {
-                return self.refuse(exchange, StatusCode::FORBIDDEN, &reason);
-            }
+            Decision::Deny { reason } => return self.refuse(start, StatusCode::FORBIDDEN, &reason),
             Decision::Allow { substitute } => substitute
                 .into_iter()
                 .filter(|(k, _)| placeholders.contains(k))
@@ -209,32 +237,43 @@ impl Connection {
         };
         if substitute.is_empty() {
             return self.refuse(
-                exchange,
+                start,
                 StatusCode::FORBIDDEN,
                 "cubed gave no claude token for this request",
             );
         }
-        self.forward(request, exchange, route, query, substitute)
-            .await
+        let target = format!("{route}{}", query.as_deref().unwrap_or(""));
+        self.forward(request, start, target, substitute).await
     }
 
     async fn forward(
         &self,
-        mut request: Request<Incoming>,
-        mut exchange: Exchange,
-        route: &str,
-        query: Option<String>,
+        request: Request<Incoming>,
+        mut start: Start,
+        target: String,
         substitute: HashMap<String, String>,
     ) -> Response<Body> {
-        let headers = request.headers_mut();
-        let basic = match secrets::substitute_headers(headers, &substitute) {
+        let (mut parts, body) = request.into_parts();
+        let body = match tokio::time::timeout(BODY_TIMEOUT, Limited::new(body, MAX_BODY).collect())
+            .await
+        {
+            Ok(Ok(body)) => body.to_bytes(),
+            Ok(Err(error)) if error.is::<http_body_util::LengthLimitError>() => {
+                let reason = format!("the request body is over {} MiB", MAX_BODY >> 20);
+                return self.refuse(start, StatusCode::PAYLOAD_TOO_LARGE, &reason);
+            }
+            Ok(Err(_)) | Err(_) => {
+                return self.refuse(
+                    start,
+                    StatusCode::BAD_REQUEST,
+                    "the request body did not arrive whole",
+                );
+            }
+        };
+        let basic = match secrets::substitute_headers(&mut parts.headers, &substitute) {
             Ok(basic) => basic,
             Err(_) => {
-                return self.refuse(
-                    exchange,
-                    StatusCode::FORBIDDEN,
-                    "invalid secret substitution",
-                );
+                return self.refuse(start, StatusCode::FORBIDDEN, "invalid secret substitution");
             }
         };
         let mut pairs = Pairs::default();
@@ -245,6 +284,7 @@ impl Connection {
             pairs.add(upstream, guest);
         }
         drop(substitute);
+        let headers = &mut parts.headers;
         strip_hop_by_hop(headers);
         headers.remove(header::PROXY_AUTHORIZATION);
         headers.insert(header::HOST, HeaderValue::from_static(HOST));
@@ -253,34 +293,60 @@ impl Connection {
             header::ACCEPT_ENCODING,
             HeaderValue::from_static("identity"),
         );
-        let target = format!("{route}{}", query.as_deref().unwrap_or(""));
-        *request.uri_mut() = match target.parse::<Uri>() {
+        parts.uri = match target.parse::<Uri>() {
             Ok(uri) => uri,
-            Err(_) => {
-                return self.refuse(exchange, StatusCode::BAD_REQUEST, "invalid request target");
+            Err(_) => return self.refuse(start, StatusCode::BAD_REQUEST, "invalid request target"),
+        };
+        // Recorded before it leaves, or it does not leave.
+        start.request = Some(body.to_vec());
+        let (thread, method, route) = (
+            start.thread.clone(),
+            start.method.clone(),
+            start.route.clone(),
+        );
+        let seq = match self.channel.audit.start(start).await {
+            Ok(seq) => seq,
+            Err(error) => {
+                eprintln!(
+                    "cube-gateway: model channel refused {method} {} (thread {thread:?}), not sent: the model audit cannot record it: {error}",
+                    route.split('?').next().unwrap_or_default()
+                );
+                return plain_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the model audit cannot record this request, so it was not sent",
+                );
             }
         };
-        let sent = Shared::default();
-        let request = request.map(|body| Tee::new(body, sent.clone(), None));
+        let request = Request::from_parts(parts, Full::new(body));
+        let fail = |reason: &str| {
+            eprintln!(
+                "cube-gateway: model channel failed {method} {} (thread {thread:?}): {reason}",
+                route.split('?').next().unwrap_or_default()
+            );
+            let response = failed(reason);
+            self.channel.audit.end(
+                seq,
+                End {
+                    outcome: Outcome::Failed,
+                    status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                    reason: Some(reason.to_string()),
+                    response_headers: kept_headers(response.headers(), false),
+                    response: None,
+                },
+            );
+            response
+        };
         let response = match self.send(request).await {
             Ok(response) => response,
-            Err(reason) => {
-                exchange.request = Some(sent.take());
-                return self.fail(exchange, &reason);
-            }
+            Err(reason) => return fail(&reason),
         };
         let (mut parts, body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
         if encoded(&parts.headers) {
-            exchange.request = Some(sent.take());
-            return self.fail(exchange, "the model channel refuses an encoded answer");
+            return fail("the model channel refuses an encoded answer");
         }
         if pairs.rewrite_headers(&mut parts.headers).is_err() {
-            exchange.request = Some(sent.take());
-            return self.fail(
-                exchange,
-                "the answer's headers cannot carry the placeholder",
-            );
+            return fail("the answer's headers cannot carry the placeholder");
         }
         let bodiless = parts.status == StatusCode::NO_CONTENT
             || parts.status == StatusCode::NOT_MODIFIED
@@ -289,23 +355,21 @@ impl Connection {
             // The length may change: hyper sends the rewritten body chunked.
             parts.headers.remove(header::CONTENT_LENGTH);
         }
-        exchange.status = Some(parts.status.as_u16());
-        exchange.response_headers = kept_headers(&parts.headers, false);
         let record = Record {
             audit: self.channel.audit.clone(),
-            exchange: Some(exchange),
-            sent,
+            seq,
+            status: parts.status.as_u16(),
+            response_headers: kept_headers(&parts.headers, false),
+            done: false,
         };
-        let body = Tee::new(Reversed::new(body, pairs), Shared::default(), Some(record));
+        let body = Tee::new(Reversed::new(body, pairs), record);
         Response::from_parts(parts, body.boxed())
     }
 
-    async fn send(&self, request: Request<Tee<Incoming>>) -> Result<Response<Incoming>, String> {
+    async fn send(&self, request: Request<Full<Bytes>>) -> Result<Response<Incoming>, String> {
         let mut sender = match self.sender().await {
             Ok(sender) => sender,
-            Err(UpstreamError::NotPublic) => {
-                return Err("upstream address is not public".into());
-            }
+            Err(UpstreamError::NotPublic) => return Err("upstream address is not public".into()),
             Err(UpstreamError::Failed(error)) => return Err(format!("{error:#}")),
         };
         let response = sender
@@ -316,7 +380,7 @@ impl Connection {
         Ok(response)
     }
 
-    async fn sender(&self) -> Result<SendRequest<Tee<Incoming>>, UpstreamError> {
+    async fn sender(&self) -> Result<SendRequest<Full<Bytes>>, UpstreamError> {
         if let Some(mut sender) = self.upstream.lock().await.take()
             && sender.ready().await.is_ok()
         {
@@ -343,102 +407,87 @@ impl Connection {
         handshake.await.map_err(UpstreamError::Failed)
     }
 
-    fn refuse(&self, mut exchange: Exchange, status: StatusCode, reason: &str) -> Response<Body> {
+    fn refuse(&self, start: Start, status: StatusCode, reason: &str) -> Response<Body> {
         eprintln!(
             "cube-gateway: model channel refused {} {} (thread {:?}): {reason}",
-            exchange.method,
-            exchange.route.split('?').next().unwrap_or_default(),
-            exchange.thread
+            start.method,
+            start.route.split('?').next().unwrap_or_default(),
+            start.thread
         );
         let response = denied(status, reason);
-        exchange.outcome = Outcome::Refused;
-        exchange.status = Some(status.as_u16());
-        exchange.reason = Some(reason.to_string());
-        exchange.response_headers = kept_headers(response.headers(), false);
-        self.channel.audit.record(exchange);
-        response
-    }
-
-    fn fail(&self, mut exchange: Exchange, reason: &str) -> Response<Body> {
-        eprintln!(
-            "cube-gateway: model channel failed {} {} (thread {:?}): {reason}",
-            exchange.method,
-            exchange.route.split('?').next().unwrap_or_default(),
-            exchange.thread
-        );
-        let response = failed(reason);
-        exchange.outcome = Outcome::Failed;
-        exchange.status = Some(StatusCode::BAD_GATEWAY.as_u16());
-        exchange.reason = Some(reason.to_string());
-        exchange.response_headers = kept_headers(response.headers(), false);
-        self.channel.audit.record(exchange);
+        let end = End {
+            outcome: Outcome::Refused,
+            status: Some(status.as_u16()),
+            reason: Some(reason.to_string()),
+            response_headers: kept_headers(response.headers(), false),
+            response: None,
+        };
+        self.channel.audit.refusal(start, end);
         response
     }
 }
 
-/// What a body has passed so far, shared with its record.
-#[derive(Clone, Default)]
-struct Shared(Arc<Mutex<Captured>>);
-
-impl Shared {
-    fn push(&self, data: &[u8]) {
-        let mut captured = self.0.lock().unwrap();
-        let room = MAX_BODY.saturating_sub(captured.bytes.len());
-        if data.len() > room {
-            captured.truncated = true;
-        }
-        captured
-            .bytes
-            .extend_from_slice(&data[..data.len().min(room)]);
-    }
-    fn take(&self) -> Captured {
-        std::mem::take(&mut *self.0.lock().unwrap())
-    }
+/// 503 with `x-cube-error`: the channel cannot serve, nothing was sent.
+fn plain_error(status: StatusCode, reason: &str) -> Response<Body> {
+    let mut response = failed(reason);
+    *response.status_mut() = status;
+    response
 }
 
-/// An exchange waiting for its answer to end: recorded once, when the
-/// answer body ends (forwarded) or is dropped or broken before (cut).
+/// A forwarded exchange waiting for its answer to end: its outcome is
+/// recorded once, when the answer body ends (forwarded) or is dropped or
+/// broken before (cut).
 struct Record {
     audit: Audit,
-    exchange: Option<Exchange>,
-    sent: Shared,
+    seq: i64,
+    status: u16,
+    response_headers: Vec<(String, String)>,
+    done: bool,
 }
 
-impl Record {
-    fn finish(&mut self, received: &Shared, complete: bool) {
-        if let Some(mut exchange) = self.exchange.take() {
-            exchange.outcome = if complete {
-                Outcome::Forwarded
-            } else {
-                Outcome::Cut
-            };
-            exchange.request = Some(self.sent.take());
-            exchange.response = Some(received.take());
-            self.audit.record(exchange);
-        }
-    }
-}
-
-/// A body passed on frame by frame as it comes, with a copy of its data
-/// kept for the audit. It holds nothing back.
+/// An answer passed on frame by frame as it comes, with a copy of its data
+/// (up to MAX_BODY) kept for the audit. It holds nothing back.
 struct Tee<B> {
     inner: B,
-    captured: Shared,
-    record: Option<Record>,
+    captured: Captured,
+    record: Record,
 }
 
 impl<B> Tee<B> {
-    fn new(inner: B, captured: Shared, record: Option<Record>) -> Self {
+    fn new(inner: B, record: Record) -> Self {
         Self {
             inner,
-            captured,
+            captured: Captured::default(),
             record,
         }
     }
-    fn finish(&mut self, complete: bool) {
-        if let Some(mut record) = self.record.take() {
-            record.finish(&self.captured, complete);
+
+    fn keep(&mut self, data: &[u8]) {
+        let room = MAX_BODY.saturating_sub(self.captured.bytes.len());
+        if data.len() > room {
+            self.captured.truncated = true;
         }
+        self.captured
+            .bytes
+            .extend_from_slice(&data[..data.len().min(room)]);
+    }
+
+    fn finish(&mut self, complete: bool) {
+        if std::mem::replace(&mut self.record.done, true) {
+            return;
+        }
+        let end = End {
+            outcome: if complete {
+                Outcome::Forwarded
+            } else {
+                Outcome::Cut
+            },
+            status: Some(self.record.status),
+            reason: None,
+            response_headers: std::mem::take(&mut self.record.response_headers),
+            response: Some(std::mem::take(&mut self.captured)),
+        };
+        self.record.audit.end(self.record.seq, end);
     }
 }
 
@@ -464,7 +513,7 @@ where
         match &polled {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
-                    this.captured.push(data);
+                    this.keep(data);
                 }
             }
             Poll::Ready(Some(Err(_))) => this.finish(false),

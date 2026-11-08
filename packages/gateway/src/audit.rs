@@ -1,17 +1,28 @@
 //! The model channel's audit (model.rs): an append-only SQLite file under
-//! CUBED_STATE (`model-audit.sqlite`, 0600), written by this process alone
-//! on one thread. It is a record for people; nothing reads it back as an
-//! agent's input.
+//! CUBED_STATE (`model-audit.sqlite`, 0600), written by one gateway at a
+//! time (an exclusive lock on `model-audit.sqlite.lock`) on one thread. It
+//! is a record for people; nothing reads it back as an agent's input.
 //!
 //! ```text
-//! blob(sha256, size, bytes)          request bodies, answers, events, by hash
-//! exchange(seq, thread, at, method, route, outcome, status, reason,
-//!          request_headers, request_sha256, request_truncated,
-//!          response_headers, response_sha256, response_truncated,
-//!          response_message_sha256)
+//! meta(key, value)                   schema = 2
+//! blob(sha256, size, bytes)          request bodies, answers, messages, events
+//! exchange(seq, thread, at, method, route, request_headers, request_sha256)
+//!                                    committed before the request goes upstream
+//! outcome(exchange, at, outcome, status, reason, response_headers,
+//!         response_sha256, response_truncated, response_message_sha256)
+//!                                    forwarded | refused | failed | cut | lost
 //! event(seq, exchange, thread, kind, sha256)
 //!                                    kind: web_search_tool_result
+//! exchange_outcome                   a view joining the three
 //! ```
+//!
+//! A forwarded request has its `exchange` row before it leaves (`start`,
+//! `synchronous=FULL`; no commit, no request) and its `outcome` when the
+//! answer ends. An outcome that cannot be written stays queued and is
+//! retried before every later write; while one is queued, `start` fails, so
+//! the channel stops rather than forward unrecorded. On open, under the
+//! lock, every exchange without an outcome (its gateway was killed) gets
+//! `lost`.
 //!
 //! `response_sha256` is the answer's bytes as the child got them (for a
 //! stream, the SSE itself); `response_message_sha256` is that answer
@@ -22,41 +33,70 @@
 //! token) and what it got (after B6 turned the token back): no token, and
 //! of the headers only an allow-list, never `Authorization`. Triggers
 //! refuse every UPDATE and DELETE.
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use rusqlite::{Connection, OptionalExtension as _, params};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::OpenOptions,
+    collections::VecDeque,
+    fs::{File, OpenOptions},
     os::unix::fs::OpenOptionsExt,
-    path::Path,
-    sync::mpsc::{Receiver, Sender, channel},
-    time::{SystemTime, UNIX_EPOCH},
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{Receiver, Sender, channel},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::{Notify, oneshot};
 
-/// A body larger than this is kept up to it and marked truncated.
-pub const MAX_BODY: usize = 64 * 1024 * 1024;
+/// A request body larger than this is refused (413), and an answer is kept
+/// up to it (then marked truncated): Anthropic's own request limit.
+pub const MAX_BODY: usize = 32 * 1024 * 1024;
+/// How long a request waits for its `exchange` row to commit.
+pub const START_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a write waits for a lock someone else holds on the file.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(1);
+/// Block indexes past this in a stream are ignored by `reconstruct`.
+const MAX_BLOCKS: usize = 4096;
+const SCHEMA_VERSION: &str = "2";
 
 const SCHEMA: &str = "
 PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
+PRAGMA synchronous=FULL;
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS blob(sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, bytes BLOB NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS exchange(seq INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, at INTEGER NOT NULL,
-  method TEXT NOT NULL, route TEXT NOT NULL,
-  outcome TEXT NOT NULL CHECK(outcome IN ('forwarded','refused','failed','cut')), status INTEGER, reason TEXT,
-  request_headers TEXT NOT NULL, request_sha256 TEXT REFERENCES blob(sha256), request_truncated INTEGER NOT NULL,
+  method TEXT NOT NULL, route TEXT NOT NULL, request_headers TEXT NOT NULL, request_sha256 TEXT REFERENCES blob(sha256));
+CREATE INDEX IF NOT EXISTS exchange_thread ON exchange(thread, seq);
+CREATE TABLE IF NOT EXISTS outcome(exchange INTEGER PRIMARY KEY REFERENCES exchange(seq), at INTEGER NOT NULL,
+  outcome TEXT NOT NULL CHECK(outcome IN ('forwarded','refused','failed','cut','lost')), status INTEGER, reason TEXT,
   response_headers TEXT NOT NULL, response_sha256 TEXT REFERENCES blob(sha256), response_truncated INTEGER NOT NULL,
   response_message_sha256 TEXT REFERENCES blob(sha256));
-CREATE INDEX IF NOT EXISTS exchange_thread ON exchange(thread, seq);
 CREATE TABLE IF NOT EXISTS event(seq INTEGER PRIMARY KEY AUTOINCREMENT, exchange INTEGER NOT NULL REFERENCES exchange(seq),
   thread TEXT NOT NULL, kind TEXT NOT NULL, sha256 TEXT NOT NULL REFERENCES blob(sha256));
-CREATE TRIGGER IF NOT EXISTS blob_no_update BEFORE UPDATE ON blob BEGIN SELECT RAISE(ABORT, 'the model audit is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS blob_no_delete BEFORE DELETE ON blob BEGIN SELECT RAISE(ABORT, 'the model audit is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS exchange_no_update BEFORE UPDATE ON exchange BEGIN SELECT RAISE(ABORT, 'the model audit is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS exchange_no_delete BEFORE DELETE ON exchange BEGIN SELECT RAISE(ABORT, 'the model audit is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS event_no_update BEFORE UPDATE ON event BEGIN SELECT RAISE(ABORT, 'the model audit is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS event_no_delete BEFORE DELETE ON event BEGIN SELECT RAISE(ABORT, 'the model audit is append-only'); END;
+CREATE VIEW IF NOT EXISTS exchange_outcome AS
+  SELECT e.seq, e.thread, e.at, e.method, e.route, e.request_headers, e.request_sha256, o.at AS ended_at, o.outcome,
+    o.status, o.reason, o.response_headers, o.response_sha256, o.response_truncated, o.response_message_sha256,
+    (SELECT count(*) FROM event v WHERE v.exchange = e.seq) AS events
+  FROM exchange e LEFT JOIN outcome o ON o.exchange = e.seq;
 ";
+
+/// Append-only: every table refuses UPDATE and DELETE.
+fn triggers() -> String {
+    ["meta", "blob", "exchange", "outcome", "event"]
+        .iter()
+        .flat_map(|table| {
+            ["update", "delete"].map(|op| {
+                format!(
+                    "CREATE TRIGGER IF NOT EXISTS {table}_no_{op} BEFORE {} ON {table} BEGIN SELECT RAISE(ABORT, 'the model audit is append-only'); END;",
+                    op.to_uppercase()
+                )
+            })
+        })
+        .collect()
+}
 
 /// Request headers kept; every other header (`Authorization` first) is not.
 const REQUEST_HEADERS: &[&str] = &[
@@ -85,10 +125,10 @@ pub enum Outcome {
     /// Refused here or by cubed's policy; nothing went upstream.
     Refused,
     /// The upstream could not be reached or gave an answer the channel
-    /// refuses (502).
+    /// refuses (502), or the request was not sent after all.
     Failed,
-    /// The answer stopped before its end (the child went away, or the
-    /// upstream broke off).
+    /// The answer stopped before its end (the child went away, the upstream
+    /// broke off, or the gateway stopped).
     Cut,
 }
 
@@ -110,20 +150,38 @@ pub struct Captured {
     pub truncated: bool,
 }
 
-/// One exchange of one thread.
+/// What is known of a request when it arrives.
 #[derive(Debug)]
-pub struct Exchange {
+pub struct Start {
     pub thread: String,
     pub at_ms: i64,
     pub method: String,
     pub route: String,
+    pub request_headers: Vec<(String, String)>,
+    /// The whole body; None for a refusal that never read it.
+    pub request: Option<Vec<u8>>,
+}
+
+/// How an exchange ended.
+#[derive(Debug)]
+pub struct End {
     pub outcome: Outcome,
     pub status: Option<u16>,
     pub reason: Option<String>,
-    pub request_headers: Vec<(String, String)>,
-    pub request: Option<Captured>,
     pub response_headers: Vec<(String, String)>,
     pub response: Option<Captured>,
+}
+
+impl End {
+    pub fn plain(outcome: Outcome, status: Option<u16>, reason: &str) -> Self {
+        Self {
+            outcome,
+            status,
+            reason: Some(reason.to_string()),
+            response_headers: vec![],
+            response: None,
+        }
+    }
 }
 
 pub fn now_ms() -> i64 {
@@ -153,15 +211,46 @@ pub fn kept_headers(headers: &http::HeaderMap, request: bool) -> Vec<(String, St
         .collect()
 }
 
+/// A write that must not be lost: retried before every later one.
+enum Pending {
+    End(i64, End),
+    Refusal(Start, End),
+}
+
+enum Command {
+    Start(Start, oneshot::Sender<Result<i64, String>>),
+    Write(Pending),
+    Flush(oneshot::Sender<Result<(), String>>),
+}
+
 /// The writer: a handle any connection may send to.
 #[derive(Clone)]
 pub struct Audit {
-    sender: Sender<Exchange>,
+    sender: Sender<Command>,
+    /// Exchanges started and not ended yet, for an orderly stop.
+    open: Arc<(AtomicUsize, Notify)>,
 }
 
 impl Audit {
-    /// Opens (or creates, 0600) the file and starts its writer thread.
+    /// Takes the audit's lock (or fails: another gateway writes it), opens
+    /// or creates the file (0600), checks its schema, records `lost` for
+    /// every exchange its last writer left without an outcome, and starts
+    /// the writer thread.
     pub fn open(file: &Path) -> Result<Self> {
+        let lock_path = PathBuf::from(format!("{}.lock", file.display()));
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(&lock_path)
+            .with_context(|| format!("open {}", lock_path.display()))?;
+        if lock.try_lock().is_err() {
+            bail!(
+                "another cube-gateway writes the model audit {} (its lock is held)",
+                file.display()
+            );
+        }
         OpenOptions::new()
             .create(true)
             .append(true)
@@ -170,38 +259,211 @@ impl Audit {
             .with_context(|| format!("open {}", file.display()))?;
         let connection =
             Connection::open(file).with_context(|| format!("open {}", file.display()))?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        let existing: bool = connection.query_row(
+            "SELECT count(*) > 0 FROM sqlite_master WHERE name='exchange'",
+            [],
+            |row| row.get(0),
+        )?;
+        let version: Option<String> = if existing {
+            connection
+                .query_row("SELECT value FROM meta WHERE key='schema'", [], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .unwrap_or(None)
+        } else {
+            None
+        };
+        if existing && version.as_deref() != Some(SCHEMA_VERSION) {
+            bail!(
+                "the model audit {} has another schema ({}); move it aside to start a new one",
+                file.display(),
+                version.as_deref().unwrap_or("none")
+            );
+        }
         connection.execute_batch(SCHEMA)?;
+        connection.execute_batch(&triggers())?;
+        connection.execute(
+            "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema', ?1)",
+            [SCHEMA_VERSION],
+        )?;
+        let lost = connection.execute(
+            "INSERT INTO outcome(exchange, at, outcome, reason, response_headers, response_truncated)
+             SELECT seq, ?1, 'lost', 'the gateway stopped before this exchange ended', '[]', 0
+             FROM exchange WHERE seq NOT IN (SELECT exchange FROM outcome)",
+            [now_ms()],
+        )?;
+        if lost > 0 {
+            eprintln!(
+                "cube-gateway: model audit: {lost} exchange(s) of the last gateway never ended; recorded as lost"
+            );
+        }
         let (sender, receiver) = channel();
+        let open = Arc::new((AtomicUsize::new(0), Notify::new()));
+        let writer_open = open.clone();
         std::thread::Builder::new()
             .name("model-audit".into())
-            .spawn(move || write_all(connection, receiver))?;
-        Ok(Self { sender })
+            .spawn(move || Writer::new(connection, lock, writer_open).run(receiver))?;
+        Ok(Self { sender, open })
     }
 
-    pub fn record(&self, exchange: Exchange) {
-        if self.sender.send(exchange).is_err() {
+    /// Commits the exchange's row before its request may go upstream, or
+    /// says why it cannot (the caller answers 503 and sends nothing).
+    pub async fn start(&self, start: Start) -> Result<i64, String> {
+        let (reply, answer) = oneshot::channel();
+        self.sender
+            .send(Command::Start(start, reply))
+            .map_err(|_| "the audit writer has stopped".to_string())?;
+        match tokio::time::timeout(START_TIMEOUT, answer).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err("the audit writer has stopped".into()),
+            Err(_) => Err(format!(
+                "the audit did not commit within {} s",
+                START_TIMEOUT.as_secs()
+            )),
+        }
+    }
+
+    /// How a started exchange ended.
+    pub fn end(&self, seq: i64, end: End) {
+        if self
+            .sender
+            .send(Command::Write(Pending::End(seq, end)))
+            .is_err()
+        {
             eprintln!(
-                "cube-gateway: model audit: the writer has stopped; an exchange was not recorded"
+                "cube-gateway: model audit: the writer has stopped; exchange {seq} has no outcome (recorded as lost on the next start)"
             );
+        }
+    }
+
+    /// A request refused before it was started; nothing went upstream.
+    pub fn refusal(&self, start: Start, end: End) {
+        if self
+            .sender
+            .send(Command::Write(Pending::Refusal(start, end)))
+            .is_err()
+        {
+            eprintln!(
+                "cube-gateway: model audit: the writer has stopped; a refusal was not recorded"
+            );
+        }
+    }
+
+    /// Exchanges started and not ended.
+    pub fn open_exchanges(&self) -> usize {
+        self.open.0.load(Ordering::SeqCst)
+    }
+
+    /// Waits until no exchange is open, or `limit` passes; true when none is.
+    pub async fn idle(&self, limit: Duration) -> bool {
+        let wait = async {
+            loop {
+                let notified = self.open.1.notified();
+                if self.open_exchanges() == 0 {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(limit, wait).await.is_ok()
+    }
+
+    /// Waits for every queued write, at most `limit`.
+    pub async fn flush(&self, limit: Duration) -> Result<(), String> {
+        let (reply, answer) = oneshot::channel();
+        self.sender
+            .send(Command::Flush(reply))
+            .map_err(|_| "the audit writer has stopped".to_string())?;
+        match tokio::time::timeout(limit, answer).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err("the audit writer has stopped".into()),
+            Err(_) => Err("the audit did not drain in time".into()),
         }
     }
 }
 
-fn write_all(mut connection: Connection, receiver: Receiver<Exchange>) {
-    for exchange in receiver {
-        if let Err(error) = write(&mut connection, &exchange) {
-            eprintln!(
-                "cube-gateway: model audit: {} {} of thread {} not recorded: {error:#}",
-                exchange.method,
-                route_path(&exchange.route),
-                exchange.thread
-            );
-        }
-    }
+struct Writer {
+    connection: Connection,
+    /// Held for the writer's life: one gateway per audit file.
+    _lock: File,
+    open: Arc<(AtomicUsize, Notify)>,
+    pending: VecDeque<Pending>,
 }
 
-fn route_path(route: &str) -> &str {
-    route.split('?').next().unwrap_or(route)
+impl Writer {
+    fn new(connection: Connection, lock: File, open: Arc<(AtomicUsize, Notify)>) -> Self {
+        Self {
+            connection,
+            _lock: lock,
+            open,
+            pending: VecDeque::new(),
+        }
+    }
+
+    fn run(mut self, receiver: Receiver<Command>) {
+        for command in receiver {
+            match command {
+                Command::Start(start, reply) => {
+                    let result = self.drain().and_then(|()| {
+                        write_start(&mut self.connection, &start).map_err(|e| format!("{e:#}"))
+                    });
+                    if let Ok(seq) = result {
+                        self.open.0.fetch_add(1, Ordering::SeqCst);
+                        if reply.send(Ok(seq)).is_err() {
+                            // Its request gave up waiting and was not sent.
+                            let end = End::plain(
+                                Outcome::Failed,
+                                Some(503),
+                                "not sent: the audit committed after the request stopped waiting",
+                            );
+                            self.pending.push_back(Pending::End(seq, end));
+                            let _ = self.drain();
+                        }
+                    } else {
+                        eprintln!(
+                            "cube-gateway: model audit: an exchange could not be started, so its request is refused: {}",
+                            result.as_ref().unwrap_err()
+                        );
+                        let _ = reply.send(result);
+                    }
+                }
+                Command::Write(pending) => {
+                    self.pending.push_back(pending);
+                    if let Err(error) = self.drain() {
+                        eprintln!(
+                            "cube-gateway: model audit: {} write(s) queued, the channel refuses new requests until they are written: {error}",
+                            self.pending.len()
+                        );
+                    }
+                }
+                Command::Flush(reply) => {
+                    let _ = reply.send(self.drain());
+                }
+            }
+        }
+    }
+
+    /// Writes every queued outcome and refusal in order; stops at the first
+    /// that fails, which stays first in the queue.
+    fn drain(&mut self) -> Result<(), String> {
+        while let Some(pending) = self.pending.front() {
+            let result = match pending {
+                Pending::End(seq, end) => write_end(&mut self.connection, *seq, end),
+                Pending::Refusal(start, end) => write_refusal(&mut self.connection, start, end),
+            };
+            if let Err(error) = result {
+                return Err(format!("{error:#}"));
+            }
+            if matches!(pending, Pending::End(..)) {
+                self.open.0.fetch_sub(1, Ordering::SeqCst);
+                self.open.1.notify_waiters();
+            }
+            self.pending.pop_front();
+        }
+        Ok(())
+    }
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -220,63 +482,97 @@ fn blob(tx: &rusqlite::Transaction<'_>, bytes: &[u8]) -> Result<String> {
     Ok(hash)
 }
 
-fn write(connection: &mut Connection, exchange: &Exchange) -> Result<()> {
-    let tx = connection.transaction()?;
-    let request = exchange
+fn insert_exchange(tx: &rusqlite::Transaction<'_>, start: &Start) -> Result<i64> {
+    let request = start
         .request
         .as_ref()
-        .map(|c| blob(&tx, &c.bytes))
+        .map(|bytes| blob(tx, bytes))
         .transpose()?;
-    let response = exchange
+    tx.execute(
+        "INSERT INTO exchange(thread, at, method, route, request_headers, request_sha256) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            start.thread,
+            start.at_ms,
+            start.method,
+            start.route,
+            serde_json::to_string(&start.request_headers)?,
+            request,
+        ],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+fn write_start(connection: &mut Connection, start: &Start) -> Result<i64> {
+    let tx = connection.transaction()?;
+    let seq = insert_exchange(&tx, start)?;
+    tx.commit()?;
+    Ok(seq)
+}
+
+fn write_refusal(connection: &mut Connection, start: &Start, end: &End) -> Result<()> {
+    let tx = connection.transaction()?;
+    let seq = insert_exchange(&tx, start)?;
+    insert_end(&tx, seq, end)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn write_end(connection: &mut Connection, seq: i64, end: &End) -> Result<()> {
+    let tx = connection.transaction()?;
+    insert_end(&tx, seq, end)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The outcome row, its answer and message blobs and its events.
+fn insert_end(tx: &rusqlite::Transaction<'_>, seq: i64, end: &End) -> Result<()> {
+    let response = end
         .response
         .as_ref()
-        .map(|c| blob(&tx, &c.bytes))
+        .map(|c| blob(tx, &c.bytes))
         .transpose()?;
-    let content_type = exchange
+    let content_type = end
         .response_headers
         .iter()
         .find(|(name, _)| name == "content-type")
         .map(|(_, value)| value.as_str());
-    let message = exchange
+    let message = end
         .response
         .as_ref()
         .and_then(|c| reconstruct(content_type, &c.bytes));
     let message_hash = match &message {
-        Some(message) => Some(blob(&tx, &serde_json::to_vec(message)?)?),
+        Some(message) => Some(blob(tx, &serde_json::to_vec(message)?)?),
         None => None,
     };
     tx.execute(
-        "INSERT INTO exchange(thread, at, method, route, outcome, status, reason, request_headers, request_sha256,
-           request_truncated, response_headers, response_sha256, response_truncated, response_message_sha256)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO outcome(exchange, at, outcome, status, reason, response_headers, response_sha256,
+           response_truncated, response_message_sha256)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
-            exchange.thread,
-            exchange.at_ms,
-            exchange.method,
-            exchange.route,
-            exchange.outcome.as_str(),
-            exchange.status,
-            exchange.reason,
-            serde_json::to_string(&exchange.request_headers)?,
-            request,
-            exchange.request.as_ref().is_some_and(|c| c.truncated),
-            serde_json::to_string(&exchange.response_headers)?,
+            seq,
+            now_ms(),
+            end.outcome.as_str(),
+            end.status,
+            end.reason,
+            serde_json::to_string(&end.response_headers)?,
             response,
-            exchange.response.as_ref().is_some_and(|c| c.truncated),
+            end.response.as_ref().is_some_and(|c| c.truncated),
             message_hash,
         ],
     )?;
-    let seq = tx.last_insert_rowid();
     if let Some(message) = &message {
+        let thread: String =
+            tx.query_row("SELECT thread FROM exchange WHERE seq=?1", [seq], |row| {
+                row.get(0)
+            })?;
         for block in web_search_results(message) {
-            let hash = blob(&tx, &block)?;
+            let hash = blob(tx, &block)?;
             tx.execute(
                 "INSERT INTO event(exchange, thread, kind, sha256) VALUES (?1, ?2, 'web_search_tool_result', ?3)",
-                params![seq, exchange.thread, hash],
+                params![seq, thread, hash],
             )?;
         }
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -319,7 +615,7 @@ pub fn reconstruct(content_type: Option<&str>, body: &[u8]) -> Option<Value> {
         match value.get("type").and_then(Value::as_str) {
             Some("message_start") => message = value.get("message").cloned(),
             Some("content_block_start") => match (index, value.get("content_block")) {
-                (Some(i), Some(block)) => {
+                (Some(i), Some(block)) if i < MAX_BLOCKS => {
                     if blocks.len() <= i {
                         blocks.resize(i + 1, Value::Null);
                         inputs.resize(i + 1, None);
@@ -613,49 +909,145 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_file_is_append_only_and_private() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("model-audit.sqlite");
-        let audit = Audit::open(&file).unwrap();
-        audit.record(Exchange {
-            thread: "t1".into(),
+    fn start(thread: &str) -> Start {
+        Start {
+            thread: thread.into(),
             at_ms: now_ms(),
             method: "POST".into(),
             route: "/v1/messages?beta=true".into(),
-            outcome: Outcome::Forwarded,
-            status: Some(200),
-            reason: None,
             request_headers: vec![],
-            request: Some(Captured {
-                bytes: b"{}".to_vec(),
-                truncated: false,
-            }),
-            response_headers: vec![],
-            response: Some(Captured::default()),
-        });
-        drop(audit);
-        let connection = Connection::open(&file).unwrap();
-        let wait = std::time::Instant::now();
-        while connection
-            .query_row("SELECT count(*) FROM exchange", [], |r| r.get::<_, i64>(0))
-            .unwrap()
-            == 0
-        {
-            assert!(wait.elapsed().as_secs() < 5, "recorded");
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            request: Some(b"{}".to_vec()),
         }
+    }
+
+    fn outcomes(file: &Path) -> Vec<(i64, Option<String>)> {
+        let connection = Connection::open(file).unwrap();
+        let mut statement = connection
+            .prepare("SELECT seq, outcome FROM exchange_outcome ORDER BY seq")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn one_writer_append_only_private_and_open_exchanges_lost_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("model-audit.sqlite");
+        let audit = Audit::open(&file).unwrap();
+        let error = Audit::open(&file)
+            .err()
+            .expect("a second writer is refused");
+        assert!(
+            error.to_string().contains("another cube-gateway"),
+            "{error}"
+        );
+        // A start is committed when it returns: before any request leaves.
+        let ended = audit.start(start("t1")).await.unwrap();
+        let open = audit.start(start("t1")).await.unwrap();
+        assert_eq!(outcomes(&file), vec![(ended, None), (open, None)]);
+        audit.end(ended, End::plain(Outcome::Forwarded, Some(200), "done"));
+        audit.flush(Duration::from_secs(5)).await.unwrap();
+        assert_eq!(audit.open_exchanges(), 1);
+        assert!(!audit.idle(Duration::from_millis(50)).await);
+        drop(audit);
+        // The writer and its lock go with the process in real life; here
+        // with the thread, once its channel closes.
+        let reopened = loop {
+            match Audit::open(&file) {
+                Ok(audit) => break audit,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        };
+        assert_eq!(
+            outcomes(&file),
+            vec![
+                (ended, Some("forwarded".into())),
+                (open, Some("lost".into()))
+            ],
+            "an exchange its gateway never ended is recorded as lost"
+        );
+        drop(reopened);
+        let connection = Connection::open(&file).unwrap();
         for statement in [
             "UPDATE exchange SET thread='x'",
             "DELETE FROM exchange",
+            "UPDATE outcome SET outcome='forwarded'",
+            "DELETE FROM outcome",
             "UPDATE blob SET size=0",
-            "DELETE FROM blob",
+            "DELETE FROM meta",
         ] {
             let error = connection.execute(statement, []).unwrap_err();
             assert!(error.to_string().contains("append-only"), "{statement}");
         }
-        let mode = std::fs::metadata(&file).unwrap().permissions();
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(mode.mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[tokio::test]
+    async fn another_schema_is_refused_and_a_locked_file_fails_starts_until_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.sqlite");
+        Connection::open(&old)
+            .unwrap()
+            .execute_batch("CREATE TABLE exchange(seq INTEGER PRIMARY KEY, outcome TEXT);")
+            .unwrap();
+        let error = Audit::open(&old).err().expect("an older audit is refused");
+        assert!(error.to_string().contains("another schema"), "{error}");
+
+        let file = dir.path().join("model-audit.sqlite");
+        let audit = Audit::open(&file).unwrap();
+        let first = audit.start(start("t1")).await.unwrap();
+        let holder = Connection::open(&file).unwrap();
+        holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        // The outcome cannot be written: it stays queued, and starts fail.
+        audit.end(first, End::plain(Outcome::Forwarded, Some(200), "done"));
+        tokio::time::sleep(BUSY_TIMEOUT + Duration::from_millis(200)).await;
+        let refused = audit.start(start("t1")).await.unwrap_err();
+        assert!(
+            !refused.contains("within"),
+            "it failed on the write, not the deadline: {refused}"
+        );
+        holder.execute_batch("ROLLBACK").unwrap();
+        let next = audit.start(start("t1")).await.unwrap();
+        assert_eq!(
+            outcomes(&file),
+            vec![(first, Some("forwarded".into())), (next, None)],
+            "the queued outcome is written first, then the new start"
+        );
+        // A start queued behind writes that keep failing passes its
+        // deadline; when the file frees it commits, and the writer records
+        // it as not sent, never open.
+        holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        audit.end(next, End::plain(Outcome::Forwarded, Some(200), "done"));
+        audit.refusal(
+            start("t3"),
+            End::plain(Outcome::Refused, Some(404), "not a route"),
+        );
+        let late = audit.start(start("t2")).await.unwrap_err();
+        assert!(late.contains("within"), "the deadline passed: {late}");
+        holder.execute_batch("ROLLBACK").unwrap();
+        audit.flush(Duration::from_secs(5)).await.unwrap();
+        let connection = Connection::open(&file).unwrap();
+        let rows: Vec<(String, String, Option<String>)> = connection
+            .prepare(
+                "SELECT thread, outcome, reason FROM exchange_outcome WHERE seq > ?1 ORDER BY seq",
+            )
+            .unwrap()
+            .query_map([next], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!((rows[0].0.as_str(), rows[0].1.as_str()), ("t3", "refused"));
+        assert_eq!((rows[1].0.as_str(), rows[1].1.as_str()), ("t2", "failed"));
+        assert!(rows[1].2.as_deref().unwrap().starts_with("not sent"));
+        assert_eq!(outcomes(&file)[1].1.as_deref(), Some("forwarded"));
+        assert_eq!(audit.open_exchanges(), 0);
     }
 }

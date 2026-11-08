@@ -92,6 +92,16 @@ try {
   await modelled.stop();
   console.log("ok: gateway supervision of the model channel: its listener and audit asked for, the address from the ready line, the same port on every restart");
 
+  // The gateway's orderly stop (grace for open answers, then the audit's
+  // drain) fits inside the 5 s stop() gives before SIGKILL.
+  const rust = fs.readFileSync(path.resolve(import.meta.dirname, "../../gateway/src/model.rs"), "utf8");
+  const seconds = (name: string) => Number(new RegExp(`const ${name}: Duration = Duration::from_secs\\((\\d+)\\)`).exec(rust)?.[1]);
+  const killAfterMs = Number(/setTimeout\(\(\) => child\.kill\("SIGKILL"\), (\d+)\)/.exec(fs.readFileSync(path.resolve(import.meta.dirname, "../src/gateway.ts"), "utf8"))?.[1]);
+  assert.ok(seconds("SHUTDOWN_GRACE") > 0 && seconds("FLUSH_LIMIT") > 0 && killAfterMs > 0, "the bounds are where this check reads them");
+  assert.ok((seconds("SHUTDOWN_GRACE") + seconds("FLUSH_LIMIT")) * 1000 + 250 < killAfterMs,
+    `the gateway stops in ${seconds("SHUTDOWN_GRACE")} + ${seconds("FLUSH_LIMIT")} s, before cubed's SIGKILL at ${killAfterMs} ms`);
+  console.log("ok: the gateway's stop (grace and audit drain) fits inside cubed's SIGKILL bound");
+
   // The real gateway, when its path is given.
   const real = process.argv[2] ? path.resolve(process.argv[2]) : null;
   if (real) {
@@ -151,7 +161,7 @@ try {
       assert.deepEqual(await post(`Bearer ${placeholder}`), { status: 403, denied: "thread thread-m has no claude code running with a claude placeholder" });
       assert.equal(fs.statSync(modelAudit).mode & 0o777, 0o600);
       const { DatabaseSync } = await import("node:sqlite");
-      await until(() => { const db = new DatabaseSync(modelAudit, { readOnly: true }); try { return (db.prepare("SELECT count(*) AS n FROM exchange WHERE thread='thread-m' AND outcome='refused'").get() as { n: number }).n === 2; } finally { db.close(); } }, "both refusals recorded");
+      await until(() => { const db = new DatabaseSync(modelAudit, { readOnly: true }); try { return (db.prepare("SELECT count(*) AS n FROM exchange_outcome WHERE thread='thread-m' AND outcome='refused'").get() as { n: number }).n === 2; } finally { db.close(); } }, "both refusals recorded");
     } finally {
       await modelGateway.stop();
       await modelEgress.close();
