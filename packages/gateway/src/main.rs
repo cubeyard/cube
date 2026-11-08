@@ -1,11 +1,11 @@
 //! `cube-gateway serve | --version`. See the library docs.
 use anyhow::{Context, Result, bail};
-use cube_gateway::{ServeOptions, decide::DECIDE_TIMEOUT, http::Upstream};
+use cube_gateway::{ModelOptions, ServeOptions, decide::DECIDE_TIMEOUT, http::Upstream};
 use std::{collections::BTreeMap, path::PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const USAGE: &str = "usage:
-  cube-gateway serve --decide SOCK --credential SOCK
+  cube-gateway serve --decide SOCK --credential SOCK [--model-listen 127.0.0.1:PORT --model-audit FILE]
   cube-gateway --version";
 
 #[cfg(feature = "test-hooks")]
@@ -90,6 +90,19 @@ fn upstream(options: &mut Options) -> Result<Upstream> {
 async fn serve(mut options: Options) -> Result<()> {
     let decide = PathBuf::from(options.take("decide")?);
     let credential = PathBuf::from(options.take("credential")?);
+    let model = match (
+        options.values.remove("model-listen"),
+        options.values.remove("model-audit"),
+    ) {
+        (Some(listen), Some(audit)) => Some(ModelOptions {
+            listen: listen
+                .parse()
+                .with_context(|| format!("--model-listen {listen:?} is not an address"))?,
+            audit: PathBuf::from(audit),
+        }),
+        (None, None) => None,
+        _ => bail!("--model-listen and --model-audit go together\n{USAGE}"),
+    };
     let upstream = upstream(&mut options)?;
     options.done()?;
     let running = cube_gateway::start(ServeOptions {
@@ -97,6 +110,7 @@ async fn serve(mut options: Options) -> Result<()> {
         credential,
         upstream,
         decide_timeout: DECIDE_TIMEOUT,
+        model,
     })
     .await?;
     let mut stdout = tokio::io::stdout();
@@ -119,7 +133,7 @@ async fn serve(mut options: Options) -> Result<()> {
         _ = tokio::signal::ctrl_c() => "SIGINT",
     };
     eprintln!("cube-gateway: stopping ({reason})");
-    running.stop();
+    running.shutdown().await;
     Ok(())
 }
 

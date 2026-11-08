@@ -7,14 +7,16 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { gatewayCommand, gatewayPidsIn } from "./gateway-pids.ts";
+import { gatewayCommand, gatewayPidsIn, MODEL_LISTEN } from "./gateway-pids.ts";
 
 // cubed's source: the argv, the sockets and the run directory gateway-pids.ts rebuilds.
 const source = (file: string) => fs.readFileSync(path.resolve(import.meta.dirname, "../src", file), "utf8");
 const gateway = source("gateway.ts");
 const index = source("index.ts");
-assert.ok(gateway.includes(`const args = ["serve", "--decide", this.options.decide, "--credential", this.options.credential, ...(this.options.extraArgs ?? [])];`),
+assert.ok(gateway.includes(`const args = ["serve", "--decide", this.options.decide, "--credential", this.options.credential, ...model, ...(this.options.extraArgs ?? [])];`)
+  && gateway.includes(`const model = this.options.model ? ["--model-listen", this.modelAt ?? "127.0.0.1:0", "--model-audit", this.options.model.audit] : [];`),
   "gateway.ts starts the gateway with this argv (change gateway-pids.ts with it)");
+assert.ok(index.includes(`...claudeCommand ? { model: { audit: path.join(options.state, "model-audit.sqlite") } } : {},`), "index.ts asks for the model channel when it runs Claude Code");
 assert.ok(gateway.includes("const child = spawn(binary, args,"), "gateway.ts spawns the binary itself, so argv[0] is CUBED_GATEWAY");
 assert.ok(gateway.includes("const configured = env.CUBED_GATEWAY?.trim();"), "CUBED_GATEWAY is used trimmed");
 assert.ok(index.includes(`const credential = path.join(run, "credential.sock");`)
@@ -25,7 +27,9 @@ assert.ok(index.includes(`const directory = path.join(state, "run");`) && index.
 // The native test uses this lookup, with the same test args it hands cubed, and no other.
 const v3 = fs.readFileSync(path.resolve(import.meta.dirname, "runner-vm-cubed-v3-test.ts"), "utf8");
 assert.ok(v3.includes("CUBED_GATEWAY: gatewayBin,") && v3.includes("CUBED_GATEWAY_TEST_ARGS: JSON.stringify(gatewayTestArgs)")
-  && v3.includes("gatewayCommand({ binary: gatewayBin, state, testArgs: gatewayTestArgs })"), "runner-vm-cubed-v3-test.ts names its gateway as it starts cubed");
+  && v3.includes("gatewayCommand({ binary: gatewayBin, state, testArgs: gatewayTestArgs, model: true })")
+  && fs.readFileSync(path.resolve(import.meta.dirname, "e2e-fixture.ts"), "utf8").includes('claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")]'),
+  "runner-vm-cubed-v3-test.ts names its gateway as it starts cubed (e2e-fixture.ts runs a fake claude, so with the model channel)");
 assert.ok(!/pgrep|serve --state/.test(v3), "runner-vm-cubed-v3-test.ts has no other gateway lookup");
 
 const binary = "/home/x/cube/target/test-hooks/debug/cube-gateway";
@@ -68,5 +72,13 @@ assert.deepEqual(gatewayPidsIn(ps(...unrelated, line(4242, command)), command, 9
 assert.deepEqual(gatewayPidsIn(ps(line(99, command), line(4242, command)), command, 99), ["4242"]);
 assert.deepEqual(gatewayPidsIn(ps(line(4242, command), line(4243, command)), command, 99), ["4242", "4243"]);
 assert.deepEqual(gatewayPidsIn("", command, 99), []);
+
+// With the model channel: its first start's port 0 and a restart's own port both match; nothing else there does.
+const modelled = gatewayCommand({ binary, state, testArgs, model: true });
+const listening = (port: string) => modelled.replace(MODEL_LISTEN, `127.0.0.1:${port}`);
+assert.equal(modelled, `${binary} serve --decide ${state}/run/egress.sock --credential ${state}/run/credential.sock --model-listen ${MODEL_LISTEN} --model-audit ${state}/model-audit.sqlite ${testArgs.join(" ")}`);
+assert.deepEqual(gatewayPidsIn(ps(line(4242, listening("0")), line(4243, listening("40999"))), modelled, 99), ["4242", "4243"]);
+assert.deepEqual(gatewayPidsIn(ps(line(5001, listening("0.0.0.0:1")), line(5002, modelled.replace(MODEL_LISTEN, "0.0.0.0:4000")), line(5003, command)), modelled, 99), [],
+  "another address, or no model channel, is not this gateway");
 
 console.log("ok: gateway pids by cubed's whole command line; pre-#230 argv, other states, binaries, upstreams, shells, lookups, zombies and self excluded");

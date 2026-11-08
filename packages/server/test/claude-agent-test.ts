@@ -14,6 +14,8 @@ import type { Models } from "@earendil-works/pi-ai";
 import { ClaudeAgent, ClaudeBusy, claudeEnvironment, type ClaudeRuntime } from "../src/claude-agent.ts";
 import { expectReady, markReady } from "../src/claude-ready.ts";
 import { ClaudeThreadEvents } from "../src/claude-thread-events.ts";
+import { claudeSecret } from "../src/egress-policy.ts";
+import { ClaudeModelChannel } from "../src/model-channel.ts";
 import { ModelAuth } from "../src/model-auth.ts";
 import type { ThreadTranscript } from "../src/thread-events.ts";
 import { WorkspaceError } from "../src/workspace.ts";
@@ -59,13 +61,15 @@ process.env.OPENAI_API_KEY = "sk-openai-must-not-reach-claude";
 process.env.GITHUB_TOKEN = "ghp-must-not-reach-claude";
 process.env.CLAUDE_CODE_OAUTH_TOKEN = "the-person's-own-claude-login";
 const mod = path.resolve(import.meta.dirname, "../../claude-mod");
-const runtime: ClaudeRuntime = { command: [process.execPath, path.join(import.meta.dirname, "fake-claude.ts")], mod, socket, stopGraceMs: 1000, env: { FAKE_CLAUDE_LOG: log } };
+// cubed's own channel over cubed's environment, where the host's token is.
+const channel = new ClaudeModelChannel({ secret: claudeSecret(), address: () => "127.0.0.1:9" });
+const runtime: ClaudeRuntime = { command: [process.execPath, path.join(import.meta.dirname, "fake-claude.ts")], mod, socket, channel, stopGraceMs: 1000, env: { FAKE_CLAUDE_LOG: log } };
 const leaseToken = (holder: ClaudeAgent) => (holder as unknown as { lease: { token: string } }).lease.token;
 async function cancelled(holder: ClaudeAgent, key: string): Promise<void> {
   await until(async () => { const state = await workspace.operation(leaseToken(holder), key).catch(e => ({ state: String(e) })); return state.state === "failed" && (state as { error?: string }).error === "CANCELLED"; }, `${key} cancelled on the guest`);
 }
 const directory = path.join(root, "thread");
-const starts = () => fs.readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as { args: string[]; cwd: string; session: string; apiKey: boolean; authToken: boolean; env: string[] });
+const starts = () => fs.readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as { args: string[]; cwd: string; session: string; apiKey: boolean; authToken: boolean; env: string[]; values: Record<string, string> });
 async function until<T>(check: () => T | undefined | false | Promise<T | undefined | false>, what: string, ms = 15000): Promise<T> {
   const deadline = Date.now() + ms;
   for (;;) {
@@ -111,12 +115,21 @@ try {
   const [first] = starts();
   assert.equal(first!.apiKey, false, "ANTHROPIC_API_KEY is removed from the child");
   assert.equal(first!.authToken, false, "ANTHROPIC_AUTH_TOKEN is removed from the child");
-  for (const name of ["ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "OPENAI_API_KEY", "GITHUB_TOKEN"]) assert.ok(!first!.env.includes(name), `${name} does not reach the child`);
-  assert.ok(first!.env.includes("CLAUDE_CODE_OAUTH_TOKEN") && first!.env.includes("HOME") && first!.env.includes("CUBE_WORKSPACE_TOKEN"));
+  for (const name of ["CLAUDE_CODE_USE_BEDROCK", "OPENAI_API_KEY", "GITHUB_TOKEN"]) assert.ok(!first!.env.includes(name), `${name} does not reach the child`);
+  // The model channel: the gateway's listener for this thread and its placeholder, never the host's token.
+  assert.equal(first!.values.ANTHROPIC_BASE_URL, "http://127.0.0.1:9/t/t1", "model requests go to the gateway, the thread in the path");
+  assert.match(first!.values.CLAUDE_CODE_OAUTH_TOKEN ?? "", /^cube_ph_claude_[A-Za-z0-9]{22}$/, "the child holds a placeholder");
+  assert.equal(first!.values.CLAUDE_CODE_OAUTH_TOKEN, channel.placeholder("t1"), "the thread's own placeholder");
+  assert.ok(Object.values(first!.values).every(value => !value.includes(process.env.CLAUDE_CODE_OAUTH_TOKEN!)), "the host's claude token reaches no variable of the child");
+  assert.ok(first!.env.includes("HOME") && first!.env.includes("CUBE_WORKSPACE_TOKEN"));
+  // A proxy of the host's never carries the loopback channel (Claude Code would send it there).
+  assert.deepEqual(first!.values.NO_PROXY?.split(",").at(-1), "127.0.0.1");
+  const proxied = claudeEnvironment({ PATH: "/bin", HTTPS_PROXY: "http://proxy.example:3128", NO_PROXY: "corp.example" }, {}, { ANTHROPIC_BASE_URL: "http://127.0.0.1:4100/t/x" });
+  assert.deepEqual([proxied.NO_PROXY, proxied.no_proxy, proxied.HTTPS_PROXY], ["corp.example,127.0.0.1", "127.0.0.1", "http://proxy.example:3128"]);
   assert.ok(first!.env.includes("CUBE_WORKSPACE_REAL_ROOT"), "the mod also knows the root with its symlinks resolved");
   assert.ok(first!.env.includes("CUBE_SKILLS_PROMPT"), "the mod gets the thread's skills to list");
-  assert.ok(first!.env.every(name => /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_\w+|TERM|TZ|TMPDIR|XDG_\w+|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|CUBE_WORKSPACE_\w+|CUBE_MOD_NONCE|CUBE_SKILLS_PROMPT|FAKE_CLAUDE_LOG)$/.test(name)), `only allow-listed variables: ${first!.env.join(" ")}`);
-  assert.deepEqual(Object.keys(claudeEnvironment({ PATH: "/bin", AWS_SECRET_ACCESS_KEY: "x" }, { ANTHROPIC_BASE_URL: "x", CLAUDE_CODE_USE_VERTEX: "1", EXTRA: "y" }, { CUBE_WORKSPACE_TOKEN: "t" })).sort(), ["CUBE_WORKSPACE_TOKEN", "EXTRA", "PATH"]);
+  assert.ok(first!.env.every(name => /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_\w+|TERM|TZ|TMPDIR|XDG_\w+|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_BASE_URL|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|CUBE_WORKSPACE_\w+|CUBE_MOD_NONCE|CUBE_SKILLS_PROMPT|FAKE_CLAUDE_LOG)$/.test(name)), `only allow-listed variables: ${first!.env.join(" ")}`);
+  assert.deepEqual(Object.keys(claudeEnvironment({ PATH: "/bin", AWS_SECRET_ACCESS_KEY: "x", CLAUDE_CODE_OAUTH_TOKEN: "real" }, { ANTHROPIC_BASE_URL: "x", CLAUDE_CODE_OAUTH_TOKEN: "real", CLAUDE_CODE_USE_VERTEX: "1", EXTRA: "y" }, { CUBE_WORKSPACE_TOKEN: "t" })).sort(), ["CUBE_WORKSPACE_TOKEN", "EXTRA", "PATH"]);
   assert.equal(first!.args[first!.args.indexOf("--setting-sources") + 1], "");
   assert.ok(first!.args.includes("--strict-mcp-config"));
   assert.deepEqual(first!.args.slice(0, 7), ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
@@ -198,6 +211,7 @@ try {
   await agent.close();
   await watch.closed;
   assert.equal(leases.holder(), null, "closing releases the lease");
+  assert.equal(channel.placeholder("t1"), null, "closing withdraws the thread's placeholder");
   agent = await ClaudeAgent.open({ directory, threadId: "t1", workspace, runtime, model: "sonnet" });
   events = new ClaudeThreadEvents({ agent, owner: () => leases.holder(), failure: () => null });
   transcript = await events.read();
@@ -218,6 +232,24 @@ try {
   // cubed itself dies mid-turn (no close): the reopen finds the turn's open
   // Bash call in the stored transcript and cancels its guest command.
   await agent.close();
+  // Without the host's token or the gateway's listener the turn fails and
+  // says why; no claude starts, with no other login to fall back on.
+  for (const [name, broken, why] of [
+    ["tokenless", new ClaudeModelChannel({ secret: claudeSecret({}), address: () => "127.0.0.1:9" }), /claude setup-token.*CLAUDE_CODE_OAUTH_TOKEN/],
+    ["no-gateway", new ClaudeModelChannel({ secret: claudeSecret({ CLAUDE_CODE_OAUTH_TOKEN: "x" }), address: () => null, unavailable: () => "cube-gateway was not found" }), /cube-gateway was not found/],
+  ] as const) {
+    const count = starts().length;
+    const opened = await ClaudeAgent.open({ directory: path.join(root, name), threadId: "t1", workspace, runtime: { ...runtime, channel: broken }, model: "sonnet" });
+    try {
+      assert.equal(await opened.submit("n1", "hello"), "started");
+      const submission = opened.state().submissions.find(item => item.requestId === "n1")!;
+      assert.equal(submission.state, "failed", name);
+      assert.match(submission.error ?? "", why);
+      assert.equal(starts().length, count, `${name}: no claude code started`);
+      assert.equal(broken.placeholder("t1"), null);
+    } finally { await opened.close(); }
+  }
+  console.log("ok: claude code without the model channel (no host token, no gateway): a failed turn that says why, nothing started");
   {
     const crashed = path.join(root, "crashed");
     const opened = await ClaudeAgent.open({ directory: crashed, threadId: "t1", workspace, runtime, model: "sonnet" });

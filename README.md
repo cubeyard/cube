@@ -13,9 +13,9 @@ browser.
 
 - **cubed** is the control plane: the web UI, [OptChat](docs/optchat.md) (one
   endless chat that starts and steers threads), the agents (Pi, or Claude Code
-  with your own login), projects, and the gateway that puts your GitHub
-  token into a thread's requests to GitHub (the machine sees only a
-  placeholder).
+  with your own subscription), projects, and the gateway that puts your GitHub
+  token into a thread's requests to GitHub and your Claude token into Claude
+  Code's model requests (the machine and Claude Code see only placeholders).
 - **berth** ([packages/berth](packages/berth/README.md)) hosts the thread
   machines: `berth vm` runs one QEMU machine per open thread, several per
   runner, on Linux with KVM or on an Apple Silicon Mac with

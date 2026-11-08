@@ -20,6 +20,7 @@ import { createCubed } from "../src/index.ts";
 import { Registry } from "../src/registry.ts";
 import { HISTORY_FRAME } from "../src/thread-history-tool.ts";
 import { LocalMachines } from "./local-guest.ts";
+import { stubModelChannel } from "./model-channel-stub.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-thread-history-cubed-"));
 const textOf = (message: Message) => typeof message.content === "string" ? message.content
@@ -68,7 +69,7 @@ machines.start = (thread, options) => { started.push(thread.id); return start(th
 const reboot = machines.reboot.bind(machines);
 machines.reboot = thread => { started.push(`reboot:${thread.id}`); reboot(thread); };
 const open = () => createCubed({ state, models, machines, gateway: null,
-  claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], claudeOptions: { stopGraceMs: 2000 } });
+  claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], modelChannel: stubModelChannel(), claudeOptions: { stopGraceMs: 2000 } });
 let app = await open();
 for (const n of [1, 2, 3, 4, 5, 6, 7, 8]) app.registry.enrollRunner({ nodeId: `node-${n}`, environmentId: n, threadId: `runner-${n}`, configPath: `/private/${n}.json`, configHash: `h${n}`, protocol: 4, kind: "vm" });
 let base = "";

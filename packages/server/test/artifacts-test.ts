@@ -23,6 +23,7 @@ import { createCubed } from "../src/index.ts";
 import { ArtifactError, ArtifactStore, commentMessage, parseActions } from "../src/artifacts.ts";
 import { GithubPullsError, type GithubPulls, type PullState } from "../src/github-pulls.ts";
 import { LocalMachines } from "./local-guest.ts";
+import { stubModelChannel } from "./model-channel-stub.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-artifacts-"));
 const textOf = (message: Message) => typeof message.content === "string" ? message.content
@@ -192,7 +193,7 @@ const models = createModels();
 models.setProvider(faux.provider);
 const machines = new LocalMachines(path.join(root, "machines"));
 const open = () => createCubed({ state, models, machines, gateway: null, githubPulls: github, artifactRetryMs: 100,
-  claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], claudeOptions: { stopGraceMs: 2000 } });
+  claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], modelChannel: stubModelChannel(), claudeOptions: { stopGraceMs: 2000 } });
 let app = await open();
 for (const n of [1, 2, 3]) app.registry.enrollRunner({ nodeId: `node-${n}`, environmentId: 1, threadId: `runner-${n}`, configPath: `/private/${n}.json`, configHash: `h${n}`, protocol: 4, kind: "vm" });
 // A project whose repository is on GitHub (never checked here: no network).

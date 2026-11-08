@@ -165,7 +165,7 @@ async function kill(child: ChildProcess, signal: NodeJS.Signals = "SIGKILL"): Pr
   await exited;
 }
 /** This state's supervised gateway, by its whole command line (gateway-pids.ts). */
-const gatewayLine = gatewayCommand({ binary: gatewayBin, state, testArgs: gatewayTestArgs });
+const gatewayLine = gatewayCommand({ binary: gatewayBin, state, testArgs: gatewayTestArgs, model: true });
 const gatewayPids = () => livePids(gatewayLine);
 
 let cubed: Cubed | undefined;

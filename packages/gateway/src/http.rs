@@ -138,6 +138,7 @@ impl Connection {
                 port,
                 path: request.uri().path().to_string(),
                 placeholders: placeholders.clone(),
+                channel: None,
             })
             .await;
         let substitute = match decision {
@@ -242,7 +243,7 @@ impl Connection {
 }
 
 /// A `Content-Encoding` other than `identity`.
-fn encoded(headers: &HeaderMap) -> bool {
+pub(crate) fn encoded(headers: &HeaderMap) -> bool {
     headers
         .get_all(header::CONTENT_ENCODING)
         .iter()
@@ -276,10 +277,10 @@ fn plain(status: StatusCode, name: &'static str, reason: &str) -> Response<Body>
     response
 }
 
-fn denied(status: StatusCode, reason: &str) -> Response<Body> {
+pub(crate) fn denied(status: StatusCode, reason: &str) -> Response<Body> {
     plain(status, DENIED_HEADER, reason)
 }
 
-fn failed(reason: &str) -> Response<Body> {
+pub(crate) fn failed(reason: &str) -> Response<Body> {
     plain(StatusCode::BAD_GATEWAY, ERROR_HEADER, reason)
 }

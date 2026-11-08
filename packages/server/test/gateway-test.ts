@@ -15,7 +15,8 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { create, toJsonString } from "@bufbuild/protobuf";
-import { EgressPolicy, serveEgress } from "../src/egress-policy.ts";
+import { claudeSecret, EgressPolicy, serveEgress } from "../src/egress-policy.ts";
+import { ClaudeModelChannel } from "../src/model-channel.ts";
 import { GatewaySupervisor, GatewayUnavailable, locateGateway } from "../src/gateway.ts";
 import { CredentialHeaderSchema } from "../src/gen/runner_pb.js";
 
@@ -71,6 +72,36 @@ try {
   await assert.rejects(supervisor.ready(), GatewayUnavailable);
   console.log("ok: gateway supervision: ready line, credential-proxy arguments, restart with growing backoff, lifeline stop, no binary fails visibly");
 
+  // The model channel: asked for with its audit file; the port the first
+  // start picked is asked for again on every restart.
+  const audit = path.join(root, "model-audit.sqlite");
+  const modelLog = path.join(root, "gateway-model.log");
+  const modelled = supervise({ model: { audit }, env: { FAKE_GATEWAY_LOG: modelLog, FAKE_GATEWAY_CRASH: "3" } });
+  assert.equal(modelled.modelAddress, null);
+  modelled.start();
+  const hello = await modelled.ready();
+  assert.match(hello.model ?? "", /^127\.0\.0\.1:\d+$/);
+  assert.equal(modelled.modelAddress, hello.model);
+  const startsOf = () => fs.readFileSync(modelLog, "utf8").trim().split("\n").map(line => JSON.parse(line) as { event: string; args: string[] })
+    .filter(event => event.event === "start").map(event => event.args);
+  assert.deepEqual(startsOf()[0]!.slice(5), ["--model-listen", "127.0.0.1:0", "--model-audit", audit]);
+  await until(() => startsOf().length >= 4, "three restarts of the modelled gateway");
+  await modelled.ready();
+  assert.ok(startsOf().slice(1).every(args => args[args.indexOf("--model-listen") + 1] === hello.model), "restarts keep the port");
+  assert.equal(modelled.modelAddress, hello.model);
+  await modelled.stop();
+  console.log("ok: gateway supervision of the model channel: its listener and audit asked for, the address from the ready line, the same port on every restart");
+
+  // The gateway's orderly stop (grace for open answers, then the audit's
+  // drain) fits inside the 5 s stop() gives before SIGKILL.
+  const rust = fs.readFileSync(path.resolve(import.meta.dirname, "../../gateway/src/model.rs"), "utf8");
+  const seconds = (name: string) => Number(new RegExp(`const ${name}: Duration = Duration::from_secs\\((\\d+)\\)`).exec(rust)?.[1]);
+  const killAfterMs = Number(/setTimeout\(\(\) => child\.kill\("SIGKILL"\), (\d+)\)/.exec(fs.readFileSync(path.resolve(import.meta.dirname, "../src/gateway.ts"), "utf8"))?.[1]);
+  assert.ok(seconds("SHUTDOWN_GRACE") > 0 && seconds("FLUSH_LIMIT") > 0 && killAfterMs > 0, "the bounds are where this check reads them");
+  assert.ok((seconds("SHUTDOWN_GRACE") + seconds("FLUSH_LIMIT")) * 1000 + 250 < killAfterMs,
+    `the gateway stops in ${seconds("SHUTDOWN_GRACE")} + ${seconds("FLUSH_LIMIT")} s, before cubed's SIGKILL at ${killAfterMs} ms`);
+  console.log("ok: the gateway's stop (grace and audit drain) fits inside cubed's SIGKILL bound");
+
   // The real gateway, when its path is given.
   const real = process.argv[2] ? path.resolve(process.argv[2]) : null;
   if (real) {
@@ -106,6 +137,37 @@ try {
       fs.rmSync(run, { recursive: true, force: true });
     }
     console.log(`ok: the real cube-gateway (${real}): ready line, a 0600 credential socket, a stream for an unknown machine denied by cubed's policy, lifeline stop`);
+
+    // Its model channel under cubed's real policy and channel: the
+    // placeholder of a thread with no claude running, or none, is refused
+    // before anything leaves; the audit file is 0600 and records both.
+    const modelRun = fs.mkdtempSync(path.join(os.tmpdir(), "cube-gw-model-"));
+    fs.chmodSync(modelRun, 0o700);
+    let modelGateway: GatewaySupervisor | null = null;
+    const channel = new ClaudeModelChannel({ secret: claudeSecret({ CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-never-sent" }), address: () => modelGateway?.modelAddress ?? null });
+    const modelEgress = await serveEgress(path.join(modelRun, "egress.sock"), new EgressPolicy({ vms: { vm: () => null }, secrets: [], model: channel, log: quiet as never }));
+    const modelAudit = path.join(modelRun, "model-audit.sqlite");
+    modelGateway = supervise({ binary: real, credential: path.join(modelRun, "credential.sock"), decide: path.join(modelRun, "egress.sock"), env: {}, model: { audit: modelAudit } });
+    modelGateway.start();
+    try {
+      await modelGateway.ready();
+      const { ANTHROPIC_BASE_URL: base, CLAUDE_CODE_OAUTH_TOKEN: placeholder } = channel.environment("thread-m");
+      channel.release("thread-m");
+      const post = async (auth: string | null) => {
+        const response = await fetch(`${base}/v1/messages`, { method: "POST", body: "{}", headers: { "content-type": "application/json", ...auth ? { authorization: auth } : {} } });
+        return { status: response.status, denied: response.headers.get("x-cube-denied") };
+      };
+      assert.deepEqual(await post(null), { status: 401, denied: "the thread's claude placeholder is missing" });
+      assert.deepEqual(await post(`Bearer ${placeholder}`), { status: 403, denied: "thread thread-m has no claude code running with a claude placeholder" });
+      assert.equal(fs.statSync(modelAudit).mode & 0o777, 0o600);
+      const { DatabaseSync } = await import("node:sqlite");
+      await until(() => { const db = new DatabaseSync(modelAudit, { readOnly: true }); try { return (db.prepare("SELECT count(*) AS n FROM exchange_outcome WHERE thread='thread-m' AND outcome='refused'").get() as { n: number }).n === 2; } finally { db.close(); } }, "both refusals recorded");
+    } finally {
+      await modelGateway.stop();
+      await modelEgress.close();
+      fs.rmSync(modelRun, { recursive: true, force: true });
+    }
+    console.log(`ok: the real cube-gateway's model channel: loopback listener from the ready line, a missing or dead placeholder refused by the gateway and cubed's policy, a 0600 audit that records them`);
   }
 } finally {
   for (const supervisor of supervisors) await supervisor.stop();

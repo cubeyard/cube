@@ -21,6 +21,7 @@ import type { ThreadEvent } from "../src/thread-events.ts";
 import { readClaudeHistory, readPiHistory } from "../src/thread-history.ts";
 import { isThreadImageRef, readThreadImage, THREAD_IMAGE_LIMITS } from "../src/thread-images.ts";
 import type { Workspace } from "../src/workspace.ts";
+import { stubModelChannel } from "./model-channel-stub.ts";
 
 const context = BACKGROUND_CONTEXT;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-thread-images-"));
@@ -46,7 +47,7 @@ try {
     const directory = path.join(root, "claude");
     fs.mkdirSync(directory);
     const workspace = { lease: async () => ({ token: "t" }), release: async () => {}, cancel: async () => {} } as unknown as Workspace;
-    await (await ClaudeAgent.open({ directory, threadId: "images", workspace, runtime: { command: ["false"], mod: "", socket: "" }, model: "opus" })).close();
+    await (await ClaudeAgent.open({ directory, threadId: "images", workspace, runtime: { command: ["false"], mod: "", socket: "", channel: stubModelChannel() }, model: "opus" })).close();
     const home = path.join(directory, "claude");
     const recorded = fs.readFileSync(path.join(import.meta.dirname, "fixtures", "claude-2.1.293-read-image.jsonl"), "utf8").trim().split("\n").map(line => line.split("__ROOT__").join(home));
     const screenshot = Buffer.from((JSON.parse(recorded[1]!) as { tool_use_result: { file: { base64: string } } }).tool_use_result.file.base64, "base64");

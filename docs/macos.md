@@ -14,7 +14,7 @@ What `brew install` does, and what stays yours to do:
 | `cubed`: the control plane with its own Node runtime, `cube-gateway` and the web UI (the signed `darwin-arm64` release bundle, verified by its pinned sha256, minus other platforms' prebuilt native modules) | nothing about images: berth pulls cube's default image (official Debian trixie, pinned) and prepares it for cube |
 | `cube-berth`: the runner, `berth vm`, with keel's arm64 guest kernel and base of the same release (each pinned by sha256); Homebrew's `qemu` and `erofs-utils` | run `cubed runners init-local` |
 | `gh`, so threads can use your GitHub access | `gh auth login`; connect a model in the UI |
-| user services (`brew services`) for both daemons, loopback only | optional: Claude Code login, Tailscale access |
+| user services (`brew services`) for both daemons, loopback only | optional: a Claude Code setup-token, Tailscale access |
 
 ## Install
 
@@ -127,7 +127,8 @@ brew upgrade --verbose cubeyard/tap/cube 2>&1 | while IFS= read -r line; do prin
 2. **A model.** Open **models** in the UI and connect a provider with Pi's
    browser or device login, or an API key. Credentials stay in `~/.pi/agent`
    on this Mac. For Claude Code threads ("claude · max"), install Claude Code,
-   run `claude /login`, and tell cubed where it is (below).
+   run `claude setup-token`, give cubed the token as `CLAUDE_CODE_OAUTH_TOKEN`
+   and tell cubed where `claude` is (below).
 3. **A project.** Name it and give it the repositories (GitHub URLs or local
    paths) its threads check out. Repositories are pinned at their current
    commit when each thread starts.
@@ -144,6 +145,7 @@ cubed reads `~/.config/cubed/environment` (shell syntax, keep it mode 600):
 ```sh
 # CUBED_STATE=/Users/me/.cube-host          # default
 # CUBED_CLAUDE=/Users/me/.local/bin/claude  # Claude Code, if it is not on the service's PATH
+# CLAUDE_CODE_OAUTH_TOKEN=…  # from claude setup-token: Claude Code threads; the gateway holds it, Claude Code a placeholder
 # CUBED_HOST=100.64.0.2                     # a Tailscale IP; see security
 # CUBED_ALLOWED_HOSTS=mymac.tailnet.ts.net,100.64.0.2
 # CUBED_PORTAL_IP=100.64.0.2                # serve threads' `cube service` web servers to the tailnet (docs/services.md)

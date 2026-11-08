@@ -826,7 +826,7 @@ export class Conversations {
     if (this.closing) throw new Error("host is stopping");
     const thread = this.thread(id);
     if (threadAgent(thread) !== "claude-code") throw new Error("thread is not a claude code thread");
-    if (!this.claude) throw new Error("claude code is not installed on this host — install it and log in with claude /login");
+    if (!this.claude) throw new Error("claude code is not installed on this host — install it, run claude setup-token and give cubed the token as CLAUDE_CODE_OAUTH_TOKEN");
     this.notArchiving(id);
     const cached = this.claudes.get(id);
     if (cached) return cached;

@@ -29,6 +29,7 @@ import { cubeThreads } from "../src/optchat-threads.ts";
 import type { Thread } from "../src/registry.ts";
 import type { StartOptions } from "../src/vm.ts";
 import { LocalMachines } from "./local-guest.ts";
+import { stubModelChannel } from "./model-channel-stub.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-restart-"));
 const state = path.join(root, "state");
@@ -103,7 +104,7 @@ const reportsOf = (id: string) => reports.filter(line => line.startsWith(`[${id.
 
 const runnerOf: Record<string, string> = { PI_QUICK: "a", PI_HELD: "b", CLAUDE_HELD: "c" };
 async function open(machines: CountedMachines) {
-  const app = await createCubed({ state, models, machines, claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")],
+  const app = await createCubed({ state, models, machines, claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], modelChannel: stubModelChannel(),
     claudeOptions: { stopGraceMs: 2000 }, gateway: null });
   const threads = {
     ...cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: () => [piModel], runners: () => ({ runners: [] }) as never }),

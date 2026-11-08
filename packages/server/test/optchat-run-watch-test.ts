@@ -32,6 +32,7 @@ import { OptChat, type OptThreads } from "../src/optchat.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
 import type { Thread } from "../src/registry.ts";
 import { LocalMachines } from "./local-guest.ts";
+import { stubModelChannel } from "./model-channel-stub.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-run-watch-"));
 const unhandled: unknown[] = [];
@@ -80,7 +81,7 @@ class Machines extends LocalMachines {
   }
 }
 const machines = new Machines(path.join(root, "machines"));
-const app = await createCubed({ state: path.join(root, "state"), models, machines, claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")],
+const app = await createCubed({ state: path.join(root, "state"), models, machines, claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], modelChannel: stubModelChannel(),
   claudeOptions: { stopGraceMs: 2000 }, gateway: null });
 app.registry.enrollRunner({ nodeId: "node-r", threadId: "r", environmentId: 1, configPath: "/private/r.json", configHash: "r", maxActiveVms: 4, protocol: 4, kind: "vm" } as never);
 app.registry.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });

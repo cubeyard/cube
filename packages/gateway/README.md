@@ -48,7 +48,53 @@ server name (`sni` = `host`, port 443, and the request's `Host` must match):
 - no keep-alive: one request per connection. A redirect is passed on
   (rewritten as above), never followed, and no credential is added to it.
 
-The gateway keeps no state of its own. (Until protocol 3 was retired it was
+## The model channel
+
+`--model-listen 127.0.0.1:PORT --model-audit FILE` adds Claude Code's model
+channel (`src/model.rs`): cubed starts each claude-code thread's `claude`
+with `ANTHROPIC_BASE_URL=http://127.0.0.1:PORT/t/<thread>` and its own
+placeholder as `CLAUDE_CODE_OAUTH_TOKEN`. Per request:
+
+- only `POST /v1/messages` and `POST /v1/messages/count_tokens` (any query)
+  under `/t/<thread>` are forwarded; any other route is 404;
+- exactly one placeholder, a `claude` one, in the headers (none: 401;
+  another or more: 403);
+- cubed's decision with `channel: "model"` and the thread (5 s, fail closed);
+  an allow without the token is refused too;
+- the token substituted, `Host: api.anthropic.com`, `Accept-Encoding:
+  identity`, TLS from this host to its public address; the answer streamed
+  frame by frame with B6 (no fixed hold-back: only a tail that could still
+  begin the token waits);
+- before the request leaves, its body read whole (over 32 MiB: 413) and its
+  row committed in the audit (no commit within 2 s: 503, nothing sent);
+- each exchange's outcome, refusals included, recorded in the audit file
+  (`src/audit.rs`): an append-only SQLite (0600, triggers refuse UPDATE and
+  DELETE) of the thread, route, outcome, status, an allow-list of headers
+  (never `Authorization`), the request body as the child sent it, the
+  answer's bytes as it got them and the answer reconstructed as one
+  Messages API message (no token in any), stored by SHA-256; each
+  `web_search_tool_result` block of that message is a separate event.
+
+The audit fails
+closed: a request's row (route, kept headers, body by hash) is committed,
+`synchronous=FULL`, before the request goes upstream, and a request whose row
+does not commit within 2 s gets 503 and is not sent. Its outcome follows when
+the answer ends; an outcome that cannot be written is retried before every
+later write, and until it is written new requests get 503. Request bodies
+over 32 MiB are refused (413). One gateway writes the file at a time (an
+exclusive lock beside it), and on start it records every exchange its
+predecessor left open (killed, crashed) as `lost`; an orderly stop gives
+open answers 3 s, records the rest as `cut` and drains the writer, inside
+cubed's 5 s before SIGKILL. Every committed exchange gets exactly one
+outcome: one whose child goes away, or that the gateway stops, before its
+answer begins is `cut` too, and one whose row commits after its request
+stopped waiting is `failed` ("not sent").
+
+The listener binds loopback only; the ready line names it
+(`{"ready":true,"version":…,"model":"127.0.0.1:PORT"}`), and cubed asks for
+the same port again on a restart.
+
+Apart from that audit file the gateway keeps no state of its own. (Until protocol 3 was retired it was
 also the protocol-3 runners' network, with a LAN per VM over Iroh, a control
 socket and an installation CA under `CUBED_STATE/gateway`; an installation
 that ran those keeps that directory, which nothing reads any more.)
@@ -56,12 +102,13 @@ that ran those keeps that directory, which nothing reads any more.)
 ## CLI
 
 ```
-cube-gateway serve --decide SOCK --credential SOCK
+cube-gateway serve --decide SOCK --credential SOCK [--model-listen 127.0.0.1:PORT --model-audit FILE]
 cube-gateway --version
 ```
 
-`serve` prints one line on stdout once the credential socket listens,
-`{"ready":true,"version":…}`, and exits when stdin reaches EOF (cubed's
+`serve` prints one line on stdout once the credential socket (and the
+model listener, when asked for) listens, `{"ready":true,"version":…}`, and
+exits when stdin reaches EOF (cubed's
 lifeline), on SIGTERM or on SIGINT, removing its socket. The socket is
 created 0600; a stale socket is replaced, a live one is refused.
 
@@ -85,6 +132,15 @@ it through a self dev-dependency.
   name and cubed's denial refused, `Content-Length` kept without a
   substitution and for HEAD, 8 MiB up and 16 MiB down, one request per
   connection, a bad or oversized header closing the connection unanswered.
+
+- `tests/model.rs`: the model channel with a TLS fake of api.anthropic.com:
+  SSE delivered before the upstream sends its next event, the token
+  upstream and only the placeholder back however the answer is chunked,
+  cubed's decision with `channel: "model"`, other routes and missing,
+  foreign or extra placeholders refused before any decision, a denial, a
+  late decision and an allow without the token refused, the audit's rows,
+  bodies by hash and event, and the real binary's log and audit without the
+  token.
 
 `packages/server/test/gateway-test.ts` drives the real binary from cubed's
 supervisor in `scripts/test-node-transport.sh`; the whole chain (berth vm, a

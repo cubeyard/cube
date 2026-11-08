@@ -32,7 +32,7 @@ Do not combine the Homebrew install with an `install.sh` install of cubed on the
 | `cubed`, the control plane, with its own Node runtime, `cube-gateway` and the web UI, from the signed `darwin-arm64` release, checked against its pinned sha256 | run `cubed runners init-local` |
 | `cube-berth`, the runner (`berth vm`), with keel's arm64 kernel and base of the same release, and Homebrew's `qemu` and `erofs-utils` | connect GitHub, in the setup or with `gh auth login` |
 | `gh`, so threads can use your GitHub access | connect a model under **settings** › **model providers** |
-| user services for both daemons, on loopback only | optional: a Claude Code login, [access from other devices](/cube/run/private-network/) |
+| user services for both daemons, on loopback only | optional: a Claude Code token ([models](/cube/use/models/#claude-code-threads)), [access from other devices](/cube/run/private-network/) |
 
 ## install progress
 

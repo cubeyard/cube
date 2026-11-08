@@ -14,12 +14,20 @@ const record = (event: Record<string, unknown>) => fs.appendFileSync(logFile, `$
 const starts = fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").split("\n").filter(line => line.includes('"start"')).length : 0;
 record({ event: "start", args });
 const server = net.createServer(socket => socket.end());
+// The model channel's listener, when asked for: the address it is given.
+const modelListen = args.includes("--model-listen") ? option("model-listen") : null;
+const model = net.createServer(socket => socket.end());
+const modelAddress = modelListen ? await new Promise<string>((resolve, reject) => {
+  const [host, port] = [modelListen.slice(0, modelListen.lastIndexOf(":")), Number(modelListen.slice(modelListen.lastIndexOf(":") + 1))];
+  model.once("error", reject);
+  model.listen(port, host, () => { const address = model.address() as net.AddressInfo; resolve(`${address.address}:${address.port}`); });
+}) : null;
 fs.rmSync(credential, { force: true });
 server.listen(credential, () => {
   fs.chmodSync(credential, 0o600);
-  process.stdout.write(`${JSON.stringify({ ready: true, version: "fake" })}\n`);
+  process.stdout.write(`${JSON.stringify({ ready: true, version: "fake", ...modelAddress ? { model: modelAddress } : {} })}\n`);
   if (starts < Number(process.env.FAKE_GATEWAY_CRASH ?? 0)) setTimeout(() => { record({ event: "crash" }); process.exit(3); }, 150);
 });
-process.stdin.on("end", () => { record({ event: "lifeline" }); server.close(); process.exit(0); });
+process.stdin.on("end", () => { record({ event: "lifeline" }); server.close(); model.close(); process.exit(0); });
 process.stdin.resume();
 process.on("SIGTERM", () => { record({ event: "sigterm" }); process.exit(0); });

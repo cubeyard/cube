@@ -55,6 +55,7 @@ import { VmWorkspace } from "../packages/server/src/vm-workspace.ts";
 import { workspaceRoute } from "../packages/server/src/workspace-http.ts";
 import { LeaseStore } from "../packages/server/src/workspace-lease.ts";
 import { LocalGuestTransport } from "../packages/server/test/local-guest.ts";
+import { stubModelChannel } from "../packages/server/test/model-channel-stub.ts";
 
 const claude = process.env.CLAUDE ?? "claude";
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "cube-claude-closed-"));
@@ -179,7 +180,7 @@ const hostRan = (cwd: string) => fs.existsSync(path.join(cwd, MARK));
 // Part 1: cubed's ClaudeAgent.
 const runtime = (modDir: string, extra: Record<string, string> = {}, modReadyMs = 15000): ClaudeRuntime => ({
   command: ["/usr/bin/env", ...Object.entries(apiEnv).map(([name, value]) => `${name}=${value}`), `CLAUDE_CONFIG_DIR=${path.join(temp, "config")}`, `HOME=${temp}`, claude],
-  mod: modDir, socket, modReadyMs, env: extra,
+  mod: modDir, socket, channel: stubModelChannel(), modReadyMs, env: extra,
 });
 async function turn(agent: ClaudeAgent, requestId: string): Promise<{ state: string; error: string | null; results: string[] }> {
   await agent.submit(requestId, "check");

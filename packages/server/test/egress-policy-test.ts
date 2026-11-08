@@ -4,7 +4,8 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { EgressPolicy, githubSecret, newPlaceholder, serveEgress, type EgressRequest } from "../src/egress-policy.ts";
+import { claudeSecret, EgressPolicy, githubSecret, newPlaceholder, serveEgress, type EgressRequest } from "../src/egress-policy.ts";
+import { ClaudeModelChannel } from "../src/model-channel.ts";
 import { EgressPolicy_Default } from "../src/gen/runner_pb.js";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-egress-"));
@@ -18,10 +19,12 @@ assert.match(mine, /^cube_ph_github_[A-Za-z0-9]{22}$/);
 assert.notEqual(mine, theirs);
 let tokenCalls = 0;
 const github = githubSecret(async () => { tokenCalls++; return "ghs_real-host-token\n"; }, { env: {} });
+const CLAUDE_TOKEN = "sk-ant-oat01-real-host-claude-token";
+const channel = new ClaudeModelChannel({ secret: claudeSecret({ CLAUDE_CODE_OAUTH_TOKEN: `${CLAUDE_TOKEN}\n` }), address: () => "127.0.0.1:4100" });
 const policy = new EgressPolicy({
   vms: { vm: vmId => vmId === "aaaaaaaaaaaaaaaa" ? { threadId: "t1", placeholders: { github: mine } }
     : vmId === "bbbbbbbbbbbbbbbb" ? { threadId: "t2", placeholders: { github: theirs } } : null },
-  secrets: [github], log,
+  secrets: [github], model: channel, log,
 });
 const ask = (patch: Partial<EgressRequest>): EgressRequest => ({ vmId: "aaaaaaaaaaaaaaaa", threadId: "t1", scheme: "https", method: "GET",
   host: "api.github.com", port: 443, path: "/user", placeholders: [], ...patch });
@@ -57,6 +60,30 @@ try {
   const offline = new EgressPolicy({ vms: { vm: () => ({ threadId: "t1", placeholders: { github: mine } }) },
     secrets: [githubSecret(async () => null, { env: {} })], log });
   assert.deepEqual(await offline.decide(ask({ placeholders: [mine] })), { allow: true });
+  // The model channel: a claude-code thread's own live placeholder, only to
+  // api.anthropic.com over https; never a guest's, never another thread's.
+  const model = (patch: Partial<EgressRequest>): EgressRequest => ask({ vmId: "", channel: "model", method: "POST", host: "api.anthropic.com", path: "/v1/messages", ...patch });
+  const claudeT1 = channel.environment("t1").CLAUDE_CODE_OAUTH_TOKEN;
+  const claudeT2 = channel.environment("t2").CLAUDE_CODE_OAUTH_TOKEN;
+  assert.notEqual(claudeT1, claudeT2);
+  assert.deepEqual(await policy.decide(model({ placeholders: [claudeT1] })), { allow: true, substitute: { [claudeT1]: CLAUDE_TOKEN } });
+  const modelDenied = async (patch: Partial<EgressRequest>, reason: RegExp) => {
+    const decision = await policy.decide(model(patch));
+    assert.equal(decision.allow, false, JSON.stringify(patch));
+    assert.match((decision as { reason: string }).reason, reason);
+  };
+  await modelDenied({ placeholders: [claudeT2] }, /does not belong to this thread/);
+  await modelDenied({ placeholders: [] }, /does not belong/);
+  await modelDenied({ placeholders: [claudeT1, mine] }, /does not belong/);
+  await modelDenied({ placeholders: [claudeT1], host: "api.anthropic.com.evil.example" }, /not allowed/);
+  await modelDenied({ placeholders: [claudeT1], scheme: "http" }, /only sent over https/);
+  await modelDenied({ threadId: "t3", placeholders: [claudeT1] }, /has no claude code running/);
+  // A guest cannot use the claude secret, even with a thread's placeholder.
+  await denied({ host: "api.anthropic.com", placeholders: [claudeT1] }, /does not belong/);
+  assert.equal(policy.policyFor({ vm: { placeholders: { github: mine, claude: claudeT1 } } }).rules!.length, 1, "no guest rule for the claude secret");
+  channel.release("t1");
+  await modelDenied({ placeholders: [claudeT1] }, /has no claude code running/);
+  assert.ok(!lines.some(line => line.includes(CLAUDE_TOKEN)), "the claude token is never logged");
   // A VM runner's policy for a thread (B-5): public egress, the 15-minute
   // lease, and a credential rule on exactly the secret's hosts.
   assert.deepEqual(policy.policyFor({ vm: { placeholders: { github: mine } } }), {
@@ -89,7 +116,11 @@ try {
     assert.equal((await post("/v1/decide", "{not json")).status, 400);
     assert.equal((await post("/v1/decide", JSON.stringify({ ...ask({}), scheme: "ftp" }))).status, 400);
     assert.equal((await post("/v1/other", "{}")).status, 404);
+    assert.equal((await post("/v1/decide", JSON.stringify({ ...ask({}), channel: "jail" }))).status, 400);
+    const live = channel.environment("t5").CLAUDE_CODE_OAUTH_TOKEN;
+    assert.deepEqual(await post("/v1/decide", JSON.stringify(model({ threadId: "t5", placeholders: [live] }))),
+      { status: 200, json: { allow: true, substitute: { [live]: CLAUDE_TOKEN } } });
   } finally { await served.close(); }
   assert.ok(!fs.existsSync(socket));
-  console.log("ok: egress policy: public hosts allowed, own github placeholder substituted only over https to github hosts, other placeholders/hosts/http/CONNECT denied with reasons, decision socket");
+  console.log("ok: egress policy: public hosts allowed, own github placeholder substituted only over https to github hosts, other placeholders/hosts/http/CONNECT denied with reasons, model channel only with the thread's live claude placeholder, decision socket");
 } finally { fs.rmSync(root, { recursive: true, force: true }); }

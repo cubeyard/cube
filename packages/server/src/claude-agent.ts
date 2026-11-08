@@ -4,13 +4,16 @@
  * cube's mod (packages/claude-mod), which sends Bash, Read, Write and Edit to
  * the thread Workspace keyed by tool_use_id.
  *
- * cubed never stores Claude credentials. The child gets an allow-listed
- * environment: no API key, auth token, base URL or Bedrock/Vertex switch, so
- * the subscription is used, not API billing, and none of cubed's provider,
- * Git or cloud credentials. Claude Code's own login is read from its config
- * directory (or CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`). The user's
- * settings files and MCP servers are not loaded, and only the mod's allowed
- * tools are offered.
+ * cubed never stores Claude credentials, and the child never holds the
+ * host's: its model requests go through cube-gateway's model channel
+ * (model-channel.ts). The child gets an allow-listed environment plus the
+ * channel's two variables, `ANTHROPIC_BASE_URL` (the gateway's loopback
+ * listener, the thread in its path) and `CLAUDE_CODE_OAUTH_TOKEN` (the
+ * thread's placeholder; the gateway substitutes the host's token from
+ * `claude setup-token`, the subscription's own auth mode). No inherited
+ * `ANTHROPIC_*`, API key or Bedrock/Vertex switch, and none of cubed's
+ * provider, Git or cloud credentials. The user's settings files and MCP
+ * servers are not loaded, and only the mod's allowed tools are offered.
  *
  * The mod must be in before Claude Code gets a prompt: without it Claude
  * Code runs Bash, Read, Write and Edit itself, on the cubed host. A child
@@ -58,6 +61,7 @@ import { DatabaseSync } from "node:sqlite";
 import { ALLOWED_TOOLS } from "../../claude-mod/hooks/tools.ts";
 import { expectReady } from "./claude-ready.ts";
 import { createLogger } from "./log.ts";
+import { ModelChannelUnavailable, type ModelChannel } from "./model-channel.ts";
 import type { ModelSelection } from "./models.ts";
 import type { ThreadAcceptance } from "./thread-events.ts";
 import type { Workspace, WorkspaceLease } from "./workspace.ts";
@@ -66,11 +70,12 @@ export const CLAUDE_PROVIDER = "claude-code";
 /** Claude Code's own model aliases; it resolves them to current models. */
 export const CLAUDE_MODELS: readonly ModelSelection[] = ["fable", "opus", "sonnet", "haiku"].map(id => ({ provider: CLAUDE_PROVIDER, id }));
 /** The only variables the child inherits from cubed: locale, home and
- * config, proxies and certificates, and Claude Code's own login token. */
-const CLAUDE_ENV = /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_[A-Z_]+|TERM|TZ|TMPDIR|XDG_[A-Z_]+|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR)$/;
-/** Never passed, not even from ClaudeRuntime.env: each would bill the API or
- * another provider instead of the subscription. */
-export const CLAUDE_REMOVED_ENV = /^(ANTHROPIC_[A-Z_]+|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))$/;
+ * config, proxies and certificates. */
+const CLAUDE_ENV = /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_[A-Z_]+|TERM|TZ|TMPDIR|XDG_[A-Z_]+|CLAUDE_CONFIG_DIR|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR)$/;
+/** Never passed, not even from ClaudeRuntime.env: a real Claude token, or
+ * a variable that would send the model's traffic elsewhere or bill another
+ * provider. The model channel sets its own two after this. */
+export const CLAUDE_REMOVED_ENV = /^(ANTHROPIC_[A-Z_]+|CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))$/;
 /** What a stop waits after SIGTERM before SIGKILL. */
 const KILL_GRACE_MS = 5000;
 const INTERRUPTED = "cubed stopped during this turn; claude code does not continue an interrupted turn — send a message to go on";
@@ -104,6 +109,8 @@ export interface ClaudeRuntime {
   mod: string;
   /** cubed's workspace socket, which serves only workspace routes. */
   socket: string;
+  /** Where the child's model requests go, and its placeholder. */
+  channel: ModelChannel;
   /** Close an idle child after this long; the next prompt resumes it. */
   idleMs?: number;
   /** How long a stop waits for Claude Code to end the turn before killing it. */
@@ -118,13 +125,17 @@ export interface ClaudeRuntime {
   modReadyMs?: number;
 }
 
-/** The child's environment: the allow-list, the runtime's extras and the
- * cube workspace, never a credential that moves billing. */
+/** The child's environment: the allow-list, the runtime's extras, then
+ * the cube workspace and the model channel; never a real credential. */
 export function claudeEnvironment(source: NodeJS.ProcessEnv, extra: Readonly<Record<string, string>>, workspace: Readonly<Record<string, string>>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(source)) if (value !== undefined && CLAUDE_ENV.test(name)) env[name] = value;
   Object.assign(env, extra);
   for (const name of Object.keys(env)) if (CLAUDE_REMOVED_ENV.test(name)) delete env[name];
+  // The model channel is on loopback: never through the host's proxy,
+  // which Claude Code would otherwise use for it too.
+  const base = workspace.ANTHROPIC_BASE_URL;
+  if (base) for (const name of ["NO_PROXY", "no_proxy"]) env[name] = [env[name], new URL(base).hostname].filter(Boolean).join(",");
   return { ...env, ...workspace };
 }
 
@@ -229,6 +240,7 @@ export class ClaudeAgent {
    * one writable owner. The token goes to the child's mod and nowhere else. */
   static async open(options: { directory: string; threadId: string; workspace: Workspace; runtime: ClaudeRuntime; model: string; skills?: string | null;
     beforePrompt?: (signal: AbortSignal) => Promise<unknown> }): Promise<ClaudeAgent> {
+    await options.runtime.channel.ready();
     const lease = await options.workspace.lease({ owner: "claude-code" });
     let db: DatabaseSync | undefined;
     try {
@@ -317,11 +329,19 @@ export class ClaudeAgent {
       this.changed();
       return "queued";
     }
-    const child = this.spawn();
     const seq = Number(this.db.prepare("INSERT INTO submission(request_id, text, state, created_at) VALUES (?, ?, 'running', ?)").run(requestId, text, Date.now()).lastInsertRowid);
     const submission: ClaudeSubmission = { seq, requestId, text, state: "running", error: null };
     this.submissions.push(submission);
     clearTimeout(this.idle);
+    let child: NonNullable<ClaudeAgent["child"]>;
+    // No model channel: the turn fails as the thread shows it, nothing started.
+    try { child = this.spawn(); }
+    catch (error) {
+      this.settle("failed", error instanceof Error ? error.message : String(error));
+      this.changed();
+      if (!(error instanceof ModelChannelUnavailable)) throw error;
+      return "started";
+    }
     this.changed();
     void child.ready.then(async ready => {
       // A child that ended first has said why (its exit is the turn's failure);
@@ -480,6 +500,7 @@ export class ClaudeAgent {
     await this.endChild();
     this.settle("failed", INTERRUPTED);
     this.lose(CLOSED);
+    this.runtime.channel.release(this.threadId);
     await this.workspace.release(this.lease.token).catch(() => {});
     this.db.close();
     this.listeners.clear();
@@ -494,8 +515,10 @@ export class ClaudeAgent {
     if (this.child) return this.child;
     const session = this.sessionId;
     const [command, ...prefix] = this.runtime.command;
+    const model = this.runtime.channel.environment(this.threadId);
     const expected = expectReady(this.threadId);
     const env = claudeEnvironment(process.env, this.runtime.env ?? {}, {
+      ...model,
       CUBE_MOD_NONCE: expected.nonce,
       CUBE_WORKSPACE_SOCKET: this.runtime.socket,
       CUBE_WORKSPACE_PATH: `/api/threads/${encodeURIComponent(this.threadId)}/workspace`,

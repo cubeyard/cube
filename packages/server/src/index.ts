@@ -14,7 +14,8 @@ import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { PATIENCE, THREADS_CLOSE_MS } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
 import type { TrustedRunnerHealth } from "./runner-types.ts";
-import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
+import { CLAUDE_TOKEN_MISSING, claudeSecret, EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
+import { ClaudeModelChannel, type ModelChannel } from "./model-channel.ts";
 import { GatewaySupervisor, locateGateway } from "./gateway.ts";
 import { errorText, machineFor, vmSizes, type ThreadMachines } from "./vm.ts";
 import { registryCredentialRoute } from "./runner-credentials.ts";
@@ -305,6 +306,9 @@ export async function createCubed(options: {
   /** The skill source before the user's (docs/skills.md); none when absent.
    * The cubed command passes DEFAULT_SKILL_SOURCE. */
   skillSource?: SkillSource | null;
+  /** Tests without a gateway: Claude Code's model channel. Default:
+   * cube-gateway's, with the host's token from CLAUDE_CODE_OAUTH_TOKEN. */
+  modelChannel?: ModelChannel;
 }) {
   const { directory: run, socket, temporary: socketDirectory } = await runDirectory(options.state);
   const registry = new Registry(path.join(options.state, "registry.sqlite"));
@@ -314,16 +318,23 @@ export async function createCubed(options: {
   const github = new GithubAuth();
   // Every guest request is decided here; secrets never leave the host
   // except as the gateway's substitution for an allowed request.
+  let gateway: GatewaySupervisor | null = null;
+  // Claude Code's model requests go through the gateway with a per-thread
+  // placeholder; only the gateway gets the host's token, per request.
+  const claudeChannel = new ClaudeModelChannel({ secret: claudeSecret(), address: () => gateway?.modelAddress ?? null,
+    unavailable: () => gateway ? gateway.unavailable : "this cubed runs no cube-gateway", started: () => gateway?.ready() ?? Promise.resolve() });
+  const claudeRuntimeChannel = options.modelChannel ?? claudeChannel;
   const policy = new EgressPolicy({
     vms: { vm: vmId => machineFor(registry, vmId) },
     secrets: options.secrets ?? [githubSecret(() => github.token())],
+    model: claudeChannel,
   });
   const egress = await serveEgress(path.join(run, "egress.sock"), policy);
-  let gateway: GatewaySupervisor | null = null;
   const threadsDirectory = path.join(options.state, "threads");
   if (!options.machines) {
     const credential = path.join(run, "credential.sock");
     gateway = new GatewaySupervisor({ decide: path.join(run, "egress.sock"), credential, extraArgs: gatewayTestArgs(process.env),
+      ...claudeCommand ? { model: { audit: path.join(options.state, "model-audit.sqlite") } } : {},
       ...(options.gateway === undefined ? {} : { binary: options.gateway }) });
     gateway.start();
     // Protocol-4 runners' credential streams go to the gateway's proxy.
@@ -350,7 +361,7 @@ export async function createCubed(options: {
   const { machines, conversations } = threadRuntime({ registry, threads: threadsDirectory, models, latestCommits, modelProblem: model => modelProblem(model),
     claudeBeforePrompt: (id, signal) => memory.text(id, "claude-code", { signal, final: true }), ...options.machines ? { machines: options.machines } : {}, ...options.now ? { now: options.now } : {},
     ...options.patience ? { patience: options.patience } : {}, runner: { policy, ...options.runner }, claude: claudeCommand ? {
-    command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
+    command: claudeCommand, socket, mod: claudeMod(options.state), channel: claudeRuntimeChannel, ...options.claudeOptions,
   } : null, portal: thread => portal!.guest(thread),
   hostTools: thread => ({ readFile, key }) => ({
     note: `artifact_write, artifact_read and artifact_edit keep documents for the user (work artifacts). ${ARTIFACT_GUIDE}`,
@@ -389,9 +400,12 @@ export async function createCubed(options: {
    * a thread is accepted against it without reading the catalog, which may
    * run a provider's key command (`!command` in Pi's auth.json). */
   let knownCatalog: readonly ModelSelection[] = [];
+  /** Claude Code threads can run: the `claude` binary and the host's
+   * setup-token for the model channel. A `claude /login` alone is not enough. */
+  const claudeReady = () => conversations.claudeAvailable && claudeRuntimeChannel.configured;
   /** What a new thread may start with: Pi's models, then claude · max. */
   const threadCatalog = async () => {
-    knownCatalog = [...await catalog(), ...(conversations.claudeAvailable ? CLAUDE_MODELS : [])];
+    knownCatalog = [...await catalog(), ...(claudeReady() ? CLAUDE_MODELS : [])];
     return [...knownCatalog];
   };
   /** Why a thread cannot start with its model, checked as it starts (the
@@ -401,8 +415,9 @@ export async function createCubed(options: {
     if (available.some(each => each.provider === model.provider && each.id === model.id)) return null;
     const selectable = `selectable models: ${available.map(each => `${each.provider}/${each.id}`).join(", ") || "none, connect a model provider"}`;
     if (model.provider === CLAUDE_PROVIDER) {
-      return CLAUDE_MODELS.some(each => each.id === model.id) ? `model ${model.provider}/${model.id} needs Claude Code, which this host does not run; ${selectable}`
-        : `model ${model.provider}/${model.id} is not one cube knows; ${selectable}`;
+      if (!CLAUDE_MODELS.some(each => each.id === model.id)) return `model ${model.provider}/${model.id} is not one cube knows; ${selectable}`;
+      return conversations.claudeAvailable ? `model ${model.provider}/${model.id} cannot run: ${CLAUDE_TOKEN_MISSING}; ${selectable}`
+        : `model ${model.provider}/${model.id} needs Claude Code, which this host does not run; ${selectable}`;
     }
     return models.getModel(model.provider, model.id)
       ? `model ${model.provider}/${model.id} is known, but its provider has no working credential (its key or key command in Pi's auth.json, or its environment); ${selectable}`
@@ -642,9 +657,9 @@ export async function createCubed(options: {
       if (url.pathname === "/api/state" && method === "GET") {
         const available = await catalog();
         // With no Pi provider, Claude Code on this host still runs threads on
-        // its own login (which cubed cannot see); do not point to providers.
+        // the host's Claude token (the model channel); do not point to providers.
         const auth = available.length ? { state: "ok", provider: available[0].provider, credentialType: "host" }
-          : conversations.claudeAvailable ? { state: "ok", provider: CLAUDE_PROVIDER, credentialType: "claude code login" }
+          : claudeReady() ? { state: "ok", provider: CLAUDE_PROVIDER, credentialType: "claude setup-token" }
           : { state: "missing", provider: "model" };
         return json({ onboardingComplete: isOnboardingComplete(onboarding), auth });
       }
