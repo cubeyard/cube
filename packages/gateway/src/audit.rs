@@ -1142,7 +1142,10 @@ mod tests {
         assert_eq!((rows[0].0.as_str(), rows[0].1.as_str()), ("t3", "refused"));
         assert_eq!((rows[1].0.as_str(), rows[1].1.as_str()), ("t2", "failed"));
         assert!(rows[1].2.as_deref().unwrap().starts_with("not sent"));
-        assert_eq!(outcomes(&file)[1].1.as_deref(), Some("forwarded"));
+        assert!(
+            outcomes(&file).contains(&(next_seq, Some("forwarded".into()))),
+            "the finished start's outcome was written once the file freed"
+        );
         assert_eq!(audit.open_exchanges(), 0);
     }
 
