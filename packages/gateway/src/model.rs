@@ -304,8 +304,11 @@ impl Connection {
             start.method.clone(),
             start.route.clone(),
         );
-        let seq = match self.channel.audit.start(start).await {
-            Ok(seq) => seq,
+        // From here the exchange owes one outcome: `started` records `cut` if
+        // this future is dropped (the child went away, the gateway stopped)
+        // before the answer's Tee takes it over.
+        let started = match self.channel.audit.start(start).await {
+            Ok(started) => started,
             Err(error) => {
                 eprintln!(
                     "cube-gateway: model channel refused {method} {} (thread {thread:?}), not sent: the model audit cannot record it: {error}",
@@ -318,35 +321,32 @@ impl Connection {
             }
         };
         let request = Request::from_parts(parts, Full::new(body));
-        let fail = |reason: &str| {
+        let fail = |started: crate::audit::Started, reason: &str| {
             eprintln!(
                 "cube-gateway: model channel failed {method} {} (thread {thread:?}): {reason}",
                 route.split('?').next().unwrap_or_default()
             );
             let response = failed(reason);
-            self.channel.audit.end(
-                seq,
-                End {
-                    outcome: Outcome::Failed,
-                    status: Some(StatusCode::BAD_GATEWAY.as_u16()),
-                    reason: Some(reason.to_string()),
-                    response_headers: kept_headers(response.headers(), false),
-                    response: None,
-                },
-            );
+            started.finish(End {
+                outcome: Outcome::Failed,
+                status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                reason: Some(reason.to_string()),
+                response_headers: kept_headers(response.headers(), false),
+                response: None,
+            });
             response
         };
         let response = match self.send(request).await {
             Ok(response) => response,
-            Err(reason) => return fail(&reason),
+            Err(reason) => return fail(started, &reason),
         };
         let (mut parts, body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
         if encoded(&parts.headers) {
-            return fail("the model channel refuses an encoded answer");
+            return fail(started, "the model channel refuses an encoded answer");
         }
         if pairs.rewrite_headers(&mut parts.headers).is_err() {
-            return fail("the answer's headers cannot carry the placeholder");
+            return fail(started, "the answer's headers cannot carry the placeholder");
         }
         let bodiless = parts.status == StatusCode::NO_CONTENT
             || parts.status == StatusCode::NOT_MODIFIED
@@ -356,11 +356,9 @@ impl Connection {
             parts.headers.remove(header::CONTENT_LENGTH);
         }
         let record = Record {
-            audit: self.channel.audit.clone(),
-            seq,
+            started: Some(started),
             status: parts.status.as_u16(),
             response_headers: kept_headers(&parts.headers, false),
-            done: false,
         };
         let body = Tee::new(Reversed::new(body, pairs), record);
         Response::from_parts(parts, body.boxed())
@@ -438,11 +436,9 @@ fn plain_error(status: StatusCode, reason: &str) -> Response<Body> {
 /// recorded once, when the answer body ends (forwarded) or is dropped or
 /// broken before (cut).
 struct Record {
-    audit: Audit,
-    seq: i64,
+    started: Option<crate::audit::Started>,
     status: u16,
     response_headers: Vec<(String, String)>,
-    done: bool,
 }
 
 /// An answer passed on frame by frame as it comes, with a copy of its data
@@ -473,9 +469,9 @@ impl<B> Tee<B> {
     }
 
     fn finish(&mut self, complete: bool) {
-        if std::mem::replace(&mut self.record.done, true) {
+        let Some(started) = self.record.started.take() else {
             return;
-        }
+        };
         let end = End {
             outcome: if complete {
                 Outcome::Forwarded
@@ -487,7 +483,7 @@ impl<B> Tee<B> {
             response_headers: std::mem::take(&mut self.record.response_headers),
             response: Some(std::mem::take(&mut self.captured)),
         };
-        self.record.audit.end(self.record.seq, end);
+        started.finish(end);
     }
 }
 

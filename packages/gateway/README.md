@@ -85,7 +85,10 @@ over 32 MiB are refused (413). One gateway writes the file at a time (an
 exclusive lock beside it), and on start it records every exchange its
 predecessor left open (killed, crashed) as `lost`; an orderly stop gives
 open answers 3 s, records the rest as `cut` and drains the writer, inside
-cubed's 5 s before SIGKILL.
+cubed's 5 s before SIGKILL. Every committed exchange gets exactly one
+outcome: one whose child goes away, or that the gateway stops, before its
+answer begins is `cut` too, and one whose row commits after its request
+stopped waiting is `failed` ("not sent").
 
 The listener binds loopback only; the ready line names it
 (`{"ready":true,"version":…,"model":"127.0.0.1:PORT"}`), and cubed asks for

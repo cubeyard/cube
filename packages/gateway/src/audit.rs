@@ -127,8 +127,8 @@ pub enum Outcome {
     /// The upstream could not be reached or gave an answer the channel
     /// refuses (502), or the request was not sent after all.
     Failed,
-    /// The answer stopped before its end (the child went away, the upstream
-    /// broke off, or the gateway stopped).
+    /// The answer stopped before its end, or before it began (the child
+    /// went away, the upstream broke off, or the gateway stopped).
     Cut,
 }
 
@@ -309,14 +309,25 @@ impl Audit {
     }
 
     /// Commits the exchange's row before its request may go upstream, or
-    /// says why it cannot (the caller answers 503 and sends nothing).
-    pub async fn start(&self, start: Start) -> Result<i64, String> {
+    /// says why it cannot (the caller answers 503 and sends nothing). The
+    /// row is owned from the moment it is known: by the returned `Started`,
+    /// or, when this future is cancelled or passes its deadline, by the
+    /// wait itself, which records it as not sent.
+    pub async fn start(&self, start: Start) -> Result<Started, String> {
         let (reply, answer) = oneshot::channel();
         self.sender
             .send(Command::Start(start, reply))
             .map_err(|_| "the audit writer has stopped".to_string())?;
-        match tokio::time::timeout(START_TIMEOUT, answer).await {
-            Ok(Ok(result)) => result,
+        let mut wait = StartWait {
+            audit: self.clone(),
+            answer,
+        };
+        match tokio::time::timeout(START_TIMEOUT, &mut wait.answer).await {
+            Ok(Ok(Ok(seq))) => {
+                wait.answer.close();
+                Ok(Started::new(self.clone(), seq))
+            }
+            Ok(Ok(Err(error))) => Err(error),
             Ok(Err(_)) => Err("the audit writer has stopped".into()),
             Err(_) => Err(format!(
                 "the audit did not commit within {} s",
@@ -325,8 +336,8 @@ impl Audit {
         }
     }
 
-    /// How a started exchange ended.
-    pub fn end(&self, seq: i64, end: End) {
+    /// How a started exchange ended (through `Started`, which gives it once).
+    fn end(&self, seq: i64, end: End) {
         if self
             .sender
             .send(Command::Write(Pending::End(seq, end)))
@@ -384,6 +395,77 @@ impl Audit {
     }
 }
 
+/// The wait for a start's row. Dropped before its answer was taken (the
+/// deadline passed, the request went away), it closes the channel, so the
+/// writer records a later commit as not sent, and records an answer that
+/// already arrived the same way: a committed row never goes without an
+/// outcome.
+struct StartWait {
+    audit: Audit,
+    answer: oneshot::Receiver<Result<i64, String>>,
+}
+
+impl Drop for StartWait {
+    fn drop(&mut self) {
+        self.answer.close();
+        if let Ok(Ok(seq)) = self.answer.try_recv() {
+            self.audit
+                .end(seq, End::plain(Outcome::Failed, Some(503), NOT_SENT));
+        }
+    }
+}
+
+const NOT_SENT: &str = "not sent: the request stopped waiting before the audit committed";
+
+/// A started exchange: its row is committed and it owes exactly one
+/// outcome. `finish` gives it; dropped without one (the child went away or
+/// the gateway stopped before the answer began), it records `cut`.
+pub struct Started {
+    audit: Audit,
+    seq: i64,
+    owed: bool,
+}
+
+impl std::fmt::Debug for Started {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Started({})", self.seq)
+    }
+}
+
+impl Started {
+    fn new(audit: Audit, seq: i64) -> Self {
+        Self {
+            audit,
+            seq,
+            owed: true,
+        }
+    }
+
+    pub fn seq(&self) -> i64 {
+        self.seq
+    }
+
+    pub fn finish(mut self, end: End) {
+        self.owed = false;
+        self.audit.end(self.seq, end);
+    }
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        if self.owed {
+            self.audit.end(
+                self.seq,
+                End::plain(
+                    Outcome::Cut,
+                    None,
+                    "cut before the answer began: the request went away or the gateway stopped",
+                ),
+            );
+        }
+    }
+}
+
 struct Writer {
     connection: Connection,
     /// Held for the writer's life: one gateway per audit file.
@@ -413,11 +495,7 @@ impl Writer {
                         self.open.0.fetch_add(1, Ordering::SeqCst);
                         if reply.send(Ok(seq)).is_err() {
                             // Its request gave up waiting and was not sent.
-                            let end = End::plain(
-                                Outcome::Failed,
-                                Some(503),
-                                "not sent: the audit committed after the request stopped waiting",
-                            );
+                            let end = End::plain(Outcome::Failed, Some(503), NOT_SENT);
                             self.pending.push_back(Pending::End(seq, end));
                             let _ = self.drain();
                         }
@@ -947,11 +1025,16 @@ mod tests {
         // A start is committed when it returns: before any request leaves.
         let ended = audit.start(start("t1")).await.unwrap();
         let open = audit.start(start("t1")).await.unwrap();
-        assert_eq!(outcomes(&file), vec![(ended, None), (open, None)]);
-        audit.end(ended, End::plain(Outcome::Forwarded, Some(200), "done"));
+        let (ended_seq, open_seq) = (ended.seq(), open.seq());
+        assert_eq!(outcomes(&file), vec![(ended_seq, None), (open_seq, None)]);
+        ended.finish(End::plain(Outcome::Forwarded, Some(200), "done"));
         audit.flush(Duration::from_secs(5)).await.unwrap();
         assert_eq!(audit.open_exchanges(), 1);
         assert!(!audit.idle(Duration::from_millis(50)).await);
+        // A kill: the open exchange's guard never gets to record anything.
+        let mut open = open;
+        open.owed = false;
+        drop(open);
         drop(audit);
         // The writer and its lock go with the process in real life; here
         // with the thread, once its channel closes.
@@ -964,8 +1047,8 @@ mod tests {
         assert_eq!(
             outcomes(&file),
             vec![
-                (ended, Some("forwarded".into())),
-                (open, Some("lost".into()))
+                (ended_seq, Some("forwarded".into())),
+                (open_seq, Some("lost".into()))
             ],
             "an exchange its gateway never ended is recorded as lost"
         );
@@ -1006,7 +1089,8 @@ mod tests {
         let holder = Connection::open(&file).unwrap();
         holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
         // The outcome cannot be written: it stays queued, and starts fail.
-        audit.end(first, End::plain(Outcome::Forwarded, Some(200), "done"));
+        let first_seq = first.seq();
+        first.finish(End::plain(Outcome::Forwarded, Some(200), "done"));
         tokio::time::sleep(BUSY_TIMEOUT + Duration::from_millis(200)).await;
         let refused = audit.start(start("t1")).await.unwrap_err();
         assert!(
@@ -1017,14 +1101,15 @@ mod tests {
         let next = audit.start(start("t1")).await.unwrap();
         assert_eq!(
             outcomes(&file),
-            vec![(first, Some("forwarded".into())), (next, None)],
+            vec![(first_seq, Some("forwarded".into())), (next.seq(), None)],
             "the queued outcome is written first, then the new start"
         );
         // A start queued behind writes that keep failing passes its
         // deadline; when the file frees it commits, and the writer records
         // it as not sent, never open.
         holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
-        audit.end(next, End::plain(Outcome::Forwarded, Some(200), "done"));
+        let next_seq = next.seq();
+        next.finish(End::plain(Outcome::Forwarded, Some(200), "done"));
         audit.refusal(
             start("t3"),
             End::plain(Outcome::Refused, Some(404), "not a route"),
@@ -1039,7 +1124,9 @@ mod tests {
                 "SELECT thread, outcome, reason FROM exchange_outcome WHERE seq > ?1 ORDER BY seq",
             )
             .unwrap()
-            .query_map([next], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .query_map([next_seq], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
             .unwrap()
             .map(Result::unwrap)
             .collect();
@@ -1048,6 +1135,96 @@ mod tests {
         assert_eq!((rows[1].0.as_str(), rows[1].1.as_str()), ("t2", "failed"));
         assert!(rows[1].2.as_deref().unwrap().starts_with("not sent"));
         assert_eq!(outcomes(&file)[1].1.as_deref(), Some("forwarded"));
+        assert_eq!(audit.open_exchanges(), 0);
+    }
+
+    fn rows_after(file: &Path, seq: i64) -> Vec<(String, Option<String>, Option<String>)> {
+        Connection::open(file)
+            .unwrap()
+            .prepare(
+                "SELECT thread, outcome, reason FROM exchange_outcome WHERE seq > ?1 ORDER BY seq",
+            )
+            .unwrap()
+            .query_map([seq], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_start_answered_but_never_taken_or_cancelled_before_commit_is_not_sent_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("model-audit.sqlite");
+        let audit = Audit::open(&file).unwrap();
+        // The writer's answer arrives, and the wait is dropped unread (the
+        // request went away between commit and taking it).
+        let (reply, answer) = oneshot::channel();
+        audit
+            .sender
+            .send(Command::Start(start("delivered"), reply))
+            .unwrap();
+        audit.flush(Duration::from_secs(5)).await.unwrap();
+        drop(StartWait {
+            audit: audit.clone(),
+            answer,
+        });
+        // Cancelled while the file is locked: the commit comes after.
+        let holder = Connection::open(&file).unwrap();
+        holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        tokio::select! {
+            _ = audit.start(start("cancelled")) => panic!("it cannot commit under the lock"),
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+        holder.execute_batch("ROLLBACK").unwrap();
+        audit.flush(Duration::from_secs(5)).await.unwrap();
+        let rows = rows_after(&file, 0);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        for (thread, outcome, reason) in &rows {
+            assert_eq!(outcome.as_deref(), Some("failed"), "{thread}");
+            assert_eq!(reason.as_deref(), Some(NOT_SENT), "{thread}");
+        }
+        assert_eq!(
+            audit.open_exchanges(),
+            0,
+            "each counted once and released once"
+        );
+        // Exactly once: a second outcome would violate the key and hold the
+        // channel shut; a new start still commits.
+        let next = audit.start(start("after")).await.unwrap();
+        next.finish(End::plain(Outcome::Forwarded, Some(200), "done"));
+        audit.flush(Duration::from_secs(5)).await.unwrap();
+        assert_eq!(audit.open_exchanges(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_started_exchange_is_cut_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("model-audit.sqlite");
+        let audit = Audit::open(&file).unwrap();
+        let started = audit.start(start("t1")).await.unwrap();
+        assert_eq!(audit.open_exchanges(), 1);
+        drop(started);
+        assert!(
+            audit.idle(Duration::from_secs(2)).await,
+            "the count goes back to 0"
+        );
+        let finished = audit.start(start("t1")).await.unwrap();
+        finished.finish(End::plain(Outcome::Forwarded, Some(200), "done"));
+        audit.flush(Duration::from_secs(5)).await.unwrap();
+        let rows = rows_after(&file, 0);
+        assert_eq!(rows[0].1.as_deref(), Some("cut"));
+        assert!(
+            rows[0]
+                .2
+                .as_deref()
+                .unwrap()
+                .starts_with("cut before the answer began")
+        );
+        assert_eq!(
+            rows[1].1.as_deref(),
+            Some("forwarded"),
+            "finish gives one outcome, no cut after it"
+        );
         assert_eq!(audit.open_exchanges(), 0);
     }
 }

@@ -124,7 +124,19 @@ forwarded requests, and the channel failed open. Now:
    in-flight answers 3 s, drops the rest (recorded `cut`), and waits at most
    1 s for the writer to drain: 4 s in all. A kill past that leaves `lost`
    on the next start, never silence.
-6. **Schema version.** `meta(schema=2)`; a file of another schema is refused
+6. **Exactly one outcome per committed exchange (round 4).** The review
+   found that a child leaving (or a stop) between the commit and the first
+   answer byte left the exchange open and its count held, so a stop waited
+   its full grace and the next start called it `lost`. Ownership is now a
+   value: `Audit::start` returns a `Started` guard the moment the commit is
+   known; `finish` gives the outcome once, and dropping it unfinished (the
+   request's future dropped by a disconnect or the stop's abort) records
+   `cut`. The answer's Tee takes the guard over. The wait for the commit is
+   a `StartWait` whose drop closes the reply channel and takes any answer
+   already in it, so a commit that lands after its request stopped waiting
+   (deadline or disconnect) is recorded `failed` ("not sent") by the wait
+   or by the writer, never by both and never by neither.
+7. **Schema version.** `meta(schema=2)`; a file of another schema is refused
    at start rather than written wrongly. `reconstruct` ignores block indexes
    past 4096.
 
@@ -133,4 +145,8 @@ restart shows `lost`; a locked audit gives 503 with nothing upstream, and
 the channel recovers when it frees; an outcome that cannot be written holds
 later requests at 503 until it is; 413 over the cap; 16 concurrent
 exchanges; a second gateway refused on the same audit; SIGTERM mid-stream
-exits within the bound with `cut` recorded.
+exits within the bound with `cut` recorded; a child leaving before the
+first byte is `cut` once, releases its count, and a stop after it is quick
+and a restart keeps `cut`; a silent upstream at SIGTERM is `cut` after the
+grace; an answered-but-untaken start and a start cancelled before its
+commit are `failed` once.

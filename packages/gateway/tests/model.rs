@@ -143,6 +143,7 @@ async fn answer(request: hyper::Request<Incoming>, fake: Fake) -> Answer {
     );
     let chunk: usize = header("x-test-chunk").parse().unwrap_or(0);
     let wait = header("x-test-wait") == "1";
+    let silent = header("x-test-silent") == "1";
     let body = request.into_body().collect().await.unwrap().to_bytes();
     fake.seen.lock().unwrap().push(Seen {
         target: target.clone(),
@@ -151,6 +152,10 @@ async fn answer(request: hyper::Request<Incoming>, fake: Fake) -> Answer {
         encoding,
         body,
     });
+    if silent {
+        // Takes the request and never answers: no header, no byte.
+        std::future::pending::<()>().await;
+    }
     let token = auth.strip_prefix("Bearer ").unwrap_or(&auth).to_string();
     if target.starts_with("/v1/messages/count_tokens") {
         return hyper::Response::builder()
@@ -194,6 +199,8 @@ struct Channel {
     audit: PathBuf,
     decide: FakeDecide,
     fake: Fake,
+    /// The gateway's audit handle: its open-exchange count.
+    handle: cube_gateway::audit::Audit,
 }
 
 impl Channel {
@@ -227,6 +234,7 @@ impl Channel {
         .await
         .unwrap();
         let address = running.ready["model"].as_str().unwrap().parse().unwrap();
+        let handle = running.model.as_ref().unwrap().audit.clone();
         std::mem::forget(running);
         Self {
             _dir: dir,
@@ -234,6 +242,7 @@ impl Channel {
             audit,
             decide,
             fake,
+            handle,
         }
     }
 
@@ -1036,4 +1045,130 @@ async fn concurrent_exchanges_each_get_their_own_rows() {
     let mut want: Vec<String> = (0..16).map(|n| format!("{{\"n\":{n}}}")).collect();
     want.sort();
     assert_eq!(bodies, want);
+}
+
+/// A request the silent upstream has taken, sent from a task the caller
+/// can abort: the child going away before the first answer byte.
+async fn silent(address: std::net::SocketAddr, fake: &Fake) -> tokio::task::JoinHandle<()> {
+    let child = tokio::spawn(async move {
+        let stream = TcpStream::connect(address).await.unwrap();
+        let headers = [("x-test-silent", "1")];
+        let _ = request(
+            stream,
+            post("/t/thread-1/v1/messages", Some(&bearer()), &headers),
+        )
+        .await;
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while fake.seen.lock().unwrap().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the request reached upstream"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    child
+}
+
+#[tokio::test]
+async fn a_child_that_leaves_before_the_first_byte_is_cut_once_and_released() {
+    let channel = Channel::start(substitute()).await;
+    let child = silent(channel.address, &channel.fake).await;
+    assert_eq!(channel.handle.open_exchanges(), 1);
+    child.abort();
+    let rows = channel.exchanges(1).await;
+    assert_eq!(rows[0]["outcome"], "cut");
+    assert!(
+        rows[0]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("cut before the answer began")
+    );
+    assert!(
+        channel.handle.idle(Duration::from_secs(2)).await,
+        "no open exchange is left counted"
+    );
+    // Exactly once: a second outcome for it would fail its key and hold
+    // the channel at 503; the next request goes through.
+    let (status, _, _) = channel
+        .send(post("/t/thread-1/v1/messages", Some(&bearer()), &[]))
+        .await;
+    assert_eq!(status, 200);
+    let rows = channel.exchanges(2).await;
+    let kinds: Vec<&str> = rows
+        .iter()
+        .map(|row| row["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["cut", "forwarded"]);
+    assert!(channel.handle.idle(Duration::from_secs(2)).await);
+}
+
+#[tokio::test]
+async fn after_a_child_left_before_the_first_byte_sigterm_is_quick_and_restart_keeps_cut() {
+    let binary = Binary::new().await;
+    let (mut child, address) = binary.start().await;
+    silent(address, &binary.fake).await.abort();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while outcomes(&binary.audit) != vec![(1, Some("cut".into()))] {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{:?}",
+            outcomes(&binary.audit)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let began = std::time::Instant::now();
+    let pid = child.id().unwrap();
+    let sh = std::process::Command::new("sh")
+        .args(["-c", &format!("kill -TERM {pid}")])
+        .status();
+    assert!(sh.unwrap().success());
+    let exit = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(exit.success());
+    assert!(
+        began.elapsed() < Duration::from_millis(1500),
+        "nothing open, so no grace to wait: {:?}",
+        began.elapsed()
+    );
+    let (mut again, _) = binary.start().await;
+    assert_eq!(
+        outcomes(&binary.audit),
+        vec![(1, Some("cut".into()))],
+        "not lost after a restart"
+    );
+    again.kill().await.unwrap();
+}
+
+#[tokio::test]
+async fn sigterm_while_upstream_is_silent_cuts_after_the_grace_and_restart_keeps_cut() {
+    let binary = Binary::new().await;
+    let (mut child, address) = binary.start().await;
+    let _child = silent(address, &binary.fake).await;
+    let began = std::time::Instant::now();
+    let pid = child.id().unwrap();
+    let sh = std::process::Command::new("sh")
+        .args(["-c", &format!("kill -TERM {pid}")])
+        .status();
+    assert!(sh.unwrap().success());
+    let exit = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    let took = began.elapsed();
+    assert!(exit.success());
+    assert!(
+        took >= Duration::from_millis(2900) && took < Duration::from_millis(4500),
+        "{took:?}"
+    );
+    assert_eq!(outcomes(&binary.audit), vec![(1, Some("cut".into()))]);
+    let (mut again, _) = binary.start().await;
+    assert_eq!(
+        outcomes(&binary.audit),
+        vec![(1, Some("cut".into()))],
+        "not lost after a restart"
+    );
+    again.kill().await.unwrap();
 }
