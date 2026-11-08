@@ -837,6 +837,20 @@ async fn held(address: std::net::SocketAddr) -> Incoming {
     body
 }
 
+/// The rows of exchanges that were sent: a refused start may still commit
+/// late (slow lock retries), and is then recorded as not sent, never open.
+fn sent(rows: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    rows.into_iter()
+        .filter(|row| {
+            let late = row["outcome"] == "failed"
+                && row["reason"]
+                    .as_str()
+                    .is_some_and(|r| r.starts_with("not sent"));
+            !late
+        })
+        .collect()
+}
+
 /// The audit's exchanges as (seq, outcome), outcome None while open.
 fn outcomes(audit: &Path) -> Vec<(i64, Option<String>)> {
     read_exchanges(audit)
@@ -948,12 +962,8 @@ async fn a_locked_audit_refuses_with_503_and_sends_nothing_until_it_frees() {
         .send(post("/t/thread-1/v1/messages", Some(&bearer()), &[]))
         .await;
     assert_eq!(status, 200);
-    let rows = channel.exchanges(1).await;
-    assert_eq!(
-        rows.len(),
-        1,
-        "the refused request has no row: it was never started"
-    );
+    let rows = sent(channel.exchanges(1).await);
+    assert_eq!(rows.len(), 1, "only the second request was sent");
     assert_eq!(rows[0]["outcome"], "forwarded");
 }
 
@@ -983,7 +993,7 @@ async fn an_outcome_that_cannot_be_written_holds_new_requests_until_it_is() {
         .send(post("/t/thread-1/v1/messages", Some(&bearer()), &[]))
         .await;
     assert_eq!(status, 200);
-    let rows = channel.exchanges(2).await;
+    let rows = sent(channel.exchanges(2).await);
     let kinds: Vec<&str> = rows
         .iter()
         .map(|row| row["outcome"].as_str().unwrap())

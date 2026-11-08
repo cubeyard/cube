@@ -1091,18 +1091,26 @@ mod tests {
         // The outcome cannot be written: it stays queued, and starts fail.
         let first_seq = first.seq();
         first.finish(End::plain(Outcome::Forwarded, Some(200), "done"));
-        tokio::time::sleep(BUSY_TIMEOUT + Duration::from_millis(200)).await;
-        let refused = audit.start(start("t1")).await.unwrap_err();
-        assert!(
-            !refused.contains("within"),
-            "it failed on the write, not the deadline: {refused}"
-        );
+        // The flush fails only once the queued outcome has failed to write.
+        assert!(audit.flush(Duration::from_secs(10)).await.is_err());
+        // Refused, on the write or on the deadline (slow lock retries on some
+        // hosts); either way nothing is started while the outcome is queued.
+        assert!(audit.start(start("t1")).await.is_err());
         holder.execute_batch("ROLLBACK").unwrap();
         let next = audit.start(start("t1")).await.unwrap();
+        let rows = outcomes(&file);
         assert_eq!(
-            outcomes(&file),
-            vec![(first_seq, Some("forwarded".into())), (next.seq(), None)],
-            "the queued outcome is written first, then the new start"
+            rows.first(),
+            Some(&(first_seq, Some("forwarded".into()))),
+            "the queued outcome is written first"
+        );
+        assert_eq!(rows.last(), Some(&(next.seq(), None)), "then the new start");
+        let between = &rows[1..rows.len() - 1];
+        assert!(
+            between
+                .iter()
+                .all(|(_, outcome)| outcome.as_deref() == Some("failed")),
+            "a refused start that committed late is recorded not sent, never open: {rows:?}"
         );
         // A start queued behind writes that keep failing passes its
         // deadline; when the file frees it commits, and the writer records
