@@ -138,6 +138,7 @@ try {
     await unknown.waitFor();
     assert.equal(await inkOf(unknown), await badInk(page), "usage unknown is printed in error ink");
     assert.notEqual(await inkOf(page.locator(".usage-total small")), await badInk(page), "the rest stays quiet");
+    await page.locator(".usage-panel").getByText("unread").first().waitFor();
     // Its own retained machine is listed here, and none of project p's.
     await page.locator(".runner-row", { hasText: "kept for the other project" }).waitFor();
     assert.equal(await page.locator(".runner-row", { hasText: "dirty: work not pushed" }).count(), 0, "project p's retained machine is not on this page");

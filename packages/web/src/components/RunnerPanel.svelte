@@ -5,7 +5,8 @@
   import type { CapacityGroup, RunnersObservation, RunnerStatus, ThreadSummary } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
 
-  let { onChanged = () => {} }: { onChanged?: () => void } = $props();
+  /** The page's project: runners are shared by every project, retained machines are its own. */
+  let { projectId, onChanged = () => {} }: { projectId: string; onChanged?: () => void } = $props();
   let runners = $state<RunnerStatus[]>([]);
   let observed = $state<RunnersObservation | null>(null);
   let loaded = $state(false);
@@ -23,7 +24,7 @@
   };
 
   async function loadRetained(): Promise<void> {
-    retained = (await fetchThreads(true)).filter((thread) => thread.archived && thread.vm?.retain && !thread.vm.discarded);
+    retained = (await fetchThreads(true)).filter((thread) => thread.project.id === projectId && thread.archived && thread.vm?.retain && !thread.vm.discarded);
   }
 
   async function discard(thread: ThreadSummary): Promise<void> {
@@ -137,7 +138,7 @@
   <div class="board-head">
     <div>
       <h2 id="runner-heading">runners</h2>
-      <p>reachable is the latest authenticated check; stale means continuously unreachable for 7 days</p>
+      <p>shared by every project · reachable is the latest authenticated check; stale means continuously unreachable for 7 days</p>
     </div>
     <button class="key" onclick={checkAll} disabled={!loaded || checking.length > 0 || !runners.some((runner) => !runner.retiredAt)}>
       <Icon name="refresh" size={13} />{checking.length ? "checking…" : "check runners"}

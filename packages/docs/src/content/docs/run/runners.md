@@ -23,7 +23,7 @@ For the local runner, choose the number at the first `cubed runners init-local -
 
 ## watch runners
 
-- **On the project page**, each runner is listed with its contact, version, slots and free disk space.
+- **On any project page**, each runner is listed with its contact, version, slots and free disk space. Every project shares the same runners, so each project page lists all of them. Below the runners, the page lists only that project's retained machines.
 - **In the chat**, ask about the runners. The chat reports them as cubed last heard from them.
 - **On the cubed host**, `cubed runners status` shows whether each runner answers.
 

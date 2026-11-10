@@ -56,4 +56,4 @@ cube deletes the machine's disk, unless it holds work that would be lost or coul
 - commits that were not pushed,
 - files outside a checkout, in a project without repositories.
 
-Then the disk is retained, and the thread says why. You can discard a retained disk later from the UI.
+Then the disk is retained, and the thread says why. You can discard a retained disk later from its project's page, under **retained machines**.
