@@ -78,6 +78,8 @@ try {
   registry.applyPhase(unread.id, { type: "releaseBegan" });
   registry.applyPhase(unread.id, { type: "released" });
   registry.saveProject({ ...broken, status: "error", error: "github: repository not found" });
+  // The other project's archived thread whose disk was kept: only its own project page lists it.
+  registry.updateThreadVm(unread.id, { retain: true, retainReason: "kept for the other project" });
 
   for (const [viewport, name] of [[{ width: 1280, height: 900 }, "desktop"], [{ width: 390, height: 844 }, "phone"]] as const) {
     const page = await browser.newPage({ viewport });
@@ -108,6 +110,8 @@ try {
     await keptRow.waitFor();
     assert.match(await keptRow.textContent() ?? "", /on a protocol-3 runner: cube no longer reaches it, so the disk stays on that runner's host/);
     assert.equal(await keptRow.locator("button", { hasText: "discard" }).count(), 0, "no discard for a disk on a p3 runner");
+    assert.equal(await page.locator(".runner-row", { hasText: "kept for the other project" }).count(), 0, "another project's retained machine is not on this project's page");
+    assert.match(await panel.locator(".board-head p").first().textContent() ?? "", /shared by every project/);
     // pool-a reported 3 slots and holds 2 open threads; berth-vm 2 with 1 from its stale report.
     assert.equal(await panel.locator(".capacity-p4").textContent(), "p4 · vm pool 2 free of 5 slots · host by name 1 free of 1 slot");
     assert.equal(await panel.locator(".capacity-p3").textContent(), "p3 · no longer supported: 2 runners still enrolled, never contacted · unarchived p3 threads: 1");
@@ -134,6 +138,14 @@ try {
     await unknown.waitFor();
     assert.equal(await inkOf(unknown), await badInk(page), "usage unknown is printed in error ink");
     assert.notEqual(await inkOf(page.locator(".usage-total small")), await badInk(page), "the rest stays quiet");
+    // Its own retained machine is listed here, and none of project p's.
+    await page.locator(".runner-row", { hasText: "kept for the other project" }).waitFor();
+    assert.equal(await page.locator(".runner-row", { hasText: "dirty: work not pushed" }).count(), 0, "project p's retained machine is not on this page");
+    // Moving to the other project in the same tab shows only that project's.
+    await page.evaluate(() => { location.hash = "#/projects/p"; });
+    await page.locator(".runner-row", { hasText: "dirty: work not pushed" }).waitFor();
+    assert.equal(await page.locator(".runner-row", { hasText: "kept for the other project" }).count(), 0, "after switching, the previous project's retained machine is gone");
+    assert.equal(await page.locator(".usage-panel").getByText("unread").count(), 0, "after switching, the previous project's usage is gone");
     await page.close();
   }
 } finally {
