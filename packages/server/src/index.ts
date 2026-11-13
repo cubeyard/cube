@@ -355,6 +355,12 @@ export async function createCubed(options: {
     ...memory.tools(thread),
     ...registry.getThread(thread)?.capabilities?.includes("thread_history")
       ? [threadHistoryTool({ thread, agent, registry, read: (id, request) => readThreads({ registry, conversations }).history(id, request) })] : []];
+  // The workspaces' chats, by workspace. Made before anything that asks for
+  // one; how a chat opens and when workspaces are ready are set further down.
+  type ChatHandle = { chat: OptChat; events: OptChatEvents };
+  let openChat: (workspace: Project, readOnly: boolean) => Promise<ChatHandle> = async () => { throw new WorkspaceChatError("cubed is starting", 503); };
+  let workspacesReady: () => Promise<unknown> = async () => { throw new WorkspaceChatError("cubed is starting", 503); };
+  const chats = new WorkspaceChats<ChatHandle>({ registry, ready: () => workspacesReady(), open: (workspace, readOnly) => openChat(workspace, readOnly) });
   // OptChat's memory for every thread created since it exists: OptChat is
   // opened for it (as at boot), never a browser or a turn.
   const memory = new ThreadMemory({ registry, chat: async workspace => (await chats.get(workspace)).chat, ...options.memoryWaitMs ? { waitMs: options.memoryWaitMs } : {} });
@@ -524,19 +530,16 @@ export async function createCubed(options: {
    * why, and the next start of cubed tries again. */
   let migration: Promise<unknown> | null = null;
   let migrationError: string | null = null;
-  const workspacesReady = (): Promise<unknown> => migration ??= migrateWorkspaces({ state: options.state, registry, models, artifacts: artifactService.store, settle }).catch(error => {
+  workspacesReady = () => migration ??= migrateWorkspaces({ state: options.state, registry, models, artifacts: artifactService.store, settle }).catch(error => {
     migrationError = error instanceof Error ? error.message : String(error);
     createLogger("workspaces").error("workspaces not started", { error: migrationError });
     throw new WorkspaceChatError(`workspaces are not available: ${migrationError}`, 503);
   });
-  const chats: WorkspaceChats<{ chat: OptChat; events: OptChatEvents }> = new WorkspaceChats({
-    registry, ready: workspacesReady,
-    open: async (workspace, readOnly) => {
-      const chat = await OptChat.open({ directory: chatDirectory(options.state, workspace.id), workspace: workspace.id, readOnly,
-        threads: workspaceThreads(optchatThreads, registry, workspace.id), ...chatOptions() });
-      return { chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) };
-    },
-  });
+  openChat = async (workspace, readOnly) => {
+    const chat = await OptChat.open({ directory: chatDirectory(options.state, workspace.id), workspace: workspace.id, readOnly,
+      threads: workspaceThreads(optchatThreads, registry, workspace.id), ...chatOptions() });
+    return { chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) };
+  };
   /** The settings page: what is saved and the model the compactor uses now. */
   const settingsView = async (): Promise<SettingsView> => {
     // A chat still opening (a long log) does not hold the page up.
