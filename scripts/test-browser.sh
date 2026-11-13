@@ -60,5 +60,5 @@ if [ -n "${CUBE_SCREENSHOTS:-}" ]; then
 else
   verify=$(mktemp -d)
 fi
-.agents/skills/verify-cube/verify-cube run --run "$verify/run" chat project thread spawn cli
+.agents/skills/verify-cube/verify-cube run --run "$verify/run" chat project thread spawn workspaces cli
 if [ -z "${CUBE_SCREENSHOTS:-}" ]; then rm -rf "$verify"; fi

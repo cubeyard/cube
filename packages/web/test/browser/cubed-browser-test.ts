@@ -21,7 +21,7 @@ const watch = await monitor(page);
 await page.goto(`${url}/#/chat`);
 const composer = page.locator(".composer textarea");
 await composer.waitFor();
-await page.locator(".conversation-empty", { hasText: "one chat, every thread" }).waitFor();
+await page.locator(".conversation-empty", { hasText: "what do you want to build?" }).waitFor();
 
 async function send(page: Page, text: string): Promise<void> {
   await composer.fill(text);

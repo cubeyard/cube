@@ -11,6 +11,10 @@ DEVELOPING.md before changing behavior.
 - `packages/server/src/optchat*.ts`: OptChat, the user's endless chat; a
   second Pi store whose entries are its log and summary tree. It only starts
   and tells threads (docs/optchat.md).
+- `packages/server/src/workspace-chats.ts`, `workspace-migration.ts`: a
+  workspace (a project row) has one chat store, bound to it; a chat reaches
+  only its own workspace's threads, and the one chat of older installations
+  is copied into each workspace once, at start (docs/workspaces.md).
 - `packages/server/src/runner-machines.ts`, `runner-session.ts`, `vm*.ts`,
   `guest-transport.ts`, `egress-policy.ts`, `guest/`: thread machines on
   protocol-4 runners, tool execution over guest streams, the egress policy

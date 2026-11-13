@@ -148,7 +148,7 @@ try {
   assert.match(notices(late)[0]!.note!, /archived/);
 
   // The chat's own artifact: told to the chat alone.
-  const own = await write({ kind: "optchat" }, [120], "own");
+  const own = await write({ kind: "optchat", workspace: null }, [120], "own");
   // A run cut off mid-merge: cubed stops after GitHub was asked, before the outcome; told as unknown, never as failed or done.
   artifacts.close();
   store.beginAction(own, 1, "merge-120", "m6");

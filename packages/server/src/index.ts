@@ -35,6 +35,8 @@ import { OptChat, OptChatEvents } from "./optchat.ts";
 import { isMediaId, MEDIA_LIMITS, MediaError } from "./optchat-media.ts";
 import { createLogger } from "./log.ts";
 import { cubeThreads, readThreads } from "./optchat-threads.ts";
+import { CHAT_WELCOME, RELEASE_WAIT_MS, WorkspaceChats, WorkspaceChatError, workspaceThreads } from "./workspace-chats.ts";
+import { chatDirectory, migrateWorkspaces, MIGRATION_IDLE_MS, MigrationNotIdle, migrationRecord, MigrationStoreHeld } from "./workspace-migration.ts";
 import { localDisk, observeRunners } from "./runner-observe.ts";
 import { diskState } from "./runner-types.ts";
 import { formatDiagnostics, threadDiagnostics } from "./vm-diagnostics.ts";
@@ -301,6 +303,10 @@ export async function createCubed(options: {
   artifactRetryMs?: number;
   /** OptChat's compactor retry, for tests. */
   optchatRetryMs?: number;
+  /** How long a request waits for a closed chat to let go of its store (RELEASE_WAIT_MS), for tests. */
+  chatReleaseWaitMs?: number;
+  /** How long the chat before workspaces may take to end its turn before it is copied (MIGRATION_IDLE_MS), for tests. */
+  workspaceIdleMs?: number;
   /** How long a thread's first prompt waits for OptChat (MEMORY_WAIT_MS), for tests. */
   memoryWaitMs?: number;
   /** The skill source before the user's (docs/skills.md); none when absent.
@@ -351,9 +357,16 @@ export async function createCubed(options: {
     ...memory.tools(thread),
     ...registry.getThread(thread)?.capabilities?.includes("thread_history")
       ? [threadHistoryTool({ thread, agent, registry, read: (id, request) => readThreads({ registry, conversations }).history(id, request) })] : []];
+  // The workspaces' chats, by workspace. Made before anything that asks for
+  // one; how a chat opens and when workspaces are ready are set further down.
+  type ChatHandle = { chat: OptChat; events: OptChatEvents };
+  let openChat: (workspace: Project, readOnly: boolean) => Promise<ChatHandle> = async () => { throw new WorkspaceChatError("cubed is starting", 503); };
+  let workspacesReady: () => Promise<unknown> = async () => { throw new WorkspaceChatError("cubed is starting", 503); };
+  const chats = new WorkspaceChats<ChatHandle>({ registry, ready: () => workspacesReady(), open: (workspace, readOnly) => openChat(workspace, readOnly),
+    ...options.chatReleaseWaitMs ? { releaseWaitMs: options.chatReleaseWaitMs } : {} });
   // OptChat's memory for every thread created since it exists: OptChat is
   // opened for it (as at boot), never a browser or a turn.
-  const memory = new ThreadMemory({ registry, chat: async () => (await openOptchat()).chat, ...options.memoryWaitMs ? { waitMs: options.memoryWaitMs } : {} });
+  const memory = new ThreadMemory({ registry, chat: async workspace => (await chats.get(workspace)).chat, ...options.memoryWaitMs ? { waitMs: options.memoryWaitMs } : {} });
   const settings = new SettingsStore(path.join(options.state, "settings.json"));
   const git = new GitService(path.join(options.state, "repositories"));
   const latestCommits = latestCommitsOf({ git, skills: () => settings.get().skills, skillSource: options.skillSource ?? null });
@@ -426,13 +439,22 @@ export async function createCubed(options: {
   // The catalog as cubed starts: Pi ran the key commands present when it
   // made its model runtime, so this read runs none of them again.
   await threadCatalog().catch(() => {});
-  let optchat: Promise<{ chat: OptChat; events: OptChatEvents }> | null = null;
   // Read-only usage accounting over the agents' own records.
   const usage = new UsageService({
     file: path.join(options.state, "usage.sqlite"), registry, threads: path.join(options.state, "threads"),
     live: id => conversations.liveUsage(id),
-    optchat: async () => optchat ? (await optchat).chat.usage() : null,
-    optchatStore: path.join(options.state, "optchat", "pi.sqlite"),
+    // The chats at work, and each archived workspace's read from its store
+    // (opened with nothing running; one that never had a chat has no store).
+    chats: async () => {
+      const working = (await chats.running()).map(({ workspace, handle }) => ({ workspace, chat: handle.chat, read: "live" as const }));
+      const kept = await Promise.all(registry.listProjects().filter(workspace => workspace.archivedAt && fs.existsSync(path.join(chatDirectory(options.state, workspace.id), "pi.sqlite")))
+        .map(async workspace => chats.get(workspace.id).then(handle => ({ workspace: workspace.id, chat: handle.chat, read: "store" as const }), () => null)));
+      const seen = new Set(working.map(item => item.workspace));
+      return Promise.all([...working, ...kept.filter(item => item !== null).filter(item => !seen.has(item.workspace))]
+        .map(async ({ workspace, chat, read }) => ({ workspace, usage: await chat.usage(), read })));
+    },
+    chatStore: workspace => path.join(chatDirectory(options.state, workspace), "pi.sqlite"),
+    before: () => migrationRecord(options.state)?.source?.usage ?? null,
     pricing: (provider, id) => {
       const cost = models.getModel(provider, id)?.cost;
       return cost ? { input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite, source: "pi-ai model catalog, USD per million tokens", asOf: Date.now() } : null;
@@ -443,7 +465,8 @@ export async function createCubed(options: {
     if (query.thread) {
       const prefix = query.thread.replace(/^\[|\]$/g, "").trim();
       if (!prefix) return "give a thread id or its first characters";
-      const matches = registry.listThreads().filter(thread => thread.id.startsWith(prefix));
+      // A workspace's chat asks with its own workspace: another's thread is no thread.
+      const matches = registry.listThreads().filter(thread => thread.id.startsWith(prefix) && (!query.project || thread.projectId === query.project));
       if (matches.length !== 1) return matches.length ? `${query.thread} names more than one thread` : `no thread ${query.thread}`;
       return threadUsageText(await usage.thread(matches[0]!.id));
     }
@@ -463,11 +486,10 @@ export async function createCubed(options: {
     diagnose: async (id: string) => { const bundle = await diagnostics(id); return bundle && formatDiagnostics(bundle); } };
   artifacts = new Artifacts({ store: new ArtifactStore(path.join(options.state, "artifacts.sqlite")), registry,
     github: options.githubPulls ?? githubPulls({ token: () => github.token() }),
-    optchat: async () => optchat ? (await optchat).chat : null,
+    optchat: async workspace => (await chats.peek(workspace))?.chat ?? null,
     submit: (thread, text, requestId) => conversations.submit(thread, text, requestId),
     ...options.artifactRetryMs ? { retryMs: options.artifactRetryMs } : {} });
   const artifactService = artifacts;
-  let optchatError = "";
   // OptChat's compactor: the model saved on the settings page, else the
   // chat's own. A saved model no provider offers now is passed over for the
   // chat's, and the settings page says so. CUBED_OPTCHAT_COMPACTOR chose it
@@ -500,23 +522,50 @@ export async function createCubed(options: {
     passedOver = key;
     return offered ? { model: saved, source: "saved", unavailable: null } : { model: null, source: "chat", unavailable: saved };
   };
-  const openOptchat = () => optchat ??= OptChat.open({
-    directory: path.join(options.state, "optchat"), models, threads: optchatThreads,
-    model: async () => preferredModel(await catalog()), compactor: async () => (await compactorChoice()).model,
+  const chatOptions = () => ({ models, model: async () => preferredModel(await catalog()), compactor: async () => (await compactorChoice()).model,
     artifacts: artifactService, skills: optchatSkills({ git, source: () => options.skillSource ?? null, config: () => settings.get().skills }),
-    ...options.optchatRetryMs ? { limits: { retryMs: options.optchatRetryMs } } : {},
-  }).then(chat => ({ chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) }))
-    .catch(error => {
-      optchat = null;
-      const message = error instanceof Error ? error.message : String(error);
-      if (message !== optchatError) createLogger("optchat").warn("chat unavailable", { error: message });
-      optchatError = message;
-      throw error;
-    });
+    ...options.optchatRetryMs ? { limits: { retryMs: options.optchatRetryMs } } : {} });
+  // The chat before workspaces, open only while the migration lets it end its turn.
+  let settling: OptChat | null = null;
+  const settle = async (directory: string) => {
+    const limit = options.workspaceIdleMs ?? MIGRATION_IDLE_MS;
+    const chat = settling = await OptChat.open({ directory, threads: optchatThreads, ...chatOptions() });
+    try {
+      for (const deadline = Date.now() + limit; !await chat.idle();) {
+        if (Date.now() >= deadline) throw new MigrationNotIdle(`the chat from before workspaces was still working after ${Math.round(limit / 1000)} s, so it was not copied into the workspaces; its turn was stopped, and cubed tries again when it next starts`);
+        await delay(Math.min(100, limit));
+      }
+    } finally { settling = null; await chat.close(); }
+    // The chat's close is bounded and may return with its Harness still
+    // closing: the store is copied only once that chat has let go of it.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const wait = options.chatReleaseWaitMs ?? RELEASE_WAIT_MS;
+    const free = await Promise.race([chat.released.then(() => true), new Promise<false>(resolve => { timer = setTimeout(resolve, wait, false); })]).finally(() => clearTimeout(timer));
+    if (!free) throw new MigrationStoreHeld("the chat from before workspaces ended its turn and was closed, but has not let go of its store yet, so it was not copied; cubed tries again once it has", chat.released);
+  };
+  /** One chat per workspace, once (workspace-migration.ts). A failure
+   * stays for this process: the chats are not opened, each request says
+   * why, and the next start of cubed tries again. One failure is tried
+   * again here: the old chat, closed, still held its store; once it has let
+   * go, the next request (or the recovery loop) runs the migration again. */
+  let migration: Promise<unknown> | null = null;
+  let migrationError: string | null = null;
+  workspacesReady = () => migration ??= migrateWorkspaces({ state: options.state, registry, models, artifacts: artifactService.store, settle }).catch(error => {
+    migrationError = error instanceof Error ? error.message : String(error);
+    createLogger("workspaces").error("workspaces not started", { error: migrationError });
+    if (error instanceof MigrationStoreHeld) void error.released.then(() => { migration = null; migrationError = null; });
+    throw new WorkspaceChatError(`workspaces are not available: ${migrationError}`, 503);
+  });
+  openChat = async (workspace, readOnly) => {
+    const chat = await OptChat.open({ directory: chatDirectory(options.state, workspace.id), workspace: workspace.id, readOnly,
+      threads: workspaceThreads(optchatThreads, registry, workspace.id), ...chatOptions() });
+    return { chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) };
+  };
   /** The settings page: what is saved and the model the compactor uses now. */
   const settingsView = async (): Promise<SettingsView> => {
     // A chat still opening (a long log) does not hold the page up.
-    const opening = optchat?.then(({ chat }) => chat.selectModel(), () => null) ?? null;
+    // The compactor follows each chat's own model; the page shows one chat's.
+    const opening = chats.running().then(running => running[0]?.handle.chat.selectModel() ?? null, () => null);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const chat = opening && await Promise.race([opening, new Promise<null>(resolve => { timer = setTimeout(resolve, 500, null); })]).finally(() => clearTimeout(timer));
     let available: ModelSelection[] | undefined, unreadable: Error | undefined;
@@ -590,18 +639,33 @@ export async function createCubed(options: {
       const method = request.method;
       if (!allowedHosts.has(new URL(`http://${request.headers.host}`).hostname)) return json({ error: "host rejected" }, 403);
       if (request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) return json({ error: "origin rejected" }, 403);
+      // A workspace's chat is /api/workspaces/<id>/chat/...; /api/optchat/...
+      // is the same chat for the UI from before workspaces, which names the
+      // workspace with ?workspace=<id> and may leave it out while there is
+      // only one. Either way the chat reached is one workspace's own.
+      let chatRoute: { workspace: string; rest: string[] } | null = null;
+      if (parts[0] === "api" && parts[1] === "workspaces" && parts[3] === "chat") chatRoute = { workspace: parts[2]!, rest: parts.slice(4) };
+      else if (parts[0] === "api" && parts[1] === "optchat") {
+        const named = url.searchParams.get("workspace");
+        const open = registry.listProjects().filter(workspace => !workspace.archivedAt);
+        if (!named && open.length !== 1) {
+          return json({ error: open.length ? "more than one workspace: name one with ?workspace=<id>, or use /api/workspaces/<id>/chat" : "no workspace yet: create one, and its chat is here" }, open.length ? 409 : 404);
+        }
+        chatRoute = { workspace: named ?? open[0]!.id, rest: parts.slice(2) };
+      }
       // The chat's images: raw bytes up, the bytes of a message's image down.
-      if (parts[0] === "api" && parts[1] === "optchat" && parts[2] === "media") {
+      if (chatRoute?.rest[0] === "media") {
+        const rest = chatRoute.rest;
         try {
-          if (parts.length === 3 && method === "POST") {
+          if (rest.length === 1 && method === "POST") {
             // A cross-site form cannot send this type; the bytes decide the format.
             if (!request.headers["content-type"]?.startsWith("image/")) return json({ error: "an image body is required" }, 415);
-            const { chat } = await openOptchat();
+            const { chat } = await chats.get(chatRoute.workspace, "write");
             return json({ image: await chat.upload(await readBytes(request, MEDIA_LIMITS.bytes)) });
           }
-          if (parts.length === 4 && method === "GET") {
-            const { chat } = await openOptchat();
-            const image = isMediaId(parts[3]) ? await chat.image(parts[3]) : null;
+          if (rest.length === 2 && method === "GET") {
+            const { chat } = await chats.get(chatRoute.workspace);
+            const image = isMediaId(rest[1]) ? await chat.image(rest[1]) : null;
             if (!image) return json({ error: "no such image" }, 404);
             response.writeHead(200, { ...IMAGE_HEADERS, "content-type": image.mimeType, "content-length": image.bytes.byteLength });
             return response.end(image.bytes);
@@ -727,10 +791,25 @@ export async function createCubed(options: {
         }
         return json({ error: "not found" }, 404);
       }
-      if (parts[0] === "api" && parts[1] === "projects") {
+      // A workspace is what was a project: /api/workspaces is the route, and
+      // /api/projects the same resource under its old name and keys, for
+      // the UI from before workspaces.
+      if (!chatRoute && parts[0] === "api" && (parts[1] === "workspaces" || parts[1] === "projects")) {
         const id = parts[2];
-        if (parts.length > 4 || (parts[3] && !(parts[3] === "check" && method === "POST"))) return json({ error: "not found" }, 404);
-        if (!id && method === "GET") { const pool = poolView(), counts = threadCounts(); return json({ projects: registry.listProjects().map(project => projectView(project, pool, counts)) }); }
+        const named = parts[1] === "workspaces";
+        const one = (project: unknown) => named ? { workspace: project } : { project };
+        const lifecycle = named && (parts[3] === "archive" || parts[3] === "unarchive");
+        if (parts.length > 4 || (parts[3] && !((parts[3] === "check" || lifecycle) && method === "POST"))) return json({ error: "not found" }, 404);
+        if (!id && method === "GET") {
+          const pool = poolView(), counts = threadCounts();
+          const all = registry.listProjects().map(project => projectView(project, pool, counts));
+          // `chats`: whether the workspaces' chats can be used, and why not.
+          return json(named ? { workspaces: all, chats: { state: migrationError ? "failed" : migrationRecord(options.state)?.state === "done" ? "ready" : "preparing", error: migrationError } } : { projects: all });
+        }
+        if (id && lifecycle) {
+          if (!registry.getProject(id)) return json({ error: "workspace not found" }, 404);
+          return json({ workspace: projectView(parts[3] === "archive" ? await chats.archive(id) : await chats.unarchive(id)) });
+        }
         if ((!id && method === "POST") || (id && method === "PUT")) {
           const previous = id ? registry.getProject(id) : null;
           if (id && !previous) return json({ error: "project not found" }, 404);
@@ -743,6 +822,7 @@ export async function createCubed(options: {
             revision: (previous?.revision ?? 0) + 1, checkedAt: null, createdAt: previous?.createdAt ?? Date.now(), updatedAt: Date.now(),
             // New threads use these; a changed pre-setup also means a new template.
             hooks, ...hooksChanged ? { hooksUpdatedAt: Date.now() } : previous?.hooksUpdatedAt ? { hooksUpdatedAt: previous.hooksUpdatedAt } : {},
+            ...previous?.archivedAt ? { archivedAt: previous.archivedAt } : {},
             // New threads get this size (clamped by each runner); empty: cubed's defaults.
             ...(() => { const machine = projectMachine(body.machine, previous?.machine); return Object.keys(machine).length ? { machine } : {}; })(),
             repositories: body.repositories.map((item, position) => {
@@ -757,17 +837,33 @@ export async function createCubed(options: {
                 status: "checking", error: null, resolvedBase: null, baseOid: null, checkedAt: null };
             }) };
           registry.saveProject(project);
-          return json({ project: await check(project) });
+          const checked = await check(project);
+          // A new workspace's chat opens with it (empty: it asks what to build).
+          if (!id) void chats.get(projectId).catch(() => {});
+          return json(one(checked));
         }
         const project = registry.getProject(id);
-        if (!project) return json({ error: "project not found" }, 404);
-        if (method === "DELETE") { registry.deleteProject(id); return json({ ok: true }); }
-        if (parts[3] === "check" && method === "POST") return json({ project: await check(project) });
-        if (method === "GET") return json({ project: projectView(project) });
+        if (!project) return json({ error: `${named ? "workspace" : "project"} not found` }, 404);
+        if (method === "DELETE") {
+          // Its chat's store goes with it: only a workspace without thread history is deleted.
+          registry.deleteProject(id);
+          await chats.close(id);
+          // Never under a chat that still holds it: then the directory is left (its id is not used again).
+          const remove = () => fs.rmSync(path.dirname(chatDirectory(options.state, id)), { recursive: true, force: true });
+          if (await chats.free(id)) remove();
+          else {
+            // The workspace is gone from the registry, so nothing opens its chat again; the files go when the old chat has.
+            createLogger("workspaces").warn("a deleted workspace's chat still holds its store; its directory is removed once it has let go", { workspace: id });
+            void chats.whenFree(id).then(() => { try { remove(); } catch (error) { createLogger("workspaces").warn("a deleted workspace's directory was not removed", { workspace: id, error }); } });
+          }
+          return json({ ok: true });
+        }
+        if (parts[3] === "check" && method === "POST") return json(one(await check(project)));
+        if (method === "GET") return json(one(projectView(project)));
       }
       if (url.pathname === "/api/usage" && method === "GET") {
-        const project = url.searchParams.get("project") || null;
-        if (project && !registry.getProject(project)) return json({ error: "project not found" }, 404);
+        const project = url.searchParams.get("workspace") || url.searchParams.get("project") || null;
+        if (project && !registry.getProject(project)) return json({ error: "workspace not found" }, 404);
         return json(await usage.report({ project }));
       }
       if (parts[0] === "api" && parts[1] === "settings") {
@@ -789,7 +885,7 @@ export async function createCubed(options: {
           }
           settings.setCompactor(chosen);
           // A node held with its answers spent gets a new round under another model.
-          void optchat?.then(({ chat }) => chat.compactorChanged(), () => {});
+          void chats.running().then(running => { for (const { handle } of running) handle.chat.compactorChanged(); }, () => {});
           return json(await settingsView());
         }
         // What updating the default source would give; nothing is saved.
@@ -814,15 +910,18 @@ export async function createCubed(options: {
         }
         return json({ error: "not found" }, 404);
       }
-      if (parts[0] === "api" && parts[1] === "optchat") {
-        const { chat, events } = await openOptchat();
-        if (parts[2] === "history" && method === "GET") return json(windowed(await events.read(), url.searchParams));
-        if (parts[2] === "stream" && method === "GET") return await serveThreadEvents(events, response, windowQuery(url.searchParams));
+      if (chatRoute) {
+        const [action] = chatRoute.rest;
+        const reading = method === "GET";
+        const { chat, events } = await chats.get(chatRoute.workspace, reading ? "read" : "write");
+        if (action === "history" && reading) return json(windowed(await events.read(), url.searchParams));
+        if (action === "stream" && reading) return await serveThreadEvents(events, response, windowQuery(url.searchParams));
         // The threads this chat started.
-        if (parts[2] === "threads" && parts.length === 3 && method === "GET") return json(await chat.threadOverview());
-        if (parts[2] === "view" && method === "GET") return json({ view: chat.memory.render(), messages: chat.memory.length, failure: chat.failure() });
-        if (parts[2] === "stop" && method === "POST") { await chat.stop(); return json({ ok: true }); }
-        if (parts[2] === "prompt" && method === "POST") {
+        if (action === "threads" && chatRoute.rest.length === 1 && reading) return json(await chat.threadOverview());
+        // `welcome`: what an empty chat shows, fixed text, never a model's.
+        if (action === "view" && reading) return json({ view: chat.memory.render(), messages: chat.memory.length, failure: chat.failure(), welcome: chat.memory.length ? null : CHAT_WELCOME });
+        if (action === "stop" && method === "POST") { await chat.stop(); return json({ ok: true }); }
+        if (action === "prompt" && method === "POST") {
           const requestId = text("requestId");
           const images = body.images ?? [];
           if (!Array.isArray(images) || !images.every(isMediaId)) return json({ error: "images must be the ids of uploaded images" }, 400);
@@ -832,7 +931,7 @@ export async function createCubed(options: {
           catch (error) { if (error instanceof MediaError) return json({ error: error.message }, error.status); throw error; }
           return json({ runId: requestId });
         }
-        if (parts[2] === "model" && (method === "GET" || method === "PATCH")) {
+        if (action === "model" && (reading || method === "PATCH")) {
           const available = await catalog();
           const selected = await chat.selectModel(method === "PATCH" ? await selection(body, available) : undefined);
           return json({ models: available, selected, images: chat.imageSupport() });
@@ -845,7 +944,10 @@ export async function createCubed(options: {
         const id = parts[2];
         const store = artifactService.store;
         try {
-          if (!id && parts.length === 2 && method === "GET") return json({ artifacts: store.list().map(artifact => artifactService.summaryView(artifact)) });
+          if (!id && parts.length === 2 && method === "GET") {
+            const workspace = url.searchParams.get("workspace");
+            return json({ artifacts: store.list(workspace ? { project: workspace } : {}).map(artifact => artifactService.summaryView(artifact)) });
+          }
           if (!isArtifactId(id) || !store.get(id)) return json({ error: "no such artifact" }, 404);
           if (parts.length === 3 && method === "GET") return json(artifactService.view(id));
           if (parts[3] === "revisions" && parts.length === 5 && method === "GET") {
@@ -874,7 +976,12 @@ export async function createCubed(options: {
         if (parts.length > 4 && parts[3] !== "workspace" && !(parts[3] === "media" && parts.length === 5)) return json({ error: "not found" }, 404);
         if (!id && method === "GET") {
           const names = new Map(registry.listProjects().map(project => [project.id, project.name]));
-          const list = JSON.stringify({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...listed(thread), ...threadRow(conversations.condition(thread)), project: { id: thread.projectId, name: names.get(thread.projectId)! } })) });
+          const only = url.searchParams.get("workspace");
+          const list = JSON.stringify({ threads: registry.listThreads().filter(thread => (url.searchParams.has("includeArchived") || !thread.archived) && (!only || thread.projectId === only)).map(thread => {
+            const workspace = { id: thread.projectId, name: names.get(thread.projectId)! };
+            // `project`: the same, under its name from before workspaces.
+            return { ...listed(thread), ...threadRow(conversations.condition(thread)), workspace, project: workspace };
+          }) });
           // The UI polls this: a list it already has is a 304 without a body.
           const etag = `"${createHash("sha1").update(list).digest("base64url")}"`;
           response.writeHead(request.headers["if-none-match"] === etag ? 304 : 200, { "content-type": "application/json", "cache-control": "no-store", etag });
@@ -956,6 +1063,7 @@ export async function createCubed(options: {
     } catch (error) {
       if (response.headersSent) response.destroy();
       else if (error instanceof TranscriptWindowError) json(error.body, error.status);
+      else if (error instanceof WorkspaceChatError) json({ error: error.message }, error.status);
       else json({ error: error instanceof Error ? error.message : String(error) }, (error as { status?: number }).status === 502 ? 502 : 409);
     }
   });
@@ -1005,12 +1113,13 @@ export async function createCubed(options: {
   await portal.listen();
   // Machines start in the background; a thread is used once its own is up.
   void conversations.boot();
-  void openOptchat().catch(() => {});
+  // Every open workspace's chat runs from the start: a thread's report needs its chat open.
+  void workspacesReady().then(() => chats.openAll(), () => {});
   const recovery = setInterval(() => {
     // Activations, and idle machines suspended (S-7a, P7-5): only on runners
     // that say they can.
     void conversations.recover();
-    void openOptchat().catch(() => {});
+    void workspacesReady().then(() => chats.openAll(), () => {});
   }, 30000);
   recovery.unref();
   // Without this a runner's version and machines are only as fresh as the
@@ -1038,7 +1147,7 @@ export async function createCubed(options: {
   const probes = setInterval(() => void probeRunners(), probeIntervalMs);
   probes.unref();
   let closePromise: Promise<void> | undefined;
-  return { server, registry, conversations, gateway, usage, portal, machines, close() {
+  return { server, registry, conversations, gateway, usage, portal, machines, chats, close() {
     // Bounded by one deadline (CLOSE_MS, under the supervisor's SIGKILL 30 s
     // after its SIGTERM): each step takes at most its cap and what is left,
     // keeping LAST_MS for the steps after the threads, and the close goes on
@@ -1054,7 +1163,7 @@ export async function createCubed(options: {
       await bounded("portal", portal.close(), left(1_000));
       await bounded("model sign-ins", modelAuth.close(), left(1_000));
       artifactService.close();
-      await bounded("optchat", (async () => (await optchat?.catch(() => null))?.chat.close())(), left(15_000, LAST_MS + 3_000));
+      await bounded("optchat", Promise.all([chats.closeAll(), settling?.close()]), left(15_000, LAST_MS + 3_000));
       await conversations.close(left(THREADS_CLOSE_MS));
       routeCredentials(null);
       await bounded("gateway", gateway?.stop() ?? Promise.resolve(), left(1_500, 1_000));

@@ -89,7 +89,7 @@ const artifact = (id: string, title: string, head: number, author: ArtifactListI
 });
 
 export const artifacts: ArtifactListItem[] = [
-  artifact(ID.review, "today's review", 1, { kind: "optchat" }),
+  artifact(ID.review, "today's review", 1, { kind: "optchat", workspace: null }),
   artifact(ID.proposal, "composer room: more space on the phone", 2, { kind: "thread", thread: ID.composer }, { delivered: 3 }),
 ];
 

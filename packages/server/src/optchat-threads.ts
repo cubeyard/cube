@@ -34,15 +34,15 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
   const free = () => { const slots = registry.runnerSlots(); return `${slots.free} of ${slots.total}`; };
   return {
     ...readThreads({ registry, conversations }),
-    async projects() {
-      const projects = registry.listProjects();
+    async projects(only) {
+      const projects = registry.listProjects().filter(project => only === undefined ? !project.archivedAt : project.id === only);
       const models = options.catalog();
       const slots = registry.runnerSlots();
       const lines = projects.map(project => `${project.name} (id ${project.id}; ${project.status}${project.error ? `: ${project.error}` : ""}): `
         + project.repositories.map(repository => `${repository.url}@${repository.base ?? "default"}`).join(", ")
         + `; hooks: ${hookSummary(project.hooks)}`);
       return [
-        lines.length ? `projects:\n${lines.join("\n")}` : "no projects: the user creates them under projects",
+        only !== undefined && lines.length ? `this workspace: ${lines[0]}` : lines.length ? `projects:\n${lines.join("\n")}` : "no projects: the user creates them under projects",
         `free thread machines: ${slots.free} of ${slots.total} in the pool (its berth vm runners, for threads that name no runner; a running thread holds one; a new thread with none free is queued and starts in its turn; `
           + "a host runner takes threads only by name; runners has each runner's version, state and slots)",
         `models (as cubed last read them): ${models.map(model => `${model.provider}/${model.id}`).join(", ") || "none connected"}`,

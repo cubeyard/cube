@@ -3,17 +3,21 @@ title: the chat
 description: Talk to cube's chat to start threads, read their reports, keep their work going and archive them.
 ---
 
-The chat is cube's home page and your one endless conversation with cube. It is an interface, not a worker: it has no machine and runs no code. It starts threads in your projects, tells them more, reads their reports and archives them when they are done. Threads do all the work, each in its own machine.
+The chat is cube's home page. Each project is a workspace with its own endless chat. It is an interface, not a worker: it has no machine and runs no code. It starts threads in its own project, tells them more, reads their reports and archives them when they are done. Threads do all the work, each in its own machine.
+
+With one project the chat page is that project's chat. With several, choose the project in **workspace** at the top of the page; the page then shows that project's chat and remembers the choice in your browser. A chat starts, reads and tells only the threads of its own project, and remembers only what was said in it. A new project's chat starts empty and asks what you want to build.
+
+When cube is updated from a version with one chat, every project that exists gets a copy of that whole chat, so nothing you said is lost. From then on each chat goes its own way. A project added later starts with an empty chat.
 
 ## start work
 
-Write what you want in plain words and name the project:
+Write what you want in plain words, in the chat of the project the work is for:
 
 ```text
-In hello, find out why the login test is flaky and fix it. Open a pull request.
+Find out why the login test is flaky and fix it. Open a pull request.
 ```
 
-The chat writes a brief and starts a thread in that project. It answers once the thread is accepted, with a line such as `[abc12345] accepted in hello: …`. A note for the thread appears beside your message, or under it on a narrow window. The note shows the thread's state and links to it.
+The chat writes a brief and starts a thread in its project. It answers once the thread is accepted, with a line such as `[abc12345] accepted in this workspace: …`. A note for the thread appears beside your message, or under it on a narrow window. The note shows the thread's state and links to it.
 
 A thread runs on the host's preferred model unless you ask for another. Name a runner only when you mean it: the chat starts a thread on a named runner, and that is the only way onto an unsandboxed host runner (see [runners](/cube/run/runners/)).
 

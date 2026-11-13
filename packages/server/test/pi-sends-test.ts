@@ -156,7 +156,7 @@ const talk = (chat: OptChat) => chat.memory.messages.filter(message => message.k
   } finally { await agent.close(); }
   // The thread's usage says so (read from its store, as for a closed thread).
   const registry = { getThread: () => ({ id: "thread", title: "t", projectId: "p", archived: true, agent: "pi", createdAt: 0 }) };
-  const usage = new UsageService({ file: path.join(root, "usage.sqlite"), registry: registry as never, threads: path.join(root, "thread"), live: async () => null, optchat: async () => null, pricing: () => null });
+  const usage = new UsageService({ file: path.join(root, "usage.sqlite"), registry: registry as never, threads: path.join(root, "thread"), live: async () => null, pricing: () => null });
   const read = await usage.thread("thread");
   assert.equal(read.unknownTurns, 1);
   assert.equal(read.coverage, "partial");

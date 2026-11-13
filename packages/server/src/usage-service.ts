@@ -58,6 +58,11 @@ export interface UsageReport {
   /** The threads OptChat started, in this report's threads already: not
    * added to the totals a second time. */
   optchatThreads: { count: number; totals: UsageTotals } | null;
+  /** Each workspace's chat apart (their sum is in `optchat`). */
+  chats: SubjectUsage[];
+  /** What the one chat had used before each workspace got its own; in
+   * `optchat` of a report of everything, and in no workspace's. */
+  beforeWorkspaces: SubjectUsage | null;
   notes: string[];
 }
 
@@ -66,8 +71,9 @@ export class UsageService {
   private readonly registry: Registry;
   private readonly threads: string;
   private readonly live: (id: string) => Promise<PiUsage | null>;
-  private readonly optchat: () => Promise<OptChatUsage | null>;
-  private readonly optchatStore: string | null;
+  private readonly chats: () => Promise<Array<{ workspace: string; usage: OptChatUsage; read?: "live" | "store" }>>;
+  private readonly chatStore: ((workspace: string) => string) | null;
+  private readonly before: () => OptChatUsage | null;
   private readonly pricing: (provider: string, model: string) => Pricing | null;
   /** Readings under way, by subject: concurrent requests share one. */
   private readonly reading = new Map<string, Promise<SubjectUsage>>();
@@ -76,16 +82,23 @@ export class UsageService {
     file: string; registry: Registry; threads: string;
     /** The open Pi agent's usage, or null when it is not open. */
     live: (id: string) => Promise<PiUsage | null>;
-    /** OptChat's own usage, or null when it is not open. */
-    optchat?: () => Promise<OptChatUsage | null>;
-    /** OptChat's store: while it does not exist, OptChat has used nothing. */
-    optchatStore?: string;
+    /** The usage of each workspace's chat that can be read now, since its
+     * store was copied if it was (`OptChat.usage`): the chats at work
+     * (`live`) and the archived workspaces', read from their stores with
+     * nothing running (`store`). */
+    chats?: () => Promise<Array<{ workspace: string; usage: OptChatUsage; read?: "live" | "store" }>>;
+    /** A workspace's chat store: while it does not exist, that chat has used nothing. */
+    chatStore?: (workspace: string) => string;
+    /** What the chat before workspaces had used when it was copied into
+     * them (workspace-migration.ts): counted once, in no workspace. */
+    before?: () => OptChatUsage | null;
     /** A model's current catalog rates. */
     pricing?: (provider: string, model: string) => Pricing | null;
   }) {
     this.registry = options.registry; this.threads = options.threads; this.live = options.live;
-    this.optchat = options.optchat ?? (async () => null);
-    this.optchatStore = options.optchatStore ?? null;
+    this.chats = options.chats ?? (async () => []);
+    this.chatStore = options.chatStore ?? null;
+    this.before = options.before ?? (() => null);
     this.pricing = options.pricing ?? (() => null);
     this.db = new DatabaseSync(options.file, { timeout: 5000 });
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
@@ -198,21 +211,46 @@ export class UsageService {
     return usage;
   }
 
-  /** OptChat's own usage: the chat and its compactor. */
-  async optchatUsage(): Promise<{ usage: SubjectUsage; threads: string[] }> {
-    let chat: OptChatUsage | null = null, failure: string | null = null;
-    try { chat = await this.optchat(); }
+  /** The chats' own usage (each chat and its compactor): every workspace's,
+   * or only `only`'s. `usage` is their sum, with the chat before workspaces
+   * in a report of everything; `chats` has each workspace's apart. */
+  async optchatUsage(only: string | null = null): Promise<{ usage: SubjectUsage; threads: string[]; chats: SubjectUsage[]; before: SubjectUsage | null }> {
+    let open = new Map<string, { usage: OptChatUsage; read?: "live" | "store" }>(), failure: string | null = null;
+    try { open = new Map((await this.chats()).map(item => [item.workspace, item])); }
     catch (error) { failure = error instanceof Error ? error.message : String(error); }
-    const base = { subject: OPTCHAT_SUBJECT, kind: "optchat" as const, title: "optchat", projectId: null, agent: "optchat" as const, archived: false };
-    if (!chat) {
-      if (this.optchatStore && !fs.existsSync(this.optchatStore)) {
-        return { usage: subject({ ...base, lines: [], unknownTurns: 0, read: "store", readAt: Date.now(), notes: ["optchat has not started"] }), threads: [] };
+    const chats: SubjectUsage[] = [], threads: string[] = [];
+    for (const workspace of this.registry.listProjects()) {
+      if (only && workspace.id !== only) continue;
+      const base = { subject: `chat:${workspace.id}`, kind: "optchat" as const, title: `chat of ${workspace.name}`, projectId: workspace.id, agent: "optchat" as const, archived: !!workspace.archivedAt };
+      const live = open.get(workspace.id);
+      if (live) {
+        const usage = this.chatSubject(base, live.usage, live.read ?? "live");
+        this.store(usage, null);
+        chats.push(usage);
+        threads.push(...live.usage.threads);
+        continue;
       }
-      const prior = this.stored(OPTCHAT_SUBJECT);
-      const note = failure ? `optchat is not open (${failure})` : "optchat is not open";
-      if (prior) return { usage: { ...prior.usage, read: "snapshot", notes: [...prior.usage.notes, `${note}; this is the last reading`] }, threads: [] };
-      return { usage: subject({ ...base, lines: [], unknownTurns: 0, read: "none", readAt: null, notes: [note] }), threads: [] };
+      const prior = this.stored(base.subject);
+      const note = failure ? `the chat is not open (${failure})` : "the chat is not open";
+      // The last reading: what the workspace is now (its name, archived or
+      // not) is the registry's, and what the chat used since is not known.
+      if (prior) chats.push(subject({ ...prior.usage, ...base, incomplete: true, read: "snapshot", notes: [...prior.usage.notes, `${note}; this is the last reading, and what it used since is not in it`] }));
+      else if (this.chatStore && !fs.existsSync(this.chatStore(workspace.id))) chats.push(subject({ ...base, lines: [], unknownTurns: 0, read: "store", readAt: Date.now(), notes: ["the chat has not started"] }));
+      else chats.push(subject({ ...base, lines: [], unknownTurns: 0, read: "none", readAt: null, notes: [note] }));
     }
+    const source = only ? null : this.before();
+    const before = source ? this.chatSubject({ subject: "chat:before-workspaces", kind: "optchat", title: "the chat before workspaces", projectId: null, agent: "optchat", archived: true }, source, "store") : null;
+    const all = before ? [...chats, before] : chats;
+    const read = all.some(item => item.read === "live") ? "live" : all.some(item => item.read === "snapshot") ? "snapshot" : all.some(item => item.read === "store") ? "store" : all.length ? "none" : "store";
+    const usage = subject({ subject: OPTCHAT_SUBJECT, kind: "optchat", title: "optchat", projectId: only, agent: "optchat", archived: false,
+      lines: mergeLines(all.flatMap(item => item.lines)), unknownTurns: all.reduce((sum, item) => sum + item.unknownTurns, 0),
+      incomplete: all.some(item => item.incomplete || item.coverage === "unavailable") && read !== "none", read, readAt: read === "none" ? null : Date.now(),
+      notes: all.length === 1 ? all[0]!.notes : all.flatMap(item => item.notes.map(text => `${item.title}: ${text}`)) });
+    return { usage, threads, chats, before };
+  }
+
+  /** One chat's usage as a subject: its Pi store's lines and its compactor's. */
+  private chatSubject(base: Pick<SubjectUsage, "subject" | "kind" | "title" | "projectId" | "agent" | "archived">, chat: OptChatUsage, read: SubjectUsage["read"] = "live"): SubjectUsage {
     const compactor = piLines({ models: chat.compactor.models }, "optchat-compactor", this.pricing)
       .map(line => ({ ...line, calls: chat.compactor.calls[`${line.provider}/${line.model}`] ?? null }));
     const notes = chat.compactor.earlier ? [`compactor calls before ${chat.compactor.since === null ? "now" : new Date(chat.compactor.since).toISOString()} were not counted (an older cube): their usage is unknown`] : [];
@@ -223,13 +261,12 @@ export class UsageService {
     if (capped) notes.push(`${capped} model calls (chat ${count(chat.cut?.capped?.chat)}, compactor ${count(chat.cut?.capped?.compactor)}) were stopped at their output cap by cube: their provider reports no usage for a call cut off, so what it billed is unknown`);
     const cutTools = Object.entries(chat.cut?.tools ?? {});
     if (cutTools.length) notes.push(`${count(chat.cut?.tools)} tool calls (${cutTools.map(([name, n]) => `${name} ${n}`).join(", ")}) were cut off by a close of cubed: what they did is unknown and was not undone; the reopened chat ran them again under the same request ids`);
-    const usage = subject({ ...base, lines: [...piLines(chat.chat, "optchat", this.pricing), ...compactor], unknownTurns: cutChat + cutCompactor + capped, incomplete: !!chat.compactor.earlier || cutChat + cutCompactor + capped > 0, read: "live", readAt: Date.now(), notes });
-    this.store(usage, null);
-    return { usage, threads: chat.threads };
+    return subject({ ...base, lines: [...piLines(chat.chat, "optchat", this.pricing), ...compactor], unknownTurns: cutChat + cutCompactor + capped, incomplete: !!chat.compactor.earlier || cutChat + cutCompactor + capped > 0, read, readAt: Date.now(), notes });
   }
 
   /** Usage of every thread (archived included) or of one project's, by
-   * project and model; a global report adds OptChat's own. */
+   * project and model, with the chats' own: every workspace's and the chat
+   * before workspaces, or the one workspace's. */
   async report(options: { project?: string | null } = {}): Promise<UsageReport> {
     const project = options.project ?? null;
     if (project && !this.registry.getProject(project)) throw new Error("project not found");
@@ -238,12 +275,13 @@ export class UsageService {
       if (project && thread.projectId !== project) continue;
       threads.push(await this.thread(thread.id));
     }
-    const chat = project ? null : await this.optchatUsage();
-    const subjects = chat ? [...threads, chat.usage] : threads;
+    const chat = await this.optchatUsage(project);
+    // A workspace whose chat has used nothing adds no subject: its threads alone say whether its usage is known.
+    const subjects = project && !chat.usage.lines.length && chat.usage.coverage === "complete" ? threads : [...threads, chat.usage];
     const byProject = new Map<string, SubjectUsage[]>();
     for (const item of threads) byProject.set(item.projectId!, [...byProject.get(item.projectId!) ?? [], item]);
-    const spawned = chat ? new Set(chat.threads) : null;
-    const optchatThreads = spawned ? threads.filter(item => spawned.has(item.subject)) : null;
+    const spawned = new Set(chat.threads);
+    const optchatThreads = threads.filter(item => spawned.has(item.subject));
     const notes = [BILLED_NOTE];
     if (subjects.some(item => item.lines.some(line => line.source === "claude-code"))) notes.push(CLAUDE_BILLING);
     if (subjects.some(item => item.read === "snapshot")) notes.push("some threads are not open now: their last reading is shown");
@@ -254,8 +292,10 @@ export class UsageService {
         .sort((a, b) => b.totals.spend.estimatedUsd - a.totals.spend.estimatedUsd),
       models: mergeLines(subjects.flatMap(item => item.lines)).sort((a, b) => b.spend.estimatedUsd - a.spend.estimatedUsd || b.spend.tokens.total - a.spend.tokens.total),
       threads: threads.sort((a, b) => b.spend.estimatedUsd - a.spend.estimatedUsd || b.spend.tokens.total - a.spend.tokens.total),
-      optchat: chat?.usage ?? null,
-      optchatThreads: optchatThreads ? { count: optchatThreads.length, totals: totals(optchatThreads) } : null,
+      optchat: chat.usage,
+      optchatThreads: { count: optchatThreads.length, totals: totals(optchatThreads) },
+      chats: chat.chats,
+      beforeWorkspaces: chat.before,
       notes,
     };
   }

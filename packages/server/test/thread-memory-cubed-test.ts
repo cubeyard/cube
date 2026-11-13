@@ -148,7 +148,7 @@ try {
   await chatSays("spawn the memory thread", "u3");
   const spawned = app.registry.listThreads().find(thread => thread.id !== ui && thread.id !== old && thread.agent === "pi")!;
   await settled(spawned.id, "result:");
-  const spawnedView = requests.find(request => request.said.includes("This thread was started by OptChat"))?.memory;
+  const spawnedView = requests.find(request => request.said.includes("This thread was started by its workspace's chat"))?.memory;
   assert.ok(spawnedView, "the spawned thread's prompt carries the memory section");
   assert.match(spawnedView, /through message \d+ /);
   assert.match(spawnedView, /EGRET/, "captured at its own start, after the newer message");

@@ -41,7 +41,7 @@ const artifacts = new Artifacts({ store, registry, github, retryMs: 60_000,
   optchat: async () => ({ send: async text => { chat.push(text); }, started: async () => true }),
   submit: async (thread, text) => { submitted.push(`${thread}:${text}`); } });
 
-const optchat: ArtifactAuthor = { kind: "optchat" };
+const optchat: ArtifactAuthor = { kind: "optchat", workspace: "p" };
 const thread = (id: string): ArtifactAuthor => ({ kind: "thread", thread: id });
 // OptChat reads its own and the threads it started (A here); a thread its own and its project's.
 const scope = (agent: ArtifactAuthor): ArtifactScope => ({ agent, authors: agent.kind === "optchat" ? [optchat, thread(A)] : [agent] });
@@ -95,7 +95,9 @@ try {
   await refused(() => write(thread(C), { id: review, base: 5, body: "# mine" }), /no artifact .* you can read/, 404);
   assert.equal(artifacts.read(scope(thread(C)), undefined), "no artifacts yet");
   // An artifact without a project stays its author's.
-  const plan = (await write(optchat, { body: "# plan" })).id;
+  // (Only the chat before workspaces wrote one; a workspace's chat writes for its workspace.)
+  const before: ArtifactAuthor = { kind: "optchat", workspace: null };
+  const plan = (await artifacts.write({ agent: before, authors: [before] }, { body: "# plan" }, { agent: "optchat", call: "plan" }, "plan")).id;
   await refused(() => artifacts.read(scope(thread(A)), plan), /you can read/, 404);
 
   // A thread's artifact: revised by another thread of its project and by the chat that started it.

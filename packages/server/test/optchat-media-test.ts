@@ -14,6 +14,7 @@ import zlib from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
+import { addWorkspace } from "./workspace-fixture.ts";
 import { createCubed } from "../src/index.ts";
 import { OptChat, OptChatEvents, turnFits, withImages, type OptThreads } from "../src/optchat.ts";
 import { MEDIA_LIMITS, MediaError, mediaData, MediaStore, sniffImage } from "../src/optchat-media.ts";
@@ -291,6 +292,7 @@ try {
 // cubed's routes: raw image bytes up; served inert, same-origin, by id.
 const state = path.join(root, "state");
 const app = await createCubed({ state, models, claude: null, gateway: null });
+addWorkspace(app.registry);
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
 const address = app.server.address();
 assert(address && typeof address === "object");
