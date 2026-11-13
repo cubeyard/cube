@@ -16,7 +16,7 @@
   import PagePanel from "./components/PagePanel.svelte";
   import NewThreadDialog from "./components/NewThreadDialog.svelte";
   import SkillSettings from "./components/SkillSettings.svelte";
-  import { errorText, fetchState, fetchThreads, isUnreachable } from "./lib/api.ts";
+  import { chosenWorkspace, errorText, fetchState, fetchThreads, isUnreachable, onWorkspace } from "./lib/api.ts";
   import { COMMAND_TTL_MS, type Command } from "./lib/command.ts";
   import { createOrdered } from "./lib/ordered.ts";
   import type { DaemonState, ThreadSummary } from "./lib/types.ts";
@@ -123,6 +123,9 @@
     }
   }
 
+  // The workspace whose chat the page shows: a change mounts the chat anew.
+  let chatWorkspace = $state(chosenWorkspace());
+  onMount(() => onWorkspace(() => { chatWorkspace = chosenWorkspace(); }));
   onMount(() => {
     void refresh();
     const timer = setInterval(refresh, 3000);
@@ -246,7 +249,7 @@
   {/if}
   <!-- The chat is home and never leaves: every other place opens over it in
        one panel, so the chat, its scroll and its draft are there when it closes. -->
-  <ChatView {threads} {threadsLoaded} covered={whole} />
+  {#key chatWorkspace}<ChatView {threads} {threadsLoaded} covered={whole} />{/key}
   {#if !chatRoute}
     <PagePanel label={panelLabel} {whole}>
       {#if settingsPage}

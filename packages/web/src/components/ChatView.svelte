@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { CHAT_BASE, errorText, fetchChatModels, fetchChatView, setChatModel } from "../lib/api.ts";
+  import { chatBase, errorText, fetchChatModels, fetchChatView, setChatModel } from "../lib/api.ts";
   import { providerLabel } from "../lib/agent.ts";
   import { chatToolLine, indexThreads, latestReports, mentionsOf, resolveArtifact, resolveThread, rowKey, threadPage, type NoteGroup } from "../lib/provenance.ts";
   import { nameText } from "../lib/thread-name.ts";
@@ -231,7 +231,7 @@
     </section>
   {/if}
   {#if modelState}
-    <Conversation base={CHAT_BASE} steer sheet foldTools {covered} model={selectedModel} {changingModel} bind:busy onRows={(shown) => (rows = shown)}
+    <Conversation base={chatBase()} steer sheet foldTools {covered} model={selectedModel} {changingModel} bind:busy onRows={(shown) => (rows = shown)}
       images={modelState.images ?? { supported: false, reason: "this host does not take images in the chat" }}
       placeholder="message optchat" {toolLine} {reportLabel} {reportTitle} {reportNamed} {page} {after} margin={wide ? margin : undefined}
       empty={{ title: "what do you want to build?", hint: "Say what you want done: the chat starts threads in this workspace, follows their reports and remembers everything you said." }} />

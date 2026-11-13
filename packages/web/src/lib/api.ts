@@ -199,16 +199,26 @@ export const threadBase = (id: string) => `/api/threads/${encodeURIComponent(id)
 /** The workspace whose chat this page shows, kept by the browser; null:
  * the only one (cubed's /api/optchat finds it while there is one). */
 const WORKSPACE_KEY = "cube.workspace";
-export const chosenWorkspace = (): string | null => typeof localStorage === "undefined" ? null : localStorage.getItem(WORKSPACE_KEY);
-/** Remembers the choice and loads the page again, so all of it reads that chat. */
+let workspace: string | null = typeof localStorage === "undefined" ? null : localStorage.getItem(WORKSPACE_KEY);
+const workspaceListeners = new Set<() => void>();
+export const chosenWorkspace = (): string | null => workspace;
+/** Remembers the choice and tells the page, which shows that chat instead
+ * (App mounts the chat page anew). Nothing is reloaded: a reload would cut
+ * off the page's other requests. */
 export function chooseWorkspace(id: string | null): void {
-  if (id === chosenWorkspace()) return;
+  if (id === workspace) return;
   if (id) localStorage.setItem(WORKSPACE_KEY, id); else localStorage.removeItem(WORKSPACE_KEY);
-  location.reload();
+  workspace = id;
+  for (const listener of [...workspaceListeners]) listener();
+}
+/** `listener` runs when the chosen workspace changes; returns the unsubscribe. */
+export function onWorkspace(listener: () => void): () => void {
+  workspaceListeners.add(listener);
+  return () => { workspaceListeners.delete(listener); };
 }
 export const fetchWorkspaces = () => request<{ workspaces: Project[] }>("/api/workspaces").then((r) => r.workspaces);
-const chosen = chosenWorkspace();
-export const CHAT_BASE = chosen ? `/api/workspaces/${encodeURIComponent(chosen)}/chat` : "/api/optchat";
+/** The chosen workspace's chat routes, read at each request. */
+export const chatBase = () => workspace ? `/api/workspaces/${encodeURIComponent(workspace)}/chat` : "/api/optchat";
 
 export const deleteThread = (id: string) => request<{ ok: true }>(threadBase(id), "DELETE");
 
@@ -263,15 +273,15 @@ export const imageUrl = (base: string, id: string) => `${base}/media/${encodeURI
 
 export const stopThread = (base: string) => request<{ ok: true }>(`${base}/stop`, "POST");
 
-export const fetchChatModels = () => request<ThreadModels>(`${CHAT_BASE}/model`);
+export const fetchChatModels = () => request<ThreadModels>(`${chatBase()}/model`);
 
-export const setChatModel = (model: ModelSelection) => request<ThreadModels>(`${CHAT_BASE}/model`, "PATCH", model);
+export const setChatModel = (model: ModelSelection) => request<ThreadModels>(`${chatBase()}/model`, "PATCH", model);
 
 /** What OptChat sees: the view of the whole chat, as one-line summaries. */
-export const fetchChatView = () => request<{ view: string; messages: number; failure: string | null }>(`${CHAT_BASE}/view`);
+export const fetchChatView = () => request<{ view: string; messages: number; failure: string | null }>(`${chatBase()}/view`);
 
 /** The threads OptChat started, each with its own state as cubed records it. */
-export const fetchChatThreads = () => request<ThreadOverview>(`${CHAT_BASE}/threads`);
+export const fetchChatThreads = () => request<ThreadOverview>(`${chatBase()}/threads`);
 
 // Work artifacts: agents write them; the user reads, comments and confirms actions.
 export const fetchArtifacts = () => request<{ artifacts: ArtifactListItem[] }>("/api/artifacts").then(result => result.artifacts);

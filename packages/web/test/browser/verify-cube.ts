@@ -355,10 +355,11 @@ async function workspacesJourney(context: Context) {
   await sendInChat(page, `hello ${inDemo}`, `ok: hello ${inDemo}`);
   context.step(`chose demo in the workspace picker and sent 'hello ${inDemo}': answered`);
   await capture(context, page, "01-demo");
-  await Promise.all([page.waitForEvent("load"), picker.selectOption(second.id)]);
+  await picker.selectOption(second.id);
+  await page.locator(".conversation-empty", { hasText: "what do you want to build?" }).waitFor();
   await page.locator(".composer textarea").waitFor();
   assert.equal(await page.locator(`${ACTIVE} .conversation`, { hasText: inDemo }).count(), 0, "the second workspace's chat does not show demo's message");
-  context.step(`switched to ${second.name}: the page loads its chat, without demo's message`);
+  context.step(`switched to ${second.name}: the page shows its empty chat with the fixed welcome, without demo's message`);
   await sendInChat(page, `hello ${inSecond}`, `ok: hello ${inSecond}`);
   const ask = `tool ${JSON.stringify({ name: "spawn", args: { tasks: [{ task: bash(`echo ${token}`) }] } })}`;
   await sendInChat(page, ask, new RegExp(`\\[[0-9a-f]{8}\\] accepted in this workspace: .*${token}`));
@@ -379,7 +380,7 @@ async function workspacesJourney(context: Context) {
   assert.ok(secondHistory!.includes(inSecond) && !secondHistory!.includes(inDemo), "the second chat holds its own message, not demo's");
   assert.ok(secondHistory!.includes(`ended its turn; nothing of it runs now: result: ${token}`), "the report is in the chat that started the thread");
   context.step("the API reads each chat with its own message only; the report is in the second workspace's chat and not in demo's");
-  await Promise.all([page.waitForEvent("load"), picker.selectOption(instance.projectId)]);
+  await picker.selectOption(instance.projectId);
   await page.locator(`${ACTIVE} .conversation-message.user`, { hasText: inDemo }).waitFor();
   assert.equal(await page.locator(`${ACTIVE} .conversation`, { hasText: token }).count(), 0, "back in demo: nothing of the second workspace's thread");
   context.step("switched back to demo: its message is there, the other workspace's thread and report are not");

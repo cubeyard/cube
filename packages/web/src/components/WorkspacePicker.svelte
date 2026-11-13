@@ -3,9 +3,8 @@
   import { chosenWorkspace, chooseWorkspace, fetchWorkspaces } from "../lib/api.ts";
 
   // Which workspace's chat this page shows. A workspace has one chat, and
-  // cubed keeps no choice per browser: the page remembers one and loads
-  // again on a change, so everything on it reads the same chat. Shown only
-  // when there is a choice.
+  // cubed keeps no choice per browser: the page remembers one, and a change
+  // mounts the chat page anew for that chat. Shown only when there is a choice.
   let workspaces = $state<Array<{ id: string; name: string }>>([]);
   const chosen = chosenWorkspace();
 
