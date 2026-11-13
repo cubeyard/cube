@@ -25,6 +25,7 @@ const JOURNEYS: Record<string, { feature: string; run(context: Context): Promise
   project: { feature: "projects.md", run: projectJourney },
   thread: { feature: "threads.md", run: threadJourney },
   spawn: { feature: "delegation.md", run: spawnJourney },
+  workspaces: { feature: "workspaces.md", run: workspacesJourney },
   cli: { feature: "cli.md", run: cliJourney },
 };
 
@@ -231,7 +232,7 @@ async function chatJourney(context: Context) {
   await phone.locator(".conversation-message.user", { hasText: "hello from verify-cube" }).waitFor();
   context.step("opened #/chat at 390x844: the same messages");
   await capture(context, phone, "03-phone");
-  saveJson(context, "optchat-history.json", await api(context.instance, "/api/optchat/history"));
+  saveJson(context, "optchat-history.json", await api(context.instance, `/api/workspaces/${context.instance.projectId}/chat/history`));
 }
 
 async function projectJourney(context: Context) {
@@ -308,10 +309,10 @@ async function spawnJourney(context: Context) {
   const token = `spawned-${Date.now().toString(36)}`;
   const task = bash(`echo ${token}`);
   const ask = `tool ${JSON.stringify({ name: "spawn", args: { tasks: [{ project: "demo", task }] } })}`;
-  await sendInChat(page, ask, new RegExp(`\\[[0-9a-f]{8}\\] accepted in demo: .*${token}`));
-  const accepted = await page.locator(`${ACTIVE} .conversation`).getByText(new RegExp(`\\[[0-9a-f]{8}\\] accepted in demo: .*${token}`)).last().innerText();
-  const short = accepted.match(/\[([0-9a-f]{8})\] accepted in demo/)![1]!;
-  context.step(`asked OptChat to spawn a thread in demo: it answers '[${short}] accepted in demo'`);
+  await sendInChat(page, ask, new RegExp(`\\[[0-9a-f]{8}\\] accepted in this workspace: .*${token}`));
+  const accepted = await page.locator(`${ACTIVE} .conversation`).getByText(new RegExp(`\\[[0-9a-f]{8}\\] accepted in this workspace: .*${token}`)).last().innerText();
+  const short = accepted.match(/\[([0-9a-f]{8})\] accepted in this workspace/)![1]!;
+  context.step(`asked OptChat to spawn a thread in demo: it answers '[${short}] accepted in this workspace'`);
   await capture(context, page, "01-accepted");
   const margin = page.getByRole("complementary", { name: "threads and artifacts from this chat" });
   await margin.getByRole("button", { name: new RegExp(`${token}.* · demo$`) }).waitFor({ timeout: 30_000 });
@@ -326,10 +327,63 @@ async function spawnJourney(context: Context) {
   assert.equal(spawned[0]!.projectId, instance.projectId, "the thread is in demo");
   assert.ok(spawned[0]!.title.includes(token), "its title is its task");
   context.step(`/api/threads has thread ${spawned[0]!.id} in demo, titled with the task`);
-  const history = await api(instance, "/api/optchat/history");
+  const history = await api(instance, `/api/workspaces/${instance.projectId}/chat/history`);
   saveJson(context, "optchat-history.json", history);
   assert.ok(JSON.stringify(history).includes(`[${short}] ended its turn; nothing of it runs now: result: ${token}`), "OptChat's history holds this thread's report");
   context.step(`OptChat's history holds '[${short}] ended its turn; … result: ${token}'`);
+}
+
+/** Two workspaces, each with its own chat: a message in each, a thread
+ * spawned in one that reports to that one, and the switch between them. */
+async function workspacesJourney(context: Context) {
+  const { instance } = context;
+  const made = await api(instance, "/api/workspaces", { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: `second-${Date.now().toString(36)}`, repositories: [{ url: instance.repository, base: "main" }] }) });
+  const second = made.workspace as { id: string; name: string; status: string };
+  assert.equal(second.status, "ready", "the second workspace is checked and ready");
+  context.step(`POST /api/workspaces made ${second.name} (${second.id}), ready`);
+  const fresh = await api(instance, `/api/workspaces/${second.id}/chat/view`);
+  assert.deepEqual([fresh.messages, fresh.welcome], [0, "what do you want to build?"], "its chat is empty and shows the fixed welcome");
+  context.step("its chat has no messages and the fixed welcome 'what do you want to build?'");
+  const page = await context.page();
+  await page.goto(`${instance.url}/#/chat`);
+  const picker = page.getByRole("combobox", { name: "workspace" });
+  await picker.waitFor({ timeout: 30_000 });
+  await picker.selectOption(instance.projectId);
+  await page.locator(".composer textarea").waitFor();
+  const [inDemo, inSecond, token] = ["only-demo", "only-second", "spawned"].map(word => `${word}-${Date.now().toString(36)}`) as [string, string, string];
+  await sendInChat(page, `hello ${inDemo}`, `ok: hello ${inDemo}`);
+  context.step(`chose demo in the workspace picker and sent 'hello ${inDemo}': answered`);
+  await capture(context, page, "01-demo");
+  await Promise.all([page.waitForEvent("load"), picker.selectOption(second.id)]);
+  await page.locator(".composer textarea").waitFor();
+  assert.equal(await page.locator(`${ACTIVE} .conversation`, { hasText: inDemo }).count(), 0, "the second workspace's chat does not show demo's message");
+  context.step(`switched to ${second.name}: the page loads its chat, without demo's message`);
+  await sendInChat(page, `hello ${inSecond}`, `ok: hello ${inSecond}`);
+  const ask = `tool ${JSON.stringify({ name: "spawn", args: { tasks: [{ task: bash(`echo ${token}`) }] } })}`;
+  await sendInChat(page, ask, new RegExp(`\\[[0-9a-f]{8}\\] accepted in this workspace: .*${token}`));
+  await page.locator(`${ACTIVE} details.report > summary[aria-label*="turn ended: result: ${token}"]`).waitFor({ timeout: 60_000 });
+  context.step(`in ${second.name}: sent 'hello ${inSecond}', spawned a thread (no project named) and its report 'turn ended: result: ${token}' came back`);
+  await capture(context, page, "02-second-report");
+  const threads = (await api(instance, `/api/threads?workspace=${second.id}`)).threads as { id: string; projectId: string; title: string; workspace: { id: string } }[];
+  saveJson(context, "threads-second.json", threads);
+  const spawned = threads.filter(thread => thread.title.includes(token));
+  assert.equal(spawned.length, 1, "exactly one spawned thread");
+  assert.equal(spawned[0]!.workspace.id, second.id, "the thread is in the workspace whose chat started it");
+  assert.equal(((await api(instance, `/api/threads?workspace=${instance.projectId}`)).threads as { title: string }[]).filter(thread => thread.title.includes(token)).length, 0, "demo's list does not have it");
+  context.step(`/api/threads?workspace=${second.id} has the thread; demo's list does not`);
+  const [demoHistory, secondHistory] = await Promise.all([instance.projectId, second.id].map(async id => JSON.stringify(await api(instance, `/api/workspaces/${id}/chat/history`))));
+  fs.writeFileSync(path.join(context.out, "chat-demo.json"), `${demoHistory}\n`);
+  fs.writeFileSync(path.join(context.out, "chat-second.json"), `${secondHistory}\n`);
+  assert.ok(demoHistory!.includes(inDemo) && !demoHistory!.includes(inSecond) && !demoHistory!.includes(token), "demo's chat holds only its own message: not the other's, not the other's thread or report");
+  assert.ok(secondHistory!.includes(inSecond) && !secondHistory!.includes(inDemo), "the second chat holds its own message, not demo's");
+  assert.ok(secondHistory!.includes(`ended its turn; nothing of it runs now: result: ${token}`), "the report is in the chat that started the thread");
+  context.step("the API reads each chat with its own message only; the report is in the second workspace's chat and not in demo's");
+  await Promise.all([page.waitForEvent("load"), picker.selectOption(instance.projectId)]);
+  await page.locator(`${ACTIVE} .conversation-message.user`, { hasText: inDemo }).waitFor();
+  assert.equal(await page.locator(`${ACTIVE} .conversation`, { hasText: token }).count(), 0, "back in demo: nothing of the second workspace's thread");
+  context.step("switched back to demo: its message is there, the other workspace's thread and report are not");
+  await capture(context, page, "03-back-in-demo");
 }
 
 async function cliJourney(context: Context) {

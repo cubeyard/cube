@@ -545,7 +545,7 @@ for (const viewport of [desktop, between]) await scenario("with many threads the
 });
 
 await scenario("an empty chat: an empty margin, nothing beside the composer", desktop, async page => {
-  await page.locator(".conversation-empty", { hasText: "one chat, every thread" }).waitFor();
+  await page.locator(".conversation-empty", { hasText: "what do you want to build?" }).waitFor();
   assert.ok(await page.locator(".sheet-margin").isVisible(), "the margin's room is kept, so the column never jumps");
   assert.equal(await page.locator(".margin-note").count(), 0);
   assert.equal(await page.locator(".composer-row > *").count(), 1, "nothing beside the field");
