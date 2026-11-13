@@ -13,16 +13,26 @@ selection. The typeface is Archivo (SIL Open Font License 1.1), latin subset.
 ```sh
 npm install --prefix /tmp/elmtool elm@0.19.1-6            # the compiler, once
 ELM=/tmp/elmtool/node_modules/.bin/elm bash packages/web-elm/build.sh
-node packages/web-elm/preview/host.ts --scratch /tmp/elm-preview --port 7790 --seed
-node packages/web-elm/preview/journeys.ts --out /tmp/elm-evidence   # browser journeys
+bash packages/web-elm/preview/serve.sh                               # the simulation
+node packages/web-elm/preview/sim-journeys.ts --out /tmp/sim-evidence # its safety checks and journeys
+node packages/web-elm/preview/journeys.ts --out /tmp/elm-evidence     # real cubed, loopback only
 ```
 
-`preview/host.ts` is a real cubed on disposable state with a scripted model
-and no VM, like the verify host: it has no login and no sandbox of its own, so
-whoever reaches its port can run commands as the account that started it.
-It adds two things cubed does not have, both marked in the code: `GET
-/api/activity` (every open thread's run state and newest events in one read
-that wakes no machine) and `preview/synthetic.ts` (labeled rows for states a
-host without runners cannot reach). The scripted model answers `demo work`,
-`demo slow`, `demo artifact`, `please fail`, `spawn <project>: <task>` (in
-optchat) and `tool {"name":…,"args":…}`.
+Two hosts serve the built UI, and only one may be shown to anyone:
+
+- `preview/sim.ts` is what a portal serves (`preview/serve.sh`). It is a
+  simulation: no cubed, model, shell, git, repository or credential. It plays
+  canned scripts on timers, matches a visitor's text against a few fixed
+  words and never runs it, and says "simulated" in every reply and step. It
+  runs under Node's permission model (no child process, no file write).
+  `node preview/sim-journeys.ts --out DIR` checks that before it is served.
+- `preview/host.ts` is a real cubed on disposable state with a scripted model
+  and no VM, like the verify host. It runs real shell commands for whoever
+  reaches it, so it listens on 127.0.0.1 only and refuses any other binding.
+  `preview/journeys.ts` drives it for evidence about cubed's real behavior.
+  It adds `GET /api/activity` (every open thread's run state in one read that
+  wakes no machine), which cubed lacks.
+
+Both show `preview/synthetic.ts`'s labeled rows for states neither can reach.
+Words both answer: `demo work`, `demo slow`, `demo artifact`, `please fail`,
+and in optchat `spawn <project>: <task>`.

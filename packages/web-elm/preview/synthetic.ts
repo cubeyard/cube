@@ -111,6 +111,8 @@ export function synthetic() {
   };
 
   return {
+    /** The same rows for the simulation (sim.ts), which has no cubed to merge them into. */
+    rows, listed, runners: () => [runner(SERVER, "server-synthetic", true, 6, 6), runner(MAC, "mac-synthetic", false, 4, 1)], project: PROJECT,
     activity<T extends { threads: unknown[] }>(real: T): T {
       return { ...real, threads: [...real.threads, ...rows().filter(row => !row.archived).map(row => ({ id: row.id, agentOpen: row.agentOpen ?? false, status: row.status(), events: row.events().slice(-6), error: null }))] };
     },

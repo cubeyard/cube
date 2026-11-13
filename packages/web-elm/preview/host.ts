@@ -3,7 +3,8 @@
  * under `--scratch`, serving packages/web-elm/dist, with a scripted model
  * and no VM. Like the verify host (packages/server/test/verify-host.ts) it
  * has no sandbox and no login of its own: whoever reaches the port can run
- * commands as this account.
+ * commands as this account. So it listens on 127.0.0.1 only and refuses any
+ * other binding; what a portal serves is preview/sim.ts.
  *
  * Two things are not cubed's:
  * - `GET /api/activity`, the read the redesign needs and cubed lacks: every
@@ -11,7 +12,7 @@
  *   opening an agent or waking a machine.
  * - synthetic.ts: rows for states a host without runners cannot reach.
  *
- * node packages/web-elm/preview/host.ts --scratch DIR --port N [--host H] [--allowed-host NAME] [--seed] */
+ * node packages/web-elm/preview/host.ts --scratch DIR --port N [--seed] */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -27,7 +28,10 @@ const { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } = await
   path.resolve(import.meta.dirname, "../../server/node_modules/@earendil-works/pi-ai/dist/index.js")) as typeof import("../../server/node_modules/@earendil-works/pi-ai/dist/index.js");
 
 const { values } = parseArgs({ options: { scratch: { type: "string" }, port: { type: "string" }, host: { type: "string" }, "allowed-host": { type: "string", multiple: true }, seed: { type: "boolean" } } });
-if (!values.scratch || !values.port) throw new Error("usage: host.ts --scratch DIR --port N [--host H] [--allowed-host NAME]");
+// Loopback only: this host runs real shell commands for whoever reaches it,
+// so it is never served through a portal. The portal gets sim.ts.
+if (values.host && values.host !== "127.0.0.1" || values["allowed-host"]) throw new Error("host.ts listens on 127.0.0.1 only; serve preview/sim.ts to others");
+if (!values.scratch || !values.port) throw new Error("usage: host.ts --scratch DIR --port N [--seed]");
 const scratch = path.resolve(values.scratch);
 const WEB = path.resolve(import.meta.dirname, "../dist");
 if (!fs.existsSync(path.join(WEB, "index.html"))) throw new Error("no built UI: bash packages/web-elm/build.sh");
