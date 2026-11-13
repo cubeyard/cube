@@ -15,6 +15,7 @@
   import ThreadName from "./ThreadName.svelte";
   import Wordmark from "./Wordmark.svelte";
   import WorkNote from "./WorkNote.svelte";
+  import WorkspacePicker from "./WorkspacePicker.svelte";
 
   // OptChat, cube's home: one sheet. The conversation has the screen; what
   // it started (threads) and named (artifacts) stands in the margin beside
@@ -215,6 +216,7 @@
 {#if memory?.failure}
   <div class="strip-note bad" role="alert"><span class="strip-note-text">{memory.failure} — retrying</span></div>
 {/if}
+<WorkspacePicker />
 <main class="chat-sheet" aria-labelledby="chat-heading">
   <h1 id="chat-heading" class="sr-only">optchat</h1>
   {#if memoryOpen}
@@ -232,7 +234,7 @@
     <Conversation base={CHAT_BASE} steer sheet foldTools {covered} model={selectedModel} {changingModel} bind:busy onRows={(shown) => (rows = shown)}
       images={modelState.images ?? { supported: false, reason: "this host does not take images in the chat" }}
       placeholder="message optchat" {toolLine} {reportLabel} {reportTitle} {reportNamed} {page} {after} margin={wide ? margin : undefined}
-      empty={{ title: "one chat, every thread", hint: "Say what you want done: the chat starts threads in your projects, follows their reports and remembers everything you said. A thread needs a project; add one under projects." }} />
+      empty={{ title: "what do you want to build?", hint: "Say what you want done: the chat starts threads in this workspace, follows their reports and remembers everything you said." }} />
   {:else}
     <div class="conversation-empty"><p class="conversation-wait" role="status">{modelError ? "connect a model provider to start the chat" : "loading…"}</p></div>
   {/if}

@@ -196,7 +196,19 @@ export const fetchModels = () => request<ThreadModels>("/api/models");
 
 export const threadBase = (id: string) => `/api/threads/${encodeURIComponent(id)}`;
 /** OptChat, the one endless chat: the same event model and prompt shape as a thread. */
-export const CHAT_BASE = "/api/optchat";
+/** The workspace whose chat this page shows, kept by the browser; null:
+ * the only one (cubed's /api/optchat finds it while there is one). */
+const WORKSPACE_KEY = "cube.workspace";
+export const chosenWorkspace = (): string | null => typeof localStorage === "undefined" ? null : localStorage.getItem(WORKSPACE_KEY);
+/** Remembers the choice and loads the page again, so all of it reads that chat. */
+export function chooseWorkspace(id: string | null): void {
+  if (id === chosenWorkspace()) return;
+  if (id) localStorage.setItem(WORKSPACE_KEY, id); else localStorage.removeItem(WORKSPACE_KEY);
+  location.reload();
+}
+export const fetchWorkspaces = () => request<{ workspaces: Project[] }>("/api/workspaces").then((r) => r.workspaces);
+const chosen = chosenWorkspace();
+export const CHAT_BASE = chosen ? `/api/workspaces/${encodeURIComponent(chosen)}/chat` : "/api/optchat";
 
 export const deleteThread = (id: string) => request<{ ok: true }>(threadBase(id), "DELETE");
 
