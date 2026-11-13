@@ -17,7 +17,14 @@ export const MEMORY_WAIT_MS = 60_000;
 export const MEMORY_PROMPT_WAIT_MS = 5_000;
 
 /** The chat as a thread reads it: OptChat's identity and its memory. */
-export interface ChatMemory { identity: string; memory: Memory }
+export interface ChatMemory {
+  identity: string;
+  /** The identity of the chat this one was copied from when workspaces
+   * began, if it was: a view frozen from that chat reads this one, whose
+   * messages until the copy are the same, with the same ids. */
+  origin?: string | null;
+  memory: Memory;
+}
 
 /** What the thread is told the memory is; `tool` names a memory tool as its agent calls it. */
 export const memoryDoc = (tool: (name: string) => string) => `Chat memory: the user's chat with OptChat, the agent that may have started this thread, as one-line
@@ -63,11 +70,12 @@ const reason = (error: unknown) => redactHook(error instanceof Error ? error.mes
 
 export class ThreadMemory {
   /** The open waited for now, and the threads whose wait for it already ran out. */
-  private opening: { promise: Promise<ChatMemory>; waited: Set<string> } | null = null;
+  private readonly opening = new Map<string, { promise: Promise<ChatMemory>; waited: Set<string> }>();
   private readonly options: {
-    registry: Pick<Registry, "threadMemory" | "captureMemory">;
-    /** OptChat, opened if it is not (index.ts `openOptchat`). */
-    chat: () => Promise<ChatMemory>;
+    registry: Pick<Registry, "threadMemory" | "captureMemory" | "getThread">;
+    /** The chat of a workspace, opened if it is not. A thread reads the
+     * chat of its own workspace and no other. */
+    chat: (workspace: string) => Promise<ChatMemory>;
     /** The wait for a Pi request and a tool call; MEMORY_WAIT_MS by default. */
     waitMs?: number;
     now?: () => number;
@@ -84,21 +92,25 @@ export class ThreadMemory {
    * baseline and patch it later. */
   private async open(thread: string, waitMs: number, signal?: AbortSignal): Promise<ChatMemory> {
     signal?.throwIfAborted();
-    if (!this.opening) {
-      const opening = { promise: this.options.chat(), waited: new Set<string>() };
-      this.opening = opening;
-      const done = () => { if (this.opening === opening) this.opening = null; };
-      opening.promise.then(done, done);
+    const workspace = this.options.registry.getThread(thread)?.projectId;
+    if (!workspace) throw new Error("the thread is gone");
+    let opening = this.opening.get(workspace);
+    if (!opening) {
+      const started = { promise: this.options.chat(workspace), waited: new Set<string>() };
+      opening = started;
+      this.opening.set(workspace, started);
+      const done = () => { if (this.opening.get(workspace) === started) this.opening.delete(workspace); };
+      started.promise.then(done, done);
     }
-    const opening = this.opening;
+    const current = opening;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let aborted: (() => void) | undefined;
     const ended = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => { opening.waited.add(thread); reject(new Error("OptChat is still opening")); }, opening.waited.has(thread) ? 0 : waitMs);
+      timer = setTimeout(() => { current.waited.add(thread); reject(new Error("OptChat is still opening")); }, current.waited.has(thread) ? 0 : waitMs);
       aborted = () => reject(signal!.reason ?? new Error("aborted"));
       signal?.addEventListener("abort", aborted, { once: true });
     });
-    try { return await Promise.race([opening.promise, ended]); }
+    try { return await Promise.race([current.promise, ended]); }
     finally { clearTimeout(timer); if (aborted) signal?.removeEventListener("abort", aborted); }
   }
 
@@ -148,7 +160,7 @@ export class ThreadMemory {
         return `chat memory unavailable now: ${reason(error)}`;
       }
       const view = this.options.registry.threadMemory(thread)?.chat;
-      if (view && view !== chat.identity) return "chat memory unavailable: this thread's view came from an earlier chat, which cubed no longer has";
+      if (view && view !== chat.identity && view !== chat.origin) return "chat memory unavailable: this thread's view came from an earlier chat, which cubed no longer has";
       return chat.memory;
     };
     const count = (memory: Memory) => memory.length ? ` The chat has messages 0-${memory.length - 1} now.` : " The chat has no messages yet.";

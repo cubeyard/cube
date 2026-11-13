@@ -54,7 +54,7 @@ const created = (said: string) => {
 
 const thread = adapter({ kind: "thread", thread: THREAD }, true);
 const other = adapter({ kind: "thread", thread: OTHER }, true);
-const optchat = adapter({ kind: "optchat" }, false);
+const optchat = adapter({ kind: "optchat", workspace: null }, false);
 
 try {
   // The reported calls: a thread's path:"" with body, OptChat's id:"" with body.
@@ -114,7 +114,7 @@ try {
   assert.equal(store.get(fromChat)!.head, 2);
 
   // The service itself treats a blank id as none, for any caller.
-  const direct = await artifacts.write({ agent: { kind: "optchat" }, authors: [{ kind: "optchat" }] }, { id: "", body: "# direct" }, { agent: "optchat" }, "direct-1");
+  const direct = await artifacts.write({ agent: { kind: "optchat", workspace: null }, authors: [{ kind: "optchat", workspace: null }] }, { id: "", body: "# direct" }, { agent: "optchat" }, "direct-1");
   assert.equal(direct.revision, 1);
   assert.equal(store.get(direct.id)!.author.kind, "optchat");
   console.log("artifact tools: ok");

@@ -34,7 +34,7 @@ const SHA = "a".repeat(40), MOVED = "b".repeat(40);
 {
   const file = path.join(root, "unit.sqlite");
   let store = new ArtifactStore(file);
-  const optchat = { kind: "optchat" } as const;
+  const optchat = { kind: "optchat", workspace: null } as const;
   const first = store.write(optchat, { title: "plan", body: "# plan\none", actions: [], projectId: null }, { agent: "optchat", call: "c1" }, "r1");
   assert.equal(first.created, true);
   const id = first.revision.artifact;
@@ -220,9 +220,10 @@ async function until<T>(read: () => Promise<T>, check: (value: T) => boolean, wh
   }
   return value;
 }
-const chatSays = async (text: string, requestId: string) => {
-  assert.equal((await call("/api/optchat/prompt", { text, requestId })).status, 200);
-  return until(() => call("/api/optchat/history"), history => history.body.status.state !== "working" && JSON.stringify(history.body).includes(text)
+/** A message in a workspace's chat: gh's, whose repository the review is about, unless named. */
+const chatSays = async (text: string, requestId: string, workspace = "gh") => {
+  assert.equal((await call(`/api/workspaces/${workspace}/chat/prompt`, { text, requestId })).status, 200);
+  return until(() => call(`/api/workspaces/${workspace}/chat/history`), history => history.body.status.state !== "working" && JSON.stringify(history.body).includes(text)
     && history.body.events.at(-1)?.type === "assistant-text", `the chat answers ${text}`);
 };
 const anchorOf = (quote: string, start = 10) => ({ quote, prefix: "before ", suffix: " after", start, end: start + quote.length, section: "post-merge review" });
@@ -236,7 +237,7 @@ try {
   let list = await call("/api/artifacts");
   assert.equal(list.body.artifacts.length, 1);
   const review = list.body.artifacts[0];
-  assert.deepEqual(review.author, { kind: "optchat" });
+  assert.deepEqual(review.author, { kind: "optchat", workspace: "gh" });
   assert.equal(review.project.name, "gh");
   let view = await call(`/api/artifacts/${review.id}`);
   assert.equal(view.body.revisions[0].provenance.agent, "optchat");
@@ -430,18 +431,20 @@ try {
   preview = await call(`/api/artifacts/${review.id}/actions/merge-7?revision=2`);
   assert.match(preview.body.preview.problems.join(), /already merged/);
   // The outcome reaches the chat, its author, as a message: the failure as a failure, the merge as done, each once.
-  const chatHeard = async (pattern: RegExp, count: number, what: string) => (await until(() => call("/api/optchat/history"),
+  const chatHeard = async (pattern: RegExp, count: number, what: string, workspace = "gh") => (await until(() => call(`/api/workspaces/${workspace}/chat/history`),
     value => (value.body.events as Array<{ type: string; text?: string }>).filter(event => event.type === "user-message" && pattern.test(event.text ?? "")).length === count, what))
     .body.events.filter((event: { type: string; text?: string }) => event.type === "user-message" && pattern.test(event.text ?? "")).map((event: { text: string }) => event.text) as string[];
   const [failedNote] = await chatHeard(/^\[artifact [0-9a-f-]{36}\] The user confirmed "merge cubeyard\/demo#7".*It did not succeed: could not reach github/, 1, "the chat hears of the failure");
   assert.doesNotMatch(failedNote!, /Done:/);
   await chatHeard(/^\[artifact [0-9a-f-]{36}\] The user confirmed "merge cubeyard\/demo#7" \(github\.merge cubeyard\/demo#7 at aaaaaaaaaaaa, squash\) on your artifact "post-merge review".*Done: merged cubeyard\/demo#7/, 1, "the chat hears of the merge");
   view = await until(() => call(`/api/artifacts/${review.id}`), value => value.body.notices.length === 2 && value.body.notices.every((notice: any) => notice.state === "delivered"), "both notices delivered");
-  assert.deepEqual(view.body.notices.map((notice: any) => notice.target), [{ kind: "optchat" }, { kind: "optchat" }]);
+  assert.deepEqual(view.body.notices.map((notice: any) => notice.target), [{ kind: "optchat", workspace: "gh" }, { kind: "optchat", workspace: "gh" }]);
   assert.equal(view.body.notices[0].text, undefined, "the page gets the state, not the message");
 
   // A thread the chat started writes the artifact: the merge reaches the thread and the chat.
-  await chatSays("spawn the merge notes thread", "u-spawn");
+  // The thread is started by the chat of its own workspace, which is the one told about it.
+  const demoId = project.body.project.id as string;
+  await chatSays("spawn the merge notes thread", "u-spawn", demoId);
   const spawned = await until(async () => app.registry.listThreads().find(thread => thread.title?.includes("stand by")), thread => !!thread, "the chat's thread");
   await idle(spawned!.id);
   // The project gains the GitHub repository (the running thread keeps its checkout).
@@ -456,12 +459,12 @@ try {
   assert.equal((await call(`/api/artifacts/${mergeNotes.id}/actions/merge-8`, { revision: 1, confirm: "cubeyard/demo#8", requestId: "m8" })).body.state, "succeeded");
   await until(async () => threadNotices(), value => value.length === 1, "the author thread is told");
   assert.match(threadNotices()[0]!, /on your artifact "merge notes".*Done: merged cubeyard\/demo#8 at aaaaaaaaaaaa \(merge\); merge commit cccccccccccc\. Nothing more is asked of you/);
-  await chatHeard(new RegExp(`^\\[artifact ${mergeNotes.id}\\] .* on the artifact "merge notes" of thread \\[${spawned!.id.slice(0, 8)}\\].*Done: merged cubeyard/demo#8`), 1, "the chat that started it is told");
+  await chatHeard(new RegExp(`^\\[artifact ${mergeNotes.id}\\] .* on the artifact "merge notes" of thread \\[${spawned!.id.slice(0, 8)}\\].*Done: merged cubeyard/demo#8`), 1, "the chat that started it is told", demoId);
   // Archived, the thread is beyond reach and says so; the chat still hears.
   await idle(spawned!.id);
   await until(() => call(`/api/threads/${spawned!.id}`, undefined, "DELETE"), value => value.status === 200, "archive the chat's thread");
   assert.equal((await call(`/api/artifacts/${mergeNotes.id}/actions/merge-9`, { revision: 1, confirm: "cubeyard/demo#9", requestId: "m9" })).body.state, "succeeded");
-  await chatHeard(/on the artifact "merge notes" of thread .*Done: merged cubeyard\/demo#9/, 1, "the chat hears of the archived thread's merge");
+  await chatHeard(/on the artifact "merge notes" of thread .*Done: merged cubeyard\/demo#9/, 1, "the chat hears of the archived thread's merge", demoId);
   view = await until(() => call(`/api/artifacts/${mergeNotes.id}`), value => value.body.notices.length === 4 && value.body.notices.every((notice: any) => notice.state !== "queued"), "settled");
   assert.deepEqual(view.body.notices.map((notice: any) => `${notice.target.kind}:${notice.state}`), ["thread:delivered", "starter:delivered", "thread:undeliverable", "starter:delivered"]);
   assert.match(view.body.notices[2].note, /archived/);
@@ -470,7 +473,7 @@ try {
 
   // The chat reads its threads' artifacts, not other ones.
   await chatSays("list artifacts", "u3");
-  const chatHistory = JSON.stringify((await call("/api/optchat/history")).body);
+  const chatHistory = JSON.stringify((await call("/api/workspaces/gh/chat/history")).body);
   assert.match(chatHistory, /post-merge review/);
   assert.doesNotMatch(chatHistory, /thread notes/, "a thread started from the UI is not the chat's");
 

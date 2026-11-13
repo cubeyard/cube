@@ -62,7 +62,8 @@ process.env.PATH = `${shim}:${process.env.PATH}`;
 const results = new Map<string, string>();
 let lastMessages: Message[] = [];
 let script: Array<() => ReturnType<typeof fauxAssistantMessage> | Promise<ReturnType<typeof fauxAssistantMessage>>> = [];
-const call = (name: string, args: ToolArgs, id: string) => () => fauxAssistantMessage([fauxToolCall(name, args, { id })], { stopReason: "toolUse" });
+// A workspace's chat names no project: each call goes to the chat of the workspace it is about (`chatAt`).
+const call = (name: string, { project: _, ...args }: ToolArgs & { project?: string }, id: string) => () => fauxAssistantMessage([fauxToolCall(name, name === "spawn" ? { tasks: (args as { tasks: Array<{ project?: string }> }).tasks.map(({ project: _p, ...task }) => task) } : args, { id })], { stopReason: "toolUse" });
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
 faux.setResponses(Array.from({ length: 200 }, () => async request => {
   const system = JSON.stringify(request.messages.filter(message => message.role === "system"));
@@ -94,16 +95,20 @@ async function until<T>(read: () => Promise<T> | T, check: (value: T) => boolean
   }
   return value;
 }
-let turns = 0;
+/** The workspace whose chat the test talks to now, and the user messages each chat has. */
+let chatAt = "";
+const counts = new Map<string, number>();
+const turn = { get n() { return counts.get(chatAt) ?? 0; }, set n(value: number) { counts.set(chatAt, value); } };
+const chatUrl = () => `/api/workspaces/${chatAt}/chat`;
 /** One user message; returns once OptChat answered it and every scripted step ran. */
-async function say(text: string, steps: typeof script, requestId = `chat-${turns + 1}`): Promise<void> {
+async function say(text: string, steps: typeof script, requestId = `chat-${turn.n + 1}`): Promise<void> {
   script = steps;
-  turns++;
-  const sent = await post("/api/optchat/prompt", { text, requestId });
+  turn.n++;
+  const sent = await post(`${chatUrl()}/prompt`, { text, requestId });
   assert.equal(sent.status, 200, await sent.clone().text());
-  await until(async () => (await (await fetch(`${base}/api/optchat/history`)).json()) as { status: { state: string }; events: Array<{ type: string; text?: string }> },
-    history => !script.length && history.status.state === "completed" && history.events.filter(event => event.type === "user-message").length === turns,
-    `turn ${turns} finishes`);
+  await until(async () => (await (await fetch(`${base}${chatUrl()}/history`)).json()) as { status: { state: string }; events: Array<{ type: string; text?: string }> },
+    history => !script.length && history.status.state === "completed" && history.events.filter(event => event.type === "user-message").length === turn.n,
+    `turn ${turn.n} finishes`);
 }
 const project = async (name: string, url: string, hooks?: { preSetup: string; preResume: string }) => {
   const created = await (await post("/api/projects", { name, repositories: [{ url, base: "main" }], ...hooks ? { hooks } : {} })).json();
@@ -118,7 +123,8 @@ try {
   const otherHooks = { preSetup: "", preResume: "echo other-resume >> \"$HOME/other\"" };
   const other = await project("other", otherRepository, otherHooks);
   const slow = await project("slow", slowRepository);
-  const dupes = [await project("dup", otherRepository), await project("Dup", otherRepository)];
+
+  chatAt = demo.id;
   const otherBefore = app.registry.getProject(other.id);
 
   // 1. Read back before anything is set: none, and what cube supports.
@@ -135,20 +141,14 @@ try {
     call("project_hooks_write", { project: "demo", preSetup: "echo x", timeout: 30, workingDirectory: "/tmp" }, "bad-field"),
     call("project_hooks_write", { project: "demo", preSetup: tooBig }, "too-big"),
     call("project_hooks_write", { project: "demo", preResume: "echo a\0b" }, "nul"),
-    call("project_hooks_write", { project: "nope", preSetup: "echo x" }, "unknown"),
-    call("project_hooks_write", { project: "dup", preSetup: "echo x" }, "ambiguous"),
     call("project_hooks_write", { project: "demo" }, "nothing"),
-    call("project_hooks", { project: "nope" }, "read-unknown"),
     () => fauxAssistantMessage("refused"),
   ]);
   assert.doesNotMatch(results.get("bad-field")!, /^saved/);
   assert.match(results.get("bad-field")!, /timeout|workingDirectory|additional/i, "unsupported fields are named, not ignored");
   assert.equal(results.get("too-big"), `not saved: hooks.preSetup must be a script of at most ${MAX_HOOK_BYTES} bytes`);
   assert.equal(results.get("nul"), `not saved: hooks.preResume must be a script of at most ${MAX_HOOK_BYTES} bytes`);
-  assert.equal(results.get("unknown"), "not saved: no project nope");
-  assert.match(results.get("ambiguous")!, new RegExp(`^not saved: 2 projects are named dup; name it by id \\(${dupes[0]!.id}, ${dupes[1]!.id}\\)$`));
   assert.equal(results.get("nothing"), "not saved: give preSetup or preResume (\"\" removes one)");
-  assert.equal(results.get("read-unknown"), "not read: no project nope");
   assert.equal(hooksOf(demo.id)?.preSetup, "", "nothing was saved");
   assert.equal(hooksOf(demo.id)?.preResume, "");
 
@@ -198,19 +198,20 @@ try {
   const waiting = new Promise<void>(resolve => { open = resolve; });
   script = [async () => { await waiting; return fauxAssistantMessage("held"); },
     call("project_hooks_write", { project: "demo", preResume: "echo batched" }, "batched"), () => fauxAssistantMessage("saved")];
-  assert.equal((await post("/api/optchat/prompt", { text: "wait a moment", requestId: `chat-${++turns}` })).status, 200);
-  await until(async () => (await (await fetch(`${base}/api/optchat/history`)).json()).status.state as string, state => state === "working", "the chat works");
-  assert.equal((await post("/api/optchat/prompt", { text: "set demo's pre-resume to echo batched", requestId: `chat-${++turns}` })).status, 200);
-  assert.equal((await post("/api/optchat/prompt", { text: "[abcdef12] ended its turn", requestId: `report:abcdef12-0000-4000-8000-000000000001:run-2` })).status, 200);
-  turns++;
+  assert.equal((await post(`${chatUrl()}/prompt`, { text: "wait a moment", requestId: `chat-${++turn.n}` })).status, 200);
+  await until(async () => (await (await fetch(`${base}${chatUrl()}/history`)).json()).status.state as string, state => state === "working", "the chat works");
+  assert.equal((await post(`${chatUrl()}/prompt`, { text: "set demo's pre-resume to echo batched", requestId: `chat-${++turn.n}` })).status, 200);
+  assert.equal((await post(`${chatUrl()}/prompt`, { text: "[abcdef12] ended its turn", requestId: `report:abcdef12-0000-4000-8000-000000000001:run-2` })).status, 200);
+  turn.n++;
   open();
-  await until(async () => (await (await fetch(`${base}/api/optchat/history`)).json()) as { status: { state: string }; events: Array<{ type: string }> },
-    history => !script.length && history.status.state === "completed" && history.events.filter(event => event.type === "user-message").length === turns, "the batched turn finishes");
+  await until(async () => (await (await fetch(`${base}${chatUrl()}/history`)).json()) as { status: { state: string }; events: Array<{ type: string }> },
+    history => !script.length && history.status.state === "completed" && history.events.filter(event => event.type === "user-message").length === turn.n, "the batched turn finishes");
   assert.match(results.get("batched")!, /^saved preResume;/);
   app.registry.saveProjectHooks(demo.id, { preSetup, preResume });
 
   // 4. Keep one, change the other; "" removes; secret-looking values are redacted in what is read back.
   const secret = "export API_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234\necho resumed";
+  chatAt = other.id;
   await say("change other's pre-resume", [
     call("project_hooks_write", { project: "other", preResume: secret }, "secret"),
     call("project_hooks_write", { project: "other", preResume: "" }, "remove"),
@@ -221,6 +222,7 @@ try {
   assert.match(results.get("secret")!, /secret-looking values shown as \[redacted\]/);
   assert.match(results.get("remove")!, /^saved preResume;[^]*\npreSetup: none\npreResume: none\n/);
   app.registry.saveProjectHooks(other.id, otherHooks);
+  chatAt = demo.id;
   assert.deepEqual(hooksOf(demo.id), { preSetup, preResume }, "demo kept its hooks");
 
   for (const [given, shown] of [["export AWS_SECRET_ACCESS_KEY=abc123", "export AWS_SECRET_ACCESS_KEY=[redacted]"],
@@ -266,26 +268,28 @@ try {
   // the next step on: a tell to the thread just spawned holds its tool
   // round while the thread's start fetches the slow repository.
   fs.rmSync(go);
+  chatAt = slow.id;
   let steeredIn = false;
   script = [call("spawn", { tasks: [{ project: "slow", task: "hold" }] }, "slow-spawn"),
-    () => call("tell", { id: /^\[([0-9a-f]{8})\] accepted in slow/.exec(results.get("slow-spawn") ?? "")?.[1] ?? "none", message: "hold on" }, "slow-tell")(),
+    () => call("tell", { id: /^\[([0-9a-f]{8})\] accepted in this workspace/.exec(results.get("slow-spawn") ?? "")?.[1] ?? "none", message: "hold on" }, "slow-tell")(),
     () => {
       // The same run: the spawn's result, then the user's message steered in after it.
       const spawned = lastMessages.findIndex(message => message.role === "toolResult" && message.toolCallId === "slow-spawn");
       steeredIn = spawned >= 0 && lastMessages.slice(spawned).some(message => message.role === "user" && textOf(message).includes("echo steered"));
       return call("project_hooks_write", { project: "demo", preResume: "echo steered" }, "steered")();
     }, () => fauxAssistantMessage("saved")];
-  assert.equal((await post("/api/optchat/prompt", { text: "[abcdef12] ended its turn", requestId: "report:abcdef12-0000-4000-8000-000000000001:run-3" })).status, 200);
-  turns++;
+  assert.equal((await post(`${chatUrl()}/prompt`, { text: "[abcdef12] ended its turn", requestId: "report:abcdef12-0000-4000-8000-000000000001:run-3" })).status, 200);
+  turn.n++;
   await until(() => fs.existsSync(held) && script.length === 2, Boolean, "the tell's tool round waits on the spawned thread's start");
-  assert.equal((await post("/api/optchat/prompt", { text: "set demo's pre-resume to echo steered", requestId: `chat-${++turns}` })).status, 200);
+  assert.equal((await post(`${chatUrl()}/prompt`, { text: "set demo's pre-resume to echo steered", requestId: `chat-${++turn.n}` })).status, 200);
   // The steer lands within milliseconds; the round is held well past it.
   await delay(2000);
   fs.writeFileSync(go, "");
-  await until(async () => (await (await fetch(`${base}/api/optchat/history`)).json()) as { status: { state: string }; events: Array<{ type: string }> },
-    history => !script.length && history.status.state === "completed" && history.events.filter(event => event.type === "user-message").length === turns, "the steered turn finishes");
+  await until(async () => (await (await fetch(`${base}${chatUrl()}/history`)).json()) as { status: { state: string }; events: Array<{ type: string }> },
+    history => !script.length && history.status.state === "completed" && history.events.filter(event => event.type === "user-message").length === turn.n, "the steered turn finishes");
   assert.ok(steeredIn, "the message was steered into the report's run");
   assert.match(results.get("steered")!, /^saved preResume;/);
+  chatAt = demo.id;
 
   // 8. A project check under way when hooks are saved keeps them.
   fs.rmSync(held);

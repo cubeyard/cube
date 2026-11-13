@@ -66,7 +66,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-artifact-diagrams-"));
 const registry = { getThread: () => null, getProject: () => null, listProjects: () => [] } as unknown as Registry;
 const store = new ArtifactStore(path.join(root, "artifacts.sqlite"));
 const artifacts = new Artifacts({ store, registry, github: {} as GithubPulls, optchat: async () => null, submit: async () => {} });
-const optchat: ArtifactAuthor = { kind: "optchat" };
+const optchat: ArtifactAuthor = { kind: "optchat", workspace: null };
 const scope: ArtifactScope = { agent: optchat, authors: [optchat] };
 const write = (input: { id?: string; body: string }, requestId: string) => artifacts.write(scope, input, { agent: "optchat", call: requestId }, requestId);
 const refusedFor = async (run: () => Promise<unknown>, diagram: number) => {

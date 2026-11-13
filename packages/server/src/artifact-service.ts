@@ -57,13 +57,13 @@ export interface ActionPreview {
 /** OptChat as artifacts need it: its own queue, and the threads it started. */
 export interface ArtifactChat { send(text: string, requestId: string): Promise<void>; started(thread: string): Promise<boolean> }
 /** One message on its way: a comment batch or an action notice. */
-type Outgoing = Pick<ActionNotice, "id" | "requestId" | "text" | "target">;
+type Outgoing = Pick<ActionNotice, "id" | "artifact" | "requestId" | "text" | "target">;
 
 export class Artifacts {
   readonly store: ArtifactStore;
   private readonly registry: Registry;
   private readonly github: GithubPulls;
-  private readonly optchat: () => Promise<ArtifactChat | null>;
+  private readonly optchat: (workspace: string) => Promise<ArtifactChat | null>;
   private readonly submit: (thread: string, text: string, requestId: string) => Promise<unknown>;
   private readonly inflight = new Set<string>();
   /** The revision each agent last read or wrote of an artifact, oldest first. */
@@ -74,7 +74,8 @@ export class Artifacts {
   private closing = false;
 
   constructor(options: { store: ArtifactStore; registry: Registry; github: GithubPulls;
-    optchat: () => Promise<ArtifactChat | null>;
+    /** The chat of a workspace, or null while it is not open. */
+    optchat: (workspace: string) => Promise<ArtifactChat | null>;
     submit: (thread: string, text: string, requestId: string) => Promise<unknown>; retryMs?: number; giveUpMs?: number; starterGraceMs?: number }) {
     this.store = options.store; this.registry = options.registry; this.github = options.github;
     this.optchat = options.optchat; this.submit = options.submit;
@@ -94,6 +95,8 @@ export class Artifacts {
       if (!thread) throw new ArtifactError("thread not found", 404);
       return thread.projectId;
     }
+    // A workspace's chat writes for its own workspace only.
+    if (author.workspace) return author.workspace;
     if (!named?.trim()) return null;
     const projects = this.registry.listProjects();
     const project = projects.find(candidate => candidate.id === named) ?? projects.find(candidate => candidate.name.toLowerCase() === named.trim().toLowerCase());
@@ -114,7 +117,7 @@ export class Artifacts {
     return project !== null && artifact.projectId === project;
   }
   private threadProject(agent: ArtifactAuthor): string | null {
-    return agent.kind === "thread" ? this.registry.getThread(agent.thread)?.projectId ?? null : null;
+    return agent.kind === "thread" ? this.registry.getThread(agent.thread)?.projectId ?? null : agent.workspace;
   }
   private remember(agent: ArtifactAuthor, id: string, revision: number): void {
     const key = `${authorKey(agent)}|${id}`;
@@ -284,7 +287,13 @@ export class Artifacts {
       : record.note(note);
     try {
       if (item.target.kind !== "thread") {
-        const chat = await this.optchat().catch(() => null);
+        // The chat of the target's workspace: a thread's starter is its own
+        // workspace's chat, and a record from before workspaces names none,
+        // so its artifact's project says which.
+        const workspace = item.target.kind === "starter" ? this.registry.getThread(item.target.thread)?.projectId ?? null
+          : item.target.workspace ?? this.store.get(item.artifact)?.projectId ?? null;
+        if (!workspace) { record.settle("undeliverable", "its chat belongs to no workspace"); return; }
+        const chat = await this.optchat(workspace).catch(() => null);
         if (!chat) { wait("waiting: the chat is not open yet"); return; }
         if (item.target.kind === "starter" && !await chat.started(item.target.thread)) {
           const young = (this.registry.getThread(item.target.thread)?.createdAt ?? 0) + this.starterGraceMs > Date.now();

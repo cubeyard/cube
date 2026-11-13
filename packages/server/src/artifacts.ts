@@ -12,6 +12,7 @@
  * against live state when the user confirms one (artifact-service.ts). A
  * run's outcome is told to the author, and to OptChat for a thread it
  * started, as notices recorded with the outcome itself. */
+import fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { DiagramProblem } from "./artifact-diagrams.ts";
@@ -32,7 +33,9 @@ export const ARTIFACT_LIMITS = {
 } as const;
 const SCHEMA = 1;
 
-export type ArtifactAuthor = { kind: "optchat" } | { kind: "thread"; thread: string };
+/** `workspace`: whose chat (a workspace has one). null only for a record
+ * from before workspaces that names none; its artifact's project says which. */
+export type ArtifactAuthor = { kind: "optchat"; workspace: string | null } | { kind: "thread"; thread: string };
 /** A merge the user may confirm: the pull request and the exact head commit
  * the document is about. GitHub refuses the merge if the head has moved. */
 export interface MergeAction {
@@ -44,6 +47,8 @@ export type ArtifactAction = MergeAction;
 export interface Provenance {
   agent: "optchat" | "pi" | "claude-code";
   thread?: string;
+  /** The workspace of the chat that wrote it (agent optchat); absent before workspaces. */
+  workspace?: string;
   /** The tool call (Pi task or Claude Code tool_use id) that wrote it. */
   call?: string;
   model?: string;
@@ -99,13 +104,17 @@ export class ArtifactError extends Error {
 
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const isArtifactId = (value: unknown): value is string => typeof value === "string" && ID.test(value);
-export const authorKey = (author: ArtifactAuthor) => author.kind === "optchat" ? "optchat" : `thread:${author.thread}`;
-const parseAuthor = (key: string): ArtifactAuthor => key === "optchat" ? { kind: "optchat" } : { kind: "thread", thread: key.slice("thread:".length) };
+export const authorKey = (author: ArtifactAuthor) => author.kind === "thread" ? `thread:${author.thread}` : author.workspace ? `optchat:${author.workspace}` : "optchat";
+/** `project`: the artifact's own; a chat's artifact from before workspaces
+ * (key `optchat`) belongs to the chat of that workspace. */
+const parseAuthor = (key: string, project: string | null = null): ArtifactAuthor => key === "optchat" ? { kind: "optchat", workspace: project }
+  : key.startsWith("optchat:") ? { kind: "optchat", workspace: key.slice("optchat:".length) } : { kind: "thread", thread: key.slice("thread:".length) };
 const targetKey = (target: NoticeTarget) => target.kind === "starter" ? `starter:${target.thread}` : authorKey(target);
 const parseTarget = (key: string): NoticeTarget => key.startsWith("starter:") ? { kind: "starter", thread: key.slice("starter:".length) } : parseAuthor(key);
 export const sameAuthor = (a: ArtifactAuthor, b: ArtifactAuthor) => authorKey(a) === authorKey(b);
 export const authorText = (author: ArtifactAuthor) => author.kind === "optchat" ? "optchat" : `thread [${author.thread.slice(0, 8)}]`;
-export const editorOf = (provenance: Provenance): ArtifactAuthor => provenance.agent === "optchat" ? { kind: "optchat" } : { kind: "thread", thread: provenance.thread ?? "" };
+export const editorOf = (provenance: Provenance, project: string | null = null): ArtifactAuthor => provenance.agent === "optchat"
+  ? { kind: "optchat", workspace: provenance.workspace ?? project } : { kind: "thread", thread: provenance.thread ?? "" };
 
 /** The typed action list as an agent wrote it, checked field by field:
  * unknown kinds and fields are refused, never ignored. */
@@ -215,6 +224,32 @@ export class ArtifactStore {
   }
   close(): void { this.db.close(); }
 
+  /** Deletes the artifacts the chat before workspaces wrote for no project
+   * (no workspace's chat can own them), with their revisions, comments,
+   * batches, action runs and notices, in one transaction; answers how many.
+   * Artifacts of a project and of threads are not touched. */
+  countUnownedChatArtifacts(): number {
+    return (this.db.prepare("SELECT count(*) AS n FROM artifacts WHERE author = 'optchat' AND project_id IS NULL").get() as { n: number }).n;
+  }
+  /** A consistent copy of the whole store at `file`, which must not exist:
+   * written beside it and renamed, so a file there is a whole copy. */
+  backupTo(file: string): void {
+    const temporary = `${file}.${process.pid}.tmp`;
+    fs.rmSync(temporary, { force: true });
+    this.db.prepare("VACUUM INTO ?").run(temporary);
+    fs.renameSync(temporary, file);
+  }
+  deleteUnownedChatArtifacts(): number {
+    return this.transaction(() => {
+      const ids = (this.db.prepare("SELECT id FROM artifacts WHERE author = 'optchat' AND project_id IS NULL").all() as Row[]).map(row => String(row.id));
+      for (const id of ids) {
+        for (const table of ["notices", "action_runs", "comments", "batches", "revisions"]) this.db.prepare(`DELETE FROM ${table} WHERE artifact = ?`).run(id);
+        this.db.prepare("DELETE FROM artifacts WHERE id = ?").run(id);
+      }
+      return ids.length;
+    });
+  }
+
   private transaction<T>(action: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
     try { const result = action(); this.db.exec("COMMIT"); return result; }
@@ -238,10 +273,11 @@ export class ArtifactStore {
     if (!requestId || requestId.length > 300) throw new ArtifactError("a request id is required");
     // The editor is read back from the provenance, so it names the editor's thread.
     if (editor.kind === "thread") provenance = { ...provenance, thread: editor.thread };
+    else if (editor.workspace) provenance = { ...provenance, workspace: editor.workspace };
     return this.transaction(() => {
       const prior = this.db.prepare("SELECT artifact, number, provenance FROM revisions WHERE request_id = ?").get(requestId) as Row | undefined;
       // Another editor's request id is a clash, never that editor's revision.
-      if (prior && !sameAuthor(editorOf(JSON.parse(String(prior.provenance)) as Provenance), editor)) throw new ArtifactError("this request id belongs to another author's write", 409);
+      if (prior && !sameAuthor(editorOf(JSON.parse(String(prior.provenance)) as Provenance, this.projectOf(String(prior.artifact))), editor)) throw new ArtifactError("this request id belongs to another author's write", 409);
       // Answered as the write it replays was: revision 1 created the
       // artifact, and a later one kept the actions it left out.
       if (prior) {
@@ -287,7 +323,7 @@ export class ArtifactStore {
   private summary(row: Row): ArtifactSummary {
     const counts = { draft: 0, queued: 0, delivered: 0, undeliverable: 0 };
     for (const comment of this.comments(String(row.id))) counts[comment.state]++;
-    return { id: String(row.id), title: String(row.title), author: parseAuthor(String(row.author)), projectId: row.project_id === null ? null : String(row.project_id),
+    return { id: String(row.id), title: String(row.title), author: parseAuthor(String(row.author), row.project_id === null ? null : String(row.project_id)), projectId: row.project_id === null ? null : String(row.project_id),
       head: Number(row.head), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), comments: counts };
   }
   get(id: string): ArtifactSummary | null {
@@ -310,7 +346,11 @@ export class ArtifactStore {
     if (!row) return null;
     const provenance = JSON.parse(String(row.provenance)) as Provenance;
     return { artifact: id, number, title: String(row.title), body: String(row.body), actions: JSON.parse(String(row.actions)) as ArtifactAction[],
-      provenance, createdAt: Number(row.created_at), editor: editorOf(provenance) };
+      provenance, createdAt: Number(row.created_at), editor: editorOf(provenance, this.projectOf(id)) };
+  }
+  private projectOf(id: string): string | null {
+    const row = this.db.prepare("SELECT project_id FROM artifacts WHERE id = ?").get(id) as Row | undefined;
+    return row && row.project_id !== null ? String(row.project_id) : null;
   }
   /** The revision `editor` wrote with `requestId`, if any. */
   requested(editor: ArtifactAuthor, requestId: string): Revision | null {
@@ -330,11 +370,12 @@ export class ArtifactStore {
   }
   /** Every revision without its body, oldest first. */
   revisions(id: string): Array<Omit<Revision, "body" | "actions"> & { bytes: number; actions: number }> {
+    const project = this.projectOf(id);
     return (this.db.prepare("SELECT number, title, length(CAST(body AS BLOB)) AS bytes, actions, provenance, created_at FROM revisions WHERE artifact = ? ORDER BY number").all(id) as Row[])
       .map(row => {
         const provenance = JSON.parse(String(row.provenance)) as Provenance;
         return { artifact: id, number: Number(row.number), title: String(row.title), bytes: Number(row.bytes),
-          actions: (JSON.parse(String(row.actions)) as unknown[]).length, provenance, createdAt: Number(row.created_at), editor: editorOf(provenance) };
+          actions: (JSON.parse(String(row.actions)) as unknown[]).length, provenance, createdAt: Number(row.created_at), editor: editorOf(provenance, project) };
       });
   }
 

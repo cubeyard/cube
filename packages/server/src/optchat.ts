@@ -219,6 +219,17 @@ thread's own words may give. Comments the user leaves on yours come to you as a
 message starting "[artifact <id>]"; comments on a thread's go to that
 thread, whoever wrote the revision. ${ARTIFACT_GUIDE}`;
 
+/** What a workspace's chat is told about its scope; the same bytes in every workspace. */
+export const WORKSPACE_NOTE = `Workspace: you are the chat of one workspace of cube (what older messages
+call a project): its repositories, hooks and machine size. Every thread you
+start is in this workspace, so spawn, usage, project_hooks and
+project_hooks_write name no project, and projects describes this
+workspace only. You cannot start, read or tell threads of another
+workspace, nor read its chat; work for another workspace is the user's to
+ask in that workspace's chat. Messages from before this workspace had its
+own chat may mention other projects and their threads: that is history, and
+those threads are not yours.`;
+
 /** OptChat's part in project hooks (project-hooks.ts, docs/project-hooks.md). */
 export const HOOKS_NOTE = `Project hooks: a project in cube's projects has two external hooks,
 pre-setup and pre-resume, shell scripts cube runs in each of its thread
@@ -234,7 +245,7 @@ you saved. Nothing else (a timeout, a working directory, another
 trigger) can be set.`;
 
 /** What a thread report says when the thread started: its final reply is the report. */
-export const THREAD_NOTE = "(This thread was started by OptChat, the user's chat agent. Your final reply is your report to it. "
+export const THREAD_NOTE = "(This thread was started by its workspace's chat, the user's chat agent. Your final reply is your report to it. "
   + "Once you end your turn nothing wakes you, so do not end it to wait for CI, a review or a command: "
   + "wait for those yourself in the foreground (a command runs at most 10 minutes; repeat a bounded wait such as `timeout 590 gh pr checks <n> --watch`), then go on. "
   + "If you stop before the task is done, say plainly what is left and what you are waiting for.)";
@@ -246,7 +257,8 @@ export type ThreadListRequest = { archived?: boolean; query?: string | undefined
 
 export interface OptThreads {
   /** Projects, models and capacity a new thread can use, as text. */
-  projects(): Promise<string>;
+  /** `only`: just that workspace (its id). */
+  projects(only?: string): Promise<string>;
   /** Each runner's last report (version, platform, machines) and what is unknown, as text. */
   runners(): Promise<string>;
   /** Accepts one thread, which starts in the background; the same request
@@ -312,8 +324,18 @@ export type { ObservedThread, OverviewThread, ThreadOverview };
 /** `tells`: the tell calls to a thread since the user's last message. */
 /** `archives`: by archive call (its task id), each thread it named and the
  * line it answered, "" while it was out; a replay answers those lines. */
-type Settings = { tree: number; cache: string; threads: Record<string, { at: number; tells?: string[] }>; archives?: Record<string, Record<string, string>> };
-const SettingsDoc = defineDoc<Settings>({ kind: "cube.optchat", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({ tree: 0, cache: "", threads: {} }) });
+/** `workspace`: the workspace this store is the chat of; a bound store opens
+ * for no other. `copiedFrom`: the store this one was copied from when
+ * workspaces began (workspace-migration.ts). */
+export type ChatSettings = { tree: number; cache: string; threads: Record<string, { at: number; tells?: string[] }>; archives?: Record<string, Record<string, string>>;
+  workspace?: string; copiedFrom?: CopiedFrom };
+type Settings = ChatSettings;
+/** Where a copied store came from: the original's `identity` (threads
+ * started before the copy froze their memory under it; message ids below
+ * `messages` are the same in both), and its `usage` at the copy, which this
+ * chat's own usage leaves out so no copy counts the past again. */
+export type CopiedFrom = { identity: string; at: number; usage: JsonRepresentation<OptChatUsage>; messages?: number };
+export const SettingsDoc = defineDoc<Settings>({ kind: "cube.optchat", version: 1, checkpointWhen: () => false, scope: "session", initial: () => ({ tree: 0, cache: "", threads: {} }) });
 /** The view parts the current turn started with; the request hook renders
  * them. `userInputs`: the latest run inputs that carry a message of the
  * user (not a thread's report); project_hooks_write needs one among the
@@ -465,6 +487,14 @@ export function runReport(status: ThreadStatus, reply: string): string {
 
 export type OptChatOptions = {
   directory: string;
+  /** The workspace this chat belongs to (its id). The store is bound to it
+   * at its first open and refused for any other; the chat's tools then
+   * reach that workspace only. Absent: an unbound store (the chat before
+   * workspaces, opened once more to settle before it is copied). */
+  workspace?: string;
+  /** An archived workspace's chat: read as it was, nothing of it runs. No
+   * message is accepted, no turn or summary goes on, no thread is watched. */
+  readOnly?: boolean;
   models: Models;
   /** The model a new chat starts with. */
   model: () => Promise<{ provider: string; id: string } | null>;
@@ -479,6 +509,37 @@ export type OptChatOptions = {
   /** Tests lower these. */
   limits?: { view?: number; low?: number; node?: number; compaction?: number; compactionLow?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number; page?: number; closeMs?: number; skillsWaitMs?: number };
 };
+
+/** `total` less `baseline`, number by number; what only `total` has stays. */
+export function usageSince<T>(total: T, baseline: unknown): T {
+  if (typeof total === "number") return (total - (typeof baseline === "number" ? baseline : 0)) as T;
+  if (total === null || typeof total !== "object" || Array.isArray(total)) return total;
+  const base = baseline !== null && typeof baseline === "object" ? baseline as Record<string, unknown> : {};
+  return Object.fromEntries(Object.entries(total).map(([key, value]) => [key, usageSince(value, Object.hasOwn(base, key) ? base[key] : undefined)])) as T;
+}
+
+/** Whether a chat store has nothing under way, read from its Harness
+ * without resuming it: no message waiting to be placed and no task of Pi's
+ * that has not ended (a turn's generation, a tool call). */
+export async function storeIdle(harness: Harness): Promise<boolean> {
+  const pending = await harness.snapshot(PendingDoc, context);
+  if (pending && (pending.items.length || pending.batch?.length || pending.sent.length)) return false;
+  return (await harness.inspect(context)).tasks.every(({ record }) => record.state.status === "terminal");
+}
+
+/** A chat store's usage as its documents hold it (`OptChat.usage` without a copy's baseline). */
+export async function storeUsage(harness: Harness): Promise<OptChatUsage> {
+  const compactor = await harness.snapshot(CompactorUsageDoc, context);
+  const cut = await harness.snapshot(CutDoc, context);
+  // Chat requests out at a stop (pi-sends.ts) count with those a close cut before them.
+  const interrupted = (await harness.snapshot(SendsDoc, context))?.interrupted ?? {};
+  const chat: Record<string, number> = { ...cut?.chat };
+  for (const [key, n] of Object.entries(interrupted)) chat[key] = (Object.hasOwn(chat, key) ? chat[key]! : 0) + n;
+  return { chat: await harness.usage(context) as OptChatUsage["chat"],
+    compactor: compactor ? JSON.parse(JSON.stringify(compactor)) as OptChatUsage["compactor"] : { models: {}, calls: {}, since: null, earlier: false },
+    threads: Object.keys((await harness.snapshot(SettingsDoc, context))?.threads ?? {}),
+    cut: { chat, compactor: { ...cut?.compactor }, tools: { ...cut?.tools }, capped: { chat: { ...cut?.capped?.chat }, compactor: { ...cut?.capped?.compactor } } } };
+}
 
 /** The log's shape after one more entry: a hash over how many messages each
  * entry gave, so a reopen can tell a log that numbers its messages as the
@@ -600,6 +661,9 @@ export class OptChat {
   get agent() { return { conversation: this.conversation, storage: this.storage }; }
   /** Names this chat for as long as its store lives (`optchat-<uuid>`, the providers' cache key too). */
   get identity(): string { return this.cacheKey; }
+  /** The identity of the chat this store was copied from, if it was. */
+  get origin(): string | null { return this.copied?.identity ?? null; }
+  private copied: CopiedFrom | undefined;
   /** Why the chat cannot go on right now, if it cannot. */
   failure(): string | null {
     return this.down ?? (this.compactorError ? `summarizing: ${this.compactorError}` : null) ?? this.requestError;
@@ -709,17 +773,27 @@ export class OptChat {
       log.warn("a chat request was out when cubed stopped: not sent again, its cost is unknown, its turn ends unanswered", { models: dropped.map(send => send.model) });
       this.requestError = "the chat's last request was out when cubed stopped, so it was not sent again (what it cost is unknown): send a message to go on";
     }
+    const existing = await this.harness.conversation(ROOT_CONVERSATION_ID, context);
+    const workspace = this.options.workspace;
     this.tree = await this.harness.commit(async tx => {
       const settings = await tx.doc(SettingsDoc);
+      // A store is one workspace's chat for good: another's is not opened,
+      // and a store with a chat in it is never adopted (only a copy made
+      // for the workspace, or a new store, is).
+      if (settings.workspace !== workspace) {
+        if (settings.workspace) throw new Error(`this chat store belongs to workspace ${settings.workspace}, not ${workspace ?? "the chat before workspaces"}; not opened`);
+        if (existing) throw new Error(`this chat store has a chat that belongs to no workspace; not opened for workspace ${workspace}`);
+        settings.workspace = workspace!;
+      }
       if (!settings.tree) settings.tree = (await tx.createConversation({ ownership: { kind: "ownerless" } })).id;
       settings.cache ||= randomUUID();
       return settings.tree as ConversationId;
     }, context);
     const settings = await this.harness.snapshot(SettingsDoc, context);
     this.cacheKey = `optchat-${settings!.cache}`;
+    this.copied = settings!.copiedFrom;
     // The compactor's task is its own: its request end is not cached.
     this.compactorModels = cachedModels(boundedOutput(this.options.models, undefined, model => this.countCapped("compactor", model)), () => `${this.cacheKey}-compact`, { task: false });
-    const existing = await this.harness.conversation(ROOT_CONVERSATION_ID, context);
     if (existing) this.conversation = existing;
     else {
       const model = await this.options.model();
@@ -774,6 +848,12 @@ export class OptChat {
     const total = stored && stored.total <= messages.length && this.memory.restore(messages.slice(0, stored.total), toParts(stored.parts), stored.batch === true,
       stored.compaction ? { parts: toParts(stored.compaction), batching: stored.compactionBatch === true } : undefined) ? stored.total : 0;
     for (const message of messages.slice(total)) this.memory.append(message);
+    // A copy's first open: how many messages it shares with its original.
+    if (this.copied && this.copied.messages === undefined) {
+      const shared = this.memory.length;
+      await this.harness.commit(async tx => { const doc = await tx.doc(SettingsDoc); if (doc.copiedFrom && doc.copiedFrom.messages === undefined) doc.copiedFrom.messages = shared; }, context);
+      this.copied = { ...this.copied, messages: shared };
+    }
     // The compactor is counted from the first open that knows how. A tree
     // that already holds a node the compactor built (not one whose text fit
     // as it was) had calls nobody counted.
@@ -815,6 +895,7 @@ export class OptChat {
       const [l, i] = key.split(":").map(Number);
       if (!this.memory.built(l!, i!)) this.spend.set(key, { ...spend });
     }
+    if (this.options.readOnly) return;
     this.harness.resume();
     this.pump();
     void this.drain();
@@ -1192,21 +1273,27 @@ export class OptChat {
 
   /** The chat's own usage (its Pi store and its compactor) and the threads it started. */
   async usage(): Promise<OptChatUsage> {
-    const compactor = await this.harness.snapshot(CompactorUsageDoc, context);
-    const threads = Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {});
-    const cut = await this.harness.snapshot(CutDoc, context);
-    // Chat requests out at a stop (pi-sends.ts) count with those a close cut before them.
-    const interrupted = (await this.harness.snapshot(SendsDoc, context))?.interrupted ?? {};
-    const chat: Record<string, number> = { ...cut?.chat };
-    for (const [key, n] of Object.entries(interrupted)) chat[key] = (Object.hasOwn(chat, key) ? chat[key]! : 0) + n;
-    return { chat: await this.harness.usage(context) as OptChatUsage["chat"],
-      compactor: compactor ? JSON.parse(JSON.stringify(compactor)) as OptChatUsage["compactor"] : { models: {}, calls: {}, since: null, earlier: false }, threads,
-      cut: { chat, compactor: { ...cut?.compactor }, tools: { ...cut?.tools }, capped: { chat: { ...cut?.capped?.chat }, compactor: { ...cut?.capped?.compactor } } } };
+    const total = await storeUsage(this.harness);
+    const threads = total.threads;
+    // A copy reports what it used since it was copied: the original's usage
+    // until then is in every copy's store and is reported once, apart.
+    if (!this.copied) return total;
+    const own = usageSince(total, this.copied.usage);
+    return { ...own, threads, compactor: { ...own.compactor, since: this.copied.at, earlier: false } };
+  }
+
+  /** Whether nothing of the chat is under way: no message waiting, no turn
+   * running, no model or tool call out. Summaries still to be written do not
+   * count: each copy writes its own. */
+  async idle(): Promise<boolean> {
+    if ((await this.pending()).length) return false;
+    return storeIdle(this.harness);
   }
 
   /** Accepts a user message or a thread report and keeps it until it is in
    * the chat. The same request id is accepted once. */
   async send(text: string, requestId: string, images: readonly string[] = []): Promise<void> {
+    if (this.options.readOnly) throw new Error("the workspace is archived: its chat takes no message");
     if (!images.length) return this.accept(text, requestId, []);
     // Checked and accepted under the media lock: no sweep deletes an image
     // between its check and the message that holds it.
@@ -1748,11 +1835,13 @@ export class OptChat {
       replay: "safe",
       execute: async () => text(await this.options.threads.runners()),
     });
+    const bound = this.options.workspace;
     const spawn = defineTool({
       name: "spawn",
       description: "Start one thread per task (one goal, one result; another pull request, question or review is a new task), in parallel, and answer their ids at once: each is accepted, then checks its model, fetches the project's latest commits and starts in the background. Each thread is a coding agent with its own machine and a checkout of the project; it sees this chat only as context, so the task must stand on its own. Its report comes back later as a message starting \"[id] \", and so does a start that keeps failing (a model it cannot run, a repository it cannot fetch).",
       parameters: Type.Object({ tasks: Type.Array(Type.Object({
-        project: Type.String({ description: "Project name or id" }),
+        // A workspace's chat starts threads in its own workspace only.
+        ...bound ? {} : { project: Type.String({ description: "Project name or id" }) },
         task: Type.String({ description: "The whole task, self-contained" }),
         model: Type.Optional(Type.String({ description: "provider/model; default: the host's preferred model" })),
         runner: Type.Optional(Type.String({ description: "A runner's node id (see runners), only when the user asks for that runner. "
@@ -1766,7 +1855,9 @@ export class OptChat {
         const signal = callContext.abortSignal;
         const started = performance.now();
         let commitMs = 0;
-        for (const [index, task] of args.tasks.entries()) {
+        for (const [index, given] of args.tasks.entries()) {
+          const task = { ...given, project: bound ?? (given as { project?: string }).project ?? "" };
+          const where = bound ? "this workspace" : task.project;
           // Aborted (a close or a stop): no further thread starts, and the
           // call ends aborted rather than reporting the rest "not started".
           signal?.throwIfAborted();
@@ -1777,10 +1868,10 @@ export class OptChat {
             commitMs += performance.now() - committing;
             this.mine.add(thread.id);
             this.attach(thread.id);
-            lines.push(`[${short(thread.id)}] accepted in ${task.project}: ${thread.title}`);
+            lines.push(`[${short(thread.id)}] accepted in ${where}: ${thread.title}`);
           } catch (error) {
             if (signal?.aborted) throw error;
-            lines.push(`task ${index + 1} (${task.project}) not started: ${error instanceof Error ? error.message : String(error)}`);
+            lines.push(`task ${index + 1} (${where}) not started: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
         log.info("spawn answered", { call: api.callId, tasks: args.tasks.length,
@@ -1935,21 +2026,21 @@ export class OptChat {
       name: "usage",
       description: "Token usage and estimated cost so far: of everything (by project, model and thread, and your own), of one project, or of one thread (its id). Estimates, not charges; usage without a record is reported as unknown.",
       parameters: Type.Object({
-        project: Type.Optional(Type.String({ description: "Project name or id" })),
+        ...bound ? {} : { project: Type.Optional(Type.String({ description: "Project name or id" })) },
         thread: Type.Optional(Type.String({ description: "Thread id or its first characters" })),
       }),
       replay: "safe",
-      execute: async args => text(this.options.threads.usage ? await this.options.threads.usage(args) : "usage is not available"),
+      execute: async args => text(this.options.threads.usage ? await this.options.threads.usage(bound ? { project: bound, thread: args.thread } : args as { project?: string; thread?: string }) : "usage is not available"),
     });
     const hooks = defineTool({
       name: "project_hooks",
       description: "Read a project's external hooks as cubed saved them (the scripts, each with its size and sha256; secret-looking values redacted), "
         + "the latest hook outcomes in its newest threads, and what hooks cube supports. Read-only.",
-      parameters: Type.Object({ project: Type.String({ description: "Project name or id" }) }),
+      parameters: Type.Object(bound ? {} : { project: Type.String({ description: "Project name or id" }) }),
       replay: "safe",
       execute: async args => {
         if (!this.options.threads.hooks) return text("project hooks are not available");
-        try { return text(await this.options.threads.hooks(args.project)); }
+        try { return text(await this.options.threads.hooks(bound ?? (args as { project: string }).project)); }
         catch (error) { return text(`not read: ${error instanceof Error ? error.message : String(error)}`); }
       },
     });
@@ -1958,7 +2049,7 @@ export class OptChat {
       description: "Save a project's external hooks in cube's projects (not its repository) and read them back. Hooks are shell scripts that run in every new thread machine of that project, "
         + "so change them only when the user asked for it, naming the project. A hook not given stays as it is; \"\" removes it. Only preSetup and preResume exist.",
       parameters: Type.Object({
-        project: Type.String({ description: "Project name or id" }),
+        ...bound ? {} : { project: Type.String({ description: "Project name or id" }) },
         preSetup: Type.Optional(Type.String({ description: "The whole pre-setup script; \"\" removes it" })),
         preResume: Type.Optional(Type.String({ description: "The whole pre-resume script; \"\" removes it" })),
       }, { additionalProperties: false }),
@@ -1973,7 +2064,7 @@ export class OptChat {
         if (!inputs.some(id => users.includes(Number(id)))) {
           return text("not saved: no message of the user in this turn asks for it, and a thread's report cannot change hooks; ask the user to confirm in the chat");
         }
-        try { return text(await this.options.threads.writeHooks(args.project, { preSetup: args.preSetup, preResume: args.preResume }, `${this.cacheKey}:hooks:${api.taskId}`)); }
+        try { return text(await this.options.threads.writeHooks(bound ?? (args as { project: string }).project, { preSetup: args.preSetup, preResume: args.preResume }, `${this.cacheKey}:hooks:${api.taskId}`)); }
         catch (error) { return text(`not saved: ${error instanceof Error ? error.message : String(error)}`); }
       },
     });
@@ -1981,15 +2072,16 @@ export class OptChat {
     // An artifact call's key is its durable task's id within this chat
     // store: the same on replay, unique whatever ids the provider gives.
     const artifacts = this.options.artifacts ? artifactTools({
-      artifacts: this.options.artifacts, author: { kind: "optchat" }, agent: "optchat", projects: true,
+      artifacts: this.options.artifacts, author: { kind: "optchat", workspace: bound ?? null }, agent: "optchat", projects: !bound,
       model: () => this.model ? `${this.model.provider}/${this.model.id}` : undefined,
-      readable: async () => [{ kind: "optchat" as const }, ...Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {}).map(thread => ({ kind: "thread" as const, thread }))],
+      readable: async () => [{ kind: "optchat" as const, workspace: bound ?? null }, ...Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {}).map(thread => ({ kind: "thread" as const, thread }))],
     }).map(tool => piTool(tool, api => `${this.cacheKey}:artifact:${api.taskId}`)) : [];
     return defineExtension({
       name: "optchat",
       tools: [zoom, date, ...skill ? [skill] : [], projects, runners, spawn, tell, threads, archivedThreads, history, diagnose, archive, usage, hooks, writeHooks, ...artifacts].map(tool => this.guard(tool)),
       sections: [
         section("master", () => MASTER, { tag: false }),
+        ...bound ? [section("workspace", () => WORKSPACE_NOTE, { tag: false })] : [],
         section("hooks", () => HOOKS_NOTE, { tag: false }),
         ...artifacts.length ? [section("artifacts", () => ARTIFACTS_NOTE, { tag: false })] : [],
         ...skills ? [section("skills", input => this.skillsSection(skills, input.shown), { tag: false })] : [],

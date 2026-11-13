@@ -322,7 +322,7 @@ export async function smokeProduct(root: string) {
     assert.ok(report.totals.spend.unpricedTokens > 0);
     assert.ok(report.models.some((line: { provider: string; model: string }) => line.provider === "claude-code" && line.model === "claude-opus"));
     const scoped = await (await fetch(`${restarted.url}/api/usage?project=${otherProject.id}`)).json();
-    assert.ok(scoped.threads.every((item: { projectId: string }) => item.projectId === otherProject.id) && scoped.optchat === null);
+    assert.ok(scoped.threads.every((item: { projectId: string }) => item.projectId === otherProject.id) && scoped.chats.every((chat: { projectId: string }) => chat.projectId === otherProject.id));
     await new Promise(resolve => setTimeout(resolve, 5500));
     assert.ok(!fs.existsSync(path.join(claudeWorkspace, "claude-late")), "stop cancelled the guest command");
     // The archived thread keeps its images when its machine's disk is gone.

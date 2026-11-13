@@ -177,7 +177,7 @@ function endless(capped: boolean, stats: Stats): Models {
     }
     assert.ok(asked.includes(Math.min(CHAT_OUTPUT_TOKENS, faux.getModel().maxTokens)), `the chat's cap, clamped to the model's maximum: ${asked.join(",")}`);
     assert.ok(asked.includes(outputTokens(CHAT_LIMITS.node)), "the compactor's cap");
-    const usage = new UsageService({ file: path.join(directory, "usage.sqlite"), registry: { listThreads: () => [], getThread: () => null, getProject: () => null } as never, threads: directory, live: async () => null, optchat: async () => chat.usage(), pricing: () => null });
+    const usage = new UsageService({ file: path.join(directory, "usage.sqlite"), registry: { listThreads: () => [], getThread: () => null, getProject: () => null, listProjects: () => [{ id: "w", name: "w" }] } as never, threads: directory, live: async () => null, chats: async () => [{ workspace: "w", usage: await chat.usage() }], pricing: () => null });
     const report = (await usage.optchatUsage()).usage;
     assert.ok(report.unknownTurns >= 2 && report.coverage === "partial", `counted as calls without a usage report: ${JSON.stringify({ unknown: report.unknownTurns, coverage: report.coverage })}`);
     assert.ok(report.notes.some(note => /stopped at their output cap by cube/.test(note)), report.notes.join(" | "));

@@ -3,6 +3,7 @@
  * failure ("please fail"). `renderMs` slows each frame of Pi's transcript
  * as a long chat's render is slow. `runnerHealth` answers cubed's runner
  * probes, and `registry` enrolls runners. Offline and disposable. */
+import { addWorkspace } from "./workspace-fixture.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -45,6 +46,8 @@ export async function startChatHost(options: { renderMs?: number; models?: strin
   models.setProvider(faux.provider);
   const app = await createCubed({ state: path.join(root, "state"), models, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null,
     ...options.skillSource ? { skillSource: options.skillSource } : {}, ...options.runnerHealth ? { runnerHealth: options.runnerHealth } : {} });
+  // The chat the browser tests talk to is this workspace's.
+  addWorkspace(app.registry, "demo");
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   // `setup`: leave the first-run setup to the test.

@@ -6,6 +6,7 @@
  * registry closed, and the threads got at most their share. The stuck parts
  * are stand-ins in a real cubed on disposable state, with a faux model so
  * the chat opens; no runner, VM or provider. */
+import { addWorkspace } from "./workspace-fixture.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -28,6 +29,7 @@ const models = createModels();
 models.setProvider(faux.provider);
 const state = fs.mkdtempSync(path.join(os.tmpdir(), "cube-cubed-close-"));
 const app = await createCubed({ state, models, claude: null, gateway: null });
+await app.chats.get(addWorkspace(app.registry).id);
 const conversations = app.conversations as unknown as { agents: Map<string, Promise<unknown>>; commands: Map<string, Promise<unknown>>; machines: { close(): Promise<void> }; close(ms?: number): Promise<void> };
 // The chat opens in the background; give it time to, so its close is the stuck one.
 await new Promise(resolve => setTimeout(resolve, 1000));

@@ -109,6 +109,9 @@ export interface Project {
   hooksUpdatedAt?: number;
   /** The size of the project's new thread machines; absent: cubed's defaults. */
   machine?: ProjectMachine;
+  /** When the workspace was archived: it has no open thread, takes no new
+   * one, and its chat is closed; everything stays readable. Absent: open. */
+  archivedAt?: number;
 }
 export interface Runner extends NodeBinding {
   configPath: string; configHash: string;
@@ -448,6 +451,39 @@ export class Registry {
       if (request) this.db.prepare("INSERT INTO hooks_request VALUES (?,?,?)").run(request.id, id, report!);
       this.db.exec("COMMIT");
       return request ? report! : saved;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  /** Archives a workspace (a project row): refused while it has an open
+   * thread. One IMMEDIATE transaction with `createThread`'s, so of an
+   * archive and a thread creation racing, one wins. Already archived: as it is. */
+  archiveProject(id: string, now = Date.now()): Project {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const project = this.getProject(id);
+      if (!project) throw new Error("workspace not found");
+      if (!project.archivedAt) {
+        const open = (this.db.prepare(`SELECT count(*) AS n FROM thread WHERE project_id=? AND ${OPEN_THREAD}`).get(id) as { n: number }).n;
+        if (open) throw new Error(`the workspace has ${open} open thread${open === 1 ? "" : "s"}: archive ${open === 1 ? "it" : "them"} first`);
+        this.saveProject({ ...project, archivedAt: now, updatedAt: now });
+      }
+      const saved = this.getProject(id)!;
+      this.db.exec("COMMIT");
+      return saved;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  /** Opens an archived workspace again, as it was. */
+  unarchiveProject(id: string, now = Date.now()): Project {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const project = this.getProject(id);
+      if (!project) throw new Error("workspace not found");
+      if (project.archivedAt) {
+        const { archivedAt: _, ...open } = project;
+        this.saveProject({ ...open, updatedAt: now });
+      }
+      const saved = this.getProject(id)!;
+      this.db.exec("COMMIT");
+      return saved;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   deleteProject(id: string): void {
@@ -912,6 +948,7 @@ export class Registry {
       }
       const project = this.getProject(projectId);
       if (!project) throw new Error("project not found");
+      if (project.archivedAt) throw new Error("the workspace is archived: restore it before starting a thread");
       if (project.status !== "ready") throw new Error("check the project before starting a thread");
       const repositories = allocationRepositories(project, true);
       // Counting open threads and inserting this one in one IMMEDIATE

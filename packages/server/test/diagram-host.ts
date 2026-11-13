@@ -15,7 +15,7 @@ export async function startDiagramHost(options: { web: string; body: string; tit
   const state = path.join(root, "state");
   fs.mkdirSync(state, { recursive: true });
   const seed = new ArtifactStore(path.join(state, "artifacts.sqlite"));
-  const id = seed.write({ kind: "optchat" }, { title: options.title, body: options.body, projectId: null }, { agent: "optchat" }, "seed").revision.artifact;
+  const id = seed.write({ kind: "optchat", workspace: null }, { title: options.title, body: options.body, projectId: null }, { agent: "optchat" }, "seed").revision.artifact;
   seed.close();
   const app = await createCubed({ state, models: createModels(), machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null, web: options.web });
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));

@@ -57,8 +57,8 @@ function claude(id: string) {
 }
 /** OptChat's artifact tools as Pi offers them, reading its own and its threads' artifacts. */
 let calls = 0;
-const chatTools = Object.fromEntries(artifactTools({ artifacts, author: { kind: "optchat" }, agent: "optchat", projects: true,
-  readable: async () => [{ kind: "optchat" }, thread(LIVE), thread(STORED)] }).map(tool => [tool.name, piTool(tool, api => `chat-${api.callId}`)]));
+const chatTools = Object.fromEntries(artifactTools({ artifacts, author: { kind: "optchat", workspace: null }, agent: "optchat", projects: true,
+  readable: async () => [{ kind: "optchat", workspace: null }, thread(LIVE), thread(STORED)] }).map(tool => [tool.name, piTool(tool, api => `chat-${api.callId}`)]));
 const chat = async (name: string, args: Record<string, unknown>) => {
   const result = await chatTools[name]!.execute(args as never, { callId: `c${++calls}` } as unknown as ToolExecutionApi, {} as never);
   return (result as { output: Array<{ text: string }> }).output.map(part => part.text).join("");

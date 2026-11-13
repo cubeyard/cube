@@ -21,6 +21,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { GitService } from "@cube/git";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { addWorkspace } from "./workspace-fixture.ts";
 import { createCubed } from "../src/index.ts";
 import { OptChat, type OptThreads } from "../src/optchat.ts";
 import { optchatSkills, resolveSkills, SKILL_PAGE, skillsPrompt, type OptChatSkills, type ResolvedSkill, type SkillGit, type SkillSource } from "../src/skills.ts";
@@ -160,6 +161,7 @@ const state = path.join(root, "state");
 const machines = new LocalMachines(path.join(root, "machines"));
 const open = async () => {
   const app = await createCubed({ state, models, machines, claude: null, gateway: null, skillSource: defaults });
+  if (!app.registry.listProjects().length) addWorkspace(app.registry);
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
   const address = app.server.address();
   assert(address && typeof address === "object");

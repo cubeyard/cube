@@ -15,6 +15,7 @@ import type { AddressInfo } from "node:net";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxThinking, type Message } from "@earendil-works/pi-ai";
 import { ANSWERS } from "../src/optchat.ts";
 import { TRIES } from "../src/optchat-compactor.ts";
+import { addWorkspace } from "./workspace-fixture.ts";
 import { createCubed } from "../src/index.ts";
 import { LocalMachines } from "./local-guest.ts";
 
@@ -46,6 +47,7 @@ const other = { provider: "faux", id: "faux-other" };
 
 async function start(dir = state, optchatRetryMs?: number) {
   const app = await createCubed({ state: dir, models, ...optchatRetryMs ? { optchatRetryMs } : {}, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null });
+  if (!app.registry.listProjects().length) addWorkspace(app.registry);
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   const call = async (route: string, method = "GET", body?: unknown) => {

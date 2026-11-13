@@ -164,7 +164,7 @@ const registry = {
 } as unknown as Registry;
 const threads = path.join(root, "threads");
 const live = new Map<string, Harness>();
-const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), registry, threads, optchatStore: path.join(root, "optchat", "pi.sqlite"),
+const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), registry, threads, chatStore: workspace => path.join(root, "workspaces", workspace, "chat", "pi.sqlite"),
   live: async id => live.get(id)?.usage(context) as Promise<UsageState> ?? null });
 
 {
@@ -259,7 +259,9 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
   assert.equal(reading.coverage, "partial");
   db.close();
   const report = await usage.report({ project: "p1" });
-  assert.equal(report.optchat, null);
+  // A workspace's report has its own chat's usage (none yet here) and no other's.
+  assert.deepEqual(report.chats.map(item => [item.projectId, item.notes]), [["p1", ["the chat has not started"]]]);
+  assert.equal(report.beforeWorkspaces, null);
   assert.ok(report.models.some(line => line.provider === "claude-code"));
   assert.match(usageText(report, { projectName: "cube" }), /claude code's own estimate|claude-code/);
   usage.close();
@@ -291,7 +293,7 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
     assert.ok(counted.compactor.calls[key]! >= 1, JSON.stringify(counted));
     assert.ok(counted.compactor.models[key]!.totalTokens > 0);
     assert.ok(counted.chat.models[key]!.totalTokens > 0, "the chat's own calls are in its Pi ledger");
-    const usage = new UsageService({ file: path.join(root, "usage.sqlite"), registry, threads, live: async () => null, optchat: async () => chat.usage() });
+    const usage = new UsageService({ file: path.join(root, "usage.sqlite"), registry, threads, live: async () => null, chats: async () => [{ workspace: "p1", usage: await chat.usage() }] });
     const report = await usage.report();
     assert.ok(report.optchat!.lines.some(line => line.source === "optchat-compactor" && line.calls! >= 1));
     assert.ok(report.optchat!.lines.some(line => line.source === "optchat"));
@@ -306,7 +308,7 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
     usage.close();
     // Calls out at a stop (a close past its grace, a crash): their cost is unknown, not zero.
     const cutUsage = new UsageService({ file: path.join(root, "usage-cut.sqlite"), registry, threads, live: async () => null,
-      optchat: async () => ({ ...await chat.usage(), cut: { chat: { [key]: 1 }, compactor: { [key]: 2 }, tools: { spawn: 1 } } }) });
+      chats: async () => [{ workspace: "p1", usage: { ...await chat.usage(), cut: { chat: { [key]: 1 }, compactor: { [key]: 2 }, tools: { spawn: 1 } } } }] });
     const cut = (await cutUsage.report()).optchat!;
     assert.notEqual(cut.coverage, "complete");
     assert.equal(cut.unknownTurns, 3);
