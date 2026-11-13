@@ -70,10 +70,6 @@ type alias Conv =
     }
 
 
-type alias NewThreadForm =
-    { projectId : String, text : String, busy : Bool, error : Maybe String }
-
-
 type alias ProjectForm =
     { name : String, url : String, base : String, busy : Bool, error : Maybe String }
 
@@ -84,7 +80,6 @@ type alias ActionForm =
 
 type Dialog
     = NoDialog
-    | NewThread NewThreadForm
     | NewProject ProjectForm
     | Confirm { title : String, body : String, label : String, run : Msg }
     | Rename String String
@@ -150,7 +145,11 @@ type alias Model =
     , cursor : Int
     , goPending : Bool
     , counter : Int
-    , quietOpen : Bool
+
+    -- The floor's desk: where a message goes ("optchat" or a project id).
+    , deskTarget : String
+    , deskBusy : Bool
+    , deskError : Maybe String
     }
 
 
@@ -195,7 +194,9 @@ type Msg
     | MarkAllSeen
     | SetProjectFilter (Maybe String)
     | SetSearch String
-    | ToggleQuiet
+    | DeskTarget String
+    | DeskSend
+    | DeskSent (Api ())
     | Pressed Key
     | Open Dialog
     | CloseDialog
@@ -309,16 +310,50 @@ inGroup model wanted =
     shownThreads model |> List.filter (\thread -> Phase.group (phaseOf model thread) == wanted)
 
 
-{-| The rows the keyboard cursor walks on the Now page, in the order shown.
+{-| Where a thread sits on the floor: in one of its runner's slots, in the
+runner's queue, or shelved (suspended: it holds no slot).
 -}
-nowRows : Model -> List Thread
-nowRows model =
-    List.concatMap (inGroup model)
-        ([ Phase.NeedsYou, Phase.Running, Phase.GettingReady ]
-            ++ (if model.quietOpen then
-                    [ Phase.Quiet ]
+type Place
+    = InSlot
+    | InQueue
+    | Shelved
 
-                else
-                    []
-               )
-        )
+
+placeOf : Thread -> Place
+placeOf item =
+    case item.sleep of
+        Just (Suspended _) ->
+            Shelved
+
+        Just (Queued _ _) ->
+            InQueue
+
+        Just (Waking (Just _)) ->
+            InQueue
+
+        _ ->
+            if item.machine == MachineStarting && item.waiting /= Nothing then
+                InQueue
+
+            else
+                InSlot
+
+
+{-| The cards the keyboard cursor walks, in the order the floor shows them:
+bay by bay, slots, then queue, then shelf.
+-}
+floorOrder : Model -> List Thread
+floorOrder model =
+    let
+        rank item =
+            case placeOf item of
+                InSlot ->
+                    0
+
+                InQueue ->
+                    1
+
+                Shelved ->
+                    2
+    in
+    shownThreads model |> List.sortBy (\item -> ( Maybe.withDefault "~" item.runnerId, rank item, negate item.createdAt ))

@@ -1,4 +1,4 @@
-module View exposing (newThreadDialog, view)
+module View exposing (view)
 
 import Browser
 import Convo
@@ -8,7 +8,6 @@ import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Json.Decode as D
-import Json.Encode as E
 import Model exposing (..)
 import Pages
 import Phase exposing (Group(..), Phase(..))
@@ -18,21 +17,24 @@ import Ui exposing (..)
 view : Model -> Browser.Document Msg
 view model =
     let
-        needs =
-            List.length (inGroup { model | projectFilter = Nothing } NeedsYou)
+        everything =
+            { model | projectFilter = Nothing }
 
-        running =
-            List.length (inGroup { model | projectFilter = Nothing } Running)
+        forYou =
+            List.length (inGroup everything NeedsYou)
+
+        working =
+            List.length (inGroup everything Running)
     in
     { title =
-        (if needs > 0 then
-            "(" ++ String.fromInt needs ++ ") "
+        (if forYou > 0 then
+            "(" ++ String.fromInt forYou ++ ") "
 
          else
             ""
         )
-            ++ (if running > 0 then
-                    "▶ "
+            ++ (if working > 0 then
+                    String.fromInt working ++ " working · "
 
                 else
                     ""
@@ -40,12 +42,12 @@ view model =
             ++ "cube"
     , body =
         [ div [ class "app" ]
-            [ rail model needs running
+            [ masthead model forYou working
+            , banners model
             , main_ [ class "main" ]
-                [ banners model
-                , case model.route of
+                [ case model.route of
                     Now ->
-                        nowPage model
+                        floor model
 
                     Chat ->
                         Convo.chatPage model
@@ -72,7 +74,7 @@ view model =
                         Pages.settings model
 
                     NotFound path ->
-                        div [ class "page" ] [ h1 [] [ text "nothing here" ], p [] [ text ("no page at " ++ path ++ ". "), a [ href "#/" ] [ text "back to now" ] ] ]
+                        div [ class "page" ] [ h1 [] [ text "No page here" ], p [] [ text ("Nothing is at " ++ path ++ ". "), a [ href "#/" ] [ text "Back to the floor" ] ] ]
                 ]
             ]
         , dialog model
@@ -80,16 +82,16 @@ view model =
     }
 
 
-chatState : Model -> ( String, String )
-chatState model =
+chatWords : Model -> ( String, String )
+chatWords model =
     case model.chatGlance of
         Nothing ->
-            ( "quiet", "…" )
+            ( "quiet", "not read yet" )
 
         Just glance ->
             case glance.status.state of
                 Working ->
-                    ( "running", "working" )
+                    ( "working", "working" )
 
                 Failed ->
                     ( "failed", "run failed" )
@@ -104,77 +106,46 @@ chatState model =
                     ( "quiet", "idle" )
 
 
-rail : Model -> Int -> Int -> Html Msg
-rail model needs running =
+{-| One line across the top: where you are, the two counts that matter, and
+whether what you see is current.
+-}
+masthead : Model -> Int -> Int -> Html Msg
+masthead model forYou working =
     let
-        item route fragment label badge =
-            a [ href fragment, classList [ ( "nav-item", True ), ( "current", sameSection route model.route ) ] ]
-                [ span [] [ text label ], badge ]
-
-        count n kind =
-            if n > 0 then
-                span [ class ("badge " ++ kind) ] [ text (String.fromInt n) ]
-
-            else
-                text ""
-
-        ( chatClass, chatWords ) =
-            chatState model
-
-        flight =
-            List.concatMap (inGroup { model | projectFilter = Nothing }) [ NeedsYou, Running, GettingReady ]
+        item route fragment label =
+            a [ href fragment, classList [ ( "current", sameSection route model.route ) ] ] [ text label ]
     in
-    nav [ class "rail", attribute "aria-label" "cube" ]
-        [ a [ href "#/", class "brand" ] [ text "cube" ]
-        , div [ class "nav" ]
-            [ item Now "#/" "now" (span [] [ count needs "needs", count running "running" ])
-            , item Chat "#/chat" "optchat" (span [ class ("dot " ++ chatClass), title ("optchat: " ++ chatWords) ] [])
-            , item Artifacts "#/artifacts" "artifacts" (text "")
-            , item Projects "#/projects" "projects" (text "")
-            , item Runners "#/runners" "runners" (text "")
-            , item History "#/history" "history" (text "")
-            , item Settings "#/settings" "settings" (text "")
+    header [ class "masthead" ]
+        [ a [ href "#/", class "wordmark" ] [ text "cube" ]
+        , nav [ attribute "aria-label" "sections" ]
+            [ item Now "#/" "floor"
+            , item Chat "#/chat" "optchat"
+            , item Artifacts "#/artifacts" "artifacts"
+            , item Projects "#/projects" "projects"
+            , item Runners "#/runners" "runners"
+            , item History "#/history" "history"
+            , item Settings "#/settings" "settings"
             ]
-        , div [ class "rail-live" ]
-            [ h2 [] [ text "in flight" ]
-            , if List.isEmpty flight then
-                p [ class "muted" ] [ text "nothing is working or waiting on you." ]
+        , p [ class "tally", attribute "role" "status" ]
+            [ a [ href "#/", classList [ ( "tally-foryou", forYou > 0 ) ] ] [ text (String.fromInt forYou ++ " for you") ]
+            , span [ classList [ ( "tally-working", working > 0 ) ] ] [ text (String.fromInt working ++ " working") ]
+            , case model.link of
+                Connecting ->
+                    span [] [ text "connecting" ]
 
-              else
-                div []
-                    (List.map
-                        (\thread ->
-                            let
-                                value =
-                                    phaseOf model thread
-                            in
-                            a [ href ("#/t/" ++ thread.id), class ("mini " ++ phaseClass value), classList [ ( "current", model.route == ThreadPage thread.id ) ] ]
-                                [ glyph value
-                                , span [ class "mini-main" ]
-                                    [ span [ class "mini-title" ] [ text (threadLabel thread) ]
-                                    , span [ class "mini-doing" ] [ text (Phase.label value ++ " · " ++ thread.projectName) ]
-                                    ]
-                                ]
-                        )
-                        flight
-                    )
-            ]
-        , div [ class "rail-foot" ]
-            [ case model.runners of
-                Loaded known ->
-                    a [ href "#/runners" ] [ text (String.fromInt known.free ++ " of " ++ String.fromInt known.slots ++ " machine slots free") ]
+                Live _ ->
+                    span [ class "tally-live" ] [ text "live" ]
 
-                _ ->
-                    text ""
-            , linkNote model
-            , button [ class "quiet-button", onClick (Open Help) ] [ text "? keys" ]
+                Lost _ ->
+                    span [ class "tally-lost" ] [ text "cubed unreachable" ]
+            , button [ class "plain", onClick (Open Help), attribute "aria-label" "keyboard shortcuts" ] [ text "keys" ]
             ]
         ]
 
 
 sameSection : Route -> Route -> Bool
-sameSection nav current =
-    case ( nav, current ) of
+sameSection section current =
+    case ( section, current ) of
         ( Now, ThreadPage _ ) ->
             True
 
@@ -182,20 +153,7 @@ sameSection nav current =
             True
 
         _ ->
-            nav == current
-
-
-linkNote : Model -> Html Msg
-linkNote model =
-    case model.link of
-        Connecting ->
-            span [ class "link" ] [ text "connecting to cubed…" ]
-
-        Live _ ->
-            span [ class "link live" ] [ text "connected to cubed" ]
-
-        Lost _ ->
-            span [ class "link lost" ] [ text "cubed unreachable" ]
+            section == current
 
 
 banners : Model -> Html Msg
@@ -203,18 +161,18 @@ banners model =
     div [ class "banners" ]
         [ case model.health |> Maybe.andThen .preview of
             Just words ->
-                div [ class "banner preview" ] [ text words ]
+                p [ class "banner preview" ] [ text words ]
 
             Nothing ->
                 text ""
         , case model.link of
             Lost lost ->
-                div [ class "banner lost", attribute "role" "alert" ]
-                    [ strong [] [ text "can't reach cubed. " ]
+                p [ class "banner lost", attribute "role" "alert" ]
+                    [ strong [] [ text "Can't reach cubed. " ]
                     , text
-                        ("everything below is as of "
-                            ++ (lost.lastOk |> Maybe.map (ago model.now) |> Maybe.withDefault "never (nothing was read yet)")
-                            ++ " and may have changed. retrying every 3 s. "
+                        ("What you see is from "
+                            ++ (lost.lastOk |> Maybe.map (ago model.now) |> Maybe.withDefault "before anything was read")
+                            ++ " and may have changed. Trying again every 3 s. "
                             ++ lost.why
                         )
                     ]
@@ -222,71 +180,31 @@ banners model =
             _ ->
                 text ""
         , if model.activityRoute == Just False then
-            div [ class "banner" ] [ text "this cubed reports run states only for threads optchat started; other threads show “run not reported” until opened." ]
+            p [ class "banner" ] [ text "This cubed reports run states only for threads optchat started. Other threads read “run not reported” until you open them." ]
 
           else
             text ""
         , case model.notice of
             Just ( bad, words ) ->
-                div [ class "banner notice", classList [ ( "lost", bad ) ], attribute "role" "status" ]
-                    [ text words, button [ class "quiet-button", onClick DismissNotice ] [ text "dismiss" ] ]
+                p [ class "banner notice", classList [ ( "lost", bad ) ], attribute "role" "status" ]
+                    [ text words, button [ class "plain", onClick DismissNotice ] [ text "dismiss" ] ]
 
             Nothing ->
                 text ""
         ]
 
 
-newThreadDialog : Model -> Maybe String -> Dialog
-newThreadDialog model projectId =
-    NewThread
-        { projectId =
-            case projectId of
-                Just id ->
-                    id
-
-                Nothing ->
-                    case model.projectFilter of
-                        Just id ->
-                            id
-
-                        Nothing ->
-                            loaded model.projects |> List.filter (\p -> p.status == "ready") |> List.head |> Maybe.map .id |> Maybe.withDefault ""
-        , text = ""
-        , busy = False
-        , error = Nothing
-        }
-
-
-nowPage : Model -> Html Msg
-nowPage model =
+{-| The floor: on the left what is for you and the desk you give work
+from; on the right every runner as a bay, each thread in the slot it holds.
+-}
+floor : Model -> Html Msg
+floor model =
     let
-        section kind emptyWords =
-            let
-                rows =
-                    inGroup model kind
+        forYou =
+            inGroup model NeedsYou
 
-                offset =
-                    nowRows model |> List.indexedMap Tuple.pair |> List.filter (\( _, item ) -> List.member item rows) |> List.head |> Maybe.map Tuple.first |> Maybe.withDefault 0
-            in
-            Html.section [ class ("group " ++ groupClass kind), attribute "aria-label" (Phase.groupLabel kind) ]
-                [ h2 [] [ text (Phase.groupLabel kind), span [ class "count" ] [ text (String.fromInt (List.length rows)) ] ]
-                , if List.isEmpty rows then
-                    empty emptyWords
-
-                  else
-                    div [ class "rows" ] (List.indexedMap (\index item -> threadRow model (offset + index == model.cursor) item) rows)
-                ]
-
-        quiet =
-            inGroup model Quiet
-
-        counts =
-            [ ( NeedsYou, "need you" ), ( Running, "working" ), ( GettingReady, "getting ready" ), ( Quiet, "quiet" ) ]
-                |> List.map (\( kind, words ) -> String.fromInt (List.length (inGroup model kind)) ++ " " ++ words)
-                |> String.join " · "
-
-        ( chatClass, chatWords ) =
-            chatState model
+        ( chatClass, chatState ) =
+            chatWords model
 
         chatLine =
             model.chatGlance
@@ -299,110 +217,212 @@ nowPage model =
                              else
                                 Ended Phase.TurnEnded False
                             )
-                            emptyThread
+                            noThread
                             glance.events
                     )
                 |> Maybe.withDefault ""
+
+        draft =
+            Dict.get "desk" model.drafts |> Maybe.withDefault ""
+
+        ready =
+            loaded model.projects |> List.filter (\p -> p.status == "ready")
     in
-    div [ class "page now" ]
-        [ header [ class "page-head" ]
-            [ div []
-                [ h1 [] [ text "now" ]
-                , p [ class "summary", attribute "role" "status" ]
-                    [ case model.threads of
-                        Loading ->
-                            text "reading threads…"
+    div [ class "floor" ]
+        [ section [ class "side", attribute "aria-label" "for you" ]
+            [ div [ class "desk" ]
+                [ h2 [] [ text "Give work" ]
+                , textarea
+                    [ id "desk"
+                    , rows 3
+                    , value draft
+                    , onInput (DraftChanged "desk")
+                    , onEnter DeskSend
+                    , attribute "aria-label" "what should be done"
+                    , placeholder
+                        (if model.deskTarget == "optchat" then
+                            "Tell optchat what you want done. It starts threads and reports back."
 
-                        Unavailable why ->
-                            span [ class "problem" ] [ text ("threads could not be read: " ++ why) ]
-
-                        Loaded _ ->
-                            text counts
+                         else
+                            "The first message of a new thread."
+                        )
                     ]
-                ]
-            , div [ class "head-actions" ]
-                [ button [ class "quiet-button", onClick MarkAllSeen ] [ text "mark all read" ]
-                , button [ class "primary", onClick (Open (newThreadDialog model Nothing)) ] [ text "new thread" ]
-                ]
-            ]
-        , div [ class "filters", attribute "role" "group", attribute "aria-label" "project" ]
-            (button [ classList [ ( "chip", True ), ( "on", model.projectFilter == Nothing ) ], onClick (SetProjectFilter Nothing) ] [ text "all projects" ]
-                :: List.map
-                    (\p ->
-                        button [ classList [ ( "chip", True ), ( "on", model.projectFilter == Just p.id ) ], onClick (SetProjectFilter (Just p.id)) ] [ text p.name ]
-                    )
-                    (loaded model.projects)
-            )
-        , div [ class "now-grid" ]
-            [ div [ class "now-main" ]
-                [ a [ href "#/chat", class ("row chat-row " ++ chatClass) ]
-                    [ span [ class ("glyph " ++ chatClass) ]
-                        [ text
-                            (if chatClass == "running" then
-                                "▶"
-
-                             else
-                                "✉"
+                    []
+                , div [ class "desk-row" ]
+                    [ label [ class "inline" ]
+                        [ text "to "
+                        , select [ onInput DeskTarget, id "desk-target" ]
+                            (option [ value "optchat", selected (model.deskTarget == "optchat") ] [ text "optchat" ]
+                                :: List.map (\p -> option [ value p.id, selected (model.deskTarget == p.id) ] [ text ("a new thread in " ++ p.name) ]) ready
                             )
                         ]
-                    , div [ class "row-main" ]
-                        [ div [ class "row-top" ] [ strong [] [ text "optchat" ], span [ class ("pill " ++ chatClass) ] [ text chatWords ] ]
-                        , div [ class "row-doing" ] [ text chatLine ]
-                        , div [ class "row-meta" ] [ span [] [ text "your chat: ask for work here; it starts and directs threads" ] ]
+                    , button [ class "primary", onClick DeskSend, disabled (model.deskBusy || String.isEmpty (String.trim draft)) ]
+                        [ text
+                            (if model.deskBusy then
+                                "sending"
+
+                             else if model.deskTarget == "optchat" then
+                                "send"
+
+                             else
+                                "start thread"
+                            )
                         ]
                     ]
-                , section NeedsYou "nothing needs you."
-                , section Running "nothing is working right now."
-                , section GettingReady "no machine is starting or waiting for a slot."
-                , Html.section [ class "group quiet" ]
-                    [ h2 []
-                        [ button [ class "quiet-button", onClick ToggleQuiet, attribute "aria-expanded" (boolText model.quietOpen) ]
-                            [ text
-                                ((if model.quietOpen then
-                                    "▾ "
+                , case model.deskError of
+                    Just why ->
+                        p [ class "problem", attribute "role" "alert" ] [ text ("Not sent: " ++ why ++ ". Your text is still here.") ]
 
-                                  else
-                                    "▸ "
-                                 )
-                                    ++ "quiet"
-                                )
-                            ]
-                        , span [ class "count" ] [ text (String.fromInt (List.length quiet)) ]
-                        ]
-                    , if model.quietOpen then
-                        if List.isEmpty quiet then
-                            empty "no quiet threads."
-
-                        else
-                            let
-                                offset =
-                                    List.length (nowRows model) - List.length quiet
-                            in
-                            div [ class "rows" ] (List.indexedMap (\index item -> threadRow model (offset + index == model.cursor) item) quiet)
+                    Nothing ->
+                        text ""
+                , a [ href "#/chat", class "desk-chat" ]
+                    [ span [ class ("state " ++ chatClass) ] [ text ("optchat " ++ chatState) ]
+                    , span [ class "desk-line" ] [ text chatLine ]
+                    ]
+                ]
+            , div [ class "tray" ]
+                [ div [ class "tray-top" ]
+                    [ h2 [] [ text ("For you · " ++ String.fromInt (List.length forYou)) ]
+                    , if List.isEmpty forYou then
+                        text ""
 
                       else
-                        p [ class "muted" ] [ text "open threads with no run going and nothing unread: turn ended and read, stopped, suspended or never run." ]
+                        button [ class "plain", onClick MarkAllSeen ] [ text "mark all read" ]
+                    ]
+                , case model.threads of
+                    Loading ->
+                        p [ class "muted" ] [ text "Reading threads." ]
+
+                    Unavailable why ->
+                        p [ class "problem" ] [ text ("Threads could not be read: " ++ why) ]
+
+                    Loaded _ ->
+                        if List.isEmpty forYou then
+                            p [ class "muted" ] [ text "Nothing waits on you. A thread lands here when its turn ends unread, its run fails or its machine fails." ]
+
+                        else
+                            div [] (List.map (trayItem model) forYou)
+                ]
+            ]
+        , section [ class "bays", attribute "aria-label" "runners" ]
+            [ div [ class "bays-top" ]
+                [ h1 [] [ text "The floor" ]
+                , label [ class "inline" ]
+                    [ text "show "
+                    , select [ onInput (\id -> SetProjectFilter (if id == "" then Nothing else Just id)), id "project-filter" ]
+                        (option [ value "", selected (model.projectFilter == Nothing) ] [ text "all projects" ]
+                            :: List.map (\p -> option [ value p.id, selected (model.projectFilter == Just p.id) ] [ text p.name ]) (loaded model.projects)
+                        )
                     ]
                 ]
-            , aside [ class "now-side", attribute "aria-label" "where work runs" ]
-                [ h2 [] [ text "where it runs" ]
-                , remoteView model.runners "runners" (\known -> div [] (List.map (Pages.runnerCard model True) known.runners))
-                ]
+            , remoteView model.runners "runners" <|
+                \known ->
+                    if List.isEmpty known.runners then
+                        p [ class "muted" ] [ text "No runner is enrolled, so no thread can start. Enroll one with berth; it shows up here as a bay." ]
+
+                    else
+                        div [ class "bay-row" ] (List.map (bay model) known.runners ++ [ unplaced model known.runners ])
             ]
         ]
 
 
-boolText : Bool -> String
-boolText value =
-    if value then
-        "true"
+bay : Model -> Runner -> Html Msg
+bay model item =
+    let
+        here =
+            shownThreads model |> List.filter (\t -> t.runnerId == Just item.id)
+
+        at place =
+            List.filter (\t -> placeOf t == place) here
+
+        down =
+            item.contact == "unreachable"
+
+        taken =
+            item.slotsTotal - item.slotsFree
+
+        others =
+            Basics.max 0 (taken - List.length (at InSlot))
+    in
+    div [ classList [ ( "bay", True ), ( "down", down ) ], attribute "data-runner" item.nodeId ]
+        [ div [ class "bay-head" ]
+            [ h2 [] [ a [ href "#/runners" ] [ text item.nodeId ] ]
+            , p []
+                [ text
+                    (case ( item.contact, item.unreachableSince ) of
+                        ( "unreachable", Just since ) ->
+                            "not answering for " ++ duration (model.now - since)
+
+                        ( "unknown", _ ) ->
+                            String.fromInt item.slotsFree ++ " of " ++ String.fromInt item.slotsTotal ++ " slots free · never probed"
+
+                        _ ->
+                            String.fromInt item.slotsFree ++ " of " ++ String.fromInt item.slotsTotal ++ " slots free"
+                    )
+                ]
+            ]
+        , if down then
+            p [ class "bay-note" ] [ text "Its cards show what cubed last knew. Nothing here can move until it answers." ]
+
+          else
+            text ""
+        , div [ class "slots" ]
+            (List.map (card model) (at InSlot)
+                ++ (if others > 0 && not down then
+                        [ p [ class "slot other" ]
+                            [ text
+                                (String.fromInt others
+                                    ++ (if model.projectFilter == Nothing then
+                                            " more taken; cubed lists no open thread for them"
+
+                                        else
+                                            " more taken by other projects"
+                                       )
+                                )
+                            ]
+                        ]
+
+                    else
+                        []
+                   )
+                ++ (if down then
+                        []
+
+                    else
+                        List.repeat item.slotsFree (p [ class "slot free" ] [ text "free slot" ])
+                   )
+            )
+        , shelf "Waiting for a slot" (at InQueue) model
+        , shelf "Suspended, holding no slot" (at Shelved) model
+        ]
+
+
+shelf : String -> List Thread -> Model -> Html Msg
+shelf title_ items model =
+    if List.isEmpty items then
+        text ""
 
     else
-        "false"
+        div [ class "shelf" ] (h3 [] [ text title_ ] :: List.map (card model) items)
 
 
-emptyThread : Thread
-emptyThread =
+{-| Threads whose runner is not in the list (or that have none yet).
+-}
+unplaced : Model -> List Runner -> Html Msg
+unplaced model known =
+    let
+        lost =
+            shownThreads model |> List.filter (\t -> not (List.any (\r -> Just r.id == t.runnerId) known))
+    in
+    if List.isEmpty lost then
+        text ""
+
+    else
+        div [ class "bay" ] [ div [ class "bay-head" ] [ h2 [] [ text "No known runner" ], p [] [ text "cubed names no enrolled runner for these" ] ], div [ class "slots" ] (List.map (card model) lost) ]
+
+
+noThread : Thread
+noThread =
     { id = "", title = Nothing, name = Nothing, projectId = "", projectName = "", machine = MachineReady, error = Nothing, failureKind = Nothing, waiting = Nothing, createdAt = 0, archived = False, agent = "pi", model = Nothing, runnerId = Nothing, vmId = Nothing, steps = [], sleep = Nothing, notice = Nothing, retain = Nothing, retainReason = Nothing, discarded = False, startupMs = Nothing, prepared = Nothing }
 
 
@@ -423,16 +443,16 @@ dialog model =
                 Nothing ->
                     text ""
 
-        buttons label busy =
+        buttons label_ busy =
             div [ class "dialog-actions" ]
-                [ button [ class "quiet-button", onClick CloseDialog ] [ text "cancel" ]
+                [ button [ onClick CloseDialog ] [ text "cancel" ]
                 , button [ class "primary", onClick SubmitDialog, disabled busy ]
                     [ text
                         (if busy then
-                            "working…"
+                            "working"
 
                          else
-                            label
+                            label_
                         )
                     ]
                 ]
@@ -442,37 +462,27 @@ dialog model =
             text ""
 
         Help ->
-            shell "keys"
+            shell "Keys"
                 [ table [ class "keys" ]
                     (List.map (\( key, what ) -> tr [] [ td [] [ kbd [] [ text key ] ], td [] [ text what ] ])
-                        [ ( "g n", "now" ), ( "g c", "optchat" ), ( "g a", "artifacts" ), ( "g p", "projects" ), ( "g r", "runners" ), ( "g h", "history" ), ( "g s", "settings" ), ( "j / k", "move down / up the now list" ), ( "enter", "open the marked thread" ), ( "c", "write a message" ), ( "n", "new thread" ), ( "/", "search (history)" ), ( "esc", "close, leave the field, or back to now" ), ( "?", "this list" ) ]
+                        [ ( "g f", "the floor" ), ( "g c", "optchat" ), ( "g a", "artifacts" ), ( "g p", "projects" ), ( "g r", "runners" ), ( "g h", "history" ), ( "g s", "settings" ), ( "j / k", "next / previous card on the floor" ), ( "enter", "open the marked card" ), ( "n", "give work (the desk)" ), ( "c", "write in the open conversation" ), ( "/", "filter history" ), ( "esc", "close, leave the field, or back to the floor" ), ( "?", "this list" ) ]
                     )
                 , div [ class "dialog-actions" ] [ button [ class "primary", onClick CloseDialog ] [ text "close" ] ]
                 ]
 
-        NewThread form ->
-            shell "new thread"
-                [ p [ class "muted" ] [ text "a thread is one agent in its own machine, working on one project. its first message starts it." ]
-                , label [] [ text "project", select [ id "dialog-first", onInput (DialogField "project") ] (List.map (\p -> option [ value p.id, selected (p.id == form.projectId), disabled (p.status /= "ready") ] [ text (p.name ++ (if p.status == "ready" then "" else " (" ++ p.status ++ ")")) ]) (loaded model.projects)) ]
-                , label [] [ text "first message", textarea [ rows 4, value form.text, onInput (DialogField "text"), placeholder "what should it do?" ] [] ]
-                , p [ class "muted" ] [ text ("model: " ++ (model.models |> Maybe.andThen .selected |> Maybe.map modelName |> Maybe.withDefault "none connected") ++ " (cubed's preferred model)") ]
-                , problem form.error
-                , buttons "start thread" form.busy
-                ]
-
         NewProject form ->
-            shell "new project"
-                [ label [] [ text "name", input [ id "dialog-first", value form.name, onInput (DialogField "name") ] [] ]
-                , label [] [ text "repository url", input [ value form.url, onInput (DialogField "url"), placeholder "https://github.com/owner/name" ] [] ]
-                , label [] [ text "base branch (empty: the default branch)", input [ value form.base, onInput (DialogField "base") ] [] ]
-                , p [ class "muted" ] [ text "cubed checks the repository when you save. hooks and machine size are not editable in this preview." ]
+            shell "New project"
+                [ label [] [ text "Name", input [ id "dialog-first", value form.name, onInput (DialogField "name") ] [] ]
+                , label [] [ text "Repository url", input [ value form.url, onInput (DialogField "url"), placeholder "https://github.com/owner/name" ] [] ]
+                , label [] [ text "Base branch (empty: the default branch)", input [ value form.base, onInput (DialogField "base") ] [] ]
+                , p [ class "muted" ] [ text "cubed checks the repository when you save. Hooks and machine size cannot be edited in this preview." ]
                 , problem form.error
                 , buttons "save and check" form.busy
                 ]
 
         Rename _ title_ ->
-            shell "rename thread"
-                [ label [] [ text "title", input [ id "dialog-first", value title_, onInput (DialogField "title"), onEnter SubmitDialog ] [] ]
+            shell "Rename thread"
+                [ label [] [ text "Title", input [ id "dialog-first", value title_, onInput (DialogField "title"), onEnter SubmitDialog ] [] ]
                 , buttons "rename" False
                 ]
 
@@ -480,7 +490,7 @@ dialog model =
             shell spec.title
                 [ p [] [ text spec.body ]
                 , div [ class "dialog-actions" ]
-                    [ button [ class "quiet-button", id "dialog-first", onClick CloseDialog ] [ text "cancel" ]
+                    [ button [ id "dialog-first", onClick CloseDialog ] [ text "cancel" ]
                     , button [ class "danger", onClick SubmitDialog ] [ text spec.label ]
                     ]
                 ]
@@ -490,21 +500,21 @@ dialog model =
                 [ p [] [ text (form.action.kind ++ " · " ++ form.action.repository ++ "#" ++ String.fromInt form.action.pull ++ " · " ++ form.action.method ++ " at "), code [] [ text (String.left 12 form.action.headSha) ] ]
                 , case form.preview of
                     Nothing ->
-                        p [ class "muted loading" ] [ text "checking the pull request now…" ]
+                        p [ class "muted" ] [ text "Checking the pull request now." ]
 
                     Just (Err error) ->
-                        p [ class "problem" ] [ text ("it could not be checked: " ++ error.message) ]
+                        p [ class "problem" ] [ text ("It could not be checked: " ++ error.message) ]
 
                     Just (Ok known) ->
                         div []
                             [ case known.pullTitle of
                                 Just title_ ->
-                                    p [] [ text ("pull request: " ++ title_ ++ " (" ++ Maybe.withDefault "?" known.pullState ++ ")") ]
+                                    p [] [ text ("Pull request: " ++ title_ ++ " (" ++ Maybe.withDefault "?" known.pullState ++ ")") ]
 
                                 Nothing ->
                                     text ""
                             , if List.isEmpty known.problems then
-                                label [] [ text ("type " ++ known.confirm ++ " to confirm"), input [ id "dialog-first", value form.typed, onInput (DialogField "confirm") ] [] ]
+                                label [] [ text ("Type " ++ known.confirm ++ " to confirm"), input [ id "dialog-first", value form.typed, onInput (DialogField "confirm") ] [] ]
 
                               else
                                 ul [ class "problem" ] (List.map (\words -> li [] [ text words ]) known.problems)
@@ -514,12 +524,12 @@ dialog model =
                         p [ class "note", attribute "role" "status" ] [ text words ]
 
                     Just (Err error) ->
-                        p [ class "problem", attribute "role" "alert" ] [ text ("it did not run: " ++ error.message) ]
+                        p [ class "problem", attribute "role" "alert" ] [ text ("It did not run: " ++ error.message) ]
 
                     Nothing ->
                         text ""
                 , div [ class "dialog-actions" ]
-                    [ button [ class "quiet-button", onClick CloseDialog ] [ text "close" ]
+                    [ button [ onClick CloseDialog ] [ text "close" ]
                     , button
                         [ class "danger"
                         , onClick SubmitDialog

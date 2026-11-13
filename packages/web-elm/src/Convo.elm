@@ -75,16 +75,16 @@ stepView live item =
 
         mark =
             if item.isError then
-                span [ class "step-mark failed" ] [ text "✕" ]
+                span [ class "step-mark failed" ] []
 
             else if running then
-                span [ class "step-mark running" ] [ text "▶" ]
+                span [ class "step-mark running" ] []
 
             else if item.done then
-                span [ class "step-mark done" ] [ text "✓" ]
+                span [ class "step-mark done" ] []
 
             else
-                span [ class "step-mark" ] [ text "·" ]
+                span [ class "step-mark" ] []
 
         summary_ =
             item.input |> Maybe.map Phase.inputSummary |> Maybe.withDefault ""
@@ -305,7 +305,7 @@ composer model conv options =
                         "sending…"
 
                      else if options.working then
-                        "send (steers)"
+                        "send"
 
                      else
                         "send"
@@ -347,8 +347,8 @@ chatPage model =
                     , div [ class "head-actions" ] [ modelSelect chatBase model.chatModels ]
                     ]
                 , transcriptView model conv Nothing
-                , div [ class "strip", classList [ ( "running", working ) ] ]
-                    [ span [ class ("pill " ++ runClass conv.status) ] [ text (runWords conv.status) ]
+                , div [ class "strip", classList [ ( "working", working ) ] ]
+                    [ span [ class ("state " ++ runClass conv.status) ] [ text (runWords conv.status) ]
                     , span [ class "strip-doing" ] [ text (runDoing conv) ]
                     , streamNote conv
                     , if working then
@@ -357,7 +357,7 @@ chatPage model =
                       else
                         text ""
                     ]
-                , composer model conv { blocked = Nothing, hold = Nothing, working = working, placeholder_ = "tell optchat what you want done" }
+                , composer model conv { blocked = Nothing, hold = Nothing, working = False, placeholder_ = "Tell optchat what you want done" }
                 ]
 
 
@@ -387,7 +387,7 @@ runClass : Maybe RunStatus -> String
 runClass status =
     case Maybe.map .state status of
         Just Working ->
-            "running"
+            "working"
 
         Just Failed ->
             "failed"
@@ -493,9 +493,8 @@ threadPage model id =
                      else
                         Nothing
                     )
-                , div [ class "strip", classList [ ( phaseClass value, True ) ] ]
-                    [ glyph value
-                    , pill value
+                , div [ class ("strip " ++ stateClass value) ]
+                    [ stateWord value
                     , span [ class "strip-doing" ] [ text (Phase.activityLine value item (List.drop (List.length conv.events - 4) conv.events)) ]
                     , case elapsed model item value of
                         Just ( time, why ) ->
@@ -527,13 +526,13 @@ threadPage model id =
                     , placeholder_ =
                         case value of
                             Busy ->
-                                "write ahead: it sends when the run has ended"
+                                "Write ahead: you can send it when the run has ended"
 
                             Asleep ->
-                                "a message wakes its machine"
+                                "A message wakes its machine"
 
                             _ ->
-                                "message this thread"
+                                "Message this thread"
                     }
                 , panel model conv item value
                 ]
@@ -568,7 +567,7 @@ panel model conv item value =
         [ h2 [] [ text "where it runs" ]
         , fact "runner" [ a [ href "#/runners" ] [ text (runnerName model item) ] ]
         , fact "machine" [ code [] [ text (Maybe.withDefault "none yet" item.vmId) ] ]
-        , fact "state" [ pill value ]
+        , fact "state" [ stateWord value ]
         , case item.sleep of
             Just (Suspended at) ->
                 fact "sleep" [ text ("suspended " ++ ago model.now at ++ "; holds no slot") ]

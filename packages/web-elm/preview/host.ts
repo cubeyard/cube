@@ -11,7 +11,7 @@
  *   opening an agent or waking a machine.
  * - synthetic.ts: rows for states a host without runners cannot reach.
  *
- * node packages/web-elm/preview/host.ts --scratch DIR --port N [--host H] [--allowed-host NAME] */
+ * node packages/web-elm/preview/host.ts --scratch DIR --port N [--host H] [--allowed-host NAME] [--seed] */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -26,7 +26,7 @@ import { synthetic } from "./synthetic.ts";
 const { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } = await import(
   path.resolve(import.meta.dirname, "../../server/node_modules/@earendil-works/pi-ai/dist/index.js")) as typeof import("../../server/node_modules/@earendil-works/pi-ai/dist/index.js");
 
-const { values } = parseArgs({ options: { scratch: { type: "string" }, port: { type: "string" }, host: { type: "string" }, "allowed-host": { type: "string", multiple: true } } });
+const { values } = parseArgs({ options: { scratch: { type: "string" }, port: { type: "string" }, host: { type: "string" }, "allowed-host": { type: "string", multiple: true }, seed: { type: "boolean" } } });
 if (!values.scratch || !values.port) throw new Error("usage: host.ts --scratch DIR --port N [--host H] [--allowed-host NAME]");
 const scratch = path.resolve(values.scratch);
 const WEB = path.resolve(import.meta.dirname, "../dist");
@@ -179,6 +179,13 @@ for (const name of ["demo", "atlas"]) {
   const repository = seedRepository(name, `# ${name}\n\nseeded by the preview host; synthetic.\n`);
   const { project } = await post("/api/projects", { name, repositories: [{ url: repository, base: "main" }] });
   if (project.status !== "ready") throw new Error(`seeded project ${name}: ${JSON.stringify(project)}`);
+}
+// --seed: two real threads to look at, so the floor is not only synthetic rows.
+if (values.seed) {
+  const { projects } = await (await fetch(`${url}/api/projects`, { headers: { "x-preview-raw": "1" } })).json() as { projects: { id: string; name: string }[] };
+  for (const [name, said] of [["demo", "demo artifact"], ["atlas", "demo work"]] as const) {
+    await post("/api/threads", { projectId: projects.find(project => project.name === name)!.id, requestId: `seed-${name}`, text: said });
+  }
 }
 console.log(`ready ${url} scratch=${scratch} pid=${process.pid}`);
 

@@ -55,90 +55,38 @@ ago now at =
     duration (now - at) ++ " ago"
 
 
-groupClass : Group -> String
-groupClass value =
-    case value of
-        NeedsYou ->
-            "needs"
-
-        Running ->
-            "running"
-
-        GettingReady ->
-            "preparing"
-
-        Quiet ->
-            "quiet"
-
-
-phaseClass : Phase -> String
-phaseClass value =
+{-| The four colours of the floor, as class names: a card's whole head
+takes one.
+-}
+stateClass : Phase -> String
+stateClass value =
     case value of
         MachineFailed _ ->
             "failed"
 
-        Ended (Phase.RunFailed _) _ ->
+        Ended (Phase.RunFailed _) True ->
             "failed"
 
-        Asleep ->
-            "asleep"
-
         _ ->
-            groupClass (Phase.group value)
+            case Phase.group value of
+                NeedsYou ->
+                    "foryou"
+
+                Running ->
+                    "working"
+
+                GettingReady ->
+                    "readying"
+
+                Quiet ->
+                    "quiet"
 
 
-{-| The state mark: a shape and a colour, never colour alone.
+{-| The state in words beside a square of its colour.
 -}
-glyph : Phase -> Html msg
-glyph value =
-    span [ class ("glyph " ++ phaseClass value), attribute "aria-hidden" "true" ]
-        [ text
-            (case value of
-                MachineFailed _ ->
-                    "✕"
-
-                Ended (Phase.RunFailed _) _ ->
-                    "✕"
-
-                Ended Phase.RunStopped _ ->
-                    "■"
-
-                Ended _ True ->
-                    "●"
-
-                Ended _ False ->
-                    "✓"
-
-                Busy ->
-                    "▶"
-
-                Background _ ->
-                    "▶"
-
-                Starting ->
-                    "◌"
-
-                WaitingSlot _ ->
-                    "⧖"
-
-                WakingUp ->
-                    "◌"
-
-                Asleep ->
-                    "☾"
-
-                NeverRan ->
-                    "○"
-
-                Unreported ->
-                    "?"
-            )
-        ]
-
-
-pill : Phase -> Html msg
-pill value =
-    span [ class ("pill " ++ phaseClass value) ] [ text (Phase.label value) ]
+stateWord : Phase -> Html msg
+stateWord value =
+    span [ class ("state " ++ stateClass value) ] [ text (Phase.label value) ]
 
 
 runnerName : Model -> Thread -> String
@@ -222,40 +170,55 @@ empty words =
     p [ class "empty" ] [ text words ]
 
 
-threadRow : Model -> Bool -> Thread -> Html Msg
-threadRow model current item =
+{-| A thread as a card in a bay: the coloured head carries its title and
+state, the body what it is doing.
+-}
+card : Model -> Thread -> Html Msg
+card model item =
     let
         value =
             phaseOf model item
 
         known =
             runOf model item
+
+        current =
+            (floorOrder model |> List.drop model.cursor |> List.head |> Maybe.map .id) == Just item.id && model.cursor >= 0
     in
     a
         [ href ("#/t/" ++ item.id)
-        , classList [ ( "row", True ), ( phaseClass value, True ), ( "cursor", current ) ]
+        , classList [ ( "card", True ), ( stateClass value, True ), ( "cursor", current ) ]
         , attribute "data-thread" item.id
         , attribute "data-phase" (Phase.label value)
         ]
-        [ glyph value
-        , div [ class "row-main" ]
-            [ div [ class "row-top" ]
-                [ strong [] [ text (threadLabel item) ]
-                , pill value
-                , case elapsed model item value of
-                    Just ( time, why ) ->
-                        span [ class "elapsed", title why ] [ text time ]
-
-                    Nothing ->
-                        text ""
-                ]
-            , div [ class "row-doing" ] [ text (Phase.activityLine value item known.events) ]
-            , div [ class "row-meta" ]
-                [ span [ class "tag" ] [ text item.projectName ]
-                , span [] [ text ("on " ++ runnerName model item) ]
-                , span [] [ text (item.agent ++ (item.model |> Maybe.map (\m -> " · " ++ m.id) |> Maybe.withDefault "")) ]
-                , span [] [ text (Maybe.withDefault "" item.name) ]
-                , code [] [ text (shortId item.id) ]
-                ]
+        [ div [ class "card-head" ]
+            [ span [ class "card-title" ] [ text (threadLabel item) ]
+            , span [ class "card-state" ] [ text (Phase.label value) ]
             ]
+        , p [ classList [ ( "card-doing", True ), ( "cmd", value == Busy ) ] ] [ text (Phase.activityLine value item known.events) ]
+        , p [ class "card-foot" ]
+            [ span [] [ text item.projectName ]
+            , case elapsed model item value of
+                Just ( time, why ) ->
+                    span [ title why ] [ text time ]
+
+                Nothing ->
+                    text ""
+            ]
+        ]
+
+
+{-| A thread in the "for you" list: enough of its last words to decide
+whether to open it.
+-}
+trayItem : Model -> Thread -> Html Msg
+trayItem model item =
+    let
+        value =
+            phaseOf model item
+    in
+    a [ href ("#/t/" ++ item.id), class ("tray-item " ++ stateClass value), attribute "data-tray" item.id ]
+        [ div [ class "tray-head" ] [ stateWord value, span [ class "tray-where" ] [ text (item.projectName ++ " · " ++ runnerName model item) ] ]
+        , p [ class "tray-title" ] [ text (threadLabel item) ]
+        , p [ class "tray-text" ] [ text (Phase.activityLine value item (runOf model item).events) ]
         ]

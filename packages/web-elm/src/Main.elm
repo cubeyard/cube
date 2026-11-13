@@ -69,7 +69,9 @@ init flags url key =
             , cursor = -1
             , goPending = False
             , counter = 0
-            , quietOpen = False
+            , deskTarget = "optchat"
+            , deskBusy = False
+            , deskError = Nothing
             }
 
         ( entered, enter ) =
@@ -743,8 +745,35 @@ update msg model =
         SetSearch text ->
             ( { model | search = text }, Cmd.none )
 
-        ToggleQuiet ->
-            ( { model | quietOpen = not model.quietOpen }, Cmd.none )
+        DeskTarget target ->
+            ( { model | deskTarget = target, deskError = Nothing }, Cmd.none )
+
+        DeskSend ->
+            let
+                words =
+                    Dict.get "desk" model.drafts |> Maybe.withDefault "" |> String.trim
+
+                counted =
+                    { model | counter = model.counter + 1, deskBusy = True, deskError = Nothing }
+            in
+            if String.isEmpty words || model.deskBusy then
+                ( model, Cmd.none )
+
+            else if model.deskTarget == "optchat" then
+                ( counted, send "POST" (chatBase ++ "/prompt") (E.object [ ( "text", E.string words ), ( "requestId", E.string (requestId model) ) ]) ok DeskSent )
+
+            else
+                ( counted
+                , send "POST" "/api/threads" (E.object [ ( "projectId", E.string model.deskTarget ), ( "requestId", E.string (requestId model) ), ( "text", E.string words ) ]) (D.field "id" D.string) Created
+                )
+
+        DeskSent result ->
+            case result of
+                Ok () ->
+                    ( { model | deskBusy = False, drafts = Dict.remove "desk" model.drafts }, poll model )
+
+                Err error ->
+                    ( { model | deskBusy = False, deskError = Just error.message }, Cmd.none )
 
         Pressed key ->
             pressed key model
@@ -774,15 +803,6 @@ update msg model =
             ( { model
                 | dialog =
                     case model.dialog of
-                        NewThread form ->
-                            NewThread
-                                (if name == "project" then
-                                    { form | projectId = value }
-
-                                 else
-                                    { form | text = value }
-                                )
-
                         NewProject form ->
                             NewProject
                                 (case name of
@@ -814,15 +834,6 @@ update msg model =
                     { model | counter = model.counter + 1 }
             in
             case model.dialog of
-                NewThread form ->
-                    if String.isEmpty (String.trim form.text) || String.isEmpty form.projectId then
-                        ( { model | dialog = NewThread { form | error = Just "choose a project and write the first message" } }, Cmd.none )
-
-                    else
-                        ( { counted | dialog = NewThread { form | busy = True, error = Nothing } }
-                        , send "POST" "/api/threads" (E.object [ ( "projectId", E.string form.projectId ), ( "requestId", E.string (requestId model) ), ( "text", E.string form.text ) ]) (D.field "id" D.string) Created
-                        )
-
                 NewProject form ->
                     ( { model | dialog = NewProject { form | busy = True, error = Nothing } }
                     , send "POST"
@@ -872,15 +883,12 @@ update msg model =
                     ( model, Cmd.none )
 
         Created result ->
-            case ( result, model.dialog ) of
-                ( Ok id, _ ) ->
-                    ( { model | dialog = NoDialog }, Cmd.batch [ go model ("#/t/" ++ id), poll model ] )
+            case result of
+                Ok id ->
+                    ( { model | deskBusy = False, drafts = Dict.remove "desk" model.drafts }, Cmd.batch [ go model ("#/t/" ++ id), poll model ] )
 
-                ( Err error, NewThread form ) ->
-                    ( { model | dialog = NewThread { form | busy = False, error = Just error.message } }, Cmd.none )
-
-                _ ->
-                    ( model, Cmd.none )
+                Err error ->
+                    ( { model | deskBusy = False, deskError = Just error.message }, Cmd.none )
 
         ProjectSaved result ->
             case ( result, model.dialog ) of
@@ -1086,7 +1094,7 @@ pressed key model =
             List.member key.tag [ "INPUT", "TEXTAREA", "SELECT" ]
 
         rows =
-            nowRows model
+            floorOrder model
 
         to fragment =
             ( { model | goPending = False }, go model fragment )
@@ -1109,6 +1117,9 @@ pressed key model =
 
     else if model.goPending then
         case key.key of
+            "f" ->
+                to "#/"
+
             "n" ->
                 to "#/"
 
@@ -1162,7 +1173,7 @@ pressed key model =
                 ( model, focus "search" )
 
             "n" ->
-                update (Open (View.newThreadDialog model Nothing)) model
+                ( model, Cmd.batch [ go model "#/", focus "desk" ] )
 
             _ ->
                 ( model, Cmd.none )

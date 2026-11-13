@@ -73,7 +73,7 @@ export function synthetic() {
           { name: "build-prepare", attempt: 1, state: "running", startedAt: now - 3 * MIN + 3400, detail: "setup: pnpm install" }] },
         status: () => null, events: () => [asked("s.1", "synthetic: add a health endpoint")] },
       { id: "syn-queued", title: "synthetic: waits for a free slot", words: "synthetic queuer", emoji: "🧪", runner: SERVER, state: "starting",
-        vm: { vmId: "syn0000000000005", suspension: { state: "queued", waiting: "runner server-synthetic has no free slot (4 of 4 machines run)", since: born - 4 * MIN } },
+        vm: { vmId: "syn0000000000005", suspension: { state: "queued", waiting: "runner server-synthetic has no free slot (6 of 6 machines run)", since: born - 4 * MIN } },
         status: () => null, events: () => [asked("q.1", "synthetic: update the changelog")] },
       { id: "syn-failed", title: "synthetic: setup hook failed", words: "synthetic failure", emoji: "🧪", runner: SERVER, state: "error", failureKind: "allocation",
         error: "workspace allocation failed: the setup hook exited with status 1 (synthetic)",
@@ -99,14 +99,14 @@ export function synthetic() {
   const listed = (row: Row) => ({ id: row.id, projectId: PROJECT.id, runnerId: row.runner, title: row.title, name: { emoji: row.emoji, words: row.words }, model: { provider: "faux", id: "faux-1" },
     agent: "pi", archived: !!row.archived, createdAt: born - 60 * MIN, vm: row.vm, state: row.state, error: row.error ?? null, failureKind: row.failureKind ?? null, waiting: null, project: PROJECT });
   const transcript = (row: Row) => ({ agent: "pi", owner: null, status: row.status() ?? { state: "idle", run: null, error: null }, events: row.events(), start: 0 });
-  const runner = (id: string, nodeId: string, reachable: boolean, taken: number) => {
+  const runner = (id: string, nodeId: string, reachable: boolean, total: number, taken: number) => {
     const now = Date.now();
     const report = { at: reachable ? now - 20_000 : now - 14_500 * MIN, ageMs: reachable ? 20_000 : 14_500 * MIN, fresh: reachable, softwareVersion: "0.3.47 (synthetic)", protocolVersion: 4,
-      lifecycle: "ready", draining: false, error: null, activeVms: taken, runningVms: taken, maxActiveVms: 4, retainedVms: 1, retainedBytes: 0, platform: reachable ? "linux-x86_64" : "macos-aarch64" };
+      lifecycle: "ready", draining: false, error: null, activeVms: taken, runningVms: taken, maxActiveVms: total, retainedVms: 1, retainedBytes: 0, platform: reachable ? "linux-x86_64" : "macos-aarch64" };
     return { id, nodeId, enrolledAt: born - 40_000 * MIN, kind: "vm", protocol: 4, byName: false,
       contact: { status: reachable ? "reachable" : "unreachable", lastAttemptAt: now - 20_000, lastContactAt: report.at, unreachableSince: reachable ? null : report.at,
         error: reachable ? null : "connect ETIMEDOUT (synthetic)" },
-      report, slots: { total: 4, totalSource: "reported", reserved: taken, free: reachable ? 4 - taken : 0, allocatable: reachable }, retirement: "none",
+      report, slots: { total, totalSource: "reported", reserved: taken, free: reachable ? total - taken : 0, allocatable: reachable }, retirement: "none",
       unknown: reachable ? [] : ["its machines now: the last report is 10 d old (synthetic)"] };
   };
 
@@ -166,8 +166,8 @@ export function synthetic() {
       }
       if (url.pathname === "/api/runners/observed") {
         const body = await real();
-        json({ ...body, pool: { ...body.pool, slots: body.pool.slots + 4, reserved: body.pool.reserved + 4, runners: body.pool.runners + 2 },
-          runners: [...body.runners, runner(SERVER, "server-synthetic", true, 4), runner(MAC, "mac-synthetic", false, 1)] });
+        json({ ...body, pool: { ...body.pool, slots: body.pool.slots + 6, reserved: body.pool.reserved + 6, runners: body.pool.runners + 2 },
+          runners: [...body.runners, runner(SERVER, "server-synthetic", true, 6, 6), runner(MAC, "mac-synthetic", false, 4, 1)] });
         return true;
       }
       return false;

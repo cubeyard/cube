@@ -44,21 +44,21 @@ artifacts model =
                     empty "no artifacts yet. an agent writes one when a result deserves a document."
 
                 else
-                    div [ class "rows" ]
+                    div [ class "ledger" ]
                         (List.map
                             (\item ->
-                                a [ href ("#/a/" ++ item.id), class "row plain" ]
+                                a [ href ("#/a/" ++ item.id), class "entry" ]
                                     [ div [ class "row-main" ]
                                         [ div [ class "row-top" ]
                                             [ strong [] [ text item.title ]
-                                            , span [ class "pill quiet" ] [ text ("revision " ++ String.fromInt item.head) ]
+                                            , span [ class "state quiet" ] [ text ("revision " ++ String.fromInt item.head) ]
                                             , if item.comments.draft > 0 then
-                                                span [ class "pill needs" ] [ text (String.fromInt item.comments.draft ++ " unsent comments") ]
+                                                span [ class "state foryou" ] [ text (String.fromInt item.comments.draft ++ " unsent comments") ]
 
                                               else
                                                 text ""
                                             , if item.comments.undeliverable > 0 then
-                                                span [ class "pill failed" ] [ text (String.fromInt item.comments.undeliverable ++ " undeliverable") ]
+                                                span [ class "state failed" ] [ text (String.fromInt item.comments.undeliverable ++ " undeliverable") ]
 
                                               else
                                                 text ""
@@ -218,7 +218,7 @@ projects model =
                     empty "no projects yet. add one to start threads."
 
                 else
-                    div [ class "cards" ]
+                    div [ class "ledger" ]
                         (List.map
                             (\item ->
                                 let
@@ -228,17 +228,17 @@ projects model =
                                     working =
                                         open |> List.filter (\t -> Phase.group (phaseOf model t) == Phase.Running) |> List.length
                                 in
-                                div [ class "card", attribute "data-project" item.name ]
+                                div [ class "entry", attribute "data-project" item.name ]
                                     [ div [ class "row-top" ]
                                         [ h2 [] [ text item.name ]
                                         , span
                                             [ class
-                                                ("pill "
+                                                ("state "
                                                     ++ (if item.status == "ready" then
-                                                            "done"
+                                                            "ok"
 
                                                         else if item.status == "checking" then
-                                                            "preparing"
+                                                            "readying"
 
                                                         else
                                                             "failed"
@@ -291,7 +291,7 @@ projects model =
                                             )
                                         ]
                                     , div [ class "card-actions" ]
-                                        [ button [ class "primary", onClick (Open (NewThread { projectId = item.id, text = "", busy = False, error = Nothing })), disabled (item.status /= "ready") ] [ text "new thread" ]
+                                        [ a [ class "button-link", href "#/", onClick (DeskTarget item.id) ] [ text "start a thread" ]
                                         , a [ class "button-link", href "#/", onClick (SetProjectFilter (Just item.id)) ] [ text "its threads" ]
                                         , button [ class "quiet-button", onClick (Do "check" (post ("/api/projects/" ++ item.id ++ "/check") ("checked " ++ item.name))) ] [ text "check again" ]
                                         , button
@@ -337,14 +337,14 @@ runnerCard model compact item =
         taken =
             item.slotsTotal - item.slotsFree
     in
-    div [ class "card runner", classList [ ( "stale", item.contact == "unreachable" ) ], attribute "data-runner" item.nodeId ]
+    div [ class "entry runner", classList [ ( "stale", item.contact == "unreachable" ) ], attribute "data-runner" item.nodeId ]
         [ div [ class "row-top" ]
             [ h3 [] [ text item.nodeId ]
             , span
                 [ class
-                    ("pill "
+                    ("state "
                         ++ (if reachable then
-                                "done"
+                                "ok"
 
                             else if item.contact == "unknown" then
                                 "quiet"
@@ -356,10 +356,10 @@ runnerCard model compact item =
                 ]
                 [ text item.contact ]
             , if item.protocol /= 4 then
-                span [ class "pill quiet" ] [ text "retired protocol 3" ]
+                span [ class "state quiet" ] [ text "retired protocol 3" ]
 
               else if item.byName then
-                span [ class "pill quiet" ] [ text "by name only" ]
+                span [ class "state quiet" ] [ text "by name only" ]
 
               else
                 text ""
@@ -387,7 +387,7 @@ runnerCard model compact item =
                             value =
                                 phaseOf model t
                         in
-                        li [] [ glyph value, div [] [ a [ href ("#/t/" ++ t.id) ] [ text (threadLabel t) ], div [ class "muted" ] [ text (Phase.label value) ] ] ]
+                        li [] [ a [ href ("#/t/" ++ t.id) ] [ text (threadLabel t) ], text " ", stateWord value ]
                     )
                     hosted
                 )
@@ -443,7 +443,7 @@ runners model =
                         empty "no runner is enrolled, so no thread can start."
 
                       else
-                        div [ class "cards" ] (List.map (runnerCard model False) known.runners)
+                        div [ class "ledger" ] (List.map (runnerCard model False) known.runners)
                     , if List.isEmpty known.notReported then
                         text ""
 
@@ -488,16 +488,16 @@ history model =
                     empty ("no archived thread matches “" ++ model.search ++ "”.")
 
                 else
-                    div [ class "rows" ]
+                    div [ class "ledger" ]
                         (List.map
                             (\t ->
-                                div [ class "row plain" ]
+                                div [ class "entry" ]
                                     [ div [ class "row-main" ]
                                         [ div [ class "row-top" ]
                                             [ strong [] [ text (threadLabel t) ]
-                                            , span [ class "pill quiet" ] [ text "archived" ]
+                                            , span [ class "state quiet" ] [ text "archived" ]
                                             , if t.retain == Just True && not t.discarded then
-                                                span [ class "pill needs" ] [ text "disk kept" ]
+                                                span [ class "state foryou" ] [ text "disk kept" ]
 
                                               else
                                                 text ""
@@ -540,11 +540,11 @@ settings model =
             model.settings
 
         part title_ content =
-            section [ class "card" ] (h2 [] [ text title_ ] :: content)
+            section [ class "entry" ] (h2 [] [ text title_ ] :: content)
     in
     div [ class "page" ]
         [ header [ class "page-head" ] [ div [] [ h1 [] [ text "settings" ], p [ class "muted" ] [ text "what this cubed is, what it can reach and what it has spent. most of it is read-only in this preview." ] ] ]
-        , div [ class "cards" ]
+        , div [ class "ledger" ]
             [ part "this cubed"
                 [ case model.health of
                     Just known ->
@@ -574,7 +574,7 @@ settings model =
                                 (\item ->
                                     li []
                                         [ text (item.name ++ " · ")
-                                        , span [ class ("pill " ++ (if item.connected then "done" else "failed")) ] [ text (if item.connected then "connected" else "not connected") ]
+                                        , span [ class ("state " ++ (if item.connected then "ok" else "failed")) ] [ text (if item.connected then "connected" else "not connected") ]
                                         , if item.checkError then
                                             span [ class "problem" ] [ text " its last check failed" ]
 

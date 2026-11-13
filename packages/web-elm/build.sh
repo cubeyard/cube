@@ -4,5 +4,5 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 "${ELM:-elm}" make src/Main.elm --optimize --output=dist/elm.js
-cp static/index.html static/boot.js static/app.css dist/
+cp static/index.html static/boot.js static/app.css static/archivo-latin.woff2 dist/
 echo "built $(pwd)/dist"
