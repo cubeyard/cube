@@ -1,0 +1,205 @@
+/** Workspaces through the real cubed over HTTP; offline and disposable (a
+ * faux model, no machine).
+ *
+ *   1. A state from before workspaces (one chat, two projects) started by
+ *      this cubed: each project is a workspace whose chat has the old chat;
+ *      a new workspace's chat is empty and shows the fixed welcome.
+ *   2. Two chats at once: a message in one is in that one only.
+ *   3. The routes of the UI from before workspaces (/api/optchat,
+ *      /api/projects) reach the same things and no further: a chat only by
+ *      naming its workspace once there are several.
+ *   4. Lists by workspace: threads, artifacts, usage.
+ *   5. Archive and restore over HTTP.
+ *   6. A chat still working when cubed starts: after the wait, no workspace
+ *      chat opens and every chat route says why; the next start goes on. */
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import type { AddressInfo } from "node:net";
+import { createModels, fauxAssistantMessage, fauxProvider, type Message } from "@earendil-works/pi-ai";
+import { createCubed } from "../src/index.ts";
+import { OptChat, type OptThreads } from "../src/optchat.ts";
+import { Registry } from "../src/registry.ts";
+import { CHAT_WELCOME } from "../src/workspace-chats.ts";
+import { chatDirectory, migrationRecord } from "../src/workspace-migration.ts";
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-workspaces-api-"));
+const faux = fauxProvider({ tokensPerSecond: 100_000 });
+const models = createModels();
+models.setProvider(faux.provider);
+const model = { provider: faux.getModel().provider, id: faux.getModel().id };
+let hung: (() => void) | null = null;
+faux.setResponses(Array.from({ length: 2000 }, () => async (request: { messages: Message[] }) => {
+  const system = JSON.stringify(request.messages.filter(message => message.role === "system"));
+  if (system.includes("You write the memory of OptChat")) return fauxAssistantMessage("a summary");
+  const last = request.messages.at(-1)!;
+  const said = last.role !== "user" ? "" : typeof last.content === "string" ? last.content : last.content.flatMap(part => part.type === "text" ? [part.text] : []).at(-1) ?? "";
+  if (said.includes("please hang")) await new Promise<void>(resolve => { hung = resolve; });
+  return fauxAssistantMessage(`answer: ${said.slice(0, 40)}`);
+}));
+const none = { startFailure: () => null, onStartFailure: () => () => {}, onRunFeed: () => () => {}, projects: async () => "", runners: async () => "",
+  spawn: async () => { throw new Error("no threads here"); }, tell: async () => {}, describe: async () => "", events: async () => null, history: async () => null } as unknown as OptThreads;
+async function until<T>(read: () => Promise<T>, check: (value: T) => boolean, what: string, ms = 30_000): Promise<T> {
+  let value = await read();
+  for (const deadline = Date.now() + ms; !check(value); value = await read()) { assert.ok(Date.now() < deadline, `${what}: ${JSON.stringify(value).slice(0, 600)}`); await delay(30); }
+  return value;
+}
+/** A state as a cubed before workspaces left it: projects and one chat with `messages`. */
+async function before(state: string, projects: string[], messages: string[], hang = false): Promise<void> {
+  fs.mkdirSync(state, { recursive: true });
+  const registry = new Registry(path.join(state, "registry.sqlite"));
+  registry.enrollRunner({ nodeId: "node-1", environmentId: 1, threadId: "runner-1", configPath: "/private/1.json", configHash: "h1", protocol: 4, kind: "vm" });
+  for (const id of projects) registry.saveProject({ id, name: id, status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
+  registry.close();
+  const chat = await OptChat.open({ directory: path.join(state, "optchat"), models, model: async () => model, threads: none, limits: { closeMs: 100 } });
+  for (const [index, text] of messages.entries()) {
+    const had = chat.memory.length;
+    await chat.send(text, `old-${index}`);
+    await until(async () => chat.memory.length > had && await chat.idle(), Boolean, `the old chat answers ${text}`);
+  }
+  if (hang) {
+    await chat.send("please hang", "old-hang");
+    await until(async () => hung !== null, Boolean, "the old chat's request is out");
+    // And a message still waiting behind it: the chat has work left whenever it is opened.
+    await chat.send("please hang too", "old-hang-2");
+    hung = null;
+  }
+  // Closed as a stop of cubed closes it: a turn under way is cut off, in the store as it was.
+  await chat.close();
+}
+async function start(state: string, options: { workspaceIdleMs?: number } = {}) {
+  const app = await createCubed({ state, models, claude: null, gateway: null, ...options });
+  await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
+  const call = async (route: string, body?: unknown, method = body === undefined ? "GET" : "POST") => {
+    const response = await fetch(`${base}${route}`, { method, ...body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } });
+    return { status: response.status, body: await response.json() as any };
+  };
+  const ready = () => until(() => call("/api/workspaces"), listed => listed.body.chats.state !== "preparing", "the workspaces' chats are decided");
+  const say = async (chat: string, text: string, requestId: string) => {
+    assert.equal((await call(`${chat}/prompt`, { text, requestId })).status, 200);
+    await until(() => call(`${chat}/history`), history => history.body.status.state !== "working" && JSON.stringify(history.body).includes(`answer: ${text.slice(0, 40)}`), `the chat answers ${text}`);
+  };
+  return { app, call, ready, say, close: async () => { app.server.closeAllConnections(); await app.close(); } };
+}
+const chatOf = (id: string) => `/api/workspaces/${id}/chat`;
+
+try {
+  // ---- 1. a state from before workspaces
+  const state = path.join(root, "state");
+  await before(state, ["alpha", "beta"], ["the plan is ORCHID", "and then HERON"]);
+  let cubed = await start(state);
+  let { call, say } = cubed;
+  const listed = await cubed.ready();
+  assert.deepEqual([listed.body.chats.state, listed.body.workspaces.map((item: any) => item.id).sort()], ["ready", ["alpha", "beta"]]);
+  assert.equal(migrationRecord(state)!.state, "done");
+  const views = await Promise.all(["alpha", "beta"].map(id => call(`${chatOf(id)}/view`)));
+  for (const view of views) {
+    assert.match(view.body.view, /ORCHID|a summary/);
+    assert.equal(view.body.messages, 4);
+    assert.equal(view.body.welcome, null);
+  }
+  const created = await call("/api/workspaces", { name: "gamma", repositories: [] });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  const gamma = created.body.workspace.id as string;
+  const empty = await call(`${chatOf(gamma)}/view`);
+  assert.deepEqual([empty.body.messages, empty.body.welcome], [0, CHAT_WELCOME], "a new workspace's chat is empty and asks what to build, with no model call");
+  assert.equal((await call(`${chatOf(gamma)}/history`)).body.events.length, 0);
+  console.log("ok: started on a state from before workspaces: each project's chat has the old chat; a new workspace's is empty with the fixed welcome");
+
+  // ---- 2. two chats at once
+  await Promise.all([say(chatOf("alpha"), "only alpha hears FALCON", "a-1"), say(chatOf("beta"), "only beta hears MAGPIE", "b-1")]);
+  const [alpha, beta] = await Promise.all(["alpha", "beta"].map(async id => JSON.stringify((await call(`${chatOf(id)}/history`)).body)));
+  assert.ok(alpha!.includes("FALCON") && !alpha!.includes("MAGPIE") && beta!.includes("MAGPIE") && !beta!.includes("FALCON"), "each message is in its own workspace's chat only");
+  assert.ok(alpha!.includes("ORCHID") && beta!.includes("ORCHID"), "over the same past");
+
+  // ---- 3. the routes from before workspaces
+  const projects = await call("/api/projects");
+  assert.deepEqual(projects.body.projects.map((item: any) => item.id).sort(), ["alpha", "beta", gamma].sort());
+  assert.equal((await call(`/api/projects/${gamma}`)).body.project.name, "gamma");
+  const unnamed = await call("/api/optchat/view");
+  assert.equal(unnamed.status, 409, "with several workspaces the old chat route names none");
+  assert.match(unnamed.body.error, /name one with \?workspace=/);
+  assert.equal((await call("/api/optchat/prompt", { text: "to nobody", requestId: "nobody" })).status, 409);
+  assert.equal((await call("/api/optchat/view?workspace=nope")).status, 404);
+  assert.equal((await call("/api/workspaces/nope/chat/view")).status, 404);
+  await say("/api/optchat", "unreachable", "skip").then(() => assert.fail("an unnamed chat took a message"), () => {});
+  const viaOld = async (text: string, requestId: string) => {
+    assert.equal((await call("/api/optchat/prompt?workspace=beta", { text, requestId })).status, 200);
+    await until(() => call("/api/optchat/history?workspace=beta"), history => JSON.stringify(history.body).includes(`answer: ${text}`), "the old route's chat answers");
+  };
+  await viaOld("through the old route WREN", "b-2");
+  assert.ok(JSON.stringify((await call(`${chatOf("beta")}/history`)).body).includes("WREN"), "the old route with a workspace is that workspace's chat");
+  assert.ok(!JSON.stringify((await call(`${chatOf("alpha")}/history`)).body).includes("WREN"), "and no other's");
+  console.log("ok: two chats work side by side; /api/projects and /api/optchat reach the same workspaces, a chat only when its workspace is named");
+
+  // ---- 4. lists by workspace
+  const registry = cubed.app.registry;
+  const thread = registry.createThread("alpha", "ui-1", model, "a thread in alpha");
+  registry.createThread("beta", "ui-2", model, "a thread in beta");
+  const inAlpha = await call("/api/threads?workspace=alpha");
+  assert.deepEqual(inAlpha.body.threads.map((item: any) => [item.id, item.workspace.id, item.project.id]), [[thread.id, "alpha", "alpha"]]);
+  assert.equal((await call("/api/threads")).body.threads.length, 2);
+  const usage = await call("/api/usage?workspace=alpha");
+  assert.deepEqual(usage.body.chats.map((item: any) => item.projectId), ["alpha"]);
+  assert.equal(usage.body.beforeWorkspaces, null);
+  const all = await call("/api/usage");
+  assert.ok(all.body.beforeWorkspaces.spend.tokens.total > 0, "the old chat's usage is reported once, apart");
+  assert.ok(usage.body.optchat.spend.tokens.total > 0 && usage.body.optchat.spend.tokens.total < all.body.optchat.spend.tokens.total);
+  assert.equal((await call("/api/usage?workspace=nope")).status, 404);
+  assert.deepEqual((await call(`/api/artifacts?workspace=alpha`)).body.artifacts, []);
+
+  // ---- 5. archive and restore
+  const refused = await call("/api/workspaces/alpha/archive", {});
+  assert.equal(refused.status, 409);
+  assert.match(refused.body.error, /has 1 open thread/);
+  const archived = await call(`/api/workspaces/${gamma}/archive`, {});
+  assert.ok(archived.body.workspace.archivedAt);
+  assert.equal((await call(`${chatOf(gamma)}/prompt`, { text: "anyone?", requestId: "g-1" })).status, 409);
+  assert.equal((await call(`/api/optchat/prompt?workspace=${gamma}`, { text: "anyone?", requestId: "g-2" })).status, 409, "nor through the old route");
+  assert.equal((await call(`${chatOf(gamma)}/view`)).status, 200, "an archived workspace's chat stays readable");
+  assert.match((await call("/api/threads", { projectId: gamma, requestId: "g-thread", text: "start" })).body.error, /the workspace is archived/);
+  const renamed = await call(`/api/workspaces/${gamma}`, { name: "gamma two", repositories: [] }, "PUT");
+  assert.ok(renamed.body.workspace.archivedAt, "editing an archived workspace keeps it archived");
+  assert.equal((await call(`/api/workspaces/${gamma}/unarchive`, {})).body.workspace.archivedAt, undefined);
+  await say(chatOf(gamma), "back in gamma", "g-3");
+  await cubed.close();
+
+  // A restart: the migration is not run again, and the chats are as they were.
+  cubed = await start(state);
+  ({ call, say } = cubed);
+  await cubed.ready();
+  assert.ok(JSON.stringify((await call(`${chatOf("beta")}/history`)).body).includes("WREN"));
+  assert.equal((await call(`${chatOf(gamma)}/view`)).body.messages, 2);
+  assert.equal((await call(`${chatOf("alpha")}/view`)).body.messages, 6);
+  await cubed.close();
+  console.log("ok: lists by workspace; archive refused with an open thread, then read-only and restored; a restart changes nothing");
+
+  // ---- 6. the old chat still working when cubed starts
+  const busy = path.join(root, "busy");
+  await before(busy, ["solo"], ["before the hang"], true);
+  cubed = await start(busy, { workspaceIdleMs: 400 });
+  ({ call } = cubed);
+  const failed = await cubed.ready();
+  assert.ok(hung, "the old chat was opened once more and went on with its waiting message");
+  assert.equal(failed.body.chats.state, "failed");
+  assert.match(failed.body.chats.error, /was still working after 0 s, so it was not copied/);
+  const refusedChat = await call(`${chatOf("solo")}/view`);
+  assert.equal(refusedChat.status, 503);
+  assert.match(refusedChat.body.error, /workspaces are not available: the chat from before workspaces was still working/);
+  assert.equal((await call("/api/optchat/prompt", { text: "hello?", requestId: "s-1" })).status, 503);
+  assert.ok(!fs.existsSync(chatDirectory(busy, "solo")), "no workspace chat was made");
+  assert.equal((await call("/api/workspaces")).status, 200, "the rest of cubed works");
+  await cubed.close();
+  // The next start: the cut-off turn is settled as after any stop, and the copy is made.
+  (hung as (() => void) | null)?.(); hung = null;
+  cubed = await start(busy, { workspaceIdleMs: 20_000 });
+  ({ call } = cubed);
+  assert.equal((await cubed.ready()).body.chats.state, "ready");
+  assert.match((await call("/api/optchat/view")).body.view, /before the hang|a summary/, "one workspace: the old route needs no name");
+  await cubed.close();
+  console.log("ok: a chat still working at start: workspaces stay closed with the reason on every chat route; the next start copies it");
+} finally { fs.rmSync(root, { recursive: true, force: true }); }
+console.log("workspaces api: ok");

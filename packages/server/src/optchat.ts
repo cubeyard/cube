@@ -764,6 +764,17 @@ export class OptChat {
       restartLimit: RESTART_LIMIT,
     } }, context);
     void this.harness.closed.then(end => this.ended(end), () => {});
+    // A store is one workspace's chat for good: another's is not opened,
+    // and a store with a chat in it is never adopted (only a copy made for
+    // the workspace, or a new store, is). Checked before anything is
+    // written or scheduled.
+    const existing = await this.harness.conversation(ROOT_CONVERSATION_ID, context);
+    const workspace = this.options.workspace;
+    const bound = (await this.harness.snapshot(SettingsDoc, context))?.workspace;
+    if (bound !== workspace) {
+      if (bound) throw new Error(`this chat store belongs to workspace ${bound}, not ${workspace ?? "the chat before workspaces"}; not opened`);
+      if (existing) throw new Error(`this chat store has a chat that belongs to no workspace; not opened for workspace ${workspace}`);
+    }
     // Before anything is scheduled: a chat request that was out at the last
     // stop is counted and its turn ends unanswered; it is never sent again
     // on its own (pi-sends.ts). The next message is the user's to send.
@@ -773,18 +784,10 @@ export class OptChat {
       log.warn("a chat request was out when cubed stopped: not sent again, its cost is unknown, its turn ends unanswered", { models: dropped.map(send => send.model) });
       this.requestError = "the chat's last request was out when cubed stopped, so it was not sent again (what it cost is unknown): send a message to go on";
     }
-    const existing = await this.harness.conversation(ROOT_CONVERSATION_ID, context);
-    const workspace = this.options.workspace;
     this.tree = await this.harness.commit(async tx => {
       const settings = await tx.doc(SettingsDoc);
-      // A store is one workspace's chat for good: another's is not opened,
-      // and a store with a chat in it is never adopted (only a copy made
-      // for the workspace, or a new store, is).
-      if (settings.workspace !== workspace) {
-        if (settings.workspace) throw new Error(`this chat store belongs to workspace ${settings.workspace}, not ${workspace ?? "the chat before workspaces"}; not opened`);
-        if (existing) throw new Error(`this chat store has a chat that belongs to no workspace; not opened for workspace ${workspace}`);
-        settings.workspace = workspace!;
-      }
+      // A new store is bound at its first open, for good.
+      if (workspace && !settings.workspace) settings.workspace = workspace;
       if (!settings.tree) settings.tree = (await tx.createConversation({ ownership: { kind: "ownerless" } })).id;
       settings.cache ||= randomUUID();
       return settings.tree as ConversationId;
