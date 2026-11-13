@@ -510,6 +510,12 @@ export type OptChatOptions = {
   limits?: { view?: number; low?: number; node?: number; compaction?: number; compactionLow?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number; page?: number; closeMs?: number; skillsWaitMs?: number };
 };
 
+const failedOpens = new WeakMap<Error, Promise<void>>();
+/** For an error `OptChat.open` rejected with: resolves once the chat that
+ * failed to open has let go of its store, which may be after the open
+ * rejected (its close is bounded). undefined: not such an error. */
+export const releasedAfter = (error: unknown): Promise<void> | undefined => error instanceof Error ? failedOpens.get(error) : undefined;
+
 /** `total` less `baseline`, number by number; what only `total` has stays. */
 export function usageSince<T>(total: T, baseline: unknown): T {
   if (typeof total === "number") return (total - (typeof baseline === "number" ? baseline : 0)) as T;
@@ -670,10 +676,18 @@ export class OptChat {
     this.released = new Promise(resolve => { this.letGo = resolve; });
   }
 
+  /** A failed open has still had the store: it closes what it opened
+   * (bounded, as any close), and the error it rejects with says when the
+   * store is really let go (`releasedAfter`). */
   static async open(options: OptChatOptions): Promise<OptChat> {
     const chat = new OptChat(options);
     try { await chat.start(); }
-    catch (error) { await chat.close(); throw error; }
+    catch (error) {
+      await chat.close();
+      const failure = error instanceof Error ? error : new Error(String(error));
+      failedOpens.set(failure, chat.released);
+      throw failure;
+    }
     return chat;
   }
 

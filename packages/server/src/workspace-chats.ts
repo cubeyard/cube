@@ -6,7 +6,7 @@
  * An open workspace's chat runs (turns, summaries, thread watchers), so
  * all of them are opened when cubed starts: a thread's report needs its
  * chat open. An archived workspace's chat is opened read-only, when read. */
-import type { OptChat, OptThreads } from "./optchat.ts";
+import { releasedAfter, type OptChat, type OptThreads } from "./optchat.ts";
 import type { Project, Registry } from "./registry.ts";
 import { createLogger } from "./log.ts";
 
@@ -22,8 +22,10 @@ export class WorkspaceChatError extends Error {
 }
 
 type Opened<Handle> = { handle: Promise<Handle>; readOnly: boolean };
-/** A close under way: `closed` once the chat's `close()` returned (bounded),
- * `released` once the chat has let go of its store. */
+/** A store on its way to being free: `closed` once its chat's `close()`
+ * returned (bounded), `released` once that chat has let go of the store.
+ * Every store a chat acquired is here until then, whether the chat was
+ * closed or never finished opening. */
 type Ending = { closed: Promise<void>; released: Promise<void> };
 /** How long a request for a chat waits for the store's last owner to let go of it. */
 export const RELEASE_WAIT_MS = 20_000;
@@ -31,7 +33,7 @@ export const RELEASE_WAIT_MS = 20_000;
 export class WorkspaceChats<Handle extends { chat: Pick<OptChat, "close" | "released"> }> {
   private readonly opened = new Map<string, Opened<Handle>>();
   private readonly errors = new Map<string, string>();
-  /** The closes under way, by workspace: each until its chat has let go of the store. */
+  /** The stores not free yet, by workspace: each until its chat has let go of it. */
   private readonly ending = new Map<string, Ending>();
   private readonly options: {
     registry: Pick<Registry, "getProject" | "listProjects" | "archiveProject" | "unarchiveProject">;
@@ -78,6 +80,13 @@ export class WorkspaceChats<Handle extends { chat: Pick<OptChat, "close" | "rele
       this.opened.set(id, opening);
       opening.handle.then(() => { this.errors.delete(id); }, error => {
         if (this.opened.get(id) === opening) this.opened.delete(id);
+        // An open that failed has had the store all the same, and may hold
+        // it past its rejection: it is the store's owner until it lets go.
+        const held = releasedAfter(error);
+        if (held && !this.ending.has(id)) {
+          const released = held.finally(() => { if (this.ending.get(id)?.released === released) this.ending.delete(id); });
+          this.ending.set(id, { closed: Promise.resolve(), released });
+        }
         const message = error instanceof Error ? error.message : String(error);
         if (this.errors.get(id) !== message) log.warn("chat unavailable", { workspace: id, error: message });
         this.errors.set(id, message);
@@ -146,24 +155,27 @@ export class WorkspaceChats<Handle extends { chat: Pick<OptChat, "close" | "rele
     if (ending) return ending;
     const current = this.opened.get(id);
     if (!current) return null;
-    const chat = current.handle.then(handle => handle.chat, () => null);
+    // The chat to close and when its store is let go: the open chat's own
+    // word, or for an open that failed, its error's (it closed itself).
+    const owner = current.handle.then(handle => ({ chat: handle.chat as Pick<OptChat, "close"> | null, released: handle.chat.released as Promise<void> | undefined }),
+      error => ({ chat: null, released: releasedAfter(error) }));
     // A close that fails has not shown the store free: only `released` does.
-    const closed = chat.then(opened => opened?.close()).then(() => {}, error => { log.warn("a chat's close failed; its store stays its own until it lets go", { workspace: id, error }); });
+    const closed = owner.then(({ chat }) => chat?.close()).then(() => {}, error => { log.warn("a chat's close failed; its store stays its own until it lets go", { workspace: id, error }); });
     const released = closed.then(async () => {
-      const opened = await chat;
-      if (!opened) return;
+      const held = (await owner).released;
+      if (!held) return;
       let free = false;
-      void opened.released.then(() => { free = true; });
+      void held.then(() => { free = true; });
       await Promise.resolve();
       if (free) return;
       log.warn("a closed chat still holds its store; the workspace's chat is not opened until it lets go", { workspace: id });
-      await opened.released;
+      await held;
       log.info("the closed chat let go of its store", { workspace: id });
     }).finally(() => {
       if (this.opened.get(id) === current) this.opened.delete(id);
-      this.ending.delete(id);
+      if (this.ending.get(id) === started) this.ending.delete(id);
     });
-    const started = { closed, released };
+    const started: Ending = { closed, released };
     this.ending.set(id, started);
     return started;
   }

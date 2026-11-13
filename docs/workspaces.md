@@ -188,7 +188,10 @@ its `close()` returns: that is bounded and may return first. A read, a
 restore or a reopen that arrives meanwhile waits for the release, then
 looks at the workspace again. After 20 seconds (`RELEASE_WAIT_MS`) it is
 refused with 503 instead, and the store stays its last owner's; cubed's
-recovery loop opens the chat once that owner is gone. An archive or a
+recovery loop opens the chat once that owner is gone. An open that
+fails counts the same: it has had the store, closes what it opened, and may
+still hold it after it has rejected. Its error says when the store is let
+go (`releasedAfter`), and until then a retry is refused and opens nothing. An archive or a
 restore itself returns when the close does. `unarchive` opens the same
 store for work again. A workspace is deleted only without thread history,
 as a project was; its chat store goes with it. If its closed chat still holds the store, the

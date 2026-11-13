@@ -19,7 +19,9 @@
  *      old chat's without a project deleted after a backup.
  *   9. Usage: each chat since its copy, the past once.
  *  10. Archive: refused with an open thread, no thread after it, the chat
- *      read-only, restored as it was. */
+ *      read-only, restored as it was.
+ *  11. An open that fails has had the store: until it has let go, a retry
+ *      is refused and opens nothing; then the chat opens. */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -28,6 +30,7 @@ import path from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
+import { Harness } from "@earendil-works/pi-durable";
 import { Artifacts, type ArtifactScope } from "../src/artifact-service.ts";
 import { ArtifactStore, type ArtifactAuthor } from "../src/artifacts.ts";
 import type { GithubPulls } from "../src/github-pulls.ts";
@@ -382,6 +385,49 @@ try {
   await say(back, "back again", "w3-u3");
   await chats.closeAll();
   console.log("ok: archive: refused with an open thread; then no thread starts, the chat is read-only and readable; restored as it was");
+
+  // ---- 11. an open that fails still has the store until it lets go
+  {
+    workspace("f1");
+    const directory = path.join(root, "failed-open-chat");
+    // Every Harness on the store is counted; the first one's close is held (the one seam).
+    type AnyHarness = { close(...args: unknown[]): Promise<unknown> };
+    const harnessClass = Harness as unknown as { open(...args: unknown[]): Promise<AnyHarness> };
+    const openHarness = harnessClass.open;
+    let letGo!: () => void;
+    const held = new Promise<void>(resolve => { letGo = resolve; });
+    let harnesses = 0, live = 0, most = 0, firstClosed = false, modelsAsked = 0;
+    harnessClass.open = async (...args) => {
+      const harness = await openHarness.apply(harnessClass, args);
+      const n = ++harnesses;
+      most = Math.max(most, ++live);
+      const close = harness.close.bind(harness);
+      harness.close = async (...closing) => { if (n === 1) await held; try { return await close(...closing); } finally { live--; if (n === 1) firstClosed = true; } };
+      return harness;
+    };
+    const failing = new WorkspaceChats({ registry, ready: async () => {}, releaseWaitMs: 100, open: async (item, readOnly) => ({ chat: await OptChat.open({
+      directory, workspace: item.id, readOnly, models, limits, threads: workspaceThreads(base, registry, item.id),
+      // The first open fails after its Harness has the store.
+      model: async () => { if (++modelsAsked === 1) throw new Error("startup model unavailable"); return model; } }) }) });
+    try {
+      await assert.rejects(failing.get("f1"), /startup model unavailable/);
+      assert.equal(firstClosed, false, "the failed open's close returned at its bound, its Harness still closing");
+      assert.equal(await failing.free("f1"), false, "the store is not free: the failed open still has it");
+      const refused = (error: unknown) => error instanceof WorkspaceChatError && error.status === 503 && /its store is not free yet/.test(error.message);
+      await assert.rejects(failing.get("f1"), refused, "a retry is refused");
+      await assert.rejects(failing.get("f1", "write"), refused);
+      await failing.close("f1");
+      assert.equal(await failing.free("f1"), false, "a close of it does not free the store either");
+      await assert.rejects(failing.get("f1"), refused);
+      assert.deepEqual([harnesses, modelsAsked, most], [1, 1, 1], "nothing opened the store again");
+      letGo();
+      await until(() => firstClosed, "the failed open's Harness closes");
+      const chat = (await failing.get("f1", "write")).chat;
+      await say(chat, "after the failed open let go", "f1-u1");
+      assert.deepEqual([harnesses, most], [2, 1], "one more Harness, after the first: never two at once");
+    } finally { harnessClass.open = openHarness; letGo(); await failing.closeAll(); }
+    console.log("ok: a failed open keeps its store until it has let go: retries are refused and open nothing, then the chat opens");
+  }
 } finally {
   artifacts.close(); store.close(); registry.close();
   fs.rmSync(root, { recursive: true, force: true });

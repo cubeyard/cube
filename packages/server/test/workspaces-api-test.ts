@@ -16,6 +16,9 @@
  *      closing keeps the store: nothing opens it until it has let go.
  *      A workspace deleted while its closed chat still holds the store
  *      keeps its directory until that chat has let go.
+ *   7c. A chat that failed to open and still holds its store: a retry opens
+ *      nothing, and deleting the workspace keeps its database until the
+ *      store is let go.
  *   6b. The old chat, opened to end its turn and closed, still holding its
  *      store: no copy is taken and no workspace chat opens; once it has
  *      let go, the migration runs.
@@ -32,6 +35,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AddressInfo } from "node:net";
 import { createModels, fauxAssistantMessage, fauxProvider, type Message } from "@earendil-works/pi-ai";
+import { Harness } from "@earendil-works/pi-durable";
 import { createCubed } from "../src/index.ts";
 import { OptChat, type OptThreads } from "../src/optchat.ts";
 import { Registry } from "../src/registry.ts";
@@ -372,6 +376,46 @@ try {
       } finally { OptChat.open = wrapped; grip.letGo(); }
     } finally { OptChat.open = open; letGo(); await stuckState.close(); }
     console.log("ok: a close that returns at its bound with its Harness still closing keeps the store: reads, restore and reopen are refused, then the chat recovers once it has let go; a deleted workspace's directory stays until then");
+  }
+
+  // ---- 7c. a chat that failed to open, still holding its store, and its workspace deleted
+  {
+    const failedState = path.join(root, "failed-open");
+    type AnyHarness = { close(...args: unknown[]): Promise<unknown> };
+    const harnessClass = Harness as unknown as { open(...args: unknown[]): Promise<AnyHarness> };
+    const openHarness = harnessClass.open;
+    let letGo!: () => void;
+    const held = new Promise<void>(resolve => { letGo = resolve; });
+    let harnesses = 0, released = false;
+    harnessClass.open = async (...args) => {
+      const harness = await openHarness.apply(harnessClass, args);
+      if (++harnesses === 1) {
+        const close = harness.close.bind(harness);
+        harness.close = async (...closing) => { await held; try { return await close(...closing); } finally { released = true; } };
+      }
+      return harness;
+    };
+    // No model provider: a new chat's open fails after its Harness has the store.
+    const app = await createCubed({ state: failedState, models: createModels(), claude: null, gateway: null, chatReleaseWaitMs: 100 });
+    try {
+      app.registry.saveProject({ id: "empty", name: "empty", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
+      await assert.rejects(app.chats.get("empty"), /connect a model provider first/);
+      const database = path.join(chatDirectory(failedState, "empty"), "pi.sqlite");
+      assert.ok(fs.existsSync(database) && !released, "the failed open made the store and still holds it");
+      await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
+      const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
+      const retry = await fetch(`${base}${chatOf("empty")}/view`);
+      assert.equal(retry.status, 503, "a retry is refused while the failed open holds the store");
+      assert.match((await retry.json() as { error: string }).error, /its store is not free yet/);
+      assert.equal((await fetch(`${base}/api/workspaces/empty`, { method: "DELETE" })).status, 200);
+      assert.equal((await fetch(`${base}/api/workspaces/empty`)).status, 404, "the workspace is deleted");
+      await delay(400);
+      assert.deepEqual([fs.existsSync(database), released, harnesses], [true, false, 1], "its database stays while the failed open holds it, and nothing else opened it");
+      letGo();
+      await until(async () => fs.existsSync(path.dirname(chatDirectory(failedState, "empty"))), there => !there, "the directory is removed once the store is let go");
+      assert.deepEqual([released, harnesses], [true, 1]);
+    } finally { harnessClass.open = openHarness; letGo(); app.server.closeAllConnections(); await app.close(); }
+    console.log("ok: a chat that failed to open keeps its store: a retry opens nothing, and its deleted workspace's database stays until the store is let go");
   }
 
   // ---- 6b. the old chat, settled and closed, still holding its store
