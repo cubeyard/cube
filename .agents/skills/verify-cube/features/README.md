@@ -34,6 +34,7 @@ Each feature file has an H1 title, one paragraph of user-visible behavior, then 
 - [Projects](./projects.md) (`project`): creating a project and its repository check.
 - [Threads](./threads.md) (`thread`): starting a thread from a project, tool calls in its machine, a second turn, archive.
 - [Delegation](./delegation.md) (`spawn`): OptChat starts a thread and its report comes back to the chat.
+- [Workspaces](./workspaces.md) (`workspaces`): two workspaces, each with its own chat; a thread spawned in one reports to that one.
 - [cubed CLI](./cli.md) (`cli`): version, help, runner status, a bad option.
 
 Not mapped yet, with the tests that cover them today (all under `packages/web/test/browser/`): artifacts (`artifact-browser-test.ts`, `diagram-browser-test.ts`), settings and model providers (`settings-browser-test.ts`), skills (`skills-browser-test.ts`), the runners page (`runners-browser-test.ts`), machine startup and sleep (`startup-browser-test.ts`), thread names (`thread-names-browser-test.ts`), usage, images in messages.

@@ -36,8 +36,9 @@
   threads" below). The network stack (LAN, DNS,
   address check, CA, the guest-facing half of HTTP) is the library
   `cube-netstack` (`packages/netstack`), which berth vm runs per machine.
-- **OptChat:** the user's one endless chat (`optchat*.ts`). A second
-  in-process pi-durable Harness on `CUBED_STATE/optchat/pi.sqlite`: its
+- **OptChat:** a workspace's endless chat (`optchat*.ts`), one per
+  workspace (`workspace-chats.ts`, docs/workspaces.md). An
+  in-process pi-durable Harness on `CUBED_STATE/workspaces/<id>/chat/pi.sqlite`: its
   entries are the chat's log, a model-free conversation holds the summary tree,
   and each turn starts at a head entry. It has no machine and no code tools; it
   starts, tells and archives ordinary threads. A thread created since

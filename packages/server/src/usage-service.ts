@@ -272,7 +272,8 @@ export class UsageService {
       threads.push(await this.thread(thread.id));
     }
     const chat = await this.optchatUsage(project);
-    const subjects = [...threads, chat.usage];
+    // A workspace whose chat has used nothing adds no subject: its threads alone say whether its usage is known.
+    const subjects = project && !chat.usage.lines.length && chat.usage.coverage === "complete" ? threads : [...threads, chat.usage];
     const byProject = new Map<string, SubjectUsage[]>();
     for (const item of threads) byProject.set(item.projectId!, [...byProject.get(item.projectId!) ?? [], item]);
     const spawned = new Set(chat.threads);

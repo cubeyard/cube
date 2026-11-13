@@ -32,7 +32,7 @@ The instance has no sandbox of its own. Every tool call of its threads runs as p
 
 ## Pick the scope by risk
 
-Run the journeys the change can break, not all of them. One `run` of all five takes about 20 seconds after `pnpm build`.
+Run the journeys the change can break, not all of them. One `run` of all six takes about 30 seconds after `pnpm build`.
 
 | The change touches | Run | Also |
 | --- | --- | --- |
@@ -41,6 +41,7 @@ Run the journeys the change can break, not all of them. One `run` of all five ta
 | projects, repository checks, project page | `project` | |
 | thread start, tools, transcript, archive, guest helper | `thread` | |
 | OptChat tools, spawn, reports, delegation | `spawn` | |
+| workspaces, a chat per workspace, the chat page's workspace picker, chat scoping | `workspaces` | `packages/server/test/workspace-migration-test.ts` and `workspaces-api-test.ts` for the migration, archive and routes |
 | `cubed` flags or subcommands | `cli` | |
 | berth, keel, QEMU, gateway, egress, runner protocol, suspend | none: this skill has no VM | the native gate in DEVELOPING.md, on the host where the risk lives |
 | real providers, model auth, Claude Code | none: the model is faux | `scripts/check-claude-*.ts`, offline auth tests |

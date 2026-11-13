@@ -1,6 +1,10 @@
 # OptChat
 
-OptChat is the user's one endless chat with cube, at `#/chat` (the UI's home).
+OptChat is the chat of a workspace: one endless chat per workspace
+([workspaces.md](workspaces.md) has what a workspace is, what its chat
+reaches and how the one chat of older installations became these), at
+`#/chat` (the UI's home). What follows describes one such chat; where it
+says projects, a workspace's chat means its own workspace.
 It is an interface, not a worker: it has no machine and no code, file or shell
 tools. It starts threads in projects (`spawn`), gives a thread that has reported
 more to do (`tell`), lists its threads that are not archived (`threads`),
@@ -55,7 +59,9 @@ a merge starts once both its halves are built.
 
 ## Where things live
 
-Everything is in one pi-durable SQLite store, `<CUBED_STATE>/optchat/pi.sqlite`,
+Everything of a chat is in one pi-durable SQLite store,
+`<CUBED_STATE>/workspaces/<workspace id>/chat/pi.sqlite` (before workspaces:
+`<CUBED_STATE>/optchat/pi.sqlite`, kept as it was),
 with Pi as its only writer. cubed's live-instance socket lock (one cubed per
 `CUBED_STATE`) keeps it that way.
 

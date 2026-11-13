@@ -4,7 +4,7 @@ OptChat starts threads for the user with its `spawn` tool, answers each thread's
 
 ## Sub-features
 
-- `spawn-accept` answers `[id] accepted in <project>` at once.
+- `spawn-accept` answers `[id] accepted in this workspace` at once.
 - `spawn-report` brings the thread's report back into the chat.
 - `spawn-margin` lists the thread in the chat's margin.
 
@@ -18,10 +18,10 @@ Preconditions:
 
 - `doctor` is all `ok:`; the seeded project `demo` is ready.
 
-- **Spawn.** In `#/chat` send `tool {"name":"spawn","args":{"tasks":[{"project":"demo","task":"tool {\"name\":\"bash\",\"args\":{\"command\":\"echo spawned-<token>\"}}"}]}}`, with a token new to this run. The reply reads `result: [<id>] accepted in demo: …` with the token; the journey keeps `<id>`, the thread's 8-character short id. Captured as `01-accepted`.
+- **Spawn.** In `#/chat` send `tool {"name":"spawn","args":{"tasks":[{"task":"tool {\"name\":\"bash\",\"args\":{\"command\":\"echo spawned-<token>\"}}"}]}}`, with a token new to this run. The reply reads `result: [<id>] accepted in this workspace: …` with the token; the journey keeps `<id>`, the thread's 8-character short id. Captured as `01-accepted`.
 - **Margin.** The region `threads and artifacts from this chat` has a button for the thread, its name containing the token and ending `· demo`.
 - **Report.** Wait for the report row, `details.report > summary` with `aria-label` `report from <thread name>, turn ended: result: spawned-<token> …`. Captured as `02-report`.
-- **Proof.** `threads.json` (`/api/threads`) has exactly one thread whose id starts with `<id>`, in `demo`, titled with the task; `optchat-history.json` holds `[<id>] ended its turn; nothing of it runs now: result: spawned-<token>`.
+- **Proof.** `threads.json` (`/api/threads`) has exactly one thread whose id starts with `<id>`, in `demo`, titled with the task; `optchat-history.json` (the demo workspace's chat) holds `[<id>] ended its turn; nothing of it runs now: result: spawned-<token>`.
 
 Run: `.agents/skills/verify-cube/verify-cube run spawn`.
 

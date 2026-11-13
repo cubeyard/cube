@@ -3,7 +3,7 @@ title: projects
 description: Add a project's repositories, prepare its machines with setup scripts, and size them.
 ---
 
-A project is the repositories its threads check out, plus how their machines are prepared. Every thread belongs to one project. Projects also bound what threads share: a thread reads and revises artifacts and other threads' conversations only within its own project.
+A project is the repositories its threads check out, plus how their machines are prepared. Every thread belongs to one project. A project is also a workspace: it has its own [chat](/cube/use/chat/), which starts threads only in it. Projects also bound what threads share: a thread reads and revises artifacts and other threads' conversations only within its own project.
 
 ## add a project
 
