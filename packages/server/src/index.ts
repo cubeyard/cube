@@ -440,7 +440,16 @@ export async function createCubed(options: {
   const usage = new UsageService({
     file: path.join(options.state, "usage.sqlite"), registry, threads: path.join(options.state, "threads"),
     live: id => conversations.liveUsage(id),
-    chats: async () => Promise.all((await chats.running()).map(async ({ workspace, handle }) => ({ workspace, usage: await handle.chat.usage() }))),
+    // The chats at work, and each archived workspace's read from its store
+    // (opened with nothing running; one that never had a chat has no store).
+    chats: async () => {
+      const working = (await chats.running()).map(({ workspace, handle }) => ({ workspace, chat: handle.chat, read: "live" as const }));
+      const kept = await Promise.all(registry.listProjects().filter(workspace => workspace.archivedAt && fs.existsSync(path.join(chatDirectory(options.state, workspace.id), "pi.sqlite")))
+        .map(async workspace => chats.get(workspace.id).then(handle => ({ workspace: workspace.id, chat: handle.chat, read: "store" as const }), () => null)));
+      const seen = new Set(working.map(item => item.workspace));
+      return Promise.all([...working, ...kept.filter(item => item !== null).filter(item => !seen.has(item.workspace))]
+        .map(async ({ workspace, chat, read }) => ({ workspace, usage: await chat.usage(), read })));
+    },
     chatStore: workspace => path.join(chatDirectory(options.state, workspace), "pi.sqlite"),
     before: () => migrationRecord(options.state)?.source?.usage ?? null,
     pricing: (provider, id) => {
@@ -918,7 +927,7 @@ export async function createCubed(options: {
         try {
           if (!id && parts.length === 2 && method === "GET") {
             const workspace = url.searchParams.get("workspace");
-            return json({ artifacts: store.list().filter(artifact => !workspace || artifact.projectId === workspace).map(artifact => artifactService.summaryView(artifact)) });
+            return json({ artifacts: store.list(workspace ? { project: workspace } : {}).map(artifact => artifactService.summaryView(artifact)) });
           }
           if (!isArtifactId(id) || !store.get(id)) return json({ error: "no such artifact" }, 404);
           if (parts.length === 3 && method === "GET") return json(artifactService.view(id));

@@ -26,7 +26,7 @@ import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import type { ArtifactStore } from "./artifacts.ts";
 import { openStorage } from "./durable-agent.ts";
 import { createLogger } from "./log.ts";
-import { SettingsDoc, storeIdle, storeUsage } from "./optchat.ts";
+import { settleCompactor, SettingsDoc, storeIdle, storeUsage } from "./optchat.ts";
 import { RESTART_LIMIT } from "./pi-sends.ts";
 import type { Registry } from "./registry.ts";
 import type { OptChatUsage } from "./usage-service.ts";
@@ -108,6 +108,13 @@ async function copyFor(options: { original: string; target: string; workspace: s
     let source: NonNullable<MigrationRecord["source"]>;
     try {
       if (!await storeIdle(harness)) throw new MigrationNotIdle("the chat before workspaces has a message waiting or a turn under way");
+      // A summary request that was out when the old chat's process stopped
+      // is counted here, in the copy, before the usage every copy starts
+      // from is read: it is part of the past, once, and no copy counts it
+      // again at its first open. (A chat request out at a stop leaves a task
+      // that is not ended, so such a store is not idle and is settled by
+      // opening the original.)
+      await settleCompactor(harness);
       const usage = await storeUsage(harness);
       source = await harness.commit(async tx => {
         const settings = await tx.doc(SettingsDoc);

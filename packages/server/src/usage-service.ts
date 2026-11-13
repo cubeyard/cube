@@ -71,7 +71,7 @@ export class UsageService {
   private readonly registry: Registry;
   private readonly threads: string;
   private readonly live: (id: string) => Promise<PiUsage | null>;
-  private readonly chats: () => Promise<Array<{ workspace: string; usage: OptChatUsage }>>;
+  private readonly chats: () => Promise<Array<{ workspace: string; usage: OptChatUsage; read?: "live" | "store" }>>;
   private readonly chatStore: ((workspace: string) => string) | null;
   private readonly before: () => OptChatUsage | null;
   private readonly pricing: (provider: string, model: string) => Pricing | null;
@@ -82,9 +82,11 @@ export class UsageService {
     file: string; registry: Registry; threads: string;
     /** The open Pi agent's usage, or null when it is not open. */
     live: (id: string) => Promise<PiUsage | null>;
-    /** The usage of each workspace's chat that is open now, since its store
-     * was copied if it was (`OptChat.usage`). */
-    chats?: () => Promise<Array<{ workspace: string; usage: OptChatUsage }>>;
+    /** The usage of each workspace's chat that can be read now, since its
+     * store was copied if it was (`OptChat.usage`): the chats at work
+     * (`live`) and the archived workspaces', read from their stores with
+     * nothing running (`store`). */
+    chats?: () => Promise<Array<{ workspace: string; usage: OptChatUsage; read?: "live" | "store" }>>;
     /** A workspace's chat store: while it does not exist, that chat has used nothing. */
     chatStore?: (workspace: string) => string;
     /** What the chat before workspaces had used when it was copied into
@@ -213,8 +215,8 @@ export class UsageService {
    * or only `only`'s. `usage` is their sum, with the chat before workspaces
    * in a report of everything; `chats` has each workspace's apart. */
   async optchatUsage(only: string | null = null): Promise<{ usage: SubjectUsage; threads: string[]; chats: SubjectUsage[]; before: SubjectUsage | null }> {
-    let open = new Map<string, OptChatUsage>(), failure: string | null = null;
-    try { open = new Map((await this.chats()).map(item => [item.workspace, item.usage])); }
+    let open = new Map<string, { usage: OptChatUsage; read?: "live" | "store" }>(), failure: string | null = null;
+    try { open = new Map((await this.chats()).map(item => [item.workspace, item])); }
     catch (error) { failure = error instanceof Error ? error.message : String(error); }
     const chats: SubjectUsage[] = [], threads: string[] = [];
     for (const workspace of this.registry.listProjects()) {
@@ -222,15 +224,17 @@ export class UsageService {
       const base = { subject: `chat:${workspace.id}`, kind: "optchat" as const, title: `chat of ${workspace.name}`, projectId: workspace.id, agent: "optchat" as const, archived: !!workspace.archivedAt };
       const live = open.get(workspace.id);
       if (live) {
-        const usage = this.chatSubject(base, live);
+        const usage = this.chatSubject(base, live.usage, live.read ?? "live");
         this.store(usage, null);
         chats.push(usage);
-        threads.push(...live.threads);
+        threads.push(...live.usage.threads);
         continue;
       }
       const prior = this.stored(base.subject);
       const note = failure ? `the chat is not open (${failure})` : "the chat is not open";
-      if (prior) chats.push({ ...prior.usage, read: "snapshot", notes: [...prior.usage.notes, `${note}; this is the last reading`] });
+      // The last reading: what the workspace is now (its name, archived or
+      // not) is the registry's, and what the chat used since is not known.
+      if (prior) chats.push(subject({ ...prior.usage, ...base, incomplete: true, read: "snapshot", notes: [...prior.usage.notes, `${note}; this is the last reading, and what it used since is not in it`] }));
       else if (this.chatStore && !fs.existsSync(this.chatStore(workspace.id))) chats.push(subject({ ...base, lines: [], unknownTurns: 0, read: "store", readAt: Date.now(), notes: ["the chat has not started"] }));
       else chats.push(subject({ ...base, lines: [], unknownTurns: 0, read: "none", readAt: null, notes: [note] }));
     }

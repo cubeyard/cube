@@ -527,6 +527,25 @@ export async function storeIdle(harness: Harness): Promise<boolean> {
   return (await harness.inspect(context)).tasks.every(({ record }) => record.state.status === "terminal");
 }
 
+/** Settles the compactor answers that were out when the store's process
+ * stopped: each is counted once in `cube.optchat.cut` (its cost unknown)
+ * and its node held, in one commit; a second run finds none out. Answers the
+ * held nodes. Run by a chat as it opens, and by the migration in a copy
+ * before it reads the usage every copy starts from, so one answer out at a
+ * stop is not counted again by each copy. */
+export async function settleCompactor(harness: Harness): Promise<string[]> {
+  return harness.commit(async tx => {
+    const doc = await tx.doc(SpendDoc);
+    const cut = await tx.doc(CutDoc);
+    for (const [key, spend] of Object.entries(doc.nodes)) {
+      if (!spend.out) continue;
+      cut.compactor[spend.model] = (Object.hasOwn(cut.compactor, spend.model) ? cut.compactor[spend.model]! : 0) + 1;
+      doc.nodes[key] = { left: 0, model: spend.model, ...spend.round ? { round: spend.round } : {}, interrupted: true };
+    }
+    return Object.entries(doc.nodes).filter(([, spend]) => spend.interrupted).map(([key]) => key);
+  }, context);
+}
+
 /** A chat store's usage as its documents hold it (`OptChat.usage` without a copy's baseline). */
 export async function storeUsage(harness: Harness): Promise<OptChatUsage> {
   const compactor = await harness.snapshot(CompactorUsageDoc, context);
@@ -880,18 +899,7 @@ export class OptChat {
     // answer that was out at the last stop is counted (its cost unknown) and
     // not asked again on its own: its node is held, as a node with its
     // answers spent, until a message of the user or another compactor model.
-    const interrupted = await this.harness.commit(async tx => {
-      const doc = await tx.doc(SpendDoc);
-      const cut = await tx.doc(CutDoc);
-      const out: string[] = [];
-      for (const [key, spend] of Object.entries(doc.nodes)) {
-        if (!spend.out) continue;
-        out.push(key);
-        cut.compactor[spend.model] = (Object.hasOwn(cut.compactor, spend.model) ? cut.compactor[spend.model]! : 0) + 1;
-        doc.nodes[key] = { left: 0, model: spend.model, ...spend.round ? { round: spend.round } : {}, interrupted: true };
-      }
-      return Object.entries(doc.nodes).filter(([, spend]) => spend.interrupted).map(([key]) => key);
-    }, context);
+    const interrupted = await settleCompactor(this.harness);
     for (const key of interrupted) this.why.set(key, "its summary was out when cubed stopped (what it cost is unknown), so it was not asked again");
     if (interrupted.length) log.warn("compactor answers were out when cubed stopped: not asked again, their cost is unknown; held until a message of the user", { nodes: interrupted });
     for (const [key, spend] of Object.entries((await this.harness.snapshot(SpendDoc, context))?.nodes ?? {})) {

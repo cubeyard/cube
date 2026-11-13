@@ -330,11 +330,16 @@ export class ArtifactStore {
     const row = this.row(id);
     return row ? this.summary(row) : null;
   }
-  /** Newest first; with `authors` (or `author`), only theirs and, with `project` too, every artifact of that project. */
+  /** Newest first; with `authors` (or `author`), only theirs and, with `project` too, every artifact of that project; with `project` alone, that project's. */
   list(options: { author?: ArtifactAuthor; authors?: readonly ArtifactAuthor[]; project?: string | null; limit?: number } = {}): ArtifactSummary[] {
     const keys = options.authors ? options.authors.map(authorKey) : options.author ? [authorKey(options.author)] : null;
     const limit = options.limit ?? 200;
-    if (!keys) return (this.db.prepare("SELECT * FROM artifacts ORDER BY updated_at DESC LIMIT ?").all(limit) as Row[]).map(row => this.summary(row));
+    // Without authors: everything, or one project's, chosen before the limit
+    // so another project's newer artifacts never crowd them out.
+    if (!keys) {
+      return (options.project ? this.db.prepare("SELECT * FROM artifacts WHERE project_id = ? ORDER BY updated_at DESC LIMIT ?").all(options.project, limit)
+        : this.db.prepare("SELECT * FROM artifacts ORDER BY updated_at DESC LIMIT ?").all(limit) as Row[]).map(row => this.summary(row as Row));
+    }
     const clauses = [...keys.length ? [`author IN (${keys.map(() => "?").join(",")})`] : [], ...options.project ? ["project_id = ?"] : []];
     if (!clauses.length) return [];
     return (this.db.prepare(`SELECT * FROM artifacts WHERE ${clauses.join(" OR ")} ORDER BY updated_at DESC LIMIT ?`)

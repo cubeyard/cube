@@ -9,6 +9,8 @@
  *      twice more, it ends the same; the original is not written; a
  *      workspace made after it began gets no copy.
  *   3. A turn under way: not copied; copied once the chat has ended it.
+ *      A summary request out when the old chat's process stopped is
+ *      counted once, in the past, not once per copy.
  *   4. A store opens only for its own workspace.
  *   5. Reports: none again after the copy or a restart; a new one in one chat.
  *   6. A chat reaches its own workspace only (spawn, tell, history, archive).
@@ -23,7 +25,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { backup, DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { Artifacts, type ArtifactScope } from "../src/artifact-service.ts";
@@ -47,8 +49,15 @@ models.setProvider(faux.provider);
 const model = { provider: faux.getModel().provider, id: faux.getModel().id };
 const textOf = (message: Message) => typeof message.content === "string" ? message.content : message.content.map(part => part.type === "text" ? part.text : "").join("");
 let hung: (() => void) | null = null;
+/** While set, a summary request stays out (`summariesOut` counts them) until released. */
+let summaryHeld = false;
+let summariesOut = 0;
+const releases: Array<() => void> = [];
 faux.setResponses(Array.from({ length: 2000 }, () => async (request: { messages: Message[] }) => {
-  if (request.messages.some(message => message.role === "system" && textOf(message).includes("You write the memory of OptChat"))) return fauxAssistantMessage("a summary");
+  if (request.messages.some(message => message.role === "system" && textOf(message).includes("You write the memory of OptChat"))) {
+    if (summaryHeld) { summariesOut++; await new Promise<void>(resolve => { releases.push(resolve); }); }
+    return fauxAssistantMessage("a summary");
+  }
   const last = request.messages.at(-1)!;
   if (last.role !== "user") return fauxAssistantMessage("noted");
   // The turn's message is the last block; the ones before it are the chat's view.
@@ -203,6 +212,43 @@ try {
     assert.ok(fs.existsSync(chatDirectory(other, "b1")));
     busyStore.close(); busy.close();
     console.log("ok: a turn under way: not copied, nothing left behind; copied once it has ended");
+  }
+
+  // ---- 3b. a summary request out when the old chat's process stopped
+  {
+    const other = path.join(root, "state-crash");
+    const live = path.join(root, "state-crash-live");
+    fs.mkdirSync(other, { recursive: true });
+    const crashed = new Registry(path.join(other, "registry.sqlite"));
+    for (const id of ["k1", "k2"]) crashed.saveProject({ id, name: id, status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
+    // The chat's turn ends while a summary of its long message is still out.
+    summaryHeld = true;
+    const chat = await open(path.join(live, "optchat"));
+    await chat.send(`a long message to summarize ${"with many words ".repeat(400)}`, "k-u1");
+    await until(async () => summariesOut > 0 && await chat.idle(), "the turn has ended and a summary request is out");
+    // The store as a kill of the process leaves it: copied while its owner still has the request out.
+    fs.mkdirSync(path.join(other, "optchat"), { recursive: true });
+    const source = new DatabaseSync(path.join(live, "optchat", "pi.sqlite"), { readOnly: true });
+    await backup(source, path.join(other, "optchat", "pi.sqlite"));
+    source.close();
+    summaryHeld = false;
+    for (const release of releases.splice(0)) release();
+    await chat.close();
+    const killed = digest(path.join(other, "optchat", "pi.sqlite"));
+    const crashStore = new ArtifactStore(path.join(other, "artifacts.sqlite"));
+    const record = await migrateWorkspaces({ state: other, registry: crashed, models, artifacts: crashStore, settle: async () => { throw new Error("the chat's turn had ended: no settling"); } });
+    assert.equal(digest(path.join(other, "optchat", "pi.sqlite")), killed, "the original is not written");
+    const out = (usage: OptChatUsage) => Object.values(usage.cut?.compactor ?? {}).reduce((sum, n) => sum + n, 0);
+    assert.equal(out(record.source!.usage), 1, "the request that was out is part of the past, once");
+    const copies = await Promise.all(["k1", "k2"].map(id => open(chatDirectory(other, id), id, true)));
+    assert.deepEqual(await Promise.all(copies.map(async copy => out(await copy.usage()))), [0, 0], "no copy counts it again");
+    const service = new UsageService({ file: path.join(other, "usage.sqlite"), registry: crashed, threads: path.join(other, "threads"), live: async () => null,
+      chats: async () => Promise.all(copies.map(async (copy, n) => ({ workspace: `k${n + 1}`, usage: await copy.usage() }))), before: () => record.source!.usage });
+    assert.equal((await service.optchatUsage()).usage.unknownTurns, 1, "everything: one request without a usage report, not one per workspace");
+    service.close();
+    await Promise.all(copies.map(copy => copy.close()));
+    crashStore.close(); crashed.close();
+    console.log("ok: a summary request out when the old chat stopped: counted once before workspaces, by no copy again; the original unwritten");
   }
 
   // ---- 4. a store opens only for its own workspace

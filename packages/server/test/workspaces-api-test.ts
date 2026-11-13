@@ -10,6 +10,12 @@
  *      naming its workspace once there are several.
  *   4. Lists by workspace: threads, artifacts, usage.
  *   5. Archive and restore over HTTP.
+ *   7. A chat's store has one owner at a time: a read or a restore during
+ *      an archive waits for the archive's close.
+ *   8. An archived workspace's chat usage is what its store holds, whether
+ *      or not usage was read before, under the workspace as it is now.
+ *   9. A workspace's artifact list is its own however many newer artifacts
+ *      other workspaces have.
  *   6. A chat still working when cubed starts: after the wait, no workspace
  *      chat opens and every chat route says why; the next start goes on. */
 import assert from "node:assert/strict";
@@ -22,6 +28,7 @@ import { createModels, fauxAssistantMessage, fauxProvider, type Message } from "
 import { createCubed } from "../src/index.ts";
 import { OptChat, type OptThreads } from "../src/optchat.ts";
 import { Registry } from "../src/registry.ts";
+import { ArtifactStore } from "../src/artifacts.ts";
 import { CHAT_WELCOME } from "../src/workspace-chats.ts";
 import { chatDirectory, migrationRecord } from "../src/workspace-migration.ts";
 
@@ -176,6 +183,87 @@ try {
   assert.equal((await call(`${chatOf("alpha")}/view`)).body.messages, 6);
   await cubed.close();
   console.log("ok: lists by workspace; archive refused with an open thread, then read-only and restored; a restart changes nothing");
+
+  // ---- 7. one owner of a chat's store at a time
+  {
+    const life = path.join(root, "life");
+    cubed = await start(life);
+    ({ call, say } = cubed);
+    await cubed.ready();
+    const { chats, usage: usageService, registry: lifeRegistry } = cubed.app;
+    const made = async (name: string) => (await call("/api/workspaces", { name, repositories: [] })).body.workspace.id as string;
+    const tokensOf = (report: { optchat: { spend: { tokens: { total: number } } } | null }) => report.optchat!.spend.tokens.total;
+    const stored = async (id: string) => {
+      const used = await (await chats.get(id)).chat.usage();
+      return [...Object.values(used.chat.models), ...Object.values(used.compactor.models)].reduce((sum, item) => sum + item.totalTokens, 0);
+    };
+    const busy = await made("busy");
+    await say(chatOf(busy), "a first message", "l-1");
+    const working = (await chats.get(busy, "write")).chat;
+    hung = null;
+    assert.equal((await call(`${chatOf(busy)}/prompt`, { text: "please hang", requestId: "l-2" })).status, 200);
+    await until(async () => hung !== null, Boolean, "the chat's request is out");
+    // The archive closes the chat, which waits out its grace for the request that is out.
+    let closed = false;
+    const archiving = call(`/api/workspaces/${busy}/archive`, {}).then(answer => { closed = true; return answer; });
+    await delay(50);
+    assert.equal(closed, false, "the archive is still closing the chat");
+    assert.equal(await chats.peek(busy), null, "a chat that is closing takes no more work");
+    // A read and a restore that arrive meanwhile.
+    const order: string[] = [];
+    void archiving.then(() => order.push("archived"));
+    const reading = call(`${chatOf(busy)}/history`).then(answer => { order.push("read"); return answer; });
+    const restoring = call(`/api/workspaces/${busy}/unarchive`, {}).then(answer => { order.push("restored"); return answer; });
+    const [archived, read, restored] = await Promise.all([archiving, reading, restoring]);
+    assert.deepEqual([archived.status, read.status, restored.status], [200, 200, 200]);
+    assert.equal(order[0], "archived", `nothing else opens the store before the archive's close has ended: ${order.join(", ")}`);
+    const again = (await chats.get(busy, "write")).chat;
+    assert.notEqual(again, working, "restored: opened anew");
+    assert.equal(again.identity, working.identity, "on the same store");
+    const cut = (await again.usage()).cut!.chat;
+    assert.deepEqual(Object.values(cut), [1], `the request the close cut off is counted once, by its own chat: ${JSON.stringify(cut)}`);
+    assert.equal(lifeRegistry.getProject(busy)!.archivedAt, undefined);
+    (hung as (() => void) | null)?.(); hung = null;
+    await say(chatOf(busy), "after the restore", "l-3");
+    console.log("ok: a read and a restore during an archive wait for its close; the store never has two owners and its cut-off request is counted once");
+
+    // ---- 8. an archived workspace's usage
+    const quiet = await made("quiet");
+    await say(chatOf(quiet), "used, and usage never read", "q-1");
+    const usedQuiet = await stored(quiet);
+    await call(`/api/workspaces/${quiet}/archive`, {});
+    const neverRead = await usageService.report({ project: quiet });
+    assert.deepEqual([tokensOf(neverRead), neverRead.optchat!.coverage, neverRead.chats[0]!.archived], [usedQuiet, "complete", true], "archived without a usage read before: what its store holds");
+    const seen = await made("seen");
+    await say(chatOf(seen), "used, and read", "s-1");
+    const early = tokensOf(await usageService.report({ project: seen }));
+    await say(chatOf(seen), "used some more after the read", "s-2");
+    const usedSeen = await stored(seen);
+    assert.ok(early > 0 && usedSeen > early);
+    await call(`/api/workspaces/${seen}/archive`, {});
+    const late = await usageService.report({ project: seen });
+    assert.deepEqual([tokensOf(late), late.chats[0]!.archived, late.chats[0]!.read], [usedSeen, true, "store"], "archived after an earlier read: its final usage, not the earlier reading");
+    const everything = await usageService.report();
+    assert.equal(everything.chats.find(item => item.projectId === seen)!.spend.tokens.total, usedSeen);
+    await call(`/api/workspaces/${seen}/unarchive`, {});
+    assert.equal((await usageService.report({ project: seen })).chats[0]!.archived, false, "restored: reported as open again");
+    console.log("ok: an archived workspace's chat usage is its store's final usage, read or not before, under the workspace's state now");
+
+    // ---- 9. a workspace's artifacts, whatever the others have
+    const artifactsOf = new ArtifactStore(path.join(life, "artifacts.sqlite"));
+    const write = (workspace: string, n: number) => artifactsOf.write({ kind: "optchat", workspace }, { title: `${workspace} ${n}`, body: `# ${n}`, actions: [], projectId: workspace },
+      { agent: "optchat", workspace }, `${workspace}-${n}`).revision.artifact;
+    const own = write(quiet, 0);
+    await delay(5);
+    for (let n = 0; n < 201; n++) write(seen, n);
+    artifactsOf.close();
+    const mine = await call(`/api/artifacts?workspace=${quiet}`);
+    assert.deepEqual(mine.body.artifacts.map((item: any) => item.id), [own], "the older artifact of this workspace is listed under 201 newer ones of another");
+    assert.equal((await call(`/api/artifacts?workspace=${seen}`)).body.artifacts.length, 200);
+    assert.ok((await call("/api/artifacts")).body.artifacts.every((item: any) => item.project.id === seen), "the list of everything is the newest 200, as before");
+    await cubed.close();
+    console.log("ok: a workspace's artifact list is chosen before the limit");
+  }
 
   // ---- 6. the old chat still working when cubed starts
   const busy = path.join(root, "busy");

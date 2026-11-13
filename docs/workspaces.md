@@ -137,7 +137,7 @@ does not understand. Going back is a way to recover, not to continue.
 | `GET /api/workspaces/<id>/chat/history`, `…/stream`, `…/view`, `…/threads` | that workspace's chat; `view` has `welcome` for an empty chat |
 | `POST …/chat/prompt`, `…/chat/stop`, `GET/PATCH …/chat/model`, `…/chat/media` | |
 | `GET /api/threads?workspace=<id>` | each row has `workspace: {id, name}` |
-| `GET /api/artifacts?workspace=<id>`, `GET /api/usage?workspace=<id>` | |
+| `GET /api/artifacts?workspace=<id>`, `GET /api/usage?workspace=<id>` | the workspace's newest 200 artifacts, chosen before the limit |
 
 The server keeps no choice of workspace per client. To switch, a client
 closes one `EventSource` and opens another.
@@ -162,7 +162,8 @@ None of them reaches further than the new routes: a chat is always one
 workspace's own, and an archived workspace refuses writes through either.
 
 The web UI's chat page picks a workspace when there are several (the oldest
-at first) and remembers it in the browser.
+at first) and remembers it in the browser. A change mounts the chat page
+anew; nothing is reloaded.
 
 ## Archive
 
@@ -172,7 +173,11 @@ transaction each, so the first wins: a thread accepted first makes the
 archive fail, and after the archive no thread is accepted (from the chat or
 `POST /api/threads`). The chat is closed. Its history, view and threads
 stay readable: a read opens the store with nothing running (no turn, no
-summary, no watcher) and it takes no message. `unarchive` opens the same
+summary, no watcher) and it takes no message. A store has one owner at a
+time: the chat that is closing stays its owner until its close has ended
+(it waits out its grace for calls that are out), and a read, a restore or a
+reopen that arrives meanwhile waits for that, then looks at the workspace
+again. `unarchive` opens the same
 store for work again. A workspace is deleted only without thread history,
 as a project was; its chat store goes with it.
 
@@ -181,7 +186,11 @@ as a project was; its chat store goes with it.
 A workspace's report (`?workspace=`) has its threads and its chat since the
 copy. The report of everything adds every chat and, as `beforeWorkspaces`,
 what the one chat had used until it was copied. `chats` lists each
-workspace's chat apart.
+workspace's chat apart. An archived workspace's chat is read from its
+store, so its usage is its final usage whether or not it was read before.
+A summary request that was out when the old chat's process stopped is
+counted in the copy before the usage every copy starts from is read: once,
+before workspaces, and by no workspace again.
 
 ## Costs
 

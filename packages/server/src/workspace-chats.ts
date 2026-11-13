@@ -26,6 +26,8 @@ type Opened<Handle> = { handle: Promise<Handle>; readOnly: boolean };
 export class WorkspaceChats<Handle extends { chat: Pick<OptChat, "close"> }> {
   private readonly opened = new Map<string, Opened<Handle>>();
   private readonly errors = new Map<string, string>();
+  /** The closes under way, by workspace. */
+  private readonly ending = new Map<string, Promise<void>>();
   private readonly options: {
     registry: Pick<Registry, "getProject" | "listProjects" | "archiveProject" | "unarchiveProject">;
     /** Resolves once the installation has one chat per workspace (workspace-migration.ts); rejects with why not. */
@@ -36,38 +38,46 @@ export class WorkspaceChats<Handle extends { chat: Pick<OptChat, "close"> }> {
   constructor(options: WorkspaceChats<Handle>["options"]) { this.options = options; }
 
   /** The workspace's chat, opened if it is not. `write`: to change it (a
-   * message, a stop, its model), refused for an archived workspace. */
+   * message, a stop, its model), refused for an archived workspace. A store
+   * has one owner at a time: while the chat as it was opened is closing
+   * (its archive or restore), this waits for that close to end, then reads
+   * the workspace again, so no second Harness opens on a store whose first
+   * is still settling its calls. */
   async get(id: string, access: "read" | "write" = "read"): Promise<Handle> {
     await this.options.ready();
-    if (this.closing) throw new WorkspaceChatError("cubed is stopping", 503);
-    const workspace = this.options.registry.getProject(id);
-    if (!workspace) throw new WorkspaceChatError("workspace not found", 404);
-    const readOnly = !!workspace.archivedAt;
-    if (readOnly && access === "write") throw new WorkspaceChatError("the workspace is archived: restore it to use its chat", 409);
-    const current = this.opened.get(id);
-    if (current && current.readOnly === readOnly) return current.handle;
-    // Its archive or restore since: the chat as it was opened is closed first.
-    if (current) await this.close(id);
-    const opening: Opened<Handle> = { readOnly, handle: this.options.open(workspace, readOnly) };
-    this.opened.set(id, opening);
-    opening.handle.then(() => { this.errors.delete(id); }, error => {
-      if (this.opened.get(id) === opening) this.opened.delete(id);
-      const message = error instanceof Error ? error.message : String(error);
-      if (this.errors.get(id) !== message) log.warn("chat unavailable", { workspace: id, error: message });
-      this.errors.set(id, message);
-    });
-    return opening.handle;
+    for (;;) {
+      if (this.closing) throw new WorkspaceChatError("cubed is stopping", 503);
+      const ending = this.ending.get(id);
+      if (ending) { await ending; continue; }
+      const workspace = this.options.registry.getProject(id);
+      if (!workspace) throw new WorkspaceChatError("workspace not found", 404);
+      const readOnly = !!workspace.archivedAt;
+      if (readOnly && access === "write") throw new WorkspaceChatError("the workspace is archived: restore it to use its chat", 409);
+      const current = this.opened.get(id);
+      if (current && current.readOnly === readOnly) return current.handle;
+      // Its archive or restore since: the chat as it was opened is closed first.
+      if (current) { await this.close(id); continue; }
+      const opening: Opened<Handle> = { readOnly, handle: this.options.open(workspace, readOnly) };
+      this.opened.set(id, opening);
+      opening.handle.then(() => { this.errors.delete(id); }, error => {
+        if (this.opened.get(id) === opening) this.opened.delete(id);
+        const message = error instanceof Error ? error.message : String(error);
+        if (this.errors.get(id) !== message) log.warn("chat unavailable", { workspace: id, error: message });
+        this.errors.set(id, message);
+      });
+      return opening.handle;
+    }
   }
 
-  /** The workspace's chat if it is open for work now; nothing is opened. */
+  /** The workspace's chat if it is open for work now; nothing is opened. One that is closing is not. */
   async peek(id: string): Promise<Handle | null> {
     const current = this.opened.get(id);
-    return current && !current.readOnly ? current.handle.catch(() => null) : null;
+    return current && !current.readOnly && !this.ending.has(id) ? current.handle.catch(() => null) : null;
   }
 
   /** Every chat open for work now. */
   async running(): Promise<Array<{ workspace: string; handle: Handle }>> {
-    const all = await Promise.all([...this.opened].filter(([, opened]) => !opened.readOnly)
+    const all = await Promise.all([...this.opened].filter(([id, opened]) => !opened.readOnly && !this.ending.has(id))
       .map(async ([workspace, opened]) => ({ workspace, handle: await opened.handle.catch(() => null) })));
     return all.filter((item): item is { workspace: string; handle: Handle } => item.handle !== null);
   }
@@ -94,11 +104,22 @@ export class WorkspaceChats<Handle extends { chat: Pick<OptChat, "close"> }> {
     return workspace;
   }
 
-  async close(id: string): Promise<void> {
+  /** Closes the workspace's chat. It stays the store's owner until its
+   * close has ended: `get` waits for this, and a second close joins it. */
+  close(id: string): Promise<void> {
+    const ending = this.ending.get(id);
+    if (ending) return ending;
     const current = this.opened.get(id);
-    if (!current) return;
-    this.opened.delete(id);
-    await (await current.handle.catch(() => null))?.chat.close();
+    if (!current) return Promise.resolve();
+    const ended = (async () => {
+      try { await (await current.handle.catch(() => null))?.chat.close(); }
+      finally {
+        if (this.opened.get(id) === current) this.opened.delete(id);
+        this.ending.delete(id);
+      }
+    })();
+    this.ending.set(id, ended);
+    return ended;
   }
   async closeAll(): Promise<void> {
     this.closing = true;
