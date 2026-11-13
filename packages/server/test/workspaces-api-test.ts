@@ -12,6 +12,8 @@
  *   5. Archive and restore over HTTP.
  *   7. A chat's store has one owner at a time: a read or a restore during
  *      an archive waits for the archive's close.
+ *      A chat whose close returned at its bound with its Harness still
+ *      closing keeps the store: nothing opens it until it has let go.
  *   8. An archived workspace's chat usage is what its store holds, whether
  *      or not usage was read before, under the workspace as it is now.
  *   9. A workspace's artifact list is its own however many newer artifacts
@@ -76,7 +78,7 @@ async function before(state: string, projects: string[], messages: string[], han
   // Closed as a stop of cubed closes it: a turn under way is cut off, in the store as it was.
   await chat.close();
 }
-async function start(state: string, options: { workspaceIdleMs?: number } = {}) {
+async function start(state: string, options: { workspaceIdleMs?: number; chatReleaseWaitMs?: number } = {}) {
   const app = await createCubed({ state, models, claude: null, gateway: null, ...options });
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
@@ -214,6 +216,10 @@ try {
     void archiving.then(() => order.push("archived"));
     const reading = call(`${chatOf(busy)}/history`).then(answer => { order.push("read"); return answer; });
     const restoring = call(`/api/workspaces/${busy}/unarchive`, {}).then(answer => { order.push("restored"); return answer; });
+    // The model's answer comes at last, so the closing chat's Harness can end
+    // (until it has, the store is still that chat's: 7b holds it longer).
+    await delay(100);
+    (hung as (() => void) | null)?.(); hung = null;
     const [archived, read, restored] = await Promise.all([archiving, reading, restoring]);
     assert.deepEqual([archived.status, read.status, restored.status], [200, 200, 200]);
     assert.equal(order[0], "archived", `nothing else opens the store before the archive's close has ended: ${order.join(", ")}`);
@@ -221,11 +227,12 @@ try {
     assert.notEqual(again, working, "restored: opened anew");
     assert.equal(again.identity, working.identity, "on the same store");
     const cut = (await again.usage()).cut!.chat;
-    assert.deepEqual(Object.values(cut), [1], `the request the close cut off is counted once, by its own chat: ${JSON.stringify(cut)}`);
+    assert.deepEqual(Object.values(cut), [], `the request was answered during the close, so no owner counts it as cut off: ${JSON.stringify(cut)}`);
+    assert.ok(JSON.stringify((await call(`${chatOf(busy)}/history`)).body).includes("answer: please hang"), "and its answer is in the chat");
     assert.equal(lifeRegistry.getProject(busy)!.archivedAt, undefined);
     (hung as (() => void) | null)?.(); hung = null;
     await say(chatOf(busy), "after the restore", "l-3");
-    console.log("ok: a read and a restore during an archive wait for its close; the store never has two owners and its cut-off request is counted once");
+    console.log("ok: a read and a restore during an archive wait until the closing chat has let go; its request out is answered once and counted as cut off by nobody");
 
     // ---- 8. an archived workspace's usage
     const quiet = await made("quiet");
@@ -263,6 +270,69 @@ try {
     assert.ok((await call("/api/artifacts")).body.artifacts.every((item: any) => item.project.id === seen), "the list of everything is the newest 200, as before");
     await cubed.close();
     console.log("ok: a workspace's artifact list is chosen before the limit");
+  }
+
+  // ---- 7b. a shutdown held past the close's bound
+  {
+    // A shutdown held past the close's bound. The chat's Harness close is
+    // held here (the one seam: nothing else is replaced), so `close()`
+    // returns at its bound, as the product's does, with the store still the
+    // old chat's. Every Harness open and close on the store is counted.
+    const stuckState = await start(path.join(root, "stuck"), { chatReleaseWaitMs: 300 });
+    const { call, say } = stuckState;
+    await stuckState.ready();
+    const { chats, usage: usageService } = stuckState.app;
+    const stuck = (await call("/api/workspaces", { name: "stuck", repositories: [] })).body.workspace.id as string;
+    await say(chatOf(stuck), "before the stuck close", "k-1");
+    const first = (await chats.get(stuck, "write")).chat;
+    const harness = (first as unknown as { harness: { close(...args: unknown[]): Promise<unknown> } }).harness;
+    const closeHarness = harness.close.bind(harness);
+    let letGo!: () => void;
+    const held = new Promise<void>(resolve => { letGo = resolve; });
+    let owners = 1, most = 1, harnessClosed = false;
+    harness.close = async (...args) => { await held; try { return await closeHarness(...args); } finally { harnessClosed = true; owners--; } };
+    const opens: string[] = [];
+    const open = OptChat.open;
+    OptChat.open = async options => {
+      if (options.workspace !== stuck) return open.call(OptChat, options);
+      opens.push(harnessClosed ? "after the old owner let go" : "WHILE THE OLD OWNER HELD THE STORE");
+      const chat = await open.call(OptChat, options);
+      most = Math.max(most, ++owners);
+      void chat.released.then(() => { owners--; });
+      return chat;
+    };
+    try {
+      const beganAt = Date.now();
+      const archive = await call(`/api/workspaces/${stuck}/archive`, {});
+      assert.equal(archive.status, 200, "the archive itself ends at the close's bound");
+      assert.ok(Date.now() - beganAt >= 1_900, "the close waited out its join bound");
+      assert.equal(harnessClosed, false, "and returned with the old Harness still closing");
+      // Reads, a restore and the reopen it starts, while the old owner holds the store.
+      const [read, view, restore, usageRead] = await Promise.all([call(`${chatOf(stuck)}/history`), call(`${chatOf(stuck)}/view`),
+        call(`/api/workspaces/${stuck}/unarchive`, {}), usageService.report({ project: stuck })]);
+      assert.deepEqual([read.status, view.status], [503, 503], "a read is refused while the store is not free");
+      assert.match(read.body.error, /still closing: its store is not free yet/);
+      assert.equal(restore.status, 200, "the restore is recorded");
+      assert.equal(usageRead.chats[0]!.read, "none", "usage does not open the store either");
+      assert.equal((await call(`${chatOf(stuck)}/prompt`, { text: "too early", requestId: "k-2" })).status, 503);
+      assert.equal(await chats.peek(stuck), null);
+      await call(`/api/workspaces/${stuck}/archive`, {});
+      assert.equal((await call(`${chatOf(stuck)}/history`)).status, 503, "archived again: still refused");
+      await call(`/api/workspaces/${stuck}/unarchive`, {});
+      await delay(700);
+      assert.deepEqual([opens, most, harnessClosed], [[], 1, false], "nothing opened the store in all that time");
+      // The old owner's shutdown really ends: the store is free and the chat comes back.
+      letGo();
+      await first.released;
+      await say(chatOf(stuck), "after the old owner let go", "k-3");
+      const back = (await chats.get(stuck, "write")).chat;
+      assert.notEqual(back, first);
+      assert.equal(back.identity, first.identity, "the same store");
+      assert.ok(JSON.stringify((await call(`${chatOf(stuck)}/history`)).body).includes("before the stuck close"), "with its chat as it was");
+      assert.ok(opens.length >= 1 && opens.every(when => when === "after the old owner let go"), `every open came after the release: ${opens.join("; ")}`);
+      assert.equal(most, 1, "the store never had two owners");
+    } finally { OptChat.open = open; letGo(); await stuckState.close(); }
+    console.log("ok: a close that returns at its bound with its Harness still closing keeps the store: reads, restore and reopen are refused, then the chat recovers once it has let go");
   }
 
   // ---- 6. the old chat still working when cubed starts

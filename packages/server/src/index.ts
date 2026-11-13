@@ -303,6 +303,8 @@ export async function createCubed(options: {
   artifactRetryMs?: number;
   /** OptChat's compactor retry, for tests. */
   optchatRetryMs?: number;
+  /** How long a request waits for a closed chat to let go of its store (RELEASE_WAIT_MS), for tests. */
+  chatReleaseWaitMs?: number;
   /** How long the chat before workspaces may take to end its turn before it is copied (MIGRATION_IDLE_MS), for tests. */
   workspaceIdleMs?: number;
   /** How long a thread's first prompt waits for OptChat (MEMORY_WAIT_MS), for tests. */
@@ -360,7 +362,8 @@ export async function createCubed(options: {
   type ChatHandle = { chat: OptChat; events: OptChatEvents };
   let openChat: (workspace: Project, readOnly: boolean) => Promise<ChatHandle> = async () => { throw new WorkspaceChatError("cubed is starting", 503); };
   let workspacesReady: () => Promise<unknown> = async () => { throw new WorkspaceChatError("cubed is starting", 503); };
-  const chats = new WorkspaceChats<ChatHandle>({ registry, ready: () => workspacesReady(), open: (workspace, readOnly) => openChat(workspace, readOnly) });
+  const chats = new WorkspaceChats<ChatHandle>({ registry, ready: () => workspacesReady(), open: (workspace, readOnly) => openChat(workspace, readOnly),
+    ...options.chatReleaseWaitMs ? { releaseWaitMs: options.chatReleaseWaitMs } : {} });
   // OptChat's memory for every thread created since it exists: OptChat is
   // opened for it (as at boot), never a browser or a turn.
   const memory = new ThreadMemory({ registry, chat: async workspace => (await chats.get(workspace)).chat, ...options.memoryWaitMs ? { waitMs: options.memoryWaitMs } : {} });
@@ -836,7 +839,9 @@ export async function createCubed(options: {
           // Its chat's store goes with it: only a workspace without thread history is deleted.
           registry.deleteProject(id);
           await chats.close(id);
-          fs.rmSync(path.dirname(chatDirectory(options.state, id)), { recursive: true, force: true });
+          // Never under a chat that still holds it: then the directory is left (its id is not used again).
+          if (await chats.free(id)) fs.rmSync(path.dirname(chatDirectory(options.state, id)), { recursive: true, force: true });
+          else createLogger("workspaces").warn("a deleted workspace's chat still holds its store; its directory is left", { workspace: id });
           return json({ ok: true });
         }
         if (parts[3] === "check" && method === "POST") return json(one(await check(project)));

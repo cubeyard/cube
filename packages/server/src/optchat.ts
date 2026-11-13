@@ -667,6 +667,7 @@ export class OptChat {
   private constructor(options: OptChatOptions) {
     this.options = options;
     this.memory = new Memory(options.limits ?? {});
+    this.released = new Promise(resolve => { this.letGo = resolve; });
   }
 
   static async open(options: OptChatOptions): Promise<OptChat> {
@@ -2216,6 +2217,14 @@ export class OptChat {
     return this.closed ??= this.shut();
   }
 
+  /** Resolves once this chat has let go of its store: its Harness (or the
+   * storage, if the open failed before it had one) has closed. `close()`
+   * may return before that, at its bound, with the Harness still closing;
+   * until this resolves the store still has this chat as its owner, and no
+   * other may open it. Never resolves before `close()` is called. */
+  readonly released: Promise<void>;
+  private letGo: () => void = () => {};
+
   /** Waits at most `ms` until no model call or tool call of the chat is
    * out: no node being built, no chat request sent whose answer is not
    * stored yet (one held back by the gate in beforeRequest was never sent),
@@ -2286,12 +2295,13 @@ export class OptChat {
       await (this.harness ?? this.storage)?.close(context).catch(() => {});
       return true;
     })();
+    void rest.then(() => this.letGo(), () => this.letGo());
     // Held by its timer, so the close ends at the bound and not at the
     // process's exit; let go once the close is done.
     const bound = new AbortController();
     const joined = await Promise.race([rest, delay(CLOSE_JOIN_MS, false, { signal: bound.signal }).catch(() => false)]);
     bound.abort();
-    if (!joined) log.warn("the chat did not close in time; cubed's close goes on", { ms: CLOSE_JOIN_MS, tools: [...this.running.values()] });
+    if (!joined) log.warn("the chat did not close in time; cubed's close goes on, and the chat keeps its store until it has (released)", { ms: CLOSE_JOIN_MS, tools: [...this.running.values()] });
     // pi-ai keeps a provider connection per cache key open for minutes
     // (Codex's WebSocket); it would hold cubed's exit that long.
     for (const key of [this.cacheKey, `${this.cacheKey}-compact`]) {

@@ -174,10 +174,14 @@ archive fail, and after the archive no thread is accepted (from the chat or
 `POST /api/threads`). The chat is closed. Its history, view and threads
 stay readable: a read opens the store with nothing running (no turn, no
 summary, no watcher) and it takes no message. A store has one owner at a
-time: the chat that is closing stays its owner until its close has ended
-(it waits out its grace for calls that are out), and a read, a restore or a
-reopen that arrives meanwhile waits for that, then looks at the workspace
-again. `unarchive` opens the same
+time: the chat that is closing stays its owner until it has let go of the
+store, which is when its Harness has closed (`OptChat.released`), not when
+its `close()` returns: that is bounded and may return first. A read, a
+restore or a reopen that arrives meanwhile waits for the release, then
+looks at the workspace again. After 20 seconds (`RELEASE_WAIT_MS`) it is
+refused with 503 instead, and the store stays its last owner's; cubed's
+recovery loop opens the chat once that owner is gone. An archive or a
+restore itself returns when the close does. `unarchive` opens the same
 store for work again. A workspace is deleted only without thread history,
 as a project was; its chat store goes with it.
 

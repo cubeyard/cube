@@ -22,17 +22,24 @@ export class WorkspaceChatError extends Error {
 }
 
 type Opened<Handle> = { handle: Promise<Handle>; readOnly: boolean };
+/** A close under way: `closed` once the chat's `close()` returned (bounded),
+ * `released` once the chat has let go of its store. */
+type Ending = { closed: Promise<void>; released: Promise<void> };
+/** How long a request for a chat waits for the store's last owner to let go of it. */
+export const RELEASE_WAIT_MS = 20_000;
 
-export class WorkspaceChats<Handle extends { chat: Pick<OptChat, "close"> }> {
+export class WorkspaceChats<Handle extends { chat: Pick<OptChat, "close" | "released"> }> {
   private readonly opened = new Map<string, Opened<Handle>>();
   private readonly errors = new Map<string, string>();
-  /** The closes under way, by workspace. */
-  private readonly ending = new Map<string, Promise<void>>();
+  /** The closes under way, by workspace: each until its chat has let go of the store. */
+  private readonly ending = new Map<string, Ending>();
   private readonly options: {
     registry: Pick<Registry, "getProject" | "listProjects" | "archiveProject" | "unarchiveProject">;
     /** Resolves once the installation has one chat per workspace (workspace-migration.ts); rejects with why not. */
     ready: () => Promise<unknown>;
     open: (workspace: Project, readOnly: boolean) => Promise<Handle>;
+    /** RELEASE_WAIT_MS; tests lower it. */
+    releaseWaitMs?: number;
   };
   private closing = false;
   constructor(options: WorkspaceChats<Handle>["options"]) { this.options = options; }
@@ -40,15 +47,24 @@ export class WorkspaceChats<Handle extends { chat: Pick<OptChat, "close"> }> {
   /** The workspace's chat, opened if it is not. `write`: to change it (a
    * message, a stop, its model), refused for an archived workspace. A store
    * has one owner at a time: while the chat as it was opened is closing
-   * (its archive or restore), this waits for that close to end, then reads
-   * the workspace again, so no second Harness opens on a store whose first
-   * is still settling its calls. */
+   * (its archive or restore), this waits until that chat has let go of the
+   * store, then reads the workspace again, so no second Harness opens on a
+   * store whose first can still use it. A chat's `close()` returning is not
+   * that: it is bounded, and may return with its Harness still closing.
+   * The wait is bounded too; past it the request is refused and the store
+   * stays its last owner's, until that owner is really gone. */
   async get(id: string, access: "read" | "write" = "read"): Promise<Handle> {
     await this.options.ready();
     for (;;) {
       if (this.closing) throw new WorkspaceChatError("cubed is stopping", 503);
       const ending = this.ending.get(id);
-      if (ending) { await ending; continue; }
+      if (ending) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const released = await Promise.race([ending.released.then(() => true),
+          new Promise<false>(resolve => { timer = setTimeout(resolve, this.options.releaseWaitMs ?? RELEASE_WAIT_MS, false); })]).finally(() => clearTimeout(timer));
+        if (!released) throw new WorkspaceChatError("the workspace's chat is still closing: its store is not free yet; try again shortly", 503);
+        continue;
+      }
       const workspace = this.options.registry.getProject(id);
       if (!workspace) throw new WorkspaceChatError("workspace not found", 404);
       const readOnly = !!workspace.archivedAt;
@@ -104,22 +120,47 @@ export class WorkspaceChats<Handle extends { chat: Pick<OptChat, "close"> }> {
     return workspace;
   }
 
-  /** Closes the workspace's chat. It stays the store's owner until its
-   * close has ended: `get` waits for this, and a second close joins it. */
+  /** Closes the workspace's chat: resolves when its `close()` has returned
+   * (bounded). The chat stays the store's owner until it has let go of it
+   * (`OptChat.released`), which may be later: `get` waits for that, and a
+   * second close joins this one. */
   close(id: string): Promise<void> {
+    return this.end(id)?.closed ?? Promise.resolve();
+  }
+  /** Waits at most the release wait until no chat owns the workspace's
+   * store (after a `close`); answers whether that is so. */
+  async free(id: string): Promise<boolean> {
+    const ending = this.ending.get(id);
+    if (!ending) return !this.opened.has(id);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return Promise.race([ending.released.then(() => true),
+      new Promise<false>(resolve => { timer = setTimeout(resolve, this.options.releaseWaitMs ?? RELEASE_WAIT_MS, false); })]).finally(() => clearTimeout(timer));
+  }
+  private end(id: string): Ending | null {
     const ending = this.ending.get(id);
     if (ending) return ending;
     const current = this.opened.get(id);
-    if (!current) return Promise.resolve();
-    const ended = (async () => {
-      try { await (await current.handle.catch(() => null))?.chat.close(); }
-      finally {
-        if (this.opened.get(id) === current) this.opened.delete(id);
-        this.ending.delete(id);
-      }
-    })();
-    this.ending.set(id, ended);
-    return ended;
+    if (!current) return null;
+    const chat = current.handle.then(handle => handle.chat, () => null);
+    // A close that fails has not shown the store free: only `released` does.
+    const closed = chat.then(opened => opened?.close()).then(() => {}, error => { log.warn("a chat's close failed; its store stays its own until it lets go", { workspace: id, error }); });
+    const released = closed.then(async () => {
+      const opened = await chat;
+      if (!opened) return;
+      let free = false;
+      void opened.released.then(() => { free = true; });
+      await Promise.resolve();
+      if (free) return;
+      log.warn("a closed chat still holds its store; the workspace's chat is not opened until it lets go", { workspace: id });
+      await opened.released;
+      log.info("the closed chat let go of its store", { workspace: id });
+    }).finally(() => {
+      if (this.opened.get(id) === current) this.opened.delete(id);
+      this.ending.delete(id);
+    });
+    const started = { closed, released };
+    this.ending.set(id, started);
+    return started;
   }
   async closeAll(): Promise<void> {
     this.closing = true;
