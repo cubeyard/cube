@@ -95,6 +95,14 @@ the wait ends, it is closed, no workspace chat opens, and every chat route
 answers 503 with the reason; `GET /api/workspaces` says so in `chats`.
 Nothing is retried in that process. The next start tries again.
 
+The old chat's `close()` is bounded and may return with its Harness still
+closing. The copy is taken only once that chat has let go of its store
+(`OptChat.released`), waited for at most 20 seconds. If it still holds the
+store then, nothing is copied, chat routes answer 503 with that reason, and
+this one failure is tried again in the same process: once the old chat has
+let go, the next chat request or the recovery loop runs the migration. A
+copy is never taken of a store that a chat in this process can still write.
+
 Every step reads what exists and does what is missing:
 
 | stopped | next run |
@@ -183,7 +191,9 @@ refused with 503 instead, and the store stays its last owner's; cubed's
 recovery loop opens the chat once that owner is gone. An archive or a
 restore itself returns when the close does. `unarchive` opens the same
 store for work again. A workspace is deleted only without thread history,
-as a project was; its chat store goes with it.
+as a project was; its chat store goes with it. If its closed chat still holds the store, the
+directory is removed when that chat has let go (if cubed stops first, it
+stays on disk under an id that is not used again).
 
 ## Usage
 

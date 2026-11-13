@@ -14,6 +14,11 @@
  *      an archive waits for the archive's close.
  *      A chat whose close returned at its bound with its Harness still
  *      closing keeps the store: nothing opens it until it has let go.
+ *      A workspace deleted while its closed chat still holds the store
+ *      keeps its directory until that chat has let go.
+ *   6b. The old chat, opened to end its turn and closed, still holding its
+ *      store: no copy is taken and no workspace chat opens; once it has
+ *      let go, the migration runs.
  *   8. An archived workspace's chat usage is what its store holds, whether
  *      or not usage was read before, under the workspace as it is now.
  *   9. A workspace's artifact list is its own however many newer artifacts
@@ -94,6 +99,16 @@ async function start(state: string, options: { workspaceIdleMs?: number; chatRel
   return { app, call, ready, say, close: async () => { app.server.closeAllConnections(); await app.close(); } };
 }
 const chatOf = (id: string) => `/api/workspaces/${id}/chat`;
+/** Holds a chat's Harness close until `letGo` (the one seam these tests
+ * use): its `close()` then returns at its bound with the store still its own. */
+function hold(chat: OptChat): { letGo(): void; closed(): boolean } {
+  const harness = (chat as unknown as { harness: { close(...args: unknown[]): Promise<unknown> } }).harness;
+  const close = harness.close.bind(harness);
+  let letGo!: () => void, closed = false;
+  const held = new Promise<void>(resolve => { letGo = resolve; });
+  harness.close = async (...args) => { await held; try { return await close(...args); } finally { closed = true; } };
+  return { letGo, closed: () => closed };
+}
 
 try {
   // ---- 1. a state from before workspaces
@@ -331,8 +346,83 @@ try {
       assert.ok(JSON.stringify((await call(`${chatOf(stuck)}/history`)).body).includes("before the stuck close"), "with its chat as it was");
       assert.ok(opens.length >= 1 && opens.every(when => when === "after the old owner let go"), `every open came after the release: ${opens.join("; ")}`);
       assert.equal(most, 1, "the store never had two owners");
+
+      // Deleted while its closed chat still holds the store.
+      const gone = (await call("/api/workspaces", { name: "gone", repositories: [] })).body.workspace.id as string;
+      await say(chatOf(gone), "soon deleted", "g-1");
+      const leaving = (await chats.get(gone, "write")).chat;
+      const grip = hold(leaving);
+      const directory = path.dirname(chatDirectory(path.join(root, "stuck"), gone));
+      const database = path.join(directory, "chat", "pi.sqlite");
+      const opened: string[] = [];
+      const wrapped = OptChat.open;
+      OptChat.open = async options => { if (options.workspace === gone) opened.push("opened"); return wrapped.call(OptChat, options); };
+      try {
+        assert.equal((await call(`/api/workspaces/${gone}`, undefined, "DELETE")).status, 200);
+        assert.equal(grip.closed(), false, "the delete returned with the old chat's Harness still closing");
+        assert.equal((await call(`/api/workspaces/${gone}`)).status, 404, "the workspace is gone");
+        assert.equal((await call(`${chatOf(gone)}/view`)).status, 404, "and has no chat to open");
+        await delay(600);
+        assert.ok(fs.existsSync(database), "its directory is kept while the old chat holds the store");
+        assert.deepEqual(opened, [], "nothing opened the store meanwhile");
+        grip.letGo();
+        await leaving.released;
+        await until(async () => fs.existsSync(directory), gone => !gone, "the directory is removed once the old chat has let go");
+        assert.deepEqual(opened, []);
+      } finally { OptChat.open = wrapped; grip.letGo(); }
     } finally { OptChat.open = open; letGo(); await stuckState.close(); }
-    console.log("ok: a close that returns at its bound with its Harness still closing keeps the store: reads, restore and reopen are refused, then the chat recovers once it has let go");
+    console.log("ok: a close that returns at its bound with its Harness still closing keeps the store: reads, restore and reopen are refused, then the chat recovers once it has let go; a deleted workspace's directory stays until then");
+  }
+
+  // ---- 6b. the old chat, settled and closed, still holding its store
+  {
+    const heldState = path.join(root, "held");
+    await before(heldState, ["solo"], ["before the held close"], true);
+    const originalFile = path.join(heldState, "optchat", "pi.sqlite");
+    let old: OptChat | undefined, grip: ReturnType<typeof hold> | undefined;
+    const copies: string[] = [];
+    const open = OptChat.open;
+    OptChat.open = async options => {
+      if (options.workspace === "solo") copies.push(grip && !grip.closed() ? "WHILE THE OLD CHAT HELD ITS STORE" : "after the old chat let go");
+      const chat = await open.call(OptChat, options);
+      if (!options.workspace && options.directory === path.join(heldState, "optchat")) { old = chat; grip = hold(chat); }
+      return chat;
+    };
+    cubed = await start(heldState, { workspaceIdleMs: 20_000, chatReleaseWaitMs: 300 });
+    ({ call } = cubed);
+    try {
+      // cubed opens the old chat to end its waiting message's turn; the answer comes, the chat is idle and is closed.
+      await until(async () => hung !== null, Boolean, "the old chat goes on with its waiting message");
+      (hung as (() => void) | null)?.(); hung = null;
+      const failed = await cubed.ready();
+      assert.equal(grip!.closed(), false, "its close returned with its Harness still closing");
+      assert.equal(failed.body.chats.state, "failed");
+      assert.match(failed.body.chats.error, /has not let go of its store yet, so it was not copied/);
+      const nothingCopied = () => {
+        assert.ok(!fs.existsSync(chatDirectory(heldState, "solo")), "no workspace chat was made");
+        assert.deepEqual(fs.readdirSync(path.join(heldState, "workspaces", "solo")), [], "and no copy, whole or half, was left");
+        assert.equal(migrationRecord(heldState)!.state, "copying");
+        assert.deepEqual(copies, [], "no workspace chat was opened");
+      };
+      nothingCopied();
+      const refused = await call(`${chatOf("solo")}/view`);
+      assert.equal(refused.status, 503);
+      assert.match(refused.body.error, /workspaces are not available: .*has not let go of its store/);
+      await delay(700);
+      assert.equal((await call(`${chatOf("solo")}/view`)).status, 503, "still refused, and not tried again, while the store is held");
+      nothingCopied();
+      // The old chat's Harness closes at last: the next request runs the migration.
+      grip!.letGo();
+      await old!.released;
+      const view = await until(() => call(`${chatOf("solo")}/view`), answer => answer.status === 200, "the workspace's chat opens once the old chat has let go");
+      assert.ok(view.body.messages >= 2);
+      assert.ok(JSON.stringify((await call(`${chatOf("solo")}/history`)).body).includes("before the held close"), "with the old chat in it");
+      assert.equal(migrationRecord(heldState)!.state, "done");
+      assert.equal((await call("/api/workspaces")).body.chats.state, "ready");
+      assert.ok(copies.length >= 1 && copies.every(when => when === "after the old chat let go"), copies.join("; "));
+      assert.ok(fs.existsSync(originalFile), "the original stays");
+    } finally { OptChat.open = open; grip?.letGo(); await cubed.close(); }
+    console.log("ok: the old chat closed but still holding its store: nothing is copied or opened, every chat route says why; once it has let go the migration runs");
   }
 
   // ---- 6. the old chat still working when cubed starts

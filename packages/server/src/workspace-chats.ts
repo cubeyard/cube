@@ -57,6 +57,9 @@ export class WorkspaceChats<Handle extends { chat: Pick<OptChat, "close" | "rele
     await this.options.ready();
     for (;;) {
       if (this.closing) throw new WorkspaceChatError("cubed is stopping", 503);
+      // A workspace that is gone has no chat, whoever still holds its store.
+      const workspace = this.options.registry.getProject(id);
+      if (!workspace) throw new WorkspaceChatError("workspace not found", 404);
       const ending = this.ending.get(id);
       if (ending) {
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -65,8 +68,6 @@ export class WorkspaceChats<Handle extends { chat: Pick<OptChat, "close" | "rele
         if (!released) throw new WorkspaceChatError("the workspace's chat is still closing: its store is not free yet; try again shortly", 503);
         continue;
       }
-      const workspace = this.options.registry.getProject(id);
-      if (!workspace) throw new WorkspaceChatError("workspace not found", 404);
       const readOnly = !!workspace.archivedAt;
       if (readOnly && access === "write") throw new WorkspaceChatError("the workspace is archived: restore it to use its chat", 409);
       const current = this.opened.get(id);
@@ -135,6 +136,10 @@ export class WorkspaceChats<Handle extends { chat: Pick<OptChat, "close" | "rele
     let timer: ReturnType<typeof setTimeout> | undefined;
     return Promise.race([ending.released.then(() => true),
       new Promise<false>(resolve => { timer = setTimeout(resolve, this.options.releaseWaitMs ?? RELEASE_WAIT_MS, false); })]).finally(() => clearTimeout(timer));
+  }
+  /** Resolves once no closing chat holds the workspace's store, however long that takes. */
+  whenFree(id: string): Promise<void> {
+    return this.ending.get(id)?.released ?? Promise.resolve();
   }
   private end(id: string): Ending | null {
     const ending = this.ending.get(id);

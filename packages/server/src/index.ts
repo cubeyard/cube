@@ -35,8 +35,8 @@ import { OptChat, OptChatEvents } from "./optchat.ts";
 import { isMediaId, MEDIA_LIMITS, MediaError } from "./optchat-media.ts";
 import { createLogger } from "./log.ts";
 import { cubeThreads, readThreads } from "./optchat-threads.ts";
-import { CHAT_WELCOME, WorkspaceChats, WorkspaceChatError, workspaceThreads } from "./workspace-chats.ts";
-import { chatDirectory, migrateWorkspaces, MIGRATION_IDLE_MS, MigrationNotIdle, migrationRecord } from "./workspace-migration.ts";
+import { CHAT_WELCOME, RELEASE_WAIT_MS, WorkspaceChats, WorkspaceChatError, workspaceThreads } from "./workspace-chats.ts";
+import { chatDirectory, migrateWorkspaces, MIGRATION_IDLE_MS, MigrationNotIdle, migrationRecord, MigrationStoreHeld } from "./workspace-migration.ts";
 import { localDisk, observeRunners } from "./runner-observe.ts";
 import { diskState } from "./runner-types.ts";
 import { formatDiagnostics, threadDiagnostics } from "./vm-diagnostics.ts";
@@ -536,15 +536,24 @@ export async function createCubed(options: {
         await delay(Math.min(100, limit));
       }
     } finally { settling = null; await chat.close(); }
+    // The chat's close is bounded and may return with its Harness still
+    // closing: the store is copied only once that chat has let go of it.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const wait = options.chatReleaseWaitMs ?? RELEASE_WAIT_MS;
+    const free = await Promise.race([chat.released.then(() => true), new Promise<false>(resolve => { timer = setTimeout(resolve, wait, false); })]).finally(() => clearTimeout(timer));
+    if (!free) throw new MigrationStoreHeld("the chat from before workspaces ended its turn and was closed, but has not let go of its store yet, so it was not copied; cubed tries again once it has", chat.released);
   };
   /** One chat per workspace, once (workspace-migration.ts). A failure
    * stays for this process: the chats are not opened, each request says
-   * why, and the next start of cubed tries again. */
+   * why, and the next start of cubed tries again. One failure is tried
+   * again here: the old chat, closed, still held its store; once it has let
+   * go, the next request (or the recovery loop) runs the migration again. */
   let migration: Promise<unknown> | null = null;
   let migrationError: string | null = null;
   workspacesReady = () => migration ??= migrateWorkspaces({ state: options.state, registry, models, artifacts: artifactService.store, settle }).catch(error => {
     migrationError = error instanceof Error ? error.message : String(error);
     createLogger("workspaces").error("workspaces not started", { error: migrationError });
+    if (error instanceof MigrationStoreHeld) void error.released.then(() => { migration = null; migrationError = null; });
     throw new WorkspaceChatError(`workspaces are not available: ${migrationError}`, 503);
   });
   openChat = async (workspace, readOnly) => {
@@ -840,8 +849,13 @@ export async function createCubed(options: {
           registry.deleteProject(id);
           await chats.close(id);
           // Never under a chat that still holds it: then the directory is left (its id is not used again).
-          if (await chats.free(id)) fs.rmSync(path.dirname(chatDirectory(options.state, id)), { recursive: true, force: true });
-          else createLogger("workspaces").warn("a deleted workspace's chat still holds its store; its directory is left", { workspace: id });
+          const remove = () => fs.rmSync(path.dirname(chatDirectory(options.state, id)), { recursive: true, force: true });
+          if (await chats.free(id)) remove();
+          else {
+            // The workspace is gone from the registry, so nothing opens its chat again; the files go when the old chat has.
+            createLogger("workspaces").warn("a deleted workspace's chat still holds its store; its directory is removed once it has let go", { workspace: id });
+            void chats.whenFree(id).then(() => { try { remove(); } catch (error) { createLogger("workspaces").warn("a deleted workspace's directory was not removed", { workspace: id, error }); } });
+          }
           return json({ ok: true });
         }
         if (parts[3] === "check" && method === "POST") return json(one(await check(project)));

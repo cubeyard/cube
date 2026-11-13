@@ -58,6 +58,15 @@ export type MigrationRecord = {
 /** The chat before workspaces was still working when the wait ran out. */
 export class MigrationNotIdle extends Error {}
 
+/** The chat before workspaces was opened to end its turn and closed, but
+ * its Harness has not let go of the store yet (`released` resolves when it
+ * has). A copy taken now would be a copy of a store its owner can still
+ * write, so none is taken; the migration may be tried again after `released`. */
+export class MigrationStoreHeld extends Error {
+  readonly released: Promise<void>;
+  constructor(message: string, released: Promise<void>) { super(message); this.released = released; }
+}
+
 export const workspacesDirectory = (state: string) => path.join(state, "workspaces");
 /** A workspace's chat store. */
 export const chatDirectory = (state: string, workspace: string) => path.join(workspacesDirectory(state), workspace, "chat");
@@ -113,7 +122,8 @@ async function copyFor(options: { original: string; target: string; workspace: s
       // from is read: it is part of the past, once, and no copy counts it
       // again at its first open. (A chat request out at a stop leaves a task
       // that is not ended, so such a store is not idle and is settled by
-      // opening the original.)
+      // opening the original, which `settle` returns from only once that
+      // chat has let go of the store.)
       await settleCompactor(harness);
       const usage = await storeUsage(harness);
       source = await harness.commit(async tx => {
@@ -144,7 +154,9 @@ export type MigrationOptions = {
   models: Models;
   artifacts: Pick<ArtifactStore, "countUnownedChatArtifacts" | "deleteUnownedChatArtifacts" | "backupTo">;
   /** Opens the chat before workspaces once more, lets its turn and queue
-   * end, and closes it; throws MigrationNotIdle when that takes too long. */
+   * end, closes it and returns once it has let go of the store: the copy
+   * is taken right after. Throws MigrationNotIdle when the turn takes too
+   * long, MigrationStoreHeld when the closed chat still holds the store. */
   settle: (directory: string) => Promise<void>;
   now?: () => number;
 };
